@@ -66,3 +66,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Parse the embedded JSON.
    - Run `git diff --check`.
    - Confirm only intended files changed.
+
+7. Commit and publish.
+   - Commit directly on `main`.
+   - After each dashboard update commit, run `git push origin main`.
+   - Confirm `git status --short --branch` no longer shows local commits ahead of `origin/main`.
