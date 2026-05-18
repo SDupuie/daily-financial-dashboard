@@ -28,7 +28,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 2. Refresh prices before reading news.
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only when no source returns data after two attempts.
-   - Record the source in the row note when useful, and include all price/news sources in `footer.compiled`.
+   - In each `tape.rows[].note`, summarize the most relevant market catalyst for that line item (and include pre-market context when useful).
+   - Do not use `tape` notes as source citations. Keep all source attribution in `footer.compiled`.
 
 3. Use this price-source hierarchy.
    - U.S. indices and equities: Yahoo Finance or a live finance quote tool. Cross-check major index closes with AP, CNBC, Reuters, MarketWatch, or TradingView when available.
@@ -56,6 +57,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - `tape`: all refreshed closes.
    - `lede`: top market story from the latest close.
    - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, Fed, and Renesas.
+   - Do not include placeholder stories that only say no update was found.
    - `renesas`: latest Tokyo price plus fresh news, or explicitly say no fresh company news was found.
    - `crypto`: refreshed crypto tape plus four notes.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
