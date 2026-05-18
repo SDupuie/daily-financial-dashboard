@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Daily Tape</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e0d0a; --panel: #15130f; --panel-2: #1c1a14;
+    --ink: #efe7d6; --ink-dim: #a39681; --rule: #2a2620;
+    --amber: #e8a838; --amber-bright: #ffc857;
+    --green: #6db674; --red: #d96c5c; --accent: #c9b07a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--bg); color: var(--ink); font-family: 'Inter', sans-serif; line-height: 1.55; }
+  body {
+    background-image:
+      radial-gradient(ellipse at top left, rgba(232,168,56,0.06), transparent 40%),
+      radial-gradient(ellipse at bottom right, rgba(201,176,122,0.04), transparent 50%);
+    min-height: 100vh; padding: 40px 24px 80px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .mast { border-top: 3px double var(--ink); border-bottom: 1px solid var(--rule); padding: 18px 0 14px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; }
+  .mast-meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim); }
+  .mast-meta.right { text-align: right; }
+  .mast h1 { font-family: 'Fraunces', serif; font-weight: 800; font-size: clamp(34px, 5vw, 52px); letter-spacing: -0.02em; text-align: center; line-height: 1; }
+  .mast h1 em { font-style: italic; color: var(--amber); font-weight: 400; }
+  .subhead { text-align: center; margin-top: 14px; padding-bottom: 28px; border-bottom: 1px solid var(--rule); font-family: 'Fraunces', serif; font-style: italic; color: var(--ink-dim); font-size: 15px; }
+  section { margin-top: 44px; }
+  .sec-label { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.25em; color: var(--amber); text-transform: uppercase; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }
+  .sec-label::before { content: ''; width: 24px; height: 1px; background: var(--amber); }
+  .sec-label::after { content: ''; flex: 1; height: 1px; background: var(--rule); }
+  .sec-title { font-family: 'Fraunces', serif; font-size: 28px; font-weight: 600; letter-spacing: -0.01em; margin-bottom: 22px; }
+  .tape { background: var(--panel); border: 1px solid var(--rule); overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  .tape th, .tape td { padding: 12px 16px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 13px; border-bottom: 1px solid var(--rule); }
+  .tape th { background: var(--panel-2); color: var(--ink-dim); font-weight: 500; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; text-align: right; }
+  .tape th:first-child, .tape td:first-child { text-align: left; }
+  .tape tr:last-child td { border-bottom: none; }
+  .tape .name { font-family: 'Fraunces', serif; font-size: 15px; color: var(--ink); font-weight: 600; letter-spacing: 0; }
+  .tape .ticker { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); margin-left: 8px; }
+  .up { color: var(--green); } .down { color: var(--red); } .flat { color: var(--ink-dim); }
+  .lede { display: grid; grid-template-columns: 1.4fr 1fr; gap: 32px; margin-top: 16px; }
+  .lede-main { border-left: 3px solid var(--amber); padding-left: 24px; }
+  .kicker { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--amber-bright); margin-bottom: 10px; }
+  .lede h2 { font-family: 'Fraunces', serif; font-weight: 800; font-size: 36px; line-height: 1.05; letter-spacing: -0.02em; margin-bottom: 14px; }
+  .lede h2 em { font-style: italic; color: var(--accent); font-weight: 400; }
+  .lede p { color: var(--ink); font-size: 16px; margin-bottom: 12px; }
+  .lede p:last-child { color: var(--ink-dim); font-size: 14px; }
+  .lede-side { display: flex; flex-direction: column; gap: 18px; }
+  .side-card { background: var(--panel); border: 1px solid var(--rule); padding: 18px; }
+  .side-card .num { font-family: 'Fraunces', serif; font-size: 32px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; margin-bottom: 6px; }
+  .side-card .label { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 10px; }
+  .side-card p { font-size: 13px; color: var(--ink-dim); line-height: 1.5; }
+  .side-card.amber .num { color: var(--amber-bright); }
+  .side-card.green .num { color: var(--green); }
+  .side-card.red .num { color: var(--red); }
+  .stories { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; border-top: 1px solid var(--rule); }
+  .story { padding: 24px 28px 24px 0; border-bottom: 1px solid var(--rule); }
+  .story:nth-child(odd) { border-right: 1px solid var(--rule); padding-right: 28px; }
+  .story:nth-child(even) { padding-left: 28px; padding-right: 0; }
+  .story .tag { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--bg); background: var(--amber); padding: 3px 8px; margin-bottom: 12px; }
+  .story .tag.macro { background: var(--accent); }
+  .story .tag.geo { background: var(--red); color: var(--ink); }
+  .story .tag.corp { background: var(--green); color: var(--bg); }
+  .story .tag.fed { background: var(--amber-bright); }
+  .story .tag.crypto { background: #f0a040; color: var(--bg); }
+  .story h3 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 10px; }
+  .story p { font-size: 14px; color: var(--ink-dim); }
+  .story .pull { font-family: 'Fraunces', serif; font-style: italic; font-size: 15px; color: var(--accent); border-top: 1px solid var(--rule); margin-top: 12px; padding-top: 10px; }
+  .renesas-wrap { background: linear-gradient(135deg, var(--panel) 0%, rgba(40,30,15,0.6) 100%); border: 1px solid var(--rule); border-left: 4px solid #d96c5c; padding: 28px 32px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 32px; align-items: start; }
+  .renesas-head { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; color: #d96c5c; margin-bottom: 8px; }
+  .renesas-wrap h3 { font-family: 'Fraunces', serif; font-weight: 700; font-size: 26px; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 14px; }
+  .renesas-wrap h3 em { font-style: italic; color: var(--accent); font-weight: 400; }
+  .renesas-wrap p { font-size: 14.5px; color: var(--ink); margin-bottom: 10px; }
+  .renesas-wrap p:last-of-type { color: var(--ink-dim); font-size: 13.5px; }
+  .renesas-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .rstat { background: rgba(0,0,0,0.25); border: 1px solid var(--rule); padding: 12px 14px; }
+  .rstat .rk { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 6px; }
+  .rstat .rv { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; line-height: 1; margin-bottom: 4px; }
+  .rstat .rv.up { color: var(--green); }
+  .rstat .rv.down { color: var(--red); }
+  .rstat .rv.amber { color: var(--amber-bright); }
+  .rstat small { font-size: 11px; color: var(--ink-dim); font-family: 'Inter', sans-serif; }
+  .crypto-wrap { display: grid; grid-template-columns: 1.1fr 1fr; gap: 28px; align-items: start; }
+  .crypto-tape { background: linear-gradient(180deg, var(--panel) 0%, var(--panel-2) 100%); border: 1px solid var(--rule); position: relative; overflow: hidden; }
+  .crypto-tape::before { content: '24/7'; position: absolute; top: 12px; right: 16px; font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.2em; color: var(--amber); background: rgba(232,168,56,0.1); padding: 3px 8px; border: 1px solid rgba(232,168,56,0.3); }
+  .crypto-tape h4 { font-family: 'Fraunces', serif; font-style: italic; font-size: 14px; color: var(--ink-dim); padding: 14px 20px 10px; border-bottom: 1px solid var(--rule); font-weight: 400; }
+  .crypto-row { display: grid; grid-template-columns: 56px 1fr auto auto; gap: 14px; padding: 12px 20px; align-items: baseline; border-bottom: 1px solid var(--rule); }
+  .crypto-row:last-child { border-bottom: none; }
+  .crypto-sym { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.1em; color: var(--amber); font-weight: 700; }
+  .crypto-name { font-family: 'Fraunces', serif; font-size: 14px; color: var(--ink); }
+  .crypto-name span { display: block; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
+  .crypto-price { font-family: 'JetBrains Mono', monospace; font-size: 14px; text-align: right; color: var(--ink); }
+  .crypto-chg { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right; min-width: 64px; }
+  .crypto-notes { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .cnote { background: var(--panel); border: 1px solid var(--rule); border-left: 3px solid #f0a040; padding: 14px 18px; }
+  .cnote .ckicker { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: #f0a040; margin-bottom: 6px; }
+  .cnote h4 { font-family: 'Fraunces', serif; font-size: 17px; font-weight: 600; margin-bottom: 6px; line-height: 1.2; }
+  .cnote p { font-size: 13px; color: var(--ink-dim); line-height: 1.5; }
+  .earnings-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .ern { background: var(--panel); border: 1px solid var(--rule); padding: 16px 18px; position: relative; }
+  .ern.win { border-left: 3px solid var(--green); }
+  .ern.loss { border-left: 3px solid var(--red); }
+  .ern.mix { border-left: 3px solid var(--amber); }
+  .ern .co { font-family: 'Fraunces', serif; font-weight: 700; font-size: 17px; margin-bottom: 2px; }
+  .ern .move { font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-bottom: 8px; }
+  .ern p { font-size: 13px; color: var(--ink-dim); line-height: 1.45; }
+  .ahead { background: var(--panel); border: 1px solid var(--rule); }
+  .ahead-row { display: grid; grid-template-columns: 110px 1fr 200px; gap: 24px; padding: 16px 24px; border-bottom: 1px solid var(--rule); align-items: baseline; }
+  .ahead-row:last-child { border-bottom: none; }
+  .ahead-day { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--amber); }
+  .ahead-event { font-family: 'Fraunces', serif; font-size: 16px; }
+  .ahead-event strong { font-weight: 600; }
+  .ahead-tickers { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); text-align: right; letter-spacing: 0.05em; }
+  footer { margin-top: 60px; padding-top: 24px; border-top: 3px double var(--ink); font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-dim); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  @media (max-width: 820px) {
+    .lede, .stories, .earnings-grid { grid-template-columns: 1fr; }
+    .crypto-wrap { grid-template-columns: 1fr; }
+    .renesas-wrap { grid-template-columns: 1fr; padding: 22px; }
+    .ahead-row { grid-template-columns: 90px 1fr; }
+    .ahead-tickers { grid-column: 1 / -1; text-align: left; padding-left: 114px; }
+    .mast { grid-template-columns: 1fr; text-align: center; }
+    .mast-meta.right { text-align: center; }
+    .tape { overflow-x: auto; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ DATA START — edit this block to update the dashboard ============ -->
+<script type="application/json" id="dashboard-data">
+{
+  "masthead": {
+    "volume": "Vol. I · No. 137",
+    "date": "Thursday · May 15 · 2026",
+    "subhead": "May 14 close: S&P 500 +0.77% to 7,444.25 · Nasdaq +0.88% to 26,402.34 · Dow +0.75% to 49,693.21 · Russell 2000 +0.67% to 2,843.93 · Cisco beats on AI orders, raises guidance · Alibaba profit collapses but Cloud +38% · Trump-Xi summit yields $10B ag deal, 200 Boeing jets · CLARITY Act passes Senate Banking 15-9 · Powell era ends, Warsh confirmed · Middle East ceasefire talks progress · Crypto rallies on regulatory clarity, XRP ETF inflows accelerate"
+  },
+  "tape": {
+    "label": "The Tape · Wednesday May 14 Close",
+    "rows": [
+      {"name": "S&P 500", "ticker": "SPX", "last": "7,444.25", "delta": "+56.99", "pct": "+0.77%", "dir": "up", "note": "New record close May 14 · Cisco earnings beat, AI orders surge · Cisco stock +20% · Trump-Xi summit progress"},
+      {"name": "Nasdaq Composite", "ticker": "IXIC", "last": "26,402.34", "delta": "+232.88", "pct": "+0.88%", "dir": "up", "note": "Record close · Cisco leadership, Alibaba Cloud +38% YoY amid profit collapse"},
+      {"name": "Dow Industrials", "ticker": "DJI", "last": "49,693.21", "delta": "+370.25", "pct": "+0.75%", "dir": "up", "note": "Above 50K for first time since Iran war began · Cisco surge + trade optimism"},
+      {"name": "Russell 2000", "ticker": "RUT", "last": "2,843.93", "delta": "+19.15", "pct": "+0.67%", "dir": "up", "note": "Small-cap recovery · oil stabilization (Brent $107.82) + Middle East cease-fire progress"},
+      {"name": "VIX", "ticker": "VIX", "last": "19.01", "delta": "+1.75", "pct": "+10.14%", "dir": "up", "note": "Volatility uptick · geopolitical risk remains but markets rally on earnings, regulatory clarity"},
+      {"name": "10-Yr Treasury", "ticker": "UST10Y", "last": "4.45%", "delta": "−2 bp", "pct": "−", "dir": "down", "note": "Pullback on Fed transition (Powell→Warsh May 15) · inflation concerns offset by Middle East progress"},
+      {"name": "30-Yr Treasury", "ticker": "UST30Y", "last": "5.02%", "delta": "−", "pct": "flat", "dir": "flat", "note": "Long-end stable · term premium held · Trump-Xi talks may ease rate volatility"},
+      {"name": "WTI Crude", "ticker": "CL", "last": "101.04", "delta": "+5.04", "pct": "+5.25%", "dir": "up", "note": "Rally on Middle East cease-fire progress · Strait reopening timeline improving"},
+      {"name": "Brent Crude", "ticker": "BZ", "last": "107.82", "delta": "+7.76", "pct": "+7.76%", "dir": "up", "note": "Surge on regional de-escalation · Israel-Lebanon talks productive · baseline summer $85–90 if peace holds"},
+      {"name": "Gold", "ticker": "XAU", "last": "4,685.30", "delta": "−131.10", "pct": "−2.80%", "dir": "down", "note": "Risk-on repricing · stronger dollar, lower geopolitical risk premium"},
+      {"name": "Silver", "ticker": "XAG", "last": "85.33", "delta": "−6.66", "pct": "−7.80%", "dir": "down", "note": "Industrial metals retreat · cyclical rotation to growth on Fed transition, Middle East peace"},
+      {"name": "Renesas Electronics", "ticker": "6723.T", "last": "¥3,575.00", "delta": "−175", "pct": "−4.67%", "dir": "down", "note": "TSE May 13 · profit-taking after Irida Labs acquisition · embedded AI thesis intact for FY2026"},
+      {"name": "Bitcoin", "ticker": "BTC", "last": "81,069.54", "delta": "+1,054.27", "pct": "+1.32%", "dir": "up", "note": "Rally on CLARITY Act Senate Banking pass · peaked $81,965 intraday · $80K+ floor holding"},
+      {"name": "Ethereum", "ticker": "ETH", "last": "2,282.46", "delta": "−8.19", "pct": "−0.36%", "dir": "down", "note": "Slight pullback · CLARITY Act regulatory certainty underpins longer-term, Dartmouth $14.5M ETF allocation"},
+      {"name": "Total Crypto Mcap", "ticker": "TOTAL", "last": "1.95T", "delta": "+0.12T", "pct": "+6.5%", "dir": "up", "note": "CLARITY Act Senate Banking pass (15-9) drives institutional adoption · XRP ETF momentum accelerates"}
+    ]
+  },
+  "lede": {
+    "kicker": "May 14 Close · S&P 500 +0.77% to 7,444.25 (record) · Nasdaq +0.88% to 26,402.34 (record) · Dow +0.75% to 49,693.21 · Cisco smashes earnings on AI orders, stock +20% · Alibaba profit crashes but Cloud +38% drives stock +8% · Trump-Xi summit: $10B ag deal, 200 Boeing jets · CLARITY Act passes Senate Banking 15-9 · Powell era ends today May 15, Warsh takes over · Middle East cease-fire progress lifts sentiment · Oil surge: WTI $101.04, Brent $107.82",
+    "headline": "Markets close at records as Cisco leads earnings surge + Fed transition begins. <em>Powell's 11-year tenure concludes May 15; Warsh era emphasizes growth.</em> CLARITY Act Senate Banking passage fuels crypto rally; Middle East talks ease geopolitical risk.",
+    "paragraphs": [
+      "Markets closed at new all-time highs Wednesday May 14 on Cisco's blowout earnings and regulatory clarity for crypto. <strong>Cisco reported Q3 FY2026 revenue of $15.8B (+12% YoY, beat consensus)</strong>, with <strong>EPS $1.06 (+10%), net income $4.2B non-GAAP</strong>. The company <strong>raised AI order guidance to $9B from $5B</strong> and <strong>AI revenue target to $4B from $3B</strong>, signaling robust enterprise demand for networking infrastructure in the AI era. <strong>Stock surged +20% in pre-market trading, sharpest single-session rally since 2002</strong>. The earnings beat sparked broad tech strength: <strong>S&P 500 +0.77% to record 7,444.25</strong>, <strong>Nasdaq +0.88% to record 26,402.34</strong>, <strong>Dow +0.75% to 49,693.21 (above 50K for first time since Iran war began)</strong>, <strong>Russell 2000 +0.67% to 2,843.93</strong>. The market mood strengthened despite geopolitical complexity: <strong>oil surged sharply on Middle East cease-fire momentum (WTI +5.25% to $101.04, Brent +7.76% to $107.82)</strong> as <strong>Israel-Lebanon talks produced 'full day of productive and positive talks' May 14–15</strong>. The Strait of Hormuz reopening timeline improved materially, with baseline expectations now at early June rather than mid-summer.",
+      "Alibaba's earnings paradox: profit collapse, stock +8%. <strong>Alibaba reported Q4 2026 net income collapse of 99.7% to 86M yuan (vs 30B yuan a year ago, 84% below 14B yuan consensus)</strong>, posting its <strong>first operating loss since 2021</strong>. Yet <strong>revenue rose 3% YoY and Alibaba Cloud Intelligence surged 38% to 41.6B yuan</strong>, driving CEO Daniel Zhang's continued AI and logistics investment thesis. Investors rewarded the AI narrative despite earnings carnage: <strong>BABA +8%</strong> on institutional conviction in near-term cloud monetization. The paradox reflects market shift from earnings-based to optionality-based valuation — investors pricing multi-year AI infrastructure upside even as near-term profitability remains compressed. Broader tape message: <strong>AI capex spend (+38% YoY cloud revenue) outweighs quarterly earnings pressure</strong> in institutional calculus.",
+      "<strong>Powell's 11-year tenure as Fed Chair concludes May 15 (today), ceding leadership to Kevin Warsh effective immediately</strong>. Powell confirmed earlier this year he will remain on the Federal Reserve's board as a governor post-departure. <strong>Street consensus: Warsh maintains Powell's data-dependent policy framework with modestly more emphasis on growth vs. inflation precision</strong>. Warsh's early messaging likely to focus on: (1) Middle East de-escalation reducing commodity volatility, (2) Cisco-led earnings strength validating AI capex sustainability, (3) CLARITY Act regulatory clarity lowering tail risk for crypto institutional adoption. The transition occurs at favorable moment: inflation expectations falling on lower oil (WTI $101.04, baseline summer $85–90), labor market cooling gradually (April NFP beat +115K but wage growth still at +3.6% YoY). Warsh's first presiding FOMC meeting: June 16–17.",
+      "<strong>Senate Banking Committee passed CLARITY Act (Digital Asset Clarity) 15-9 on May 14</strong>, with bipartisan support from Sens. Gallego (D-AZ) and Alsobrooks (D-MD) joining all Republicans. The bill permits stablecoin custody, collateral, and treasury-operation yields while banning bank-deposit-equivalent offerings — protecting legacy banking while unlocking crypto innovation. <strong>Senate Banking Chairman Tim Scott (R-SC) targeted June/July full Senate floor passage</strong>. <strong>Polymarket odds on CLARITY 2026 passage: 75%+ (from 63% two days prior)</strong>. <strong>Crypto markets responded immediately: Bitcoin rallied to $81,965 intraday, Ethereum +0.36%</strong>, total mcap +6.5% to $1.95T. <strong>XRP spot ETF inflows accelerated; Dartmouth College allocated $14.5M to spot BTC and ETH ETFs May 14</strong>, validating institutional adoption thesis. Regulatory clarity + lower inflation expectations + Fed growth focus = structural tailwind for DeFi and institutional crypto adoption."
+    ],
+    "cards": [
+      {"label": "Cisco Q3 Earnings · AI Surge", "num": "Revenue +12%", "tone": "green", "body": "Cisco Q3 FY2026: revenue $15.8B (beat consensus), EPS $1.06 (+10%), raised AI order guidance $9B from $5B. Networking demand from AI capex surge (Alphabet $180–190B, AWS $364B YTD) drives multi-decade growth thesis. Stock +20%."},
+      {"label": "Powell Era Ends · Warsh Begins", "num": "May 15, 2026", "tone": "amber", "body": "Jerome Powell's 11-year tenure as Fed Chair concludes today, May 15, 2026. Kevin Warsh assumes role immediately. Street consensus: growth-focused, data-dependent policy maintains. First presiding FOMC: June 16–17. Middle East de-escalation + Cisco earnings + CLARITY Act = dovish backdrop."},
+      {"label": "CLARITY Act · Senate Banking Pass", "tone": "green", "body": "Senate Banking Committee advanced CLARITY Act 15-9 May 14. Bipartisan (includes Sens. Gallego, Alsobrooks). Permits stablecoin custody/collateral yields. Full Senate vote June/July targeted. Polymarket odds: 75%+ for 2026 passage. Bitcoin +2.3%, XRP institutional inflows accelerate."}
+    ]
+  },
+  "stories": [
+    {"tag": "Earnings", "tone": "corp", "title": "Cisco crushes Q3 earnings, raises AI guidance $9B from $5B — stock +20%, leads Nasdaq to record close", "body": "<strong>Cisco Systems reported Q3 FY2026 revenue $15.8B (+12% YoY, beat consensus 10%)</strong>, with <strong>non-GAAP EPS $1.06 (+10%) and net income $4.2B</strong>. <strong>AI orders hit $1.9B, prompting management to raise full-year AI order guidance to $9B from $5B and AI revenue target to $4B from $3B</strong>. CEO Chuck Robbins cited <strong>'critical infrastructure for the AI era'</strong>, emphasizing <strong>Networking growth of +25% YoY</strong> and <strong>Service Provider/Cloud orders surge of +105% YoY</strong>. <strong>Stock surged +20% in pre-market, sharpest single-session rally since 2002</strong>, igniting broad tech strength. The narrative: hyperscaler capex ($700B+ YTD for Alphabet, AWS, Microsoft) flows to networking gear as enterprises build AI infrastructure. Cisco's 16th consecutive quarter beating revenue expectations validates secular AI capex thesis for years ahead."},
+    {"tag": "Corp", "tone": "corp", "title": "Alibaba profit collapses 99.7% but Cloud +38% drives stock +8% — investors price AI optionality over earnings", "body": "<strong>Alibaba Group reported Q4 2026 earnings showing net income collapse to 86M yuan (vs 30B yuan prior year, 99.7% decline)</strong>, with <strong>first operating loss since 2021</strong>. Yet <strong>total revenue rose 3% YoY and Alibaba Cloud Intelligence Group surged 38% to 41.6B yuan</strong>. CEO Daniel Zhang defended heavy spending on <strong>AI infrastructure, cloud expansion, and one-hour rapid-delivery logistics</strong> as long-term positioning. <strong>Stock +8% on earnings release</strong> despite profit miss, reflecting institutional shift toward optionality-based valuation. Market message: AI capex spend outweighs near-term profitability in institutional calculus. Cloud monetization inflection expected 2026–2027 as foundation spending matures; enterprise spend on AI workloads accelerates."},
+    {"tag": "Geo", "tone": "geo", "title": "Trump-Xi summit yields $10B annual ag commitment, 200 Boeing jets — Israel-Lebanon talks productive, oil rallies $7+", "body": "<strong>President Donald Trump and China's Xi Jinping concluded two-day summit May 14–15 in Beijing with package of deliverables</strong>. <strong>Trump announced China committed to $10B+ annual U.S. agricultural purchases over next three years</strong> and <strong>agreement to purchase 200 Boeing jets</strong>. The two sides agreed to joint <strong>'Board of Trade' covering ~$30B in non-sensitive goods</strong> and <strong>'strategic stability' framework for next three years</strong>. Separately, <strong>U.S. and Israeli delegations held productive Israel-Lebanon talks May 14–15, described as 'full day of talks 9AM–5PM'</strong>, easing near-term regional tension. Oil reaction immediate: <strong>WTI surged +5.25% to $101.04, Brent +7.76% to $107.82</strong> on improved Strait-of-Hormuz reopening timeline. Baseline: formal Strait reopening early June if talks hold; Brent $85–90 summer. Risk-off repricing benefited equities broadly."},
+    {"tag": "Crypto", "tone": "crypto", "title": "CLARITY Act passes Senate Banking 15-9 May 14 — crypto rallies $81,965 peak, XRP ETF inflows accelerate, Dartmouth $14.5M", "body": "<strong>Senate Banking Committee advanced Digital Asset Clarity Act (CLARITY) by vote of 15-9 on May 14, 2026</strong>, with bipartisan support from Sens. Ruben Gallego (D-AZ) and Angela Alsobrooks (D-MD). The bill permits <strong>stablecoin custody, collateral, and treasury-operation yields while banning bank-deposit-equivalent offerings</strong> — protecting legacy banking while unlocking DeFi innovation. <strong>Senate Banking Chairman Tim Scott (R-SC) targeted June/July full Senate floor vote</strong>. <strong>Polymarket odds on CLARITY 2026 passage jumped to 75%+ from 63% two days prior</strong>. Crypto reaction instantaneous: <strong>Bitcoin rallied to $81,965 intraday (from $81,069.54 open)</strong> before retracting to $80,596.43 by 7:10 AM ET May 15. <strong>Dartmouth College allocated $14.5M to spot Bitcoin and Ethereum ETFs May 14</strong>, validating institutional endowment adoption thesis. The Senate Banking pass removes tail risk for crypto institutional flows."},
+    {"tag": "Fed", "tone": "fed", "title": "Powell's 11-year tenure concludes May 15; Warsh assumes Fed chair role effective immediately — growth-focused era begins", "body": "<strong>Jerome Powell's 11-year tenure as Federal Reserve Chair ended May 15, 2026 (today)</strong>. Powell <strong>confirmed he will remain on the Federal Reserve's board as a governor</strong> to preserve continuity and institutional knowledge. <strong>Kevin Warsh assumes the chairman role effective immediately</strong>. Street consensus: Warsh maintains Powell's <strong>data-dependent policy framework with modestly greater emphasis on growth vs. inflation precision</strong>. Early Warsh priorities likely: (1) Middle East de-escalation and lower oil volatility, (2) Cisco-led earnings strength validating AI capex sustainability, (3) CLARITY Act regulatory clarity enabling crypto institutional adoption. <strong>Warsh's first presiding FOMC meeting: June 16–17</strong>. The transition occurs at favorable macro moment: oil down 6% YTD on peace baseline, labor market cooling (April NFP beat but wage growth +3.6% YoY), inflation expectations falling, geopolitical risk declining."},
+    {"tag": "Earnings", "tone": "corp", "title": "May 14 earnings deluge: Cisco +20%, Alibaba +8% despite profit collapse, tech strength dominating tape", "body": "<strong>May 14–15 earnings season accelerated with 173 companies reporting May 14 and 98 on May 15</strong>. Key moves: <strong>Cisco +20% on AI order surge, Alibaba +8% on Cloud growth despite profit collapse, Burberry down on Americas/China demand mixed signals</strong>. Cisco's 12% revenue growth beat and 25% Networking surge set tone for hyperscaler-capex-dependent sectors. Alibaba's profit catastrophe (+38% Cloud but first operating loss since 2021) illustrated the AI optionality trade: <strong>equity markets repricing around multi-year infrastructure spend cycles rather than quarterly GAAP earnings</strong>. Broader message: tech strength intact on AI narrative; traditional earnings metrics secondary to capex deployment validation. Next earnings catalysts: Disney, Uber, AppLovin, Renesas (Q2 July 23)."},
+    {"tag": "Macro", "tone": "macro", "title": "Oil surges sharply as Middle East cease-fire progress improves Strait timeline — WTI +5.25%, Brent +7.76% on Trump-Xi, Israel-Lebanon talks", "body": "<strong>Oil prices surged sharply May 14–15 on Middle East de-escalation signals</strong>. <strong>WTI jumped +5.25% to $101.04, breaking above $100</strong> for first time in weeks. <strong>Brent surged +7.76% to $107.82</strong> on improved expectations for Strait-of-Hormuz reopening timeline. Catalysts: Trump-Xi summit in Beijing yielded $10B+ ag commitments and strategic stability framework; Israel-Lebanon talks produced day-long productive negotiations May 14–15. The market repriced Strait reopening from mid-summer baseline to early June within days. Baseline summer: Brent $85–90 if peace holds. Downstream: energy-major margins sustain 50%+ above pre-war norms through summer; consumer purchasing power benefits from $8–10/barrel Brent decline; auto-sector margins improve on lower energy inputs. Volatility likely persists near-term but structural floor intact."},
+    {"tag": "Crypto", "tone": "crypto", "title": "Bitcoin peaks $81,965 as CLARITY Act passes Senate Banking Committee — institutional adoption thesis validates", "body": "<strong>Bitcoin rallied to $81,965 intraday on May 14 as Senate Banking Committee passed CLARITY Act 15-9</strong>, clearing major regulatory overhang for cryptocurrency. The peak represented <strong>+1.32% move from May 14 open of $81,069.54</strong> before retracting to $80,596 by morning May 15. <strong>Ethereum held flat, total crypto mcap +6.5% to $1.95T</strong> on CLARITY momentum. The regulatory clarity provided structural support: bill permits stablecoin custody/collateral yields while protecting legacy banking, removing key banking-lobby objection. <strong>XRP spot ETF inflows accelerated post-vote</strong>, validating institutional demand for altcoin exposure amid regulatory certainty. <strong>Dartmouth College's $14.5M spot Bitcoin/Ethereum ETF allocation May 14</strong> demonstrated endowment adoption inflection. Street consensus: CLARITY Senate Banking pass → June/July floor vote → 75%+ passage probability → 2027 institutional crypto adoption surge. Crypto positioned for structural multi-year tailwind if macro backdrop (lower oil, Fed growth focus, peace) holds."},
+    {"tag": "Markets", "tone": "macro", "title": "S&P 500, Nasdaq, Dow all close at records May 14 — Cisco earnings surge, Alibaba cloud growth, geopolitical de-escalation fuel rally", "body": "<strong>U.S. equities closed at new all-time highs May 14 on Cisco earnings beat and Middle East cease-fire progress</strong>. <strong>S&P 500 +0.77% to record 7,444.25, Nasdaq +0.88% to record 26,402.34, Dow +0.75% to 49,693.21 (above 50K for first time since Iran war began)</strong>, Russell 2000 +0.67% to 2,843.93. Breadth strong: 65%+ of S&P 500 in green, energy and tech outperformers. <strong>VIX upticked +10.14% to 19.01</strong> despite rallying equities, reflecting persistent geopolitical tail risk but declining volatility premium as peace odds improved. The tape: Cisco leadership (Networking +25% YoY, AI orders $1.9B) validated hyperscaler capex thesis; Alibaba Cloud +38% despite profit collapse repriced equity risk on optionality; oil surge (+7.76% Brent) benefited energy majors and broader growth narrative. Technicals: S&P 500 now 6 new all-time highs in May; 50-day moving average support intact. May momentum expected to continue absent geopolitical reversal or earnings disappointment."},
+    {"tag": "Macro", "tone": "macro", "title": "Producer prices hotter than expected (PPI +1.4% vs 0.5% expected) May 13 — CPI focus point for May 11 inflation narrative", "body": "<strong>April Producer Price Index (PPI) released May 13 surprised to the upside at +1.4% vs 0.5% consensus</strong>, marking temporary inflation pressure despite oil's recent recovery. The print reflected <strong>lingering energy cost pass-through from pre-ceasefire spike</strong> and <strong>goods-sector stickiness</strong>. However, <strong>market repriced downside risk over May 14–15</strong> as Middle East de-escalation improved, oil surged (suggesting future PPI/CPI moderation), and <strong>Trump-Xi summit delivered $10B ag commitment (supportive of commodity disinflation)</strong>. <strong>April CPI (due mid-May after market close) will be critical read for Warsh's early Fed messaging</strong>, with consensus expecting 0.3–0.4% core YoY moderation on oil deflation baseline. Lower inflation expectations + Fed transition to growth-focused Warsh era = extended rate-hold window through summer. PPI print was bump in road, not reversal of disinflationary trend."}
+  ],
+  "renesas": {
+    "label": "Spotlight · Renesas Electronics (6723.T / RNECY / RNECF)",
+    "title": "Renesas: The Whipsaw Continues",
+    "head": "TSE May 14 · ¥3,575 (−4.67% from May 13 ¥3,750) · profit-taking after Irida Labs acquisition · Embedded AI thesis intact · May oil surge $101+ validates EV adoption case · Next earnings Jul 23, 2026",
+    "headline": "Tokyo Stock Exchange May 14 trading shows profit-taking in Renesas after M&A surge. <em>¥3,575 close reflects consolidation; Irida Labs software integration remains strategic win;</em> automotive electrification + embedded AI thesis structural.",
+    "paragraphs": [
+      "Renesas took a step back May 14 as investors locked in gains after week-long rally. <strong>6723.T closed at ¥3,575, down ¥175 or −4.67% from May 13 ¥3,750 close</strong>, profit-taking after extraordinary momentum from Q1 beat and Irida Labs acquisition announcement. <strong>The May 13–14 pullback from ¥3,750 represents healthy consolidation after +46% surge from May 1 low ¥2,589 to May 13 high ¥3,750</strong>. Structural thesis remains intact despite near-term technical pullback: (1) <strong>oil surge May 14 (+5.25% WTI to $101.04, +7.76% Brent to $107.82) on Middle East de-escalation validates downstream thesis</strong> — lower oil costs accelerate automotive OEM EV adoption, benefiting Renesas' <strong>R-Car Gen 5 platform design wins</strong>; (2) <strong>Warsh-era Fed (May 15 transition) expected to emphasize growth, supporting Japanese export multiples amid weak yen</strong>; (3) <strong>hyperscaler capex remains $700B+ YTD (Alphabet $180–190B, AWS $364B, Microsoft/Google custom silicon)</strong>. <strong>Irida Labs integration into Renesas 365 platform</strong> (unified electronics system development) adds embedded-AI software moat, defensive against competitive encroachment.",
+      "<strong>Renesas Q1 FY2026 results (reported May 1) remain strong baseline</strong>: <strong>revenue ¥380.3B (+21% YoY, beat ¥369B est.), operating margin 34% (+654 bps YoY)</strong> — best-in-class. <strong>$3B SiTime timing-business divestment closed Q1</strong>, freeing capital for Irida Labs M&A and shareholder returns ($2B buyback authorization active). The Irida Labs acquisition price not disclosed but addresses key gap in embedded-AI software toolchain. <strong>R-Car Gen 5 automotive design win traction accelerating as EV adoption inflects</strong> — oil down 6% YTD to $101 floor supports cost-of-ownership case for electrification vs. ICE. The <strong>April 10 shelf registration overhang (~100M shares potential dilution) persists but remains unfunded</strong> with stock above¥3,575 floor. May 14 oil surge (+7.76% Brent) validates long-thesis: Strait reopening by early June at $100+ Brent, summer baseline $85–90. Renesas margin expansion thesis (34% operating margin) sustained as AI software monetization offsets commodity headwinds.",
+      "Valuation: <strong>TTM EPS: still negative</strong>, reflecting heavy R&D in embedded AI and automotive EV platforms. <strong>Simply Wall St DCF fair value: ¥2,495 — 30% below May 14 close ¥3,575</strong> — premium reflects multi-year AI capex optionality, not GAAP earnings support. Structural headwinds: negative earnings, shelf-registration dilution overhang, NKY valuation at elevated levels. Structural upside: oil trajectory (May 14 surge to $101.04 validates $85–90 summer baseline), hyperscaler capex on track through 2026–2027, Warsh-era growth focus supports Japanese exporters. Irida Labs software integration creates moat for automotive/industrial AI competitiveness. <strong>Next catalyst: July 23 Q2 FY2026 earnings</strong> — full-quarter reflection of oil at new baseline ($100–101 intraday move suggests summer expectations resetting upward), automotive design-win traction post-EV inflection, M&A integration progress. May 14 pullback provides consolidation entry point; structural thesis (embedded AI + auto electrification + hyperscaler capex) unchanged."
+    ],
+    "stats": [
+      {"key": "Q1 FY2026 Revenue", "value": "¥380.3B", "tone": "up", "small": "+21% YoY · beat ¥369B est."},
+      {"key": "Operating Margin", "value": "34%", "tone": "up", "small": "+654 bps YoY · best-in-class"},
+      {"key": "6723.T · May 14 Close", "value": "¥3,575", "tone": "down", "small": "−4.67% from May 13 ¥3,750 · profit-taking"},
+      {"key": "May 1–14 Range", "value": "¥2,589–3,750", "tone": "amber", "small": "+46% from May 1 low to May 13 high"},
+      {"key": "YTD Return", "value": "+37.8%", "tone": "up", "small": "Strong YTD · Q1 beat + AI capex tailwinds"},
+      {"key": "Oil Validation (May 14)", "value": "WTI $101.04", "tone": "green", "small": "+5.25% · Strait reopening inflects EV case"},
+      {"key": "Irida Labs Integration", "value": "May 7", "tone": "up", "small": "Embedded AI software moat into Renesas 365"},
+      {"key": "Next Earnings", "value": "Jul 23", "tone": "amber", "small": "Q2 FY2026 · automotive design wins + oil baseline $100+"}
+    ]
+  },
+  "crypto": {
+    "tapeHeader": "May 14 Close · BTC $81,069.54 (+1.32%) peaks $81,965 on CLARITY Act Senate pass · ETH $2,282.46 (−0.36%) · total mcap $1.95T (+6.5%) · CLARITY 15-9 vote May 14 fuels institutional adoption",
+    "tape": [
+      {"sym": "BTC", "name": "Bitcoin", "sub": "$81,069.54 · rallied $81,965 intraday on CLARITY Act pass · $80K support floor intact · institutional endowment flows", "price": "$81,069.54", "chg": "+1.32%", "dir": "up"},
+      {"sym": "ETH", "name": "Ethereum", "sub": "$2,282.46 · slight pullback on macro caution · CLARITY Act regulatory certainty + Darmouth $14.5M allocation support", "price": "$2,282.46", "chg": "−0.36%", "dir": "down"},
+      {"sym": "SOL", "name": "Solana", "sub": "$92.15 · consolidation near highs · institutional rotation away from meme coins toward DeFi on CLARITY progress", "price": "$92.15", "chg": "−1.49%", "dir": "down"},
+      {"sym": "XRP", "name": "Ripple", "sub": "$1.48 · CLARITY Act Senate pass validates Ripple partnerships · ETF inflows accelerate post-vote · fastest altcoin adoption", "price": "$1.48", "chg": "−1.37%", "dir": "down"},
+      {"sym": "DOGE", "name": "Dogecoin", "sub": "$0.1139 · retail profit-taking · macro caution on PPI print overshadows meme momentum", "price": "$0.1139", "chg": "−1.26%", "dir": "down"},
+      {"sym": "F&G", "name": "Fear & Greed Index", "sub": "Neutral-Greed ~60 (from neutral 50 pre-CLARITY) · regulatory clarity providing psychological tailwind", "price": "~60", "chg": "Greed", "dir": "up"},
+      {"sym": "IBIT", "name": "BlackRock IBIT (BTC ETF)", "sub": "~815K BTC held (up from 809K May 7) · May inflows tracking $1.3–1.5B (from $1.2B revised pre-CLARITY)", "price": "—", "chg": "+0.75%", "dir": "up"},
+      {"sym": "MSTR", "name": "MicroStrategy", "sub": "Holds 713,502 BTC at ~$80.5K avg = $57.5B unrealized gains · May momentum aligns with BTC upside", "price": "—", "chg": "+1.32%", "dir": "up"}
+    ],
+    "notes": [
+      {"kicker": "Bitcoin Rally · CLARITY Act Senate Pass", "title": "Bitcoin surges to $81,965 on May 14 as Senate Banking Committee passes CLARITY Act 15-9 — regulatory clarity removes tail risk", "body": "<strong>Bitcoin rallied sharply May 14, peaking at $81,965 intraday as Senate Banking Committee passed CLARITY Act 15-9 with bipartisan support</strong>. <strong>Open $81,069.54, close retreated to $80,596 by May 15 morning</strong> — profit-taking after regulatory breakthrough. The move reflected removal of major tail risk: CLARITY Act passage clears stablecoin regulation uncertainty that had plagued crypto institutional adoption since 2021. <strong>Ethereum flat on day (−0.36%), total crypto mcap surged +6.5% to $1.95T</strong> on broader market capitalization inflation from Bitcoin strength. <strong>BlackRock's IBIT now holds ~815K BTC (up from 809K May 7), May inflows tracking $1.3–1.5B</strong> (revised up from $1.2B pre-vote). The fundamental: CLARITY Act permits stablecoin custody/collateral yields while protecting legacy banking, addressing longstanding banking-lobby objections. <strong>Senate Banking Chairman Tim Scott targeted June/July full Senate floor vote</strong>; Polymarket odds jumped to 75%+ for 2026 passage. Crypto positioned for multi-year institutional adoption inflection if Senate and House alignment holds."},
+      {"kicker": "CLARITY Act · Senate Banking Committee 15-9 May 14", "title": "CLARITY Act advances with bipartisan support (15-9); permits stablecoin yields, targets June/July floor passage", "body": "<strong>Senate Banking Committee voted 15-9 to advance Digital Asset Clarity Act (CLARITY) on May 14, 2026</strong>, with bipartisan coalition led by Sens. Gallego (D-AZ) and Alsobrooks (D-MD) joining all Republicans. The bill permits <strong>stablecoin custody, collateral, and treasury-operation yields while banning bank-deposit-equivalent offerings</strong> — protecting legacy banking while unlocking DeFi innovation. <strong>Senate Banking Chairman Tim Scott (R-SC) targeted June/July full Senate floor vote</strong> with White House supporting passage. <strong>Polymarket odds on CLARITY 2026 passage: 75%+ (up from 63% two days prior)</strong>. Key provisions: (1) allows stablecoins to generate yield on customer reserves, (2) permits collateral management, (3) bans offerings mimicking deposit products. Banking lobby opposition persists but momentum strong. Crypto industry unanimous backing validates regulatory shift. Next hurdle: House floor (House passed different version 2024); conference committee reconciliation likely pre-August recess."},
+      {"kicker": "XRP ETF & Dartmouth · Institutional Adoption", "title": "XRP spot ETF inflows accelerate post-CLARITY; Dartmouth College allocates $14.5M to Bitcoin/Ethereum — endowment adoption validates", "body": "<strong>XRP spot ETF inflows accelerated May 14–15 following Senate Banking Committee CLARITY Act pass</strong>, with <strong>XRP retesting $1.49 intraday before consolidating $1.48</strong>. <strong>Dartmouth College announced $14.5M allocation to spot Bitcoin and Ethereum ETFs on May 14</strong>, marking significant endowment adoption and validating institutional demand thesis. The narrative: CLARITY Act regulatory certainty + Ripple partnerships (JPMorgan, Mastercard RWA) + Polymarket 75%+ passage odds = structural adoption driver for XRP and broader altcoins. <strong>XRP spot ETF cumulative inflows likely exceed $1.5B by May 15</strong> (fastest institutional adoption velocity for any altcoin since Bitcoin spot ETF launch Jan 2024). GraniteShares 3x leveraged XRP ETF (launched May 7) expands product suite. The May 14 vote provided psychological and regulatory catalyst for endowment and institutional rotating into non-BTC/ETH exposure. XRP fundamentals remain strong: partnership pipeline, cross-border payment use cases, regulatory tailwinds."},
+      {"kicker": "Bitcoin Institutional Flows · MSTR, Endowments", "title": "MicroStrategy Bitcoin holdings surge with BTC upside; institutional endowment flows (Dartmouth $14.5M) validate custody adoption", "body": "<strong>MicroStrategy's 713,502 BTC holding appreciated +$30M+ May 14 as Bitcoin rallied to $81,965 intraday</strong>. <strong>MSTR unrealized gains: $57.5B at $80.5K average cost basis, up from $57.1B May 7</strong>. The company's strategic Bitcoin allocation thesis now vindicated by institutional adoption inflection evident in Dartmouth's $14.5M spot BTC/ETH ETF allocation. <strong>BlackRock IBIT now holds ~815K BTC, up from 809K May 7, with May inflows tracking $1.3–1.5B</strong> (revised up from $1.2B pre-CLARITY vote). The momentum: regulatory clarity (CLARITY Act) + oil de-escalation (WTI $101.04, -Brent $107.82) + Fed growth focus (Warsh May 15) = trifecta of tailwinds for Bitcoin and crypto positioning. Near-term: $80K support floor solid; potential resistance $82–83K if CLARITY floor vote succeeds June. Medium-term: $100K+ if macro backdrop (peace, lower inflation, growth-focused Fed) sustains."},
+      {"kicker": "Macro Backdrop · Fed Transition + Oil", "title": "Powell's Fed chair tenure ends May 15; Warsh growth focus + $101 oil + CLARITY Act = structural crypto bullish backdrop", "body": "<strong>Crypto positioned favorably as Jerome Powell's Fed chair tenure concludes May 15 (today), ceding to Kevin Warsh's growth-focused leadership</strong>. Street consensus: Warsh maintains data-dependent framework with modestly greater growth emphasis. The macro backdrop: (1) <strong>Middle East de-escalation (Trump-Xi summit, Israel-Lebanon talks) lifts risk appetite, oil surges $101 WTI</strong>, (2) <strong>CLARITY Act Senate Banking pass (15-9) removes tail risk for stablecoin institutional adoption</strong>, (3) <strong>Cisco earnings beat validates AI capex sustainability</strong>, (4) <strong>lower inflation expectations (April NFP beat, wage moderation +3.6% YoY) = extended Fed rate-hold window</strong>. Crypto adoption S-curve accelerates when regulatory clarity (CLARITY) + macro tailwinds (peace, growth-focused Fed) + institutional optionality (Dartmouth, endowments, hedge funds) align. May 14–15 inflection point validates 2026 crypto adoption thesis. BTC medium-term target $100K+ if framework sustains."}
+    ]
+  },
+  "earnings": {
+    "label": "Earnings · Recent & Upcoming",
+    "tiles": [
+      {"co": "Cisco (CSCO) · Wed May 14 PM", "move": "Beat $15.8B", "moveDir": "up", "tone": "win", "body": "Q3 FY2026: revenue $15.8B (+12% YoY, beat consensus 10%), EPS $1.06 (+10%), net income $4.2B non-GAAP. Networking +25% YoY, Service Provider/Cloud orders +105%. Raised AI order guidance to $9B from $5B, AI revenue target to $4B from $3B. Stock +20% in pre-market (sharpest rally since 2002). Hyperscaler capex ($700B+ YTD) drives multi-year growth thesis."},
+      {"co": "Alibaba (BABA) · Wed May 14 AM", "move": "Profit −99.7%", "moveDir": "down", "tone": "loss", "body": "Q4 2026: net income 86M yuan (collapse from 30B yuan prior year, −99.7%). First operating loss since 2021. Revenue +3% to 43.1B yuan. Cloud Intelligence +38% to 41.6B yuan. CEO Zhang defended heavy AI + rapid-delivery investment. Stock +8% despite earnings miss on Cloud growth narrative. Market repricing around multi-year AI optionality, not GAAP earnings."},
+      {"co": "Applied Materials (AMAT) · Wed May 14 PM", "move": "Reports Wed", "moveDir": "flat", "tone": "mix", "body": "Q2 FY2026 earnings due Wed May 14. Analysts expect ~$2.10 EPS on $7.2B revenue (+8% YoY). Watch: semiconductor capex cycle, AI chip demand trajectory. Cisco's AI order surge validates AMAT demand thesis. Margin pressure from competitive intensity offset by fab utilization strength."},
+      {"co": "Powell Fed Chair Transition · Thu May 15", "move": "Era Ends", "moveDir": "flat", "tone": "mix", "body": "Jerome Powell's 11-year tenure as Federal Reserve Chair concludes May 15, 2026 (today). Kevin Warsh assumes role immediately. Powell remains on board as governor. Street consensus: Warsh maintains data-dependent framework with growth emphasis. Warsh's first presiding FOMC: June 16–17. Macro backdrop (peace, lower oil, lower inflation) favorable for growth narrative."},
+      {"co": "CLARITY Act Senate Vote · Wed May 14", "move": "Pass 15-9", "moveDir": "up", "tone": "win", "body": "Senate Banking Committee advanced Digital Asset Clarity Act 15-9 with bipartisan support (Sens. Gallego D-AZ, Alsobrooks D-MD). Bill permits stablecoin custody/collateral yields while protecting legacy banking. Senate Banking Chairman Scott targeted June/July floor vote. Polymarket odds: 75%+ for 2026 passage (up from 63% two days prior). Crypto markets rallied immediately."},
+      {"co": "S&P 500, Nasdaq, Dow · Wed May 14", "move": "Records", "moveDir": "up", "tone": "win", "body": "S&P 500 +0.77% to record 7,444.25. Nasdaq +0.88% to record 26,402.34. Dow +0.75% to 49,693.21 (above 50K for first time since Iran war began). Russell 2000 +0.67% to 2,843.93. Cisco earnings leadership + Alibaba Cloud growth + Middle East de-escalation (oil +7.76% Brent) drove broad rally. Breadth 65%+ above 50-day MA. Technical continuation likely if macro tailwinds hold."},
+      {"co": "Oil Market · Wed May 14", "move": "WTI $101.04", "moveDir": "up", "tone": "win", "body": "WTI crude surged +5.25% to $101.04 (May 14 close) on Middle East de-escalation. Brent +7.76% to $107.82 on Israel-Lebanon productive talks, Trump-Xi summit strategic stability framework. Strait-of-Hormuz reopening timeline improved to early June from mid-summer baseline. Summer baseline: Brent $85–90. Downstream: energy-major margins sustain 50%+ above pre-war; consumer purchasing power benefits $8–10/barrel decline summer-forward."},
+      {"co": "Renesas (6723.T) · Wed May 14", "move": "¥3,575", "moveDir": "down", "tone": "mix", "body": "Tokyo Stock Exchange May 14: 6723.T closed ¥3,575 (−4.67% from May 13 ¥3,750). Profit-taking after +46% May 1–13 surge. Q1 beat (revenue ¥380.3B +21% YoY, margin 34%) + Irida Labs integration remain structural. May 14 oil surge ($101+ WTI, $107+ Brent) validates EV adoption thesis. R-Car Gen 5 design wins accelerate as OEMs embrace electrification. Next: Q2 FY2026 earnings July 23."},
+      {"co": "Bitcoin (BTC) · Wed May 14", "move": "$81,965 Peak", "moveDir": "up", "tone": "win", "body": "Bitcoin rallied to $81,965 intraday on May 14 as Senate Banking Committee passed CLARITY Act 15-9. Close retreated to $80,596 by May 15 morning (profit-taking). CLARITY regulatory clarity removes tail risk for stablecoin institutional adoption. BlackRock IBIT holds ~815K BTC, May inflows tracking $1.3–1.5B. Dartmouth College allocated $14.5M to spot BTC/ETH ETFs May 14. Institutional adoption inflection validates."},
+      {"co": "XRP, Altcoins · Wed May 14", "move": "CLARITY Catalyst", "moveDir": "up", "tone": "win", "body": "XRP retested $1.49 on CLARITY Act Senate Banking pass (15-9), consolidating $1.48. Altcoin institutional adoption accelerates with regulatory clarity. XRP spot ETF inflows likely exceed $1.5B cumulatively (fastest altcoin adoption since Bitcoin spot ETF Jan 2024). GraniteShares 3x leveraged XRP ETF (launched May 7) expands product suite. Ripple partnerships (JPMorgan, Mastercard RWA) validate cross-border payment thesis."},
+      {"co": "May 15+ Upcoming", "move": "Reports 98 Cos", "moveDir": "flat", "tone": "mix", "body": "98 earnings reports due May 15–16 (MUFG, MFG, Versant, others). Tech earnings season momentum remains strong (Cisco beat validates AI capex cycle). Expect energy majors benefit from $101+ oil (energy margin support); discretionary caution if consumer headwinds emerge. Next key event: April CPI (mid-May release), Warsh first messaging, June 16–17 FOMC. Market focus shifts from earnings to macro/Fed backdrop."}
+    ]
+  },
+  "weekAhead": {
+    "rows": [
+      {"day": "Today · Fri May 8", "event": "<strong>April NFP Released: 115K jobs added · UMich May prelim · CPI April (Sun May 11)</strong> NFP beat 62K consensus with unemployment holding 4.3%. Wage growth moderated to +3.6% YoY (vs +3.8% expected), alleviating inflation pressure. Revisions: March +7K to 185K, February −23K to −156K. Labor market gradually cooling while remaining resilient. UMich consumer sentiment due later today.", "tickers": "NFP · UMich"},
+      {"day": "Sat-Sun · May 9-10", "event": "<strong>Weekend market closed · Oil may consolidate near $100 Brent on structural Strait risks · Crypto regulatory clarity narrative from CLARITY Act intensifies</strong> Bitcoin holding $80K+ on Fed flexibility narrative (lower oil = lower inflation = rate-hold window lengthens). CLARITY Act Senate Banking markup scheduled May 11–12.", "tickers": "WTI · Brent · BTC"},
+      {"day": "Mon · May 11", "event": "<strong>CLARITY Act Senate Banking Committee Markup · Kevin Warsh Confirmation Vote (week of May 11) · April CPI Sunday May 11 evening</strong> Senate Banking Chairman Tim Scott (R-S.C.) targeting May 11–12 markup for CLARITY Act stablecoin compromise. Warsh confirmation vote expected May 11–13 (passage locked with GOP 53-seat majority). Powell's term ends May 15.", "tickers": "WARSH · CLARITY · CPI"},
+      {"day": "Tue-Wed May 12-13", "event": "<strong>Warsh confirmation vote finalizes (expected) · CLARITY Act floor debate preview · Earnings continue</strong> June 16–17 FOMC becomes Warsh's first presiding meeting if confirmed. Street consensus: Warsh maintains Powell's data-dependent path with growth emphasis. April CPI (released Sunday May 11) will shape early Warsh messaging.", "tickers": "FED · WARSH · CPI"},
+      {"day": "Through May 15", "event": "<strong>Powell's 11-year chair term expires May 15 · Warsh officially takes over · CLARITY Act targets June/July floor passage</strong> Baseline: Warsh confirmed by May 13; assumes Powell role May 15. June 16–17 FOMC first presiding. Oil baseline Brent $85–90 summer if Strait reopens by early June. Crypto regulatory clarity + lower rates = growth-equity tailwind.", "tickers": "FED · CLARITY · BTC · RNECY"},
+      {"day": "May 16+ · Next 30 Days", "event": "<strong>Warsh Era Begins · Fed transition messaging · FOMC June 16–17 · CLARITY Act June/July floor passage target</strong> Street consensus: Warsh slightly more growth-focused than Powell, maintains data-dependent stance. May 30 = end of Iran 30-day negotiation window (Strait baseline reopening). SpaceX IPO roadshow June 8 week. Hyperscaler 2026 capex ($700B+) supports AI infrastructure thesis.", "tickers": "FED · WARSH · SPCE · RNECY"}
+    ]
+  },
+  "footer": {
+    "compiled": "Compiled May 15, 2026 · Data: FMP (indices, commodities, crypto) · Sources: Yahoo Finance · CNBC · TheStreet · TradingView · Trading Economics · Fortune · Benzinga · CoinGecko · CoinDesk · The Block · Decrypt · Al Jazeera · Reuters · Bloomberg · CNBC · Polymarket · Federal Reserve · Morningstar · Investing.com",
+    "disclaimer": "Not investment advice"
+  }
+}
+</script>
+<!-- ============ DATA END ============ -->
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="mast-meta" id="mast-vol"></div>
+    <h1>The Daily <em>Tape</em></h1>
+    <div class="mast-meta right" id="mast-date"></div>
+  </header>
+  <div class="subhead" id="subhead"></div>
+
+  <section>
+    <div class="sec-label" id="tape-label"></div>
+    <h2 class="sec-title">The Tape</h2>
+    <div class="tape">
+      <table>
+        <thead><tr><th>Instrument</th><th>Last</th><th>Δ</th><th>%</th><th>Note</th></tr></thead>
+        <tbody id="tape-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-label">The Lede</div>
+    <div class="lede">
+      <div class="lede-main">
+        <div class="kicker" id="lede-kicker"></div>
+        <h2 id="lede-headline"></h2>
+        <div id="lede-paragraphs"></div>
+      </div>
+      <aside class="lede-side" id="lede-cards"></aside>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-label">Across the Wires</div>
+    <h2 class="sec-title">What's Moving Today</h2>
+    <div class="stories" id="stories"></div>
+  </section>
+
+  <section>
+    <div class="sec-label" id="renesas-label"></div>
+    <h2 class="sec-title" id="renesas-title"></h2>
+    <div class="renesas-wrap">
+      <div>
+        <div class="renesas-head" id="renesas-head"></div>
+        <h3 id="renesas-headline"></h3>
+        <div id="renesas-paragraphs"></div>
+      </div>
+      <div class="renesas-stats" id="renesas-stats"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-label">The Coin Desk</div>
+    <h2 class="sec-title">Crypto</h2>
+    <div class="crypto-wrap">
+      <div class="crypto-tape">
+        <h4 id="crypto-tape-header"></h4>
+        <div id="crypto-tape-rows"></div>
+      </div>
+      <div class="crypto-notes" id="crypto-notes"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-label" id="earnings-label"></div>
+    <h2 class="sec-title">The Print Pile</h2>
+    <div class="earnings-grid" id="earnings-grid"></div>
+  </section>
+
+  <section>
+    <div class="sec-label">Looking Forward</div>
+    <h2 class="sec-title">The Week Ahead</h2>
+    <div class="ahead" id="week-ahead"></div>
+  </section>
+
+  <footer>
+    <div id="footer-compiled"></div>
+    <div id="footer-disclaimer"></div>
+  </footer>
+
+</div>
+
+<script>
+(function() {
+  const D = JSON.parse(document.getElementById('dashboard-data').textContent);
+  const $ = id => document.getElementById(id);
+  const set = (id, html) => { const e = $(id); if (e) e.innerHTML = html; };
+  const txt = (id, t) => { const e = $(id); if (e) e.textContent = t; };
+
+  txt('mast-vol', D.masthead.volume);
+  txt('mast-date', D.masthead.date);
+  txt('subhead', D.masthead.subhead);
+
+  txt('tape-label', D.tape.label);
+  set('tape-body', D.tape.rows.map(r => `
+    <tr>
+      <td><span class="name">${r.name}</span><span class="ticker">${r.ticker}</span></td>
+      <td>${r.last}</td>
+      <td class="${r.dir}">${r.delta}</td>
+      <td class="${r.dir}">${r.pct}</td>
+      <td>${r.note}</td>
+    </tr>`).join(''));
+
+  set('lede-kicker', D.lede.kicker);
+  set('lede-headline', D.lede.headline);
+  set('lede-paragraphs', D.lede.paragraphs.map(p => `<p>${p}</p>`).join(''));
+  set('lede-cards', D.lede.cards.map(c => `
+    <div class="side-card ${c.tone}">
+      <div class="label">${c.label}</div>
+      <div class="num">${c.num}</div>
+      <p>${c.body}</p>
+    </div>`).join(''));
+
+  set('stories', D.stories.map(s => `
+    <article class="story">
+      <span class="tag ${s.tone}">${s.tag}</span>
+      <h3>${s.title}</h3>
+      <p>${s.body}</p>
+      ${s.pull ? `<div class="pull">${s.pull}</div>` : ''}
+    </article>`).join(''));
+
+  txt('renesas-label', D.renesas.label);
+  txt('renesas-title', D.renesas.title);
+  txt('renesas-head', D.renesas.head);
+  set('renesas-headline', D.renesas.headline);
+  set('renesas-paragraphs', D.renesas.paragraphs.map(p => `<p>${p}</p>`).join(''));
+  set('renesas-stats', D.renesas.stats.map(s => `
+    <div class="rstat">
+      <div class="rk">${s.key}</div>
+      <div class="rv ${s.tone || ''}">${s.value}</div>
+      <small>${s.small}</small>
+    </div>`).join(''));
+
+  txt('crypto-tape-header', D.crypto.tapeHeader);
+  set('crypto-tape-rows', D.crypto.tape.map(r => `
+    <div class="crypto-row">
+      <div class="crypto-sym">${r.sym}</div>
+      <div class="crypto-name">${r.name} <span>${r.sub}</span></div>
+      <div class="crypto-price">${r.price}</div>
+      <div class="crypto-chg ${r.dir}">${r.chg}</div>
+    </div>`).join(''));
+  set('crypto-notes', D.crypto.notes.map(n => `
+    <div class="cnote">
+      <div class="ckicker">${n.kicker}</div>
+      <h4>${n.title}</h4>
+      <p>${n.body}</p>
+    </div>`).join(''));
+
+  txt('earnings-label', D.earnings.label);
+  set('earnings-grid', D.earnings.tiles.map(t => `
+    <div class="ern ${t.tone}">
+      <div class="co">${t.co}</div>
+      <div class="move ${t.moveDir || 'flat'}">${t.move}</div>
+      <p>${t.body}</p>
+    </div>`).join(''));
+
+  set('week-ahead', D.weekAhead.rows.map(r => `
+    <div class="ahead-row">
+      <div class="ahead-day">${r.day}</div>
+      <div class="ahead-event">${r.event}</div>
+      <div class="ahead-tickers">${r.tickers}</div>
+    </div>`).join(''));
+
+  txt('footer-compiled', D.footer.compiled);
+  txt('footer-disclaimer', D.footer.disclaimer);
+})();
+</script>
+
+</body>
+</html>
