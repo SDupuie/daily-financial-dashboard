@@ -135,124 +135,500 @@
 <script type="application/json" id="dashboard-data">
 {
   "masthead": {
-    "volume": "Vol. I · No. 140",
-    "date": "Monday · May 18 · 2026",
-    "subhead": "Friday close: S&P 500 -1.24% to 7,408.50 · Nasdaq -1.54% to 26,225.14 · Dow -1.07% to 49,526.17 · Russell 2000 -2.44% to 2,793.30 · long-end yields and oil still pressure multiples into Monday · 10Y 4.59% · 30Y 5.12% · Brent settled $109.26 with $110+ prints Monday · BTC near $77K · Dominion jumped premarket on a NextEra deal"
+    "volume": "Vol. I · No. 141",
+    "date": "Tuesday · May 19 · 2026",
+    "subhead": "Monday close: S&P 500 -0.07% to 7,403.05 · Nasdaq -0.51% to 26,090.73 · Dow +0.32% to 49,686.12 · Russell 2000 -0.65% to 2,775.10 · long-end yields stayed elevated (10Y 4.61% · 30Y 5.14%) · crude still above $100 (WTI $103.97 · Brent $111.15) · BTC near $76.7K · Home Depot beat adjusted EPS while profit fell"
   },
   "tape": {
-    "label": "The Tape · Friday May 15 Close (plus Monday premarket context)",
+    "label": "The Tape · Monday May 18 Close (plus Tuesday premarket context)",
     "rows": [
-      {"name": "S&P 500", "ticker": "SPX", "last": "7,408.50", "delta": "-92.74", "pct": "-1.24%", "dir": "down", "note": "Friday's reset reflected oil-plus-yield pressure on growth; Monday futures stayed soft."},
-      {"name": "Nasdaq Composite", "ticker": "IXIC", "last": "26,225.14", "delta": "-410.08", "pct": "-1.54%", "dir": "down", "note": "Semis and AI leaders drove downside Friday; market now waits on Nvidia for re-acceleration."},
-      {"name": "Dow Industrials", "ticker": "DJI", "last": "49,526.17", "delta": "-537.29", "pct": "-1.07%", "dir": "down", "note": "Blue chips pulled back with rates; utilities outperformed in Monday premarket after M&A headlines."},
-      {"name": "Russell 2000", "ticker": "RUT", "last": "2,793.30", "delta": "-69.79", "pct": "-2.44%", "dir": "down", "note": "Small caps remained the most rate-sensitive pocket as financing costs repriced higher."},
-      {"name": "VIX", "ticker": "VIX", "last": "18.43", "delta": "+1.17", "pct": "+6.78%", "dir": "up", "note": "Volatility rose but stayed below panic levels, signaling controlled de-risking rather than disorder."},
-      {"name": "10-Yr Treasury", "ticker": "UST10Y", "last": "4.59%", "delta": "+4 bp", "pct": "-", "dir": "up", "note": "Yield held near the recent high into Monday, keeping duration-heavy equities under valuation pressure."},
-      {"name": "30-Yr Treasury", "ticker": "UST30Y", "last": "5.12%", "delta": "+26 bp", "pct": "-", "dir": "up", "note": "Long bond above 5% reinforced persistent inflation and term-premium concerns."},
-      {"name": "WTI Crude", "ticker": "CL", "last": "105.42", "delta": "+4.25", "pct": "+4.20%", "dir": "up", "note": "Crude's jump revived inflation concerns and directly pressured risk appetite."},
-      {"name": "Brent Crude", "ticker": "BZ", "last": "109.26", "delta": "+3.54", "pct": "+3.35%", "dir": "up", "note": "Geopolitical risk kept Brent near $110 in Monday trading, sustaining the energy premium."},
-      {"name": "Gold", "ticker": "XAU", "last": "4,561.90", "delta": "-126.30", "pct": "-2.70%", "dir": "down", "note": "Higher real yields and a firmer dollar outweighed safe-haven demand."},
-      {"name": "Silver", "ticker": "XAG", "last": "77.07", "delta": "-6.42", "pct": "-7.69%", "dir": "down", "note": "Silver underperformed as the selloff broadened across metals and cyclical risk."},
-      {"name": "Renesas Electronics", "ticker": "6723.T", "last": "¥3,647.00", "delta": "-207", "pct": "-5.37%", "dir": "down", "note": "Price action remained tied to global semiconductor beta and higher-rate pressure ahead of Nvidia."},
-      {"name": "Bitcoin", "ticker": "BTC", "last": "76,946.60", "delta": "-2.00%", "pct": "-2.00%", "dir": "down", "note": "Crypto traded as macro risk: higher yields and geopolitical stress pulled BTC to a two-week low."},
-      {"name": "Ethereum", "ticker": "ETH", "last": "2,122.12", "delta": "-3.30%", "pct": "-3.30%", "dir": "down", "note": "ETH underperformed BTC as broad risk-off positioning hit higher-beta majors."},
-      {"name": "Total Crypto Mcap", "ticker": "TOTAL", "last": "2.58T", "delta": "-", "pct": "-", "dir": "flat", "note": "Total crypto value stayed in a lower range as sentiment remained defensive into Monday."}
+      {
+        "name": "S&P 500",
+        "ticker": "SPX",
+        "last": "7,403.05",
+        "delta": "-5.45",
+        "pct": "-0.07%",
+        "dir": "down",
+        "note": "AP said the index slipped as oil and Iran-war uncertainty kept risk appetite choppy through the close."
+      },
+      {
+        "name": "Nasdaq Composite",
+        "ticker": "IXIC",
+        "last": "26,090.73",
+        "delta": "-134.41",
+        "pct": "-0.51%",
+        "dir": "down",
+        "note": "Tech underperformed as higher long-end yields and persistent energy risk weighed on duration-heavy growth."
+      },
+      {
+        "name": "Dow Industrials",
+        "ticker": "DJI",
+        "last": "49,686.12",
+        "delta": "+159.95",
+        "pct": "+0.32%",
+        "dir": "up",
+        "note": "Dow outperformed with defensive rotation while broader markets reacted to oil volatility."
+      },
+      {
+        "name": "Russell 2000",
+        "ticker": "RUT",
+        "last": "2,775.10",
+        "delta": "-18.20",
+        "pct": "-0.65%",
+        "dir": "down",
+        "note": "Small caps lagged again as financing-cost sensitivity remained a headwind."
+      },
+      {
+        "name": "VIX",
+        "ticker": "VIX",
+        "last": "17.82",
+        "delta": "-0.61",
+        "pct": "-3.31%",
+        "dir": "down",
+        "note": "Volatility eased from Friday highs but stayed elevated versus early-May lows."
+      },
+      {
+        "name": "10-Yr Treasury",
+        "ticker": "UST10Y",
+        "last": "4.61%",
+        "delta": "+2 bp",
+        "pct": "-",
+        "dir": "up",
+        "note": "Treasury daily curve for May 18 kept the 10Y above 4.6%, preserving valuation pressure."
+      },
+      {
+        "name": "30-Yr Treasury",
+        "ticker": "UST30Y",
+        "last": "5.14%",
+        "delta": "+2 bp",
+        "pct": "-",
+        "dir": "up",
+        "note": "The 30Y remained above 5%, signaling persistent term-premium and inflation-risk concerns."
+      },
+      {
+        "name": "WTI Crude",
+        "ticker": "CL",
+        "last": "103.97",
+        "delta": "-0.41",
+        "pct": "-0.39%",
+        "dir": "down",
+        "note": "AP premarket update showed WTI still above $100 despite a Tuesday pullback."
+      },
+      {
+        "name": "Brent Crude",
+        "ticker": "BZ",
+        "last": "111.15",
+        "delta": "-0.95",
+        "pct": "-0.85%",
+        "dir": "down",
+        "note": "Brent stayed near $111, keeping the energy risk premium firmly in place."
+      },
+      {
+        "name": "Gold",
+        "ticker": "XAU",
+        "last": "4,535.94",
+        "delta": "-4.50",
+        "pct": "-0.10%",
+        "dir": "down",
+        "note": "GoldPrice.org close for May 18 showed a mild pullback while macro stress remained elevated."
+      },
+      {
+        "name": "Silver",
+        "ticker": "XAG",
+        "last": "76.60",
+        "delta": "+0.61",
+        "pct": "+0.79%",
+        "dir": "up",
+        "note": "Silver outperformed gold on the day, lifting the short-term metals beta read."
+      },
+      {
+        "name": "Renesas Electronics",
+        "ticker": "6723.T",
+        "last": "¥3,509.00",
+        "delta": "-191",
+        "pct": "-5.16%",
+        "dir": "down",
+        "note": "Latest Tokyo close stayed under pressure with global semiconductor risk tone still fragile."
+      },
+      {
+        "name": "Bitcoin",
+        "ticker": "BTC",
+        "last": "76,657.17",
+        "delta": "+0.70%",
+        "pct": "+0.70%",
+        "dir": "up",
+        "note": "CoinGecko showed BTC stabilizing near $77K after the prior risk-off drawdown."
+      },
+      {
+        "name": "Ethereum",
+        "ticker": "ETH",
+        "last": "2,109.13",
+        "delta": "+1.30%",
+        "pct": "+1.30%",
+        "dir": "up",
+        "note": "ETH bounced with majors but remained more volatile than BTC in the same macro regime."
+      },
+      {
+        "name": "Total Crypto Mcap",
+        "ticker": "TOTAL",
+        "last": "2.64T",
+        "delta": "-0.03%",
+        "pct": "-0.03%",
+        "dir": "down",
+        "note": "CoinGecko global cap stayed broadly flat day-over-day, signaling consolidation."
+      }
     ]
   },
   "lede": {
-    "kicker": "Monday Setup · Friday close still sets the tape: SPX 7,408.50 · NDX 26,225.14 · Dow 49,526.17 · RUT 2,793.30 · VIX 18.43 · WTI $105.42 · Brent $109.26 · 10Y 4.59% · 30Y 5.12%",
-    "headline": "Rates and oil are still dictating the open. <em>Until yields cool, earnings need to do the heavy lifting.</em>",
+    "kicker": "Tuesday Setup · Monday close: SPX 7,403.05 · NDX 26,090.73 · Dow 49,686.12 · RUT 2,775.10 · VIX 17.82 · WTI $103.97 · Brent $111.15 · 10Y 4.61% · 30Y 5.14%",
+    "headline": "Oil volatility and high long-end yields are still capping risk appetite. <em>The market needs clean earnings follow-through to offset macro drag.</em>",
     "paragraphs": [
-      "Reuters reported May 18 that U.S. stock futures drifted lower as Treasury yields and oil remained elevated heading into a dense earnings week. Friday's pullback therefore looked like a repricing event, not a one-session anomaly.",
-      "The official Treasury curve for May 15 printed <strong>4.59% on the 10-year</strong> and <strong>5.12% on the 30-year</strong>, while Reuters reported settlements of <strong>$105.42 WTI</strong> and <strong>$109.26 Brent</strong>. That combination continues to compress room for stretched equity multiples.",
-      "Reuters' global wrap on May 18 said Gulf tensions kept crude and sovereign yields elevated, extending pressure across equities and risk assets. Cross-asset direction is still being set by energy and rates first, earnings second.",
-      "This week now hinges on whether headline earnings from AI and consumer leaders can offset a macro backdrop that is still tightening financial conditions."
+      "AP's May 18 close recap said U.S. equities ended mixed as markets tracked each swing in oil around Iran-war headlines, with the S&P 500 down 0.1% and the Nasdaq off 0.5%.",
+      "Treasury's official May 18 curve printed <strong>4.61% on the 10-year</strong> and <strong>5.14% on the 30-year</strong>, keeping duration pressure elevated even after Friday's surge.",
+      "AP's early May 19 market update showed crude still firmly above $100 despite a morning pullback (<strong>WTI $103.97, Brent $111.15</strong>), sustaining inflation sensitivity across assets.",
+      "The near-term pivot is now earnings quality: Home Depot's beat helped the micro backdrop, but the index-level tone still hinges on whether upcoming mega-cap AI and consumer prints can overpower rates plus oil."
     ],
     "cards": [
-      {"label": "Rates", "num": "10Y 4.59%", "tone": "amber", "body": "Treasury curve held high into Monday; 30Y remained at 5.12%."},
-      {"label": "Energy", "num": "Brent $109.26", "tone": "amber", "body": "Oil premium stayed elevated with additional $110+ prints in Monday trade."},
-      {"label": "Crypto", "num": "BTC $76.9K", "tone": "red", "body": "Macro risk-off pushed BTC to its weakest level since early May."}
+      {
+        "label": "Rates",
+        "num": "10Y 4.61%",
+        "tone": "amber",
+        "body": "Treasury curve remains restrictive for long-duration equity multiples."
+      },
+      {
+        "label": "Energy",
+        "num": "Brent $111.15",
+        "tone": "amber",
+        "body": "Crude pulled back Tuesday morning but stayed in an inflationary zone."
+      },
+      {
+        "label": "Crypto",
+        "num": "F&G 25",
+        "tone": "red",
+        "body": "Alternative.me sentiment reads Extreme Fear despite BTC stabilizing near $77K."
+      }
     ]
   },
   "stories": [
-    {"tag": "Markets", "tone": "macro", "title": "U.S. futures slipped as yields and oil remained elevated", "body": "Reuters on May 18 said futures for major U.S. indexes fell before the open as higher Treasury yields and crude prices weighed on risk appetite into earnings-heavy sessions."},
-    {"tag": "Macro", "tone": "macro", "title": "Global stocks retreated as bond yields climbed", "body": "Reuters' May 18 global markets report said fresh Gulf attacks lifted oil and sovereign yields, reviving inflation concerns and pressing equities across regions."},
-    {"tag": "Rates", "tone": "fed", "title": "Morning Bid: bond-market stress is now the key equity constraint", "body": "Reuters columnist Mike Dolan wrote May 18 that rising oil, inflation worries, and debt-supply concerns are unsettling bonds and darkening the backdrop for AI-led equities."},
-    {"tag": "Corp", "tone": "corp", "title": "NextEra agreed to buy Dominion Energy in a $127 billion deal", "body": "Reuters reported May 18 that NextEra will acquire Dominion in a $127 billion transaction. Dominion shares jumped in premarket trade, putting utilities and regulated infrastructure in focus."},
-    {"tag": "Earnings", "tone": "corp", "title": "Baidu beat quarterly revenue estimates but flagged soft advertising", "body": "Reuters on May 18 said Baidu topped revenue estimates, with AI cloud momentum helping offset ad-market pressure. Shares rose in premarket after the release."},
-    {"tag": "Earnings", "tone": "corp", "title": "Ryanair posted a 40% annual profit jump", "body": "Reuters reported May 18 that Ryanair delivered record annual profit growth, though management cautioned that higher fuel costs and pricing normalization still matter."},
-    {"tag": "Crypto", "tone": "crypto", "title": "Bitcoin slid below $77,000 as geopolitical tension rose", "body": "Reuters on May 18 said bitcoin fell below $77,000, its lowest in two weeks, as U.S.-Iran tensions increased and broader risk assets softened."},
-    {"tag": "Crypto", "tone": "crypto", "title": "Ethereum and altcoins underperformed during the risk-off move", "body": "Same-session market boards on May 18 showed ETH, SOL, XRP, and DOGE falling more than bitcoin, consistent with higher-beta underperformance in a macro-led selloff."},
-    {"tag": "Geo", "tone": "geo", "title": "Korean chip supply risk stayed on watch ahead of Nvidia week", "body": "Reuters on May 18 said Samsung's union and management resumed talks over wages ahead of potential strike action, keeping semiconductor supply-chain sensitivity in focus."}
+    {
+      "tag": "Markets",
+      "tone": "macro",
+      "title": "U.S. stocks finished mixed Monday as oil swings drove intraday direction",
+      "body": "AP on May 18 said the S&P 500 fell 0.1% while the Dow rose 0.3%, with risk sentiment repeatedly shifting alongside Iran-related crude moves."
+    },
+    {
+      "tag": "Macro",
+      "tone": "macro",
+      "title": "Tuesday futures pointed lower while oil held above $100",
+      "body": "AP's May 19 premarket update showed S&P and Nasdaq futures in the red as WTI stayed at $103.97 and Brent at $111.15."
+    },
+    {
+      "tag": "Rates",
+      "tone": "fed",
+      "title": "Treasury curve stayed elevated into week's key earnings window",
+      "body": "The U.S. Treasury daily curve for May 18 printed 4.61% (10Y) and 5.14% (30Y), reinforcing the high-rate constraint on valuations."
+    },
+    {
+      "tag": "Earnings",
+      "tone": "corp",
+      "title": "Home Depot beat adjusted EPS despite a year-over-year profit decline",
+      "body": "AP on May 19 reported Home Depot posted adjusted EPS of $3.43, topping expectations while management cited ongoing consumer uncertainty and housing affordability pressure."
+    },
+    {
+      "tag": "Corp",
+      "tone": "corp",
+      "title": "NextEra and Dominion agreed a large utility merger tied to AI-era power demand",
+      "body": "AP and Reuters follow-through on May 18 framed the deal as a major U.S. power-scale play as data-center electricity demand accelerates."
+    },
+    {
+      "tag": "Earnings",
+      "tone": "corp",
+      "title": "Baidu topped estimates with AI-cloud strength offsetting ad softness",
+      "body": "Reuters coverage dated May 18 said Baidu beat quarterly revenue and profit expectations, with cloud demand helping cushion weaker advertising."
+    },
+    {
+      "tag": "Earnings",
+      "tone": "corp",
+      "title": "Ryanair posted record full-year profit growth but flagged fuel risk",
+      "body": "Reuters-dated reporting on May 18 said Ryanair FY26 profit rose about 40%, while management still highlighted energy uncertainty."
+    },
+    {
+      "tag": "Crypto",
+      "tone": "crypto",
+      "title": "Bitcoin steadied near $77,000 after a four-session slide",
+      "body": "Reuters-attributed coverage published May 19 said BTC traded near $77K as markets weighed geopolitical risk and the inflation impact of higher oil."
+    },
+    {
+      "tag": "Semi",
+      "tone": "corp",
+      "title": "Samsung labor talks narrowed differences as strike risk remained",
+      "body": "Reuters reporting updated May 19 said Samsung and its union narrowed some gaps, but the potential for a disruptive walkout kept semiconductor supply concerns alive."
+    }
   ],
   "renesas": {
     "label": "Renesas Watch · 6723.T",
-    "title": "Renesas: still macro-sensitive, waiting for a new company catalyst",
-    "head": "Latest verified Tokyo quote in this run: ¥3,647 (-5.37%) · no new Renesas company release dated May 17-18 found",
-    "headline": "The stock remains tied to global semiconductor risk appetite. <em>In this window, macro and sector tone mattered more than company-specific flow.</em>",
+    "title": "Renesas: Tokyo shares fell again as macro and chip-cycle risk stayed in charge",
+    "head": "Latest verified Tokyo close in this run: ¥3,509 (-5.16%) · no new Renesas company release dated May 18-19 found",
+    "headline": "The name is still trading as a high-beta semiconductor proxy. <em>No fresh company release shifted the narrative in this 48-hour window.</em>",
     "paragraphs": [
-      "The latest verifiable Tokyo quote in this run is <strong>¥3,647</strong>, a <strong>-5.37%</strong> move on the session snapshot. Price behavior continues to track global semiconductor volatility and higher-rate pressure.",
-      "Renesas' official newsroom still shows earlier releases and no newly dated May 17-18 announcement. So there was no fresh company-side update to reset the narrative during this run.",
-      "That leaves the positioning lens intact: Renesas remains linked to auto and embedded-AI demand while valuation sensitivity rises whenever the long end of the Treasury curve moves up.",
-      "Near-term, the stock's tone is likely to react more to sector earnings (especially Nvidia week) and rates than to headline flow from Renesas itself."
+      "The latest verifiable Tokyo close in this run is <strong>¥3,509</strong>, down <strong>5.16%</strong>. Price action continues to track broader semiconductor beta and macro risk repricing.",
+      "A fresh newsroom check shows Renesas' latest posted release remains May 7, 2026, with no newly dated May 18-19 corporate announcement found.",
+      "That keeps the setup macro-led: elevated global yields and energy-driven inflation risk remain the dominant near-term inputs for chip valuations.",
+      "Until a new company-side catalyst emerges, Renesas direction is likely to follow sector earnings tone and global risk appetite more than idiosyncratic flow."
     ],
     "stats": [
-      {"key": "6723.T Latest Verified", "value": "¥3,647", "tone": "down", "small": "Recent Tokyo quote snapshot · -5.37%"},
-      {"key": "Fresh Release Check", "value": "None found", "tone": "amber", "small": "No dated May 17-18 Renesas release"},
-      {"key": "Q1 FY2026 Revenue", "value": "¥380.3B", "tone": "up", "small": "From prior Renesas April 24 results"},
-      {"key": "Q1 Operating Profit", "value": "¥90.6B", "tone": "up", "small": "From prior Renesas April 24 results"},
-      {"key": "Macro Pressure", "value": "30Y 5.12%", "tone": "amber", "small": "Higher long-end yields challenge semis valuations"},
-      {"key": "Energy Input", "value": "Brent $109.26", "tone": "amber", "small": "Oil premium remains elevated"},
-      {"key": "Theme", "value": "Auto + Embedded AI", "tone": "up", "small": "Strategic demand story unchanged"},
-      {"key": "Next Catalyst", "value": "Next earnings cycle", "tone": "amber", "small": "Needs company-side confirmation"}
+      {
+        "key": "6723.T Latest Verified",
+        "value": "¥3,509",
+        "tone": "down",
+        "small": "Tokyo close snapshot · -5.16%"
+      },
+      {
+        "key": "Fresh Release Check",
+        "value": "None found",
+        "tone": "amber",
+        "small": "No Renesas release dated May 18-19"
+      },
+      {
+        "key": "Q1 FY2026 Revenue",
+        "value": "¥380.3B",
+        "tone": "up",
+        "small": "From April 24 Renesas results"
+      },
+      {
+        "key": "Q1 Operating Profit",
+        "value": "¥90.6B",
+        "tone": "up",
+        "small": "From April 24 Renesas results"
+      },
+      {
+        "key": "Macro Pressure",
+        "value": "30Y 5.14%",
+        "tone": "amber",
+        "small": "Long-end yields remain a valuation headwind"
+      },
+      {
+        "key": "Energy Input",
+        "value": "Brent $111.15",
+        "tone": "amber",
+        "small": "Oil risk premium remains elevated"
+      },
+      {
+        "key": "Theme",
+        "value": "Auto + Embedded AI",
+        "tone": "up",
+        "small": "Strategic demand story unchanged"
+      },
+      {
+        "key": "Next Catalyst",
+        "value": "Next earnings cycle",
+        "tone": "amber",
+        "small": "Needs company-side confirmation"
+      }
     ]
   },
   "crypto": {
-    "tapeHeader": "May 18 crypto check · BTC $76,946.60 (-2.00%) · ETH $2,122.12 (-3.30%) · SOL $84.34 (-3.06%) · XRP $1.3795 (-3.12%) · DOGE $0.1042 (-6.70%) · total mcap ~2.58T range",
+    "tapeHeader": "May 19 crypto check · BTC $76,657.17 (+0.7%) · ETH $2,109.13 (+1.3%) · SOL $84.38 (+1.0%) · XRP $1.38 (+0.1%) · DOGE $0.1037 (+1.3%) · total mcap $2.64T (-0.03%) · F&G 25 (Extreme Fear)",
     "tape": [
-      {"sym": "BTC", "name": "Bitcoin", "sub": "May 18 session check", "price": "$76,946.60", "chg": "-2.00%", "dir": "down"},
-      {"sym": "ETH", "name": "Ethereum", "sub": "May 18 session check", "price": "$2,122.12", "chg": "-3.30%", "dir": "down"},
-      {"sym": "SOL", "name": "Solana", "sub": "May 18 session check", "price": "$84.3379", "chg": "-3.06%", "dir": "down"},
-      {"sym": "XRP", "name": "Ripple", "sub": "May 18 session check", "price": "$1.3795", "chg": "-3.12%", "dir": "down"},
-      {"sym": "DOGE", "name": "Dogecoin", "sub": "May 18 session check", "price": "$0.1042", "chg": "-6.70%", "dir": "down"},
-      {"sym": "F&G", "name": "Fear & Greed Index", "sub": "Alternative.me index page reachable; live numeric extraction unavailable in this run", "price": "N/V", "chg": "Unverified", "dir": "flat"},
-      {"sym": "IBIT", "name": "BlackRock IBIT", "sub": "Most recent verified cash close", "price": "$44.82", "chg": "-2.92%", "dir": "down"},
-      {"sym": "MSTR", "name": "Strategy", "sub": "Most recent verified cash close", "price": "$175.90", "chg": "lower", "dir": "down"}
+      {
+        "sym": "BTC",
+        "name": "Bitcoin",
+        "sub": "CoinGecko live check",
+        "price": "$76,657.17",
+        "chg": "+0.70%",
+        "dir": "up"
+      },
+      {
+        "sym": "ETH",
+        "name": "Ethereum",
+        "sub": "CoinGecko live check",
+        "price": "$2,109.13",
+        "chg": "+1.30%",
+        "dir": "up"
+      },
+      {
+        "sym": "SOL",
+        "name": "Solana",
+        "sub": "CoinGecko live check",
+        "price": "$84.38",
+        "chg": "+1.00%",
+        "dir": "up"
+      },
+      {
+        "sym": "XRP",
+        "name": "Ripple",
+        "sub": "CoinGecko live check",
+        "price": "$1.38",
+        "chg": "+0.10%",
+        "dir": "up"
+      },
+      {
+        "sym": "DOGE",
+        "name": "Dogecoin",
+        "sub": "CoinGecko live check",
+        "price": "$0.1037",
+        "chg": "+1.30%",
+        "dir": "up"
+      },
+      {
+        "sym": "F&G",
+        "name": "Fear & Greed Index",
+        "sub": "Alternative.me",
+        "price": "25",
+        "chg": "Extreme Fear",
+        "dir": "down"
+      },
+      {
+        "sym": "IBIT",
+        "name": "BlackRock IBIT",
+        "sub": "Live quote could not be reliably fetched in this run",
+        "price": "N/V",
+        "chg": "Unverified",
+        "dir": "flat"
+      },
+      {
+        "sym": "MSTR",
+        "name": "Strategy",
+        "sub": "Stooq close (May 18)",
+        "price": "$166.63",
+        "chg": "-6.08%",
+        "dir": "down"
+      }
     ],
     "notes": [
-      {"kicker": "Risk Tone · May 18", "title": "Crypto stayed tightly linked to macro risk", "body": "Higher yields, higher oil, and geopolitics kept crypto trading like high-beta macro exposure rather than an idiosyncratic asset class."},
-      {"kicker": "Bitcoin · May 18", "title": "BTC fell below $77K", "body": "Reuters said bitcoin dropped below <strong>$77,000</strong> on May 18, its lowest level in roughly two weeks as geopolitical risk escalated."},
-      {"kicker": "Breadth · May 18", "title": "Altcoins underperformed bitcoin", "body": "ETH, SOL, XRP, and DOGE all posted steeper daily losses than BTC in the same window, confirming broad risk-off breadth."},
-      {"kicker": "Data Quality", "title": "Fear & Greed numeric value not confirmed", "body": "The Alternative.me index page was accessible, but this run could not reliably extract a same-session numeric value without reusing stale data."}
+      {
+        "kicker": "Risk Tone · May 19",
+        "title": "Crypto remained macro-coupled",
+        "body": "BTC and majors stabilized, but positioning is still heavily driven by rates, oil, and geopolitical risk rather than isolated crypto catalysts."
+      },
+      {
+        "kicker": "Sentiment",
+        "title": "Fear & Greed stayed in Extreme Fear",
+        "body": "Alternative.me printed <strong>25</strong> (Extreme Fear), showing sentiment remains defensive despite intraday rebounds."
+      },
+      {
+        "kicker": "Breadth",
+        "title": "Large-cap altcoins bounced with bitcoin",
+        "body": "ETH, SOL, XRP, and DOGE all printed modest positive 24h moves in CoinGecko's latest read."
+      },
+      {
+        "kicker": "Data Quality",
+        "title": "IBIT live quote not confirmed this run",
+        "body": "Multiple quote endpoints were rate-limited or stale in this environment, so IBIT was left unverified instead of reusing old values."
+      }
     ]
   },
   "earnings": {
     "label": "Earnings · Past 48 Hours & Next 5 Days",
     "tiles": [
-      {"co": "Baidu (BIDU) · Mon May 18", "move": "Beat", "moveDir": "up", "tone": "win", "body": "Reuters reported Baidu beat quarterly revenue estimates; AI cloud supported results while advertising remained softer."},
-      {"co": "Ryanair (RYAAY) · Mon May 18", "move": "+40% profit", "moveDir": "up", "tone": "win", "body": "Reuters said Ryanair posted record annual profit growth, with investors balancing strong demand against fuel and pricing risk."},
-      {"co": "Home Depot (HD) · Tue May 19", "move": "$3.41 est.", "moveDir": "flat", "tone": "mix", "body": "Home Depot is the next key read on U.S. housing and renovation demand in a still-high-rate backdrop."},
-      {"co": "Nvidia (NVDA) · Wed May 20 AMC", "move": "AI referendum", "moveDir": "up", "tone": "win", "body": "Nvidia remains the week's central event for AI capex expectations and broad semiconductor sentiment."},
-      {"co": "Target (TGT) / Lowe's (LOW) · Wed May 20", "move": "Consumer", "moveDir": "flat", "tone": "mix", "body": "Midweek retail prints will test discretionary durability alongside Home Depot's housing read."},
-      {"co": "Walmart (WMT) · Thu May 21", "move": "$174B est.", "moveDir": "flat", "tone": "mix", "body": "Walmart should be the cleanest checkpoint for value-seeking consumer behavior under sticky inflation."},
-      {"co": "Workday / Intuit / AMAT · Thu May 21", "move": "Enterprise + semicap", "moveDir": "flat", "tone": "mix", "body": "Thursday broadens the tape to software and semiconductor equipment after the Nvidia print."},
-      {"co": "Fri May 22", "move": "Digest day", "moveDir": "flat", "tone": "mix", "body": "Friday likely centers on post-earnings positioning and whether rates/oil allow a risk rebound."},
-      {"co": "Mon May 25", "move": "U.S. holiday", "moveDir": "flat", "tone": "mix", "body": "Memorial Day keeps U.S. cash equities closed; thinner liquidity can amplify futures and crypto swings."},
-      {"co": "Past 48 Hours", "move": "Macro-led", "moveDir": "flat", "tone": "mix", "body": "Weekend-to-Monday action was dominated more by rates, oil, and geopolitics than by a single earnings miss/beat shock."}
+      {
+        "co": "Home Depot (HD) · Tue May 19",
+        "move": "Adj. EPS beat",
+        "moveDir": "up",
+        "tone": "win",
+        "body": "AP reported adjusted EPS of $3.43, ahead of expectations, while overall profit fell year over year."
+      },
+      {
+        "co": "Baidu (BIDU) · Mon May 18",
+        "move": "Beat",
+        "moveDir": "up",
+        "tone": "win",
+        "body": "Reuters-dated reporting said Baidu beat revenue and profit estimates, helped by AI cloud demand."
+      },
+      {
+        "co": "Ryanair (RYAAY) · Mon May 18",
+        "move": "+40% profit",
+        "moveDir": "up",
+        "tone": "win",
+        "body": "Reuters-reported FY26 profit growth was strong, though fuel uncertainty remained a key watch item."
+      },
+      {
+        "co": "Nvidia (NVDA) · Wed May 20 AMC",
+        "move": "Key print",
+        "moveDir": "up",
+        "tone": "mix",
+        "body": "Nvidia investor relations lists Q1 FY27 results for May 20 at 2:00 PM PT; this remains the week's central AI signal."
+      },
+      {
+        "co": "Target (TGT) · Wed May 20 BMO",
+        "move": "Consumer read",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "Target is scheduled for May 20 and should add another datapoint on discretionary demand."
+      },
+      {
+        "co": "Lowe's (LOW) · Wed May 20",
+        "move": "Housing read",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "Lowe's corporate filings list a May 20 Q1 conference call, pairing with HD for a broad home-improvement read."
+      },
+      {
+        "co": "Walmart (WMT) · Thu May 21 BMO",
+        "move": "Defensive retail",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "Walmart confirmed its Q1 earnings call for May 21, a key gauge of value-seeking consumer behavior."
+      },
+      {
+        "co": "Palo Alto (PANW) · Wed May 20 PM",
+        "move": "Cyber demand",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "TradingEconomics calendar lists PANW for May 20 PM, adding enterprise-spend signal into the mix."
+      },
+      {
+        "co": "Thu-Fri Window",
+        "move": "Follow-through",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "After core prints, focus shifts to guidance quality and whether macro conditions allow multiple expansion."
+      },
+      {
+        "co": "Past 48 Hours",
+        "move": "Macro-heavy tape",
+        "moveDir": "flat",
+        "tone": "mix",
+        "body": "Even with selective beats, cross-asset moves remained dominated by oil and yield volatility."
+      }
     ]
   },
   "weekAhead": {
     "rows": [
-      {"day": "Today · Mon May 18", "event": "<strong>Macro risk-off open plus Baidu/Ryanair results.</strong> Utilities lead premarket after the NextEra-Dominion deal.", "tickers": "SPX · BIDU · RYAAY · D"},
-      {"day": "Tue May 19", "event": "<strong>Home Depot opens the U.S. retail/housing read.</strong> Markets will test whether higher rates are freezing bigger-ticket activity.", "tickers": "HD · LOW · TGT"},
-      {"day": "Wed May 20", "event": "<strong>Nvidia after close is the fulcrum.</strong> AI demand durability meets elevated bond yields.", "tickers": "NVDA · ADI · SNOW"},
-      {"day": "Thu May 21", "event": "<strong>Walmart plus software and semicap breadth.</strong> Consumer resilience and enterprise spend are both tested.", "tickers": "WMT · AMAT · WDAY · INTU"},
-      {"day": "Fri May 22", "event": "<strong>Positioning and digestion.</strong> Watch cross-asset response after AI, retail, and macro signals stack up.", "tickers": "SPX · UST10Y · CL · BTC"},
-      {"day": "Mon May 25", "event": "<strong>Memorial Day: U.S. markets closed.</strong> Crypto and geopolitics continue through the holiday window.", "tickers": "BTC · ETH · USO"}
+      {
+        "day": "Today · Tue May 19",
+        "event": "<strong>Home Depot earnings and another oil-sensitive open.</strong> Futures were softer as crude stayed above $100.",
+        "tickers": "HD · SPX · CL"
+      },
+      {
+        "day": "Wed May 20",
+        "event": "<strong>Nvidia after close plus Fed minutes.</strong> AI demand and policy tone share the spotlight.",
+        "tickers": "NVDA · TGT · LOW · FOMC"
+      },
+      {
+        "day": "Thu May 21",
+        "event": "<strong>Walmart headline plus enterprise follow-through.</strong> Consumer resilience remains the key macro micro-bridge.",
+        "tickers": "WMT · PANW · UST10Y"
+      },
+      {
+        "day": "Fri May 22",
+        "event": "<strong>Positioning and digestion.</strong> Watch whether yields/oil fade enough for risk assets to re-rate higher.",
+        "tickers": "SPX · NDX · CL · BTC"
+      },
+      {
+        "day": "Sat-Sun May 23-24",
+        "event": "<strong>Weekend geopolitics and crypto trade.</strong> Any Iran-war headline can reset Monday risk pricing.",
+        "tickers": "BTC · ETH · BZ"
+      },
+      {
+        "day": "Mon May 25",
+        "event": "<strong>Memorial Day: U.S. markets closed.</strong> Holiday liquidity can amplify moves in futures and crypto.",
+        "tickers": "BTC · ETH · USO"
+      }
     ]
   },
   "footer": {
-    "compiled": "Compiled May 18, 2026 · Data and sources used this session: AP · U.S. Treasury Daily Yield Curve · Reuters (markets, commodities, earnings, FX, crypto, and corporate wires) · FX Leaders · Breakouts Happen · EarningSpike · Kiplinger · The Currency Analytics · CoinMarketCap · CoinCodex · CoinGecko · Alternative.me · Renesas newsroom · Asset Alive",
+    "compiled": "Compiled May 19, 2026 · Data and sources used this session: AP (May 18 close recap; May 19 premarket/oil; May 19 Home Depot) · U.S. Treasury Daily Yield Curve Rates (May 18) · GoldPrice.org (May 18 gold/silver closes) · CoinGecko (BTC/ETH/SOL/XRP/DOGE and global crypto mcap) · Alternative.me Fear & Greed Index · Yahoo Finance Japan (6723.T history) · Renesas newsroom · Reuters-attributed coverage via Investing/MarketScreener (Baidu, Ryanair, Samsung labor talks, crypto macro context) · Stooq (MSTR close)",
     "disclaimer": "Not investment advice"
   }
 }
