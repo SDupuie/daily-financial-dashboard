@@ -71,5 +71,5 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 
 7. Commit and publish.
    - Commit directly on `main`.
-   - After each dashboard update commit, run `git push origin main`.
+   - After each dashboard update commit, run `./scripts/publish_main.sh` (preflight + bounded retry + push).
    - Confirm `git status --short --branch` no longer shows local commits ahead of `origin/main`.
