@@ -56,7 +56,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - `masthead`: bump volume by 1, update date and subhead.
    - `tape`: all refreshed closes.
    - `lede`: top market story from the latest close.
-   - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, Fed, and Renesas.
+   - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, and Fed.
+   - Do not include Renesas items in `stories` ("Across the Wires"); keep all Renesas coverage in the dedicated `renesas` section only.
    - Do not include placeholder stories that only say no update was found.
    - `renesas`: latest Tokyo price plus fresh news, or explicitly say no fresh company news was found.
    - `crypto`: refreshed crypto tape plus four notes.
