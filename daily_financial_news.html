@@ -78,13 +78,14 @@
   .story p { font-size: 14px; color: var(--ink-dim); }
   .story .pull { font-family: 'Fraunces', serif; font-style: italic; font-size: 15px; color: var(--accent); border-top: 1px solid var(--rule); margin-top: 12px; padding-top: 10px; }
   .renesas-wrap { background: linear-gradient(135deg, var(--panel) 0%, rgba(40,30,15,0.6) 100%); border: 1px solid var(--rule); border-left: 4px solid #d96c5c; padding: 28px 32px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 32px; align-items: start; }
+  .renesas-wrap > * { min-width: 0; }
   .renesas-head { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase; color: #d96c5c; margin-bottom: 8px; }
   .renesas-wrap h3 { font-family: 'Fraunces', serif; font-weight: 700; font-size: 26px; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 14px; }
   .renesas-wrap h3 em { font-style: italic; color: var(--accent); font-weight: 400; }
   .renesas-wrap p { font-size: 14.5px; color: var(--ink); margin-bottom: 10px; }
   .renesas-wrap p:last-of-type { color: var(--ink-dim); font-size: 13.5px; }
   .renesas-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-  .rstat { background: rgba(0,0,0,0.25); border: 1px solid var(--rule); padding: 12px 14px; }
+  .rstat { background: rgba(0,0,0,0.25); border: 1px solid var(--rule); padding: 12px 14px; min-width: 0; }
   .rstat .rk { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 6px; }
   .rstat .rv { font-family: 'Fraunces', serif; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; line-height: 1; margin-bottom: 4px; }
   .rstat .rv.up { color: var(--green); }
@@ -97,11 +98,11 @@
   .crypto-tape h4 { font-family: 'Fraunces', serif; font-style: italic; font-size: 14px; color: var(--ink-dim); padding: 14px 20px 10px; border-bottom: 1px solid var(--rule); font-weight: 400; }
   .crypto-row { display: grid; grid-template-columns: 56px 1fr auto auto; gap: 14px; padding: 12px 20px; align-items: baseline; border-bottom: 1px solid var(--rule); }
   .crypto-row:last-child { border-bottom: none; }
-  .crypto-sym { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.1em; color: var(--amber); font-weight: 700; }
-  .crypto-name { font-family: 'Fraunces', serif; font-size: 14px; color: var(--ink); }
+  .crypto-sym { font-family: 'JetBrains Mono', monospace; font-size: 12px; letter-spacing: 0.1em; color: var(--amber); font-weight: 700; }
+  .crypto-name { font-family: 'Fraunces', serif; font-size: 15px; color: var(--ink); }
   .crypto-name span { display: block; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
-  .crypto-price { font-family: 'JetBrains Mono', monospace; font-size: 14px; text-align: right; color: var(--ink); }
-  .crypto-chg { font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: right; min-width: 64px; }
+  .crypto-price { font-family: 'JetBrains Mono', monospace; font-size: 15px; text-align: right; color: var(--ink); }
+  .crypto-chg { font-family: 'JetBrains Mono', monospace; font-size: 13px; text-align: right; min-width: 64px; }
   .crypto-notes { display: grid; grid-template-columns: 1fr; gap: 14px; }
   .cnote { background: var(--panel); border: 1px solid var(--rule); border-left: 3px solid #f0a040; padding: 14px 18px; }
   .cnote .ckicker { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: #f0a040; margin-bottom: 6px; }
