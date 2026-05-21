@@ -36,7 +36,10 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Treasury yields: Treasury.gov daily rates first; Trading Economics or CNBC as backup.
    - WTI and Brent: CME/NYMEX or ICE where available; MarketWatch, Trading Economics, or Reuters as backup.
    - Gold and silver: GoldPrice.org spot close or MarketWatch futures close. State which one is used.
-   - Renesas `6723.T`: Yahoo Finance Japan, Japan Exchange Group, Nikkei, Traders Web, or Asset Alive. Use Tokyo close.
+   - Renesas `6723.T`: use this fallback chain in order and record the best verified Tokyo close: Yahoo Finance Japan -> Japan Exchange Group (JPX) -> Nikkei -> Traders Web -> Asset Alive.
+   - For Renesas, do not stop after one fetch/tool failure; continue down the full source chain.
+   - If same-day Tokyo close is unavailable, use the latest available Tokyo close from the chain and include that trade date in the `note`/`renesas` text.
+   - Use `~` for Renesas only after two attempts per source across the full chain (10 total attempts) and explicitly state that all sources failed retrieval.
    - Crypto majors: CoinGecko or CoinMarketCap.
    - Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
    - Crypto Fear & Greed: Alternative.me.
