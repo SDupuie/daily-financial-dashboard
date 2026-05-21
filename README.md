@@ -23,11 +23,11 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 1. Confirm dates first.
    - `masthead.date`: today.
    - `tape.label`: most recent market close, usually the prior weekday.
-   - If today is Monday, update `weekAhead`; otherwise leave `weekAhead` mostly unchanged unless a scheduled event has moved.
+   - If today is Monday or Friday, update `weekAhead`; otherwise leave `weekAhead` mostly unchanged unless a scheduled event has moved.
 
 2. Refresh prices before reading news.
    - Never reuse prices already in the file.
-   - Use exact retrieved prices. Use `~` only when no source returns data after two attempts.
+   - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
    - In each `tape.rows[].note`, summarize the most relevant market catalyst for that line item (and include pre-market context when useful).
    - Do not use `tape` notes as source citations. Keep all source attribution in `footer.compiled`.
 
@@ -43,7 +43,9 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Crypto majors: CoinGecko or CoinMarketCap.
    - Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
    - Crypto Fear & Greed: Alternative.me.
-   - ETF/proxy rows such as `IBIT` and `MSTR`: Yahoo Finance, Nasdaq, or MarketWatch.
+   - ETF/proxy rows such as `IBIT` and `MSTR`: use this fallback chain in order: Yahoo Finance -> Nasdaq -> MarketWatch.
+   - For every quote row, follow its full fallback chain before `~`; if no same-day close is available, use the latest verified close and include the trade date in the row note.
+   - Use `~` only after two attempts per source across that row's full source chain, and state in the note/footer that all listed sources failed retrieval.
 
 4. Search news after prices.
    - Use today and yesterday as explicit dates in every query.
@@ -65,7 +67,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - `renesas`: latest Tokyo price plus fresh news, or explicitly say no fresh company news was found.
    - `crypto`: refreshed crypto tape plus four notes.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
-   - `weekAhead`: update on Mondays.
+   - `weekAhead`: update on Mondays and Fridays.
    - `footer`: today’s compile date and every source used.
 
 6. Validate before finishing.
