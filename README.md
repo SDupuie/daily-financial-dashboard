@@ -28,24 +28,24 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 2. Refresh prices before reading news.
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
-   - In each `tape.rows[].note`, summarize the most relevant market catalyst for that line item (and include pre-market context when useful).
-   - Do not use `tape` notes as source citations. Keep all source attribution in `footer.compiled`.
+   - In each `tape.rows[].note`, summarize only the relevant market fact or catalyst for that line item (and include pre-market context when useful).
+   - Do not name quote/news sources in `tape` notes. Keep all source attribution in `footer.compiled`.
 
 3. Use this price-source hierarchy.
    - U.S. indices and equities: Yahoo Finance or a live finance quote tool. Cross-check major index closes with AP, CNBC, Reuters, MarketWatch, or TradingView when available.
    - Treasury yields: Treasury.gov daily rates first; Trading Economics or CNBC as backup.
    - WTI and Brent: CME/NYMEX or ICE where available; MarketWatch, Trading Economics, or Reuters as backup.
-   - Gold and silver: GoldPrice.org spot close or MarketWatch futures close. State which one is used.
+   - Gold and silver: GoldPrice.org spot close or MarketWatch futures close. State which one is used in `footer.compiled`.
    - Renesas `6723.T`: use this fallback chain in order and record the best verified Tokyo close: Yahoo Finance Japan -> Japan Exchange Group (JPX) -> Nikkei -> Traders Web -> Asset Alive.
    - For Renesas, do not stop after one fetch/tool failure; continue down the full source chain.
    - If same-day Tokyo close is unavailable, use the latest available Tokyo close from the chain and include that trade date in the `note`/`renesas` text.
-   - Use `~` for Renesas only after two attempts per source across the full chain (10 total attempts) and explicitly state that all sources failed retrieval.
+   - Use `~` for Renesas only after two attempts per source across the full chain (10 total attempts) and state in `footer.compiled` that all sources failed retrieval.
    - Crypto majors: CoinGecko or CoinMarketCap.
    - Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
    - Crypto Fear & Greed: Alternative.me.
    - ETF/proxy rows such as `IBIT` and `MSTR`: use this fallback chain in order: Yahoo Finance -> Nasdaq -> MarketWatch.
    - For every quote row, follow its full fallback chain before `~`; if no same-day close is available, use the latest verified close and include the trade date in the row note.
-   - Use `~` only after two attempts per source across that row's full source chain, and state in the note/footer that all listed sources failed retrieval.
+   - Use `~` only after two attempts per source across that row's full source chain, and state in `footer.compiled` that all listed sources failed retrieval.
 
 4. Search news after prices.
    - Use today and yesterday as explicit dates in every query.
