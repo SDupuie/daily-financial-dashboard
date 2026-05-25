@@ -52,6 +52,8 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
+node scripts/validate_dashboard.js
+
 retry_count=0
 
 while true; do

@@ -76,6 +76,8 @@
   .story .tag.crypto { background: #f0a040; color: var(--bg); }
   .story h3 { font-family: 'Fraunces', serif; font-weight: 600; font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 10px; }
   .story p { font-size: 14px; color: var(--ink-dim); }
+  .story .story-link { display: inline-flex; margin-top: 12px; font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--amber-bright); text-decoration: none; border-bottom: 1px solid rgba(232,168,56,0.55); }
+  .story .story-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
   .story .pull { font-family: 'Fraunces', serif; font-style: italic; font-size: 15px; color: var(--accent); border-top: 1px solid var(--rule); margin-top: 12px; padding-top: 10px; }
   .renesas-wrap { background: linear-gradient(135deg, var(--panel) 0%, rgba(40,30,15,0.6) 100%); border: 1px solid var(--rule); border-left: 4px solid #d96c5c; padding: 28px 32px; display: grid; grid-template-columns: 1.3fr 1fr; gap: 32px; align-items: start; }
   .renesas-wrap > * { min-width: 0; }
@@ -228,7 +230,7 @@
         "delta": "+27.75",
         "pct": "+0.37%",
         "dir": "up",
-        "note": "The S&P 500 rose 0.37% to 7,473.47, extending the weekly advance."
+        "note": "Broad risk appetite improved into the holiday weekend, then Monday futures firmed on Iran-framework optimism."
       },
       {
         "name": "Nasdaq Composite",
@@ -237,7 +239,7 @@
         "delta": "+50.87",
         "pct": "+0.19%",
         "dir": "up",
-        "note": "Nasdaq rose 0.19% as AI leadership held into the holiday weekend close."
+        "note": "AI leadership held into the holiday weekend, with pre-open futures also helped by a softer oil and dollar backdrop."
       },
       {
         "name": "Dow Industrials",
@@ -246,7 +248,7 @@
         "delta": "+294.04",
         "pct": "+0.58%",
         "dir": "up",
-        "note": "Dow finished at a fresh record close, with cyclicals supported by easing late-session rate pressure."
+        "note": "Cyclicals benefited from easing late-session rate pressure as the blue-chip average logged another record close."
       },
       {
         "name": "Russell 2000",
@@ -255,7 +257,7 @@
         "delta": "+25.77",
         "pct": "+0.91%",
         "dir": "up",
-        "note": "Russell 2000 outperformed on Friday, signaling broader risk appetite into the long weekend."
+        "note": "Small caps led the major benchmarks, a breadth signal consistent with broader risk appetite."
       },
       {
         "name": "VIX",
@@ -264,7 +266,7 @@
         "delta": "-0.06",
         "pct": "-0.36%",
         "dir": "down",
-        "note": "VIX closed May 22 at 16.70, down from 16.76, indicating further cooling in implied volatility."
+        "note": "Implied volatility cooled further, consistent with calmer short-term hedging demand."
       },
       {
         "name": "10-Yr Treasury",
@@ -273,7 +275,7 @@
         "delta": "0.00",
         "pct": "0.00%",
         "dir": "flat",
-        "note": "The latest available 10-year Treasury constant maturity was 4.57% for May 21."
+        "note": "Long-end rates remained elevated but stable, leaving valuation pressure intact without a fresh rate shock."
       },
       {
         "name": "30-Yr Treasury",
@@ -282,7 +284,7 @@
         "delta": "-0.01",
         "pct": "-0.20%",
         "dir": "down",
-        "note": "The latest available 30-year yield was 5.10% for May 21, down from 5.11% on May 20."
+        "note": "The long bond eased slightly, taking some pressure off duration-sensitive equities."
       },
       {
         "name": "WTI Crude",
@@ -291,7 +293,7 @@
         "delta": "+0.25",
         "pct": "+0.26%",
         "dir": "up",
-        "note": "WTI settled Friday at $96.60, then slid sharply Monday pre-open on Iran-deal hopes."
+        "note": "Early Monday trading shifted attention lower as Iran-framework headlines raised hopes for eventual Hormuz reopening."
       },
       {
         "name": "Brent Crude",
@@ -300,7 +302,7 @@
         "delta": "+0.96",
         "pct": "+0.94%",
         "dir": "up",
-        "note": "Brent settled Friday at $103.54; Monday Asia trade opened sharply lower as Hormuz reopening hopes grew."
+        "note": "Deal optimism moved focus from Friday's high settlement to a sharp Monday pre-open pullback in global crude."
       },
       {
         "name": "Gold",
@@ -309,7 +311,7 @@
         "delta": "-20.20",
         "pct": "-0.44%",
         "dir": "down",
-        "note": "Gold closed May 22 at $4,556.40 after a mild pullback into the weekend."
+        "note": "Safe-haven demand softened as risk appetite improved and Iran-deal headlines reduced immediate geopolitical hedging."
       },
       {
         "name": "Silver",
@@ -318,7 +320,7 @@
         "delta": "-0.533",
         "pct": "-0.69%",
         "dir": "down",
-        "note": "Silver closed May 22 at $76.199, lower day-over-day."
+        "note": "Silver weakened alongside gold, with precious metals losing some defensive bid into the weekend."
       },
       {
         "name": "Renesas Electronics",
@@ -327,7 +329,7 @@
         "delta": "+119",
         "pct": "+3.14%",
         "dir": "up",
-        "note": "Latest verified Tokyo close was ¥3,904 on May 22, 2026."
+        "note": "No fresh company release appeared in the dashboard window, leaving macro, FX, and semiconductor sentiment as the main drivers."
       },
       {
         "name": "Bitcoin",
@@ -336,7 +338,7 @@
         "delta": "+0.2%",
         "pct": "+0.2%",
         "dir": "up",
-        "note": "Bitcoin was at $77,320.31 on May 25 with a +0.2% 24h move."
+        "note": "Crypto held modest gains despite headline-driven macro moves and the U.S. holiday closure."
       },
       {
         "name": "Ethereum",
@@ -345,7 +347,7 @@
         "delta": "+0.4%",
         "pct": "+0.4%",
         "dir": "up",
-        "note": "Ethereum was at $2,114.96 with a +0.4% 24h move."
+        "note": "ETH tracked the broader crypto bid as risk appetite improved and macro headlines drove cross-asset repricing."
       },
       {
         "name": "Total Crypto Mcap",
@@ -354,7 +356,7 @@
         "delta": "+0.1%",
         "pct": "+0.1%",
         "dir": "up",
-        "note": "Total crypto market cap was near $2.66T, up about 0.1% over 24 hours."
+        "note": "Digital assets stayed broadly steady while futures, FX, and oil carried most of the holiday-session headline risk."
       }
     ]
   },
@@ -393,55 +395,64 @@
       "tag": "Markets",
       "tone": "macro",
       "title": "Reuters: U.S. futures rose Monday while oil and dollar slipped",
-      "body": "Reuters (May 25) said S&P futures gained about 0.6% and Nasdaq futures about 0.9% as markets priced higher odds of progress toward a U.S.-Iran deal."
+      "body": "Reuters (May 25) said S&P futures gained about 0.6% and Nasdaq futures about 0.9% as markets priced higher odds of progress toward a U.S.-Iran deal.",
+      "url": "https://www.investing.com/news/stock-market-news/stocks-rise-oil-and-dollar-slide-on-middle-east-peace-hopes-4708247"
     },
     {
       "tag": "Energy",
       "tone": "macro",
       "title": "Reuters: oil dropped sharply in early Monday trade",
-      "body": "Reuters reported Brent and WTI falling more than $5 intraday as traders anticipated eventual reopening of the Strait of Hormuz."
+      "body": "Reuters reported Brent and WTI falling more than $5 intraday as traders anticipated eventual reopening of the Strait of Hormuz.",
+      "url": "https://www.investing.com/news/commodities-news/oil-falls-more-than-4-as-us-iran-remain-at-odds-over-peace-deal-4708240"
     },
     {
       "tag": "FX",
       "tone": "macro",
       "title": "Reuters: dollar softened as risk appetite improved",
-      "body": "A Reuters FX update said the dollar slipped in Asia while the euro and yen firmed as oil moved below $100 and risk assets rebounded."
+      "body": "A Reuters FX update said the dollar slipped in Asia while the euro and yen firmed as oil moved below $100 and risk assets rebounded.",
+      "url": "https://za.investing.com/news/forex-news/dollar-slumps-as-signs-of-deal-to-reopen-hormuz-spur-risk-appetite-4298284"
     },
     {
       "tag": "Geopolitics",
       "tone": "geo",
       "title": "AP: U.S. and regional officials signaled progress toward an Iran framework",
-      "body": "AP's May 24-25 coverage said negotiators were closing in on a structure that could end fighting and reopen Hormuz, with details still pending."
+      "body": "AP's May 24-25 coverage said negotiators were closing in on a structure that could end fighting and reopen Hormuz, with details still pending.",
+      "url": "https://apnews.com/article/b1659232611edc10808612e30647c17d"
     },
     {
       "tag": "Geopolitics",
       "tone": "geo",
       "title": "AP: White House messaging stressed progress but cautioned on timing",
-      "body": "AP reported Secretary of State Rubio citing significant but incomplete progress, while Trump said both sides should not rush a final agreement."
+      "body": "AP reported Secretary of State Rubio citing significant but incomplete progress, while Trump said both sides should not rush a final agreement.",
+      "url": "https://apnews.com/article/e603a7759d6cbd70ce5ed01f439a29dc"
     },
     {
       "tag": "Policy",
       "tone": "geo",
       "title": "AP: Republican hawks criticized draft deal terms",
-      "body": "AP said several Republican lawmakers warned that a weak settlement could leave Iran with leverage over regional shipping and energy infrastructure."
+      "body": "AP said several Republican lawmakers warned that a weak settlement could leave Iran with leverage over regional shipping and energy infrastructure.",
+      "url": "https://apnews.com/article/7894b2f0e6459cddbcdaaaef5d5f1850"
     },
     {
       "tag": "Macro",
       "tone": "fed",
       "title": "Memorial Day closure compresses U.S. cash-session price discovery",
-      "body": "With U.S. equity and bond markets closed Monday, futures, FX, oil, and crypto are carrying most headline-driven repricing into Tuesday's reopen."
+      "body": "With U.S. equity and bond markets closed Monday, futures, FX, oil, and crypto are carrying most headline-driven repricing into Tuesday's reopen.",
+      "url": "https://apnews.com/article/0b569925695e498e6fd7ece7b183e085"
     },
     {
       "tag": "Crypto",
       "tone": "crypto",
       "title": "CoinGecko: crypto market cap stayed near $2.66T",
-      "body": "CoinGecko's May 25 snapshot showed global crypto capitalization around $2.66T, with BTC and ETH both posting modest 24-hour gains."
+      "body": "CoinGecko's May 25 snapshot showed global crypto capitalization around $2.66T, with BTC and ETH both posting modest 24-hour gains.",
+      "url": "https://www.coingecko.com/"
     },
     {
       "tag": "Calendar",
       "tone": "fed",
       "title": "Kiplinger: inflation and growth data dominate the shortened week",
-      "body": "Kiplinger's May 22 week-ahead calendar flagged Consumer Confidence on Tuesday and PCE/GDP releases on Thursday as key macro catalysts."
+      "body": "Kiplinger's May 22 week-ahead calendar flagged Consumer Confidence on Tuesday and PCE/GDP releases on Thursday as key macro catalysts.",
+      "url": "https://www.kiplinger.com/investing/economy/this-weeks-economic-calendar"
     }
   ],
   "renesas": {
@@ -507,7 +518,7 @@
     ]
   },
   "crypto": {
-    "tapeHeader": "May 25 crypto check · BTC $77,320.31 (+0.2%) · ETH $2,114.96 (+0.4%) · SOL $85.71 (+0.8%) · XRP $1.36 (+0.8%) · DOGE $0.1028 (+0.6%) · total mcap $2.66T (+0.1%) · F&G ~ (Alternative.me numeric read not retrievable in this run)",
+    "tapeHeader": "May 25 crypto check · BTC $77,320.31 (+0.2%) · ETH $2,114.96 (+0.4%) · SOL $85.71 (+0.8%) · XRP $1.36 (+0.8%) · DOGE $0.1028 (+0.6%) · total mcap $2.66T (+0.1%) · F&G 30 (Fear)",
     "tape": [
       {
         "sym": "BTC",
@@ -553,9 +564,9 @@
         "sym": "F&G",
         "name": "Fear & Greed Index",
         "sub": "Alternative.me",
-        "price": "~",
-        "chg": "unavailable",
-        "dir": "flat"
+        "price": "30",
+        "chg": "Fear",
+        "dir": "down"
       },
       {
         "sym": "IBIT",
@@ -576,24 +587,24 @@
     ],
     "notes": [
       {
-        "kicker": "Market State · May 25",
-        "title": "BTC and ETH held modest gains despite headline-driven macro moves",
-        "body": "CoinGecko's latest table snapshot showed <strong>BTC +0.2%</strong> and <strong>ETH +0.4%</strong> over 24 hours."
+        "kicker": "Flow Watch",
+        "title": "ETF demand is the swing factor behind the quiet spot tape",
+        "body": "Recent U.S. spot crypto ETF outflows put more weight on Tuesday's post-holiday flow tape: a turn back toward IBIT/ETHA inflows would validate the bounce, while another redemption print would keep pressure on BTC and ETH rallies."
       },
       {
-        "kicker": "Market Breadth",
-        "title": "Total crypto capitalization stayed near $2.66T",
-        "body": "CoinGecko listed global crypto market cap around <strong>$2.66T</strong>, up about <strong>0.1%</strong> over the last day."
+        "kicker": "Policy",
+        "title": "Market-structure legislation remains the bigger crypto catalyst",
+        "body": "The CLARITY Act's Senate progress keeps a regulatory tailwind in play for exchanges, stablecoins, DeFi, and network-beta tokens, but floor passage and reconciliation are still unresolved."
       },
       {
         "kicker": "Proxy Equities",
-        "title": "IBIT and MSTR reset to Friday cash closes before holiday Monday",
-        "body": "Historical close datasets showed <strong>IBIT $42.96 (-2.36%)</strong> and <strong>MSTR $159.89 (-3.01%)</strong> for May 22."
+        "title": "IBIT and MSTR are two different reads on bitcoin risk",
+        "body": "IBIT is the cleaner spot-flow gauge; MSTR adds balance-sheet leverage, preferred/convert financing, and equity-market beta. If they diverge after the holiday, it will show whether traders want bitcoin itself or levered treasury exposure."
       },
       {
-        "kicker": "Data Quality",
-        "title": "Alternative.me pages reachable but numeric F&G pull still failed",
-        "body": "The Alternative.me sentiment pages were accessible, but current/prior numeric index fields were not extractable in this run, so F&G remains marked unavailable."
+        "kicker": "Sentiment",
+        "title": "Fear & Greed improved, but the market has not flipped risk-on",
+        "body": "The sentiment gauge moved out of extreme fear but stayed in fear, which argues for treating the bounce as tentative until flows, breadth, and proxy equities confirm it."
       }
     ]
   },
@@ -693,7 +704,7 @@
     ]
   },
   "footer": {
-    "compiled": "Compiled May 25, 2026 · Data and sources used this session: AP/Washington Post Friday May 22 U.S. index-close recap (SPX, Dow, Nasdaq, Russell) · Federal Reserve H.15 Selected Interest Rates (May 22 release; latest 10Y/30Y values for May 21) · Investing.com historical data pages (VIX, WTI, gold, silver May 22 closes) · Reuters syndication pages (May 24-25: U.S. futures, oil, dollar, Iran/Hormuz developments) via Investing.com, WIN Country, and Internazionale · AP May 24-25 Iran framework and market-impact coverage · Yahoo Finance Japan 6723.T quote page snippet (May 22 Renesas close) · CoinGecko crypto market table snapshot (BTC/ETH/SOL/XRP/DOGE and global crypto cap) · Kiplinger weekly earnings/economic calendars (May 25-29) · TipRanks weekly earnings list (May 25-29).",
+    "compiled": "Compiled May 25, 2026 · Data and sources used this session: AP/Washington Post Friday May 22 U.S. index-close recap (SPX, Dow, Nasdaq, Russell) · Federal Reserve H.15 Selected Interest Rates (May 22 release; latest 10Y/30Y values for May 21) · Investing.com historical data pages (VIX, WTI, gold, silver May 22 closes) · Reuters syndication pages (May 24-25: U.S. futures, oil, dollar, Iran/Hormuz developments) via Investing.com, WIN Country, and Internazionale · AP May 24-25 Iran framework and market-impact coverage · Yahoo Finance Japan 6723.T quote page snippet (May 22 Renesas close) · CoinGecko crypto market table snapshot (BTC/ETH/SOL/XRP/DOGE and global crypto cap) · Alternative.me Crypto Fear & Greed Index (May 25 current and prior readings) · InflowScan May 22 spot crypto ETF flow brief · JD Supra May 22 CLARITY Act market-structure update · Kiplinger weekly earnings/economic calendars (May 25-29) · TipRanks weekly earnings list (May 25-29).",
     "disclaimer": "Not investment advice"
   }
 }
@@ -825,6 +836,7 @@
       <span class="tag ${tone(s.tone)}">${esc(s.tag)}</span>
       <h3>${esc(s.title)}</h3>
       <p>${esc(s.body)}</p>
+      ${s.url ? `<a class="story-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" aria-label="Read more about ${esc(s.title)}">Read more</a>` : ''}
       ${s.pull ? `<div class="pull">${esc(s.pull)}</div>` : ''}
     </article>`).join(''));
 
