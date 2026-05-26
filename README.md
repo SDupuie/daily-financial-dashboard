@@ -82,5 +82,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 
 7. Commit and publish.
    - Commit directly on `main`.
-   - After each dashboard update commit, run `./scripts/publish_main.sh` (preflight + bounded retry + push).
+   - After each dashboard update commit, run `./scripts/publish_main.sh` (preflight + bounded retry + push + GitHub Pages deployment verification).
+   - The publish script now polls the `pages build and deployment` run for the pushed SHA and verifies live page markers (`masthead.date`, `masthead.volume`) at the GitHub Pages URL.
+   - If Pages fails due to a transient `actions/deploy-pages` fetch/download failure, the script auto-retries once by creating an empty retrigger commit and pushing again.
    - Confirm `git status --short --branch` no longer shows local commits ahead of `origin/main`.
