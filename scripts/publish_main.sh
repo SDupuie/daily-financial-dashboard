@@ -6,6 +6,10 @@ REMOTE="${1:-origin}"
 BRANCH="${2:-main}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
 RETRY_DELAY_SECONDS="${RETRY_DELAY_SECONDS:-2}"
+MAX_PUSH_TRANSIENT_RETRIES="${MAX_PUSH_TRANSIENT_RETRIES:-2}"
+NETWORK_READY_ATTEMPTS="${NETWORK_READY_ATTEMPTS:-6}"
+NETWORK_READY_DELAY_SECONDS="${NETWORK_READY_DELAY_SECONDS:-5}"
+WAKE_LOCK_ENABLED="${WAKE_LOCK_ENABLED:-1}"
 PAGES_VERIFY_ENABLED="${PAGES_VERIFY_ENABLED:-1}"
 PAGES_RETRIGGER_MAX="${PAGES_RETRIGGER_MAX:-1}"
 PAGES_POLL_ATTEMPTS="${PAGES_POLL_ATTEMPTS:-24}"
@@ -13,10 +17,41 @@ PAGES_POLL_SECONDS="${PAGES_POLL_SECONDS:-10}"
 PAGES_WORKFLOW_NAME="${PAGES_WORKFLOW_NAME:-pages build and deployment}"
 PAGES_FILE_PATH="${PAGES_FILE_PATH:-daily_financial_news.html}"
 
+maybe_enable_wake_lock() {
+  if [[ "$WAKE_LOCK_ENABLED" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -n "${PUBLISH_MAIN_CAFFEINATED:-}" ]]; then
+    return 0
+  fi
+
+  if ! command -v caffeinate >/dev/null 2>&1; then
+    echo "Wake lock skipped: caffeinate not found on this system." >&2
+    return 0
+  fi
+
+  echo "Enabling macOS wake lock for publish run (caffeinate)." >&2
+  export PUBLISH_MAIN_CAFFEINATED=1
+  exec caffeinate -dimsu "$0" "$@"
+}
+
 is_dns_error() {
   local msg="$1"
   case "$msg" in
     *"Could not resolve host"*|*"Temporary failure in name resolution"*|*"Name or service not known"*|*"nodename nor servname provided, or not known"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_retryable_push_error() {
+  local msg="$1"
+  case "$msg" in
+    *"fatal error in commit_refs"*|*"The remote end hung up unexpectedly"*|*"HTTP 502"*|*"HTTP 503"*|*"Service Unavailable"*)
       return 0
       ;;
     *)
@@ -50,11 +85,15 @@ attempt_push() {
   if is_dns_error "$output"; then
     return 2
   fi
+  if is_retryable_push_error "$output"; then
+    return 3
+  fi
   return 1
 }
 
-push_with_dns_retry() {
-  local retry_count=0
+push_with_retry() {
+  local dns_retry_count=0
+  local transient_retry_count=0
   while true; do
     local push_rc=0
     attempt_push || push_rc=$?
@@ -63,18 +102,50 @@ push_with_dns_retry() {
       return 0
     fi
 
-    if [[ "$push_rc" -eq 2 && "$retry_count" -lt "$MAX_RETRIES" ]]; then
-      retry_count=$((retry_count + 1))
-      echo "DNS/network push issue; retrying ($retry_count/$MAX_RETRIES) in ${RETRY_DELAY_SECONDS}s..." >&2
+    if [[ "$push_rc" -eq 2 && "$dns_retry_count" -lt "$MAX_RETRIES" ]]; then
+      dns_retry_count=$((dns_retry_count + 1))
+      echo "DNS/network push issue; retrying ($dns_retry_count/$MAX_RETRIES) in ${RETRY_DELAY_SECONDS}s..." >&2
+      sleep "$RETRY_DELAY_SECONDS"
+      continue
+    fi
+
+    if [[ "$push_rc" -eq 3 && "$transient_retry_count" -lt "$MAX_PUSH_TRANSIENT_RETRIES" ]]; then
+      transient_retry_count=$((transient_retry_count + 1))
+      echo "Transient remote push issue; retrying ($transient_retry_count/$MAX_PUSH_TRANSIENT_RETRIES) in ${RETRY_DELAY_SECONDS}s..." >&2
       sleep "$RETRY_DELAY_SECONDS"
       continue
     fi
 
     if [[ "$push_rc" -eq 2 ]]; then
       echo "Push failed due to DNS/network resolution. If you are in a restricted sandbox, rerun with elevated network permissions." >&2
+    elif [[ "$push_rc" -eq 3 ]]; then
+      echo "Push failed after transient remote retries; check GitHub status and rerun." >&2
     fi
     return 1
   done
+}
+
+wait_for_network_ready() {
+  local attempt=1
+  while [[ "$attempt" -le "$NETWORK_READY_ATTEMPTS" ]]; do
+    local rc=0
+    run_remote_preflight || rc=$?
+
+    if [[ "$rc" -eq 0 ]]; then
+      return 0
+    fi
+
+    if [[ "$rc" -eq 2 ]]; then
+      echo "Network not ready for ${REMOTE}/${BRANCH} (${attempt}/${NETWORK_READY_ATTEMPTS}); waiting ${NETWORK_READY_DELAY_SECONDS}s..." >&2
+      sleep "$NETWORK_READY_DELAY_SECONDS"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    return "$rc"
+  done
+
+  return 2
 }
 
 github_api_get() {
@@ -243,32 +314,21 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
+maybe_enable_wake_lock "$@"
+
 node scripts/validate_dashboard.js
 
-retry_count=0
-
-while true; do
-  preflight_rc=0
-  run_remote_preflight || preflight_rc=$?
-
-  if [[ "$preflight_rc" -eq 0 ]]; then
-    break
-  fi
-
-  if [[ "$preflight_rc" -eq 2 && "$retry_count" -lt "$MAX_RETRIES" ]]; then
-    retry_count=$((retry_count + 1))
-    echo "DNS/network preflight issue; retrying ($retry_count/$MAX_RETRIES) in ${RETRY_DELAY_SECONDS}s..." >&2
-    sleep "$RETRY_DELAY_SECONDS"
-    continue
-  fi
-
-  if [[ "$preflight_rc" -eq 2 ]]; then
-    echo "Preflight failed due to DNS/network resolution. If you are in a restricted sandbox, rerun with elevated network permissions." >&2
-  fi
+preflight_rc=0
+wait_for_network_ready || preflight_rc=$?
+if [[ "$preflight_rc" -eq 2 ]]; then
+  echo "Preflight failed due to DNS/network resolution after ${NETWORK_READY_ATTEMPTS} attempt(s). If you are in a restricted sandbox, rerun with elevated network permissions." >&2
   exit 1
-done
+fi
+if [[ "$preflight_rc" -ne 0 ]]; then
+  exit 1
+fi
 
-push_with_dns_retry
+push_with_retry
 
 status_line="$(git status --short --branch | head -n 1)"
 echo "$status_line"
@@ -333,5 +393,5 @@ while true; do
   echo "Retrying Pages deploy via empty commit (${retrigger_count}/${PAGES_RETRIGGER_MAX})..." >&2
   git commit --allow-empty -m "Retry GitHub Pages deploy (${deploy_sha:0:7})"
   deploy_sha="$(git rev-parse HEAD)"
-  push_with_dns_retry
+  push_with_retry
 done
