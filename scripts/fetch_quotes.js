@@ -669,7 +669,18 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`fetch_quotes failed: ${normalizeError(error)}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`fetch_quotes failed: ${normalizeError(error)}\n`);
+    process.exit(1);
+  });
+} else {
+  module.exports = {
+    parseYahoo,
+    parseYahooChart,
+    parseNasdaq,
+    parseMarketWatch,
+    parseDateLoose,
+    parseNumberFromText
+  };
+}

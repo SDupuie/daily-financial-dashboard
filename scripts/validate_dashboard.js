@@ -11,6 +11,10 @@ const match = html.match(/<script type="application\/json" id="dashboard-data">(
 const errors = [];
 const warnings = [];
 
+function escRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 if (!match) {
   errors.push('Could not find dashboard-data JSON block.');
 } else {
@@ -43,8 +47,14 @@ if (!match) {
     const footerCompiled = String(data.footer?.compiled ?? '');
     const dateMsg = `Masthead/footer may be stale: expected ${expectedDay}, ${expectedMonth} ${expectedDate}, ${expectedYear}.`;
 
-    const mastheadLooksFresh = [expectedDay, expectedMonth, expectedDate, expectedYear].every((x) => mastheadDate.includes(x));
-    const footerLooksFresh = footerCompiled.includes(expectedMonth) && footerCompiled.includes(expectedDate) && footerCompiled.includes(expectedYear);
+    const mastheadLooksFresh = new RegExp(
+      `\\b${escRegex(expectedDay)}\\b[\\s\\S]*\\b${escRegex(expectedMonth)}\\b[\\s\\S]*\\b${escRegex(expectedDate)}\\b[\\s\\S]*\\b${escRegex(expectedYear)}\\b`,
+      'i'
+    ).test(mastheadDate);
+    const footerLooksFresh = new RegExp(
+      `\\b${escRegex(expectedMonth)}\\b[\\s\\S]*\\b${escRegex(expectedDate)}\\b(?:,)?[\\s\\S]*\\b${escRegex(expectedYear)}\\b`,
+      'i'
+    ).test(footerCompiled);
     if (!mastheadLooksFresh || !footerLooksFresh) {
       if (strictDates) {
         errors.push(dateMsg);
