@@ -48,6 +48,28 @@ const yc = parseYahooChart(yahooChartJson);
 assert(isFiniteNumber(yc.close), 'parseYahooChart close must be numeric');
 assert(yc.tradeDate === '2026-05-30', 'parseYahooChart tradeDate should parse last timestamp');
 
+// Yahoo Chart API fallback fixture: missing previousClose/regularMarketChangePercent
+const yahooChartFallbackJson = JSON.stringify({
+  chart: {
+    result: [
+      {
+        meta: {
+          regularMarketPrice: 40.53,
+          chartPreviousClose: 42.96,
+          regularMarketTime: 1780323411
+        },
+        timestamp: [1780233600],
+        indicators: {
+          quote: [{ close: [40.53] }]
+        }
+      }
+    ]
+  }
+});
+const ycf = parseYahooChart(yahooChartFallbackJson);
+assert(isFiniteNumber(ycf.close), 'parseYahooChart fallback close must be numeric');
+assert(isFiniteNumber(ycf.pctChange), 'parseYahooChart should compute pctChange from chartPreviousClose fallback');
+
 // Nasdaq JSON fixture
 const nasdaqJson = JSON.stringify({
   data: {

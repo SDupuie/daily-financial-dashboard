@@ -321,7 +321,9 @@ function parseYahooChart(body) {
     throw new Error('Could not parse Yahoo chart close');
   }
 
-  const prevClose = Number(meta.previousClose);
+  const prevClose = Number.isFinite(Number(meta.previousClose))
+    ? Number(meta.previousClose)
+    : Number(meta.chartPreviousClose);
   const metaPct = Number(meta.regularMarketChangePercent);
   let pctChange = null;
   if (Number.isFinite(metaPct)) {
