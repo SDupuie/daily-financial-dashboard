@@ -484,8 +484,20 @@ function buildFallback(spec, cacheData) {
 
 async function fetchSymbol(spec, args) {
   const chain = [];
+  const preflightByHost = args.preflightByHost || {};
 
   for (const source of SOURCE_CHAIN) {
+    if (preflightByHost[source.host] === false) {
+      chain.push({
+        source: source.name,
+        sourceKey: source.key,
+        url: source.buildUrl(spec),
+        attempts: [{ attempt: 0, ok: false, error: 'dns-preflight-failed' }],
+        skipped: true
+      });
+      continue;
+    }
+
     const sourceResult = {
       source: source.name,
       sourceKey: source.key,
@@ -591,36 +603,21 @@ async function main() {
 
   const dnsFailures = preflight.filter((x) => !x.ok);
   if (dnsFailures.length > 0) {
-    for (const spec of args.symbolSpecs) {
-      const key = `${spec.symbol}:${spec.type}`;
-      summary.symbols[key] = {
-        symbol: spec.symbol,
-        type: spec.type,
-        result: null,
-        fallback: buildFallback(spec, cacheData),
-        chain: [],
-        unresolvedReason: 'dns-preflight-failed'
-      };
-    }
-
-    if (args.outputPath) {
-      saveJson(args.outputPath, summary);
-    }
-
-    printSummary(summary, args.compact);
+    summary.preflightWarning = `DNS preflight failed for hosts: ${dnsFailures.map((d) => d.host).join(', ')}`;
     process.stderr.write(
-      `DNS preflight failed for hosts: ${dnsFailures.map((d) => d.host).join(', ')}\n` +
-      'Rerun with elevated network permissions immediately.\n'
+      `${summary.preflightWarning}\n` +
+      'Continuing with available sources in chain order.\n'
     );
-    process.exit(2);
   }
+
+  const preflightByHost = Object.fromEntries(preflight.map((p) => [p.host, p.ok]));
 
   const updatedCache = { ...(cacheData._error ? {} : cacheData) };
   let unresolved = 0;
 
   for (const spec of args.symbolSpecs) {
     const key = `${spec.symbol}:${spec.type}`;
-    const fetched = await fetchSymbol(spec, args);
+    const fetched = await fetchSymbol(spec, { ...args, preflightByHost });
 
     if (fetched.result) {
       updatedCache[key] = {
@@ -665,6 +662,9 @@ async function main() {
   printSummary(summary, args.compact);
 
   if (unresolved > 0) {
+    if (dnsFailures.length === preflight.length) {
+      process.exit(2);
+    }
     process.exit(3);
   }
 }

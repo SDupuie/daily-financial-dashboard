@@ -303,7 +303,19 @@ verify_pages_content() {
   local html
 
   html="$(curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" "$pages_url")" || return 1
-  if [[ "$html" == *"\"date\": \"${expected_date}\""* && "$html" == *"\"volume\": \"${expected_volume}\""* ]]; then
+  if EXPECTED_DATE="$expected_date" EXPECTED_VOLUME="$expected_volume" node -e '
+const fs = require("fs");
+const html = fs.readFileSync(0, "utf8");
+const m = html.match(/<script type="application\/json" id="dashboard-data">\n([\s\S]*?)\n<\/script>/);
+if (!m) process.exit(1);
+const data = JSON.parse(m[1]);
+const date = data?.masthead?.date || "";
+const volume = data?.masthead?.volume || "";
+if (date === process.env.EXPECTED_DATE && volume === process.env.EXPECTED_VOLUME) {
+  process.exit(0);
+}
+process.exit(2);
+' <<<"$html"; then
     echo "Pages content verified at ${pages_url} (${expected_volume}; ${expected_date})."
     return 0
   fi

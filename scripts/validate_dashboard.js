@@ -9,6 +9,7 @@ const html = fs.readFileSync(file, 'utf8');
 const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 
 const errors = [];
+const warnings = [];
 
 if (!match) {
   errors.push('Could not find dashboard-data JSON block.');
@@ -21,10 +22,39 @@ if (!match) {
   }
 
   if (data) {
+    const strictDates = process.env.VALIDATE_STRICT_DATES === '1';
     const tapeRows = data.tape?.rows ?? [];
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
 
-    for (const row of tapeRows) {
+    // Freshness advisory checks (strict only when VALIDATE_STRICT_DATES=1).
+    const todayParts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago',
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric'
+    }).formatToParts(new Date());
+    const part = (type) => todayParts.find((p) => p.type === type)?.value || '';
+    const expectedDay = part('weekday');
+    const expectedMonth = part('month');
+    const expectedDate = part('day');
+    const expectedYear = part('year');
+    const mastheadDate = String(data.masthead?.date ?? '');
+    const footerCompiled = String(data.footer?.compiled ?? '');
+    const dateMsg = `Masthead/footer may be stale: expected ${expectedDay}, ${expectedMonth} ${expectedDate}, ${expectedYear}.`;
+
+    const mastheadLooksFresh = [expectedDay, expectedMonth, expectedDate, expectedYear].every((x) => mastheadDate.includes(x));
+    const footerLooksFresh = footerCompiled.includes(expectedMonth) && footerCompiled.includes(expectedDate) && footerCompiled.includes(expectedYear);
+    if (!mastheadLooksFresh || !footerLooksFresh) {
+      if (strictDates) {
+        errors.push(dateMsg);
+      } else {
+        warnings.push(dateMsg);
+      }
+    }
+
+    for (const rowRaw of tapeRows) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
       const note = String(row.note ?? '');
 
       if (sourcePattern.test(note)) {
@@ -49,7 +79,8 @@ if (!match) {
       errors.push('Crypto tape header contains stale F&G failure/unavailable language.');
     }
 
-    for (const note of cryptoNotes) {
+    for (const noteRaw of cryptoNotes) {
+      const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
       const text = `${note.kicker ?? ''} ${note.title ?? ''} ${note.body ?? ''}`;
       if (staleFngPattern.test(text)) {
         errors.push(`Crypto note "${note.title ?? '(untitled)'}" contains stale F&G failure/unavailable language.`);
@@ -57,7 +88,8 @@ if (!match) {
       if (staticCryptoPattern.test(text)) {
         errors.push(`Crypto note "${note.title ?? '(untitled)'}" looks static, placeholder-like, or quote-recap-only.`);
       }
-      for (const row of cryptoRows) {
+      for (const rowRaw of cryptoRows) {
+        const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
         for (const value of [row.price, row.chg]) {
           if (value && !['Fear'].includes(String(value)) && text.includes(String(value))) {
             errors.push(`Crypto note "${note.title ?? '(untitled)'}" repeats crypto tape value "${value}".`);
@@ -96,7 +128,8 @@ if (!match) {
       errors.push('Footer source list must include Alternative.me Crypto Fear & Greed Index when F&G is shown.');
     }
 
-    for (const story of data.stories ?? []) {
+    for (const storyRaw of data.stories ?? []) {
+      const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
       const url = String(story.url ?? '').trim();
       let isHttps = false;
       try {
@@ -117,6 +150,13 @@ if (errors.length) {
     console.error(`- ${error}`);
   }
   process.exit(1);
+}
+
+if (warnings.length) {
+  console.warn('Dashboard validation warnings:');
+  for (const warning of warnings) {
+    console.warn(`- ${warning}`);
+  }
 }
 
 console.log('Dashboard validation OK');
