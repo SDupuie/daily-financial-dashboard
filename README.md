@@ -28,6 +28,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 2. Refresh prices before reading news.
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
+   - For proxy equities (`IBIT`, `MSTR`), run `node scripts/fetch_proxy_closes.js` before manual quote pulls.
+   - If proxy DNS preflight fails, rerun proxy pulls immediately with elevated network permissions rather than waiting for publish.
    - In each `tape.rows[].note`, summarize only the relevant market commentary, catalyst, or major news snippet for that line item (and include pre-market context when useful).
    - Do not restate the row's last price, point change, or percent change in `tape.rows[].note`; those belong only in `last`, `delta`, and `pct`.
    - Do not name quote/news sources in `tape` notes. Keep all source attribution in `footer.compiled`.
@@ -46,6 +48,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2` first, then the Alternative.me Crypto Fear & Greed page if the API fails.
    - Do not publish F&G as `~`, `unavailable`, or a failed-pull note when either the API or page returns the current numeric reading and classification.
    - ETF/proxy rows such as `IBIT` and `MSTR`: use this fallback chain in order: Yahoo Finance -> Nasdaq -> MarketWatch.
+   - Use `scripts/fetch_proxy_closes.js` for a deterministic proxy chain run with DNS preflight, two attempts per source, and structured attempt logs.
+   - `scripts/fetch_proxy_closes.js` writes/reads `scripts/proxy_last_verified.json`; if all three proxy sources are unreachable due DNS/network outage, use last verified close from that cache with explicit trade date labeling and note the outage in `footer.compiled`.
    - For every quote row, follow its full fallback chain before `~`; if no same-day close is available, use the latest verified close and include the trade date in the row note.
    - Use `~` only after two attempts per source across that row's full source chain, and state in `footer.compiled` that all listed sources failed retrieval.
 
