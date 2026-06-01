@@ -50,7 +50,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - U.S. stock/ETF rows (including proxy rows such as `IBIT` and `MSTR`): use this fallback chain in order: Yahoo Finance -> Nasdaq -> MarketWatch.
    - Use `scripts/fetch_quotes.js` for deterministic stock/ETF chain runs with DNS preflight, two attempts per source, and structured attempt logs.
    - `scripts/fetch_quotes.js` writes/reads `scripts/quotes_last_verified.json`; if all three stock/ETF sources are unreachable due DNS/network outage, use last verified close from that cache with explicit trade date labeling and note the outage in `footer.compiled`.
-   - Compatibility note: `scripts/fetch_proxy_closes.js` now wraps `fetch_quotes.js` with defaults for `IBIT` and `MSTR`.
+   - Compatibility note: `scripts/fetch_proxy_closes.js` is a thin wrapper over `fetch_quotes.js` with defaults for `IBIT` and `MSTR` using the same `scripts/quotes_last_verified.json` cache.
    - For every quote row, follow its full fallback chain before `~`; if no same-day close is available, use the latest verified close and include the trade date in the row note.
    - Use `~` only after two attempts per source across that row's full source chain, and state in `footer.compiled` that all listed sources failed retrieval.
 
