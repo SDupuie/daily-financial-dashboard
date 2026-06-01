@@ -84,6 +84,9 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 
 6. Validate before finishing.
    - Run `node scripts/validate_dashboard.js`.
+   - Run `node scripts/test_dashboard_runtime.js`.
+   - Run `node scripts/test_publish_timeouts.js`.
+   - Run `node scripts/test_fetch_quotes_source_order.js`.
    - Run `git diff --check`.
    - Run a quick placeholder gate for completed reports (example):
      - `rg -n "after-close expected|after-close report" daily_financial_news.html`

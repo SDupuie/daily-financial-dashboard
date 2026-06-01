@@ -98,7 +98,13 @@ if (!match) {
 
     for (const story of data.stories ?? []) {
       const url = String(story.url ?? '').trim();
-      if (!/^https:\/\/\S+$/i.test(url)) {
+      let isHttps = false;
+      try {
+        isHttps = url.length > 0 && new URL(url).protocol === 'https:';
+      } catch (_error) {
+        isHttps = false;
+      }
+      if (!isHttps) {
         errors.push(`Story "${story.title ?? '(untitled)'}" must include an HTTPS url.`);
       }
     }

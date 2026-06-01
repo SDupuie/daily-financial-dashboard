@@ -16,6 +16,8 @@ PAGES_POLL_ATTEMPTS="${PAGES_POLL_ATTEMPTS:-24}"
 PAGES_POLL_SECONDS="${PAGES_POLL_SECONDS:-10}"
 PAGES_WORKFLOW_NAME="${PAGES_WORKFLOW_NAME:-pages build and deployment}"
 PAGES_FILE_PATH="${PAGES_FILE_PATH:-daily_financial_news.html}"
+CURL_CONNECT_TIMEOUT_SECONDS="${CURL_CONNECT_TIMEOUT_SECONDS:-10}"
+CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-30}"
 
 maybe_enable_wake_lock() {
   if [[ "$WAKE_LOCK_ENABLED" != "1" ]]; then
@@ -151,7 +153,7 @@ wait_for_network_ready() {
 github_api_get() {
   local url="$1"
   local -a args
-  args=(curl -fsSL -H "Accept: application/vnd.github+json")
+  args=(curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" -H "Accept: application/vnd.github+json")
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
@@ -300,7 +302,7 @@ verify_pages_content() {
   local expected_volume="$3"
   local html
 
-  html="$(curl -fsSL "$pages_url")" || return 1
+  html="$(curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" "$pages_url")" || return 1
   if [[ "$html" == *"\"date\": \"${expected_date}\""* && "$html" == *"\"volume\": \"${expected_volume}\""* ]]; then
     echo "Pages content verified at ${pages_url} (${expected_volume}; ${expected_date})."
     return 0

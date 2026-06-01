@@ -18,8 +18,15 @@ const EQUITY_TYPES = new Set(['stock', 'etf']);
 
 const SOURCE_CHAIN = [
   {
-    key: 'yahoo',
-    name: 'Yahoo Finance',
+    key: 'yahoo_chart',
+    name: 'Yahoo Finance Chart API',
+    host: 'query1.finance.yahoo.com',
+    buildUrl: (spec) => `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(spec.yahooSymbol || spec.symbol)}?range=5d&interval=1d`,
+    parse: parseYahooChart
+  },
+  {
+    key: 'yahoo_html',
+    name: 'Yahoo Finance HTML',
     host: 'finance.yahoo.com',
     buildUrl: (spec) => `https://finance.yahoo.com/quote/${encodeURIComponent(spec.yahooSymbol || spec.symbol)}`,
     parse: parseYahoo
@@ -275,6 +282,65 @@ function parseYahoo(body) {
     close,
     pctChange: Number.isFinite(pct) ? pct : null,
     tradeDate: Number.isFinite(tsRaw) ? new Date(tsRaw * 1000).toISOString().slice(0, 10) : null
+  };
+}
+
+function parseYahooChart(body) {
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch (_error) {
+    throw new Error('Yahoo chart response was not valid JSON');
+  }
+
+  const result = payload?.chart?.result?.[0] || {};
+  const meta = result.meta || {};
+  const closes = result?.indicators?.quote?.[0]?.close || [];
+  const timestamps = result.timestamp || [];
+
+  let close = NaN;
+  let tradeDate = null;
+  for (let i = closes.length - 1; i >= 0; i -= 1) {
+    const value = Number(closes[i]);
+    if (!Number.isFinite(value)) continue;
+    close = value;
+    const ts = Number(timestamps[i]);
+    if (Number.isFinite(ts)) {
+      tradeDate = new Date(ts * 1000).toISOString().slice(0, 10);
+    }
+    break;
+  }
+
+  if (!Number.isFinite(close)) {
+    close = Number(meta.regularMarketPrice);
+  }
+  if (!Number.isFinite(close)) {
+    close = Number(meta.previousClose);
+  }
+  if (!Number.isFinite(close)) {
+    throw new Error('Could not parse Yahoo chart close');
+  }
+
+  const prevClose = Number(meta.previousClose);
+  const metaPct = Number(meta.regularMarketChangePercent);
+  let pctChange = null;
+  if (Number.isFinite(metaPct)) {
+    pctChange = metaPct;
+  } else if (Number.isFinite(prevClose) && prevClose !== 0) {
+    pctChange = ((close - prevClose) / prevClose) * 100;
+  }
+
+  if (!tradeDate) {
+    const metaTs = Number(meta.regularMarketTime);
+    if (Number.isFinite(metaTs)) {
+      tradeDate = new Date(metaTs * 1000).toISOString().slice(0, 10);
+    }
+  }
+
+  return {
+    close,
+    pctChange: Number.isFinite(pctChange) ? pctChange : null,
+    tradeDate
   };
 }
 

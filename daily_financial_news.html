@@ -125,6 +125,17 @@
   .ahead-event { font-family: 'Fraunces', serif; font-size: 16px; }
   .ahead-event strong { font-weight: 600; }
   .ahead-tickers { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); text-align: right; letter-spacing: 0.05em; }
+  .runtime-banner {
+    margin-top: 16px;
+    border: 1px solid rgba(217,108,92,0.6);
+    border-left: 3px solid var(--red);
+    background: rgba(217,108,92,0.12);
+    color: var(--ink);
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+  }
   footer { margin-top: 60px; padding-top: 24px; border-top: 3px double var(--ink); font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-dim); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
   @media (max-width: 820px) {
     .lede, .stories, .earnings-grid { grid-template-columns: 1fr; }
@@ -719,6 +730,7 @@
     <h1>The Daily <em>Tape</em></h1>
     <div class="mast-meta right" id="mast-date"></div>
   </header>
+  <div id="runtime-banner" class="runtime-banner" hidden role="status" aria-live="polite"></div>
   <div class="subhead" id="subhead"></div>
 
   <section>
@@ -794,97 +806,7 @@
 
 </div>
 
-<script>
-(function() {
-  const D = JSON.parse(document.getElementById('dashboard-data').textContent);
-  const $ = id => document.getElementById(id);
-  const set = (id, html) => { const e = $(id); if (e) e.innerHTML = html; };
-  const txt = (id, t) => { const e = $(id); if (e) e.textContent = t; };
-  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[ch]));
-  const inline = v => esc(v).replace(/&lt;(\/?)(strong|em)&gt;/g, '<$1$2>');
-  const tone = v => ['up', 'down', 'flat', 'amber', 'green', 'red', 'macro', 'geo', 'corp', 'fed', 'crypto', 'win', 'loss', 'mix'].includes(v) ? v : '';
-
-  txt('mast-vol', D.masthead.volume);
-  txt('mast-date', D.masthead.date);
-  txt('subhead', D.masthead.subhead);
-
-  txt('tape-label', D.tape.label);
-  set('tape-body', D.tape.rows.map(r => `
-    <tr>
-      <td data-label="Instrument" aria-label="Instrument ${esc(r.name)} ${esc(r.ticker)}"><span class="name">${esc(r.name)}</span><span class="ticker">${esc(r.ticker)}</span></td>
-      <td data-label="Last" aria-label="Last ${esc(r.last)}">${esc(r.last)}</td>
-      <td data-label="Delta" aria-label="Delta ${esc(r.delta)}" class="${tone(r.dir)}">${esc(r.delta)}</td>
-      <td data-label="Percent" aria-label="Percent ${esc(r.pct)}" class="${tone(r.dir)}">${esc(r.pct)}</td>
-      <td data-label="Note">${esc(r.note)}</td>
-    </tr>`).join(''));
-
-  txt('lede-kicker', D.lede.kicker);
-  set('lede-headline', inline(D.lede.headline));
-  set('lede-paragraphs', D.lede.paragraphs.map(p => `<p>${inline(p)}</p>`).join(''));
-  set('lede-cards', D.lede.cards.map(c => `
-    <div class="side-card ${tone(c.tone)}">
-      <div class="label">${esc(c.label)}</div>
-      <div class="num">${esc(c.num)}</div>
-      <p>${esc(c.body)}</p>
-    </div>`).join(''));
-
-  set('stories', D.stories.map(s => `
-    <article class="story">
-      <span class="tag ${tone(s.tone)}">${esc(s.tag)}</span>
-      <h3>${esc(s.title)}</h3>
-      <p>${esc(s.body)}</p>
-      ${s.url ? `<a class="story-link" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer" aria-label="Read more about ${esc(s.title)}">Read more</a>` : ''}
-      ${s.pull ? `<div class="pull">${esc(s.pull)}</div>` : ''}
-    </article>`).join(''));
-
-  txt('renesas-label', D.renesas.label);
-  txt('renesas-title', D.renesas.title);
-  txt('renesas-head', D.renesas.head);
-  set('renesas-headline', inline(D.renesas.headline));
-  set('renesas-paragraphs', D.renesas.paragraphs.map(p => `<p>${inline(p)}</p>`).join(''));
-  set('renesas-stats', D.renesas.stats.map(s => `
-    <div class="rstat">
-      <div class="rk">${esc(s.key)}</div>
-      <div class="rv ${tone(s.tone)}">${esc(s.value)}</div>
-      <small>${esc(s.small)}</small>
-    </div>`).join(''));
-
-  txt('crypto-tape-header', D.crypto.tapeHeader);
-  set('crypto-tape-rows', D.crypto.tape.map(r => `
-    <div class="crypto-row">
-      <div class="crypto-sym">${esc(r.sym)}</div>
-      <div class="crypto-name">${esc(r.name)} <span>${esc(r.sub)}</span></div>
-      <div class="crypto-price">${esc(r.price)}</div>
-      <div class="crypto-chg ${tone(r.dir)}">${esc(r.chg)}</div>
-    </div>`).join(''));
-  set('crypto-notes', D.crypto.notes.map(n => `
-    <div class="cnote">
-      <div class="ckicker">${esc(n.kicker)}</div>
-      <h4>${esc(n.title)}</h4>
-      <p>${inline(n.body)}</p>
-    </div>`).join(''));
-
-  txt('earnings-label', D.earnings.label);
-  set('earnings-grid', D.earnings.tiles.map(t => `
-    <div class="ern ${tone(t.tone)}">
-      <div class="co">${esc(t.co)}</div>
-      <div class="move ${tone(t.moveDir || 'flat')}">${esc(t.move)}</div>
-      <p>${esc(t.body)}</p>
-    </div>`).join(''));
-
-  set('week-ahead', D.weekAhead.rows.map(r => `
-    <div class="ahead-row">
-      <div class="ahead-day">${esc(r.day)}</div>
-      <div class="ahead-event">${inline(r.event)}</div>
-      <div class="ahead-tickers">${esc(r.tickers)}</div>
-    </div>`).join(''));
-
-  txt('footer-compiled', D.footer.compiled);
-  txt('footer-disclaimer', D.footer.disclaimer);
-})();
-</script>
+<script src="scripts/dashboard_runtime.js"></script>
 
 </body>
 </html>
