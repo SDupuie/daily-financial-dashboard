@@ -70,6 +70,34 @@ const ycf = parseYahooChart(yahooChartFallbackJson);
 assert(isFiniteNumber(ycf.close), 'parseYahooChart fallback close must be numeric');
 assert(isFiniteNumber(ycf.pctChange), 'parseYahooChart should compute pctChange from chartPreviousClose fallback');
 
+// Yahoo Chart intraday fixture: latest daily bar is in active regular session.
+const yahooChartIntradayJson = JSON.stringify({
+  chart: {
+    result: [
+      {
+        meta: {
+          regularMarketPrice: 40.53,
+          chartPreviousClose: 42.96,
+          regularMarketTime: 1780323411,
+          currentTradingPeriod: {
+            regular: {
+              start: 1780320600,
+              end: 1780344000
+            }
+          }
+        },
+        timestamp: [1780233600, 1780322400],
+        indicators: {
+          quote: [{ close: [42.96, 40.53] }]
+        }
+      }
+    ]
+  }
+});
+const yci = parseYahooChart(yahooChartIntradayJson);
+assert(yci.tradeDate === '2026-05-31', 'parseYahooChart intraday fallback should use prior session trade date');
+assert(yci.close === 42.96, 'parseYahooChart intraday fallback should use prior session close');
+
 // Nasdaq JSON fixture
 const nasdaqJson = JSON.stringify({
   data: {

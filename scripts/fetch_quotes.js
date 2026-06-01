@@ -297,18 +297,37 @@ function parseYahooChart(body) {
   const meta = result.meta || {};
   const closes = result?.indicators?.quote?.[0]?.close || [];
   const timestamps = result.timestamp || [];
+  const bars = [];
+  for (let i = 0; i < closes.length; i += 1) {
+    const closeValue = Number(closes[i]);
+    const ts = Number(timestamps[i]);
+    if (!Number.isFinite(closeValue) || !Number.isFinite(ts)) continue;
+    bars.push({ close: closeValue, ts });
+  }
 
   let close = NaN;
   let tradeDate = null;
-  for (let i = closes.length - 1; i >= 0; i -= 1) {
-    const value = Number(closes[i]);
-    if (!Number.isFinite(value)) continue;
-    close = value;
-    const ts = Number(timestamps[i]);
-    if (Number.isFinite(ts)) {
-      tradeDate = new Date(ts * 1000).toISOString().slice(0, 10);
+  let usedPriorSessionClose = false;
+  let selectedBarIndex = bars.length - 1;
+
+  const regularStart = Number(meta?.currentTradingPeriod?.regular?.start);
+  const regularEnd = Number(meta?.currentTradingPeriod?.regular?.end);
+  if (
+    bars.length >= 2 &&
+    Number.isFinite(regularStart) &&
+    Number.isFinite(regularEnd)
+  ) {
+    const lastBarTs = bars[bars.length - 1].ts;
+    if (lastBarTs >= regularStart && lastBarTs < regularEnd) {
+      // During intraday sessions, use the most recent completed session close.
+      selectedBarIndex = bars.length - 2;
+      usedPriorSessionClose = true;
     }
-    break;
+  }
+
+  if (selectedBarIndex >= 0 && selectedBarIndex < bars.length) {
+    close = bars[selectedBarIndex].close;
+    tradeDate = new Date(bars[selectedBarIndex].ts * 1000).toISOString().slice(0, 10);
   }
 
   if (!Number.isFinite(close)) {
@@ -326,7 +345,13 @@ function parseYahooChart(body) {
     : Number(meta.chartPreviousClose);
   const metaPct = Number(meta.regularMarketChangePercent);
   let pctChange = null;
-  if (Number.isFinite(metaPct)) {
+  if (
+    selectedBarIndex > 0 &&
+    Number.isFinite(bars[selectedBarIndex - 1]?.close) &&
+    bars[selectedBarIndex - 1].close !== 0
+  ) {
+    pctChange = ((close - bars[selectedBarIndex - 1].close) / bars[selectedBarIndex - 1].close) * 100;
+  } else if (!usedPriorSessionClose && Number.isFinite(metaPct)) {
     pctChange = metaPct;
   } else if (Number.isFinite(prevClose) && prevClose !== 0) {
     pctChange = ((close - prevClose) / prevClose) * 100;
