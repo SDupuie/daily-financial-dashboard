@@ -88,6 +88,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Run `node scripts/test_publish_timeouts.js`.
    - Run `node scripts/test_fetch_quotes_source_order.js`.
    - Run `node scripts/test_fetch_quotes_parsers.js`.
+   - Run `node scripts/test_fetch_quotes_exit_behavior.js`.
    - Run `node scripts/test_validate_freshness_warning.js`.
    - Run `git diff --check`.
    - Run a quick placeholder gate for completed reports (example):

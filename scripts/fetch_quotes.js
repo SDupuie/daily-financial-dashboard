@@ -170,9 +170,9 @@ Options:
   --help                     Show this help
 
 Exit codes:
-  0  success (all symbols resolved)
+  0  success (all symbols resolved live or via cache fallback)
   2  DNS preflight failure (rerun with elevated network permissions)
-  3  one or more symbols unresolved across full source chain
+  3  one or more symbols unresolved across full source chain and cache fallback
   1  script/runtime error
 `;
   process.stdout.write(text);
@@ -640,7 +640,8 @@ async function main() {
   const preflightByHost = Object.fromEntries(preflight.map((p) => [p.host, p.ok]));
 
   const updatedCache = { ...(cacheData._error ? {} : cacheData) };
-  let unresolved = 0;
+  let unresolvedWithoutFallback = 0;
+  const fallbackKeys = [];
 
   for (const spec of args.symbolSpecs) {
     const key = `${spec.symbol}:${spec.type}`;
@@ -669,15 +670,25 @@ async function main() {
       continue;
     }
 
-    unresolved += 1;
+    const fallback = buildFallback(spec, cacheData);
+    if (!fallback) {
+      unresolvedWithoutFallback += 1;
+    } else {
+      fallbackKeys.push(key);
+    }
     summary.symbols[key] = {
       symbol: spec.symbol,
       type: spec.type,
       result: null,
-      fallback: buildFallback(spec, cacheData),
+      fallback,
       chain: fetched.chain,
       unresolvedReason: fetched.unresolvedReason
     };
+  }
+
+  if (fallbackKeys.length > 0) {
+    summary.fallbackWarning = `Used cached fallback for symbols: ${fallbackKeys.join(', ')}`;
+    process.stderr.write(`${summary.fallbackWarning}\n`);
   }
 
   saveJson(args.cachePath, updatedCache);
@@ -688,7 +699,7 @@ async function main() {
 
   printSummary(summary, args.compact);
 
-  if (unresolved > 0) {
+  if (unresolvedWithoutFallback > 0) {
     if (dnsFailures.length === preflight.length) {
       process.exit(2);
     }
