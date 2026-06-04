@@ -152,11 +152,13 @@
 
     setHtml('crypto-notes', asArr(d.crypto.notes).map((nRaw) => {
       const n = asObj(nRaw);
+      const safeUrl = safeHttpsUrl(n.url);
       return `
     <div class="cnote">
       <div class="ckicker">${esc(n.kicker)}</div>
       <h4>${esc(n.title)}</h4>
       <p>${inline(n.body)}</p>
+      ${safeUrl ? `<a class="story-link" href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Read more about ${esc(n.title)}">Read more</a>` : ''}
     </div>`;
     }).join(''));
   }

@@ -76,6 +76,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Do not include placeholder stories that only say no update was found.
    - `renesas`: latest Tokyo price plus fresh news, or explicitly say no fresh company news was found.
    - `crypto`: refreshed crypto tape plus up to six fresh crypto notes/stories. Notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation; do not merely restate the crypto tape quotes.
+   - Each `crypto.notes[]` item must include a direct `url` to the article, source page, API endpoint, or market page used for that note so the rendered card can show a `READ MORE` link like `stories[]`.
    - No static content in `crypto.notes`: rewrite the items daily from current sources, and do not keep evergreen explainers, placeholder updates, or unchanged notes just to fill the section.
   - `earnings`: reports from the past 48 hours and the next five calendar days.
   - For any company that reported after close on `yesterday` or `today`, replace schedule placeholders with actual reported data before publish (at minimum revenue, EPS, and guidance/reaction context when available).
