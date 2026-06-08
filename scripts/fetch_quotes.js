@@ -15,6 +15,14 @@ const DEFAULT_SYMBOLS = [
 ];
 
 const EQUITY_TYPES = new Set(['stock', 'etf']);
+const MARKET_SCHEDULES = {
+  '6723.T': {
+    label: 'Tokyo cash close',
+    timeZone: 'Asia/Tokyo',
+    closeHour: 15,
+    closeMinute: 30
+  }
+};
 
 const SOURCE_CHAIN = [
   {
@@ -146,6 +154,7 @@ function parseSymbolSpec(token) {
     symbol,
     type,
     yahooSymbol,
+    marketSchedule: MARKET_SCHEDULES[yahooSymbol] || null,
     nasdaqAssetClass: type === 'etf' ? 'etf' : 'stocks',
     marketwatchType: type === 'etf' ? 'fund' : 'stock'
   };
@@ -485,6 +494,58 @@ function formatPct(value) {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
+function getTimeZoneParts(timeZone, now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(now);
+
+  const read = (type) => parts.find((part) => part.type === type)?.value || '';
+  return {
+    weekday: read('weekday'),
+    year: Number(read('year')),
+    month: Number(read('month')),
+    day: Number(read('day')),
+    hour: Number(read('hour')),
+    minute: Number(read('minute'))
+  };
+}
+
+function getExpectedTradeDateForMarket(schedule, now = new Date()) {
+  if (!schedule) return null;
+
+  const local = getTimeZoneParts(schedule.timeZone, now);
+  if (!['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].includes(local.weekday)) {
+    return null;
+  }
+
+  const afterClose = local.hour > schedule.closeHour ||
+    (local.hour === schedule.closeHour && local.minute >= schedule.closeMinute);
+  if (!afterClose) return null;
+
+  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
+}
+
+function assessTradeDateFreshness(spec, tradeDate, now = new Date()) {
+  const expectedTradeDate = getExpectedTradeDateForMarket(spec.marketSchedule, now);
+  if (!expectedTradeDate) {
+    return null;
+  }
+
+  return {
+    marketLabel: spec.marketSchedule.label,
+    timeZone: spec.marketSchedule.timeZone,
+    expectedTradeDate,
+    isStale: tradeDate !== expectedTradeDate
+  };
+}
+
 function cacheKeyFor(spec) {
   return `${spec.symbol}:${spec.type}`;
 }
@@ -557,7 +618,8 @@ async function fetchSymbol(spec, args) {
             close: Number(formatClose(parsed.close)),
             pctChange: parsed.pctChange,
             pct: formatPct(parsed.pctChange),
-            tradeDate: parsed.tradeDate
+            tradeDate: parsed.tradeDate,
+            freshness: assessTradeDateFreshness(spec, parsed.tradeDate)
           },
           chain,
           unresolvedReason: null
@@ -585,6 +647,9 @@ function printSummary(summary, compact) {
     const row = summary.symbols[key];
     if (row.result) {
       process.stdout.write(`${key}: OK via ${row.result.source} | close ${row.result.close.toFixed(2)} | pct ${row.result.pct || 'n/a'} | tradeDate ${row.result.tradeDate || 'unknown'}\n`);
+      if (row.result.freshness?.isStale) {
+        process.stdout.write(`  warning: ${row.result.freshness.marketLabel} expected ${row.result.freshness.expectedTradeDate} in ${row.result.freshness.timeZone}, got ${row.result.tradeDate || 'unknown'}\n`);
+      }
       continue;
     }
 
@@ -655,6 +720,7 @@ async function main() {
         pctChange: Number.isFinite(fetched.result.pctChange) ? fetched.result.pctChange : null,
         pct: fetched.result.pct,
         tradeDate: fetched.result.tradeDate,
+        freshness: fetched.result.freshness || null,
         source: fetched.result.source,
         verifiedAt: nowIso
       };
@@ -719,6 +785,8 @@ if (require.main === module) {
     parseNasdaq,
     parseMarketWatch,
     parseDateLoose,
-    parseNumberFromText
+    parseNumberFromText,
+    getExpectedTradeDateForMarket,
+    assessTradeDateFreshness
   };
 }

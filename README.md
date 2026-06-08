@@ -23,6 +23,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 1. Confirm dates first.
    - `masthead.date`: today.
    - `tape.label`: most recent market close, usually the prior weekday.
+   - For non-U.S. listings, check the local market calendar/date before accepting any quote. Example: on a Monday morning U.S. run, Tokyo cash trading has already closed, so Renesas `6723.T` should normally use the Monday Tokyo close, not the prior Friday close.
    - If today is Monday or Friday, update `weekAhead`; otherwise leave `weekAhead` mostly unchanged unless a scheduled event has moved.
 
 2. Refresh prices before reading news.
@@ -41,7 +42,9 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Gold and silver: GoldPrice.org spot close or MarketWatch futures close. State which one is used in `footer.compiled`.
    - Renesas `6723.T`: use this fallback chain in order and record the best verified Tokyo close: Yahoo Finance Japan -> Japan Exchange Group (JPX) -> Nikkei -> Traders Web -> Asset Alive.
    - For Renesas, do not stop after one fetch/tool failure; continue down the full source chain.
+   - For Renesas, do not accept a stale trade date just because one source returned a quote. If the Tokyo session has already closed for the current Tokyo date and the retrieved trade date is still the prior session, continue down the fallback chain until you verify the latest Tokyo close or exhaust all listed sources.
    - If same-day Tokyo close is unavailable, use the latest available Tokyo close from the chain and include that trade date in the `note`/`renesas` text.
+   - On Monday U.S. morning runs specifically, treat Friday `6723.T` data as stale once Monday Tokyo has closed; the default expectation is a Monday Tokyo close unless every source in the Renesas chain still lacks it.
    - Use `~` for Renesas only after two attempts per source across the full chain (10 total attempts) and state in `footer.compiled` that all sources failed retrieval.
    - Crypto majors: CoinGecko or CoinMarketCap.
    - Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
@@ -92,7 +95,9 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Run `node scripts/test_fetch_quotes_parsers.js`.
    - Run `node scripts/test_fetch_quotes_exit_behavior.js`.
    - Run `node scripts/test_validate_freshness_warning.js`.
+   - Run `node scripts/test_validate_market_dates.js`.
    - Run `git diff --check`.
+   - Manually confirm that any non-U.S. listing uses the latest local-market close available for that market date. Example: if the run happens after Tokyo cash close, verify that `6723.T` is not still showing the prior Tokyo session unless the fallback notes explicitly document why newer data was unavailable.
    - Run a quick placeholder gate for completed reports (example):
      - `rg -n "after-close expected|after-close report" daily_financial_news.html`
      - If matches refer to companies that already reported in the last 48 hours, backfill those tiles with actual results.

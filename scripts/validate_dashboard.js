@@ -15,6 +15,64 @@ function escRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function getNow() {
+  const override = process.env.VALIDATE_NOW_ISO;
+  if (!override) return new Date();
+  const parsed = new Date(override);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function getTimeZoneParts(timeZone, now) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(now);
+
+  const read = (type) => parts.find((part) => part.type === type)?.value || '';
+  return {
+    weekday: read('weekday'),
+    year: Number(read('year')),
+    month: Number(read('month')),
+    day: Number(read('day')),
+    hour: Number(read('hour')),
+    minute: Number(read('minute'))
+  };
+}
+
+function getExpectedTradeDateForMarket({ timeZone, closeHour, closeMinute }, now) {
+  const local = getTimeZoneParts(timeZone, now);
+  if (!['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].includes(local.weekday)) {
+    return null;
+  }
+
+  const afterClose = local.hour > closeHour ||
+    (local.hour === closeHour && local.minute >= closeMinute);
+  if (!afterClose) return null;
+
+  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
+}
+
+function parseMonthDayForYear(text, year) {
+  const match = String(text || '').match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})\b/i);
+  if (!match) return null;
+
+  const monthToken = match[1].slice(0, 3).toLowerCase();
+  const monthMap = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+  };
+  const month = monthMap[monthToken];
+  const day = Number(match[2]);
+  if (!month || !Number.isFinite(day)) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
 if (!match) {
   errors.push('Could not find dashboard-data JSON block.');
 } else {
@@ -26,6 +84,7 @@ if (!match) {
   }
 
   if (data) {
+    const now = getNow();
     const strictDates = process.env.VALIDATE_STRICT_DATES === '1';
     const tapeRows = data.tape?.rows ?? [];
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
@@ -37,7 +96,7 @@ if (!match) {
       month: 'long',
       day: 'numeric',
       year: 'numeric'
-    }).formatToParts(new Date());
+    }).formatToParts(now);
     const part = (type) => todayParts.find((p) => p.type === type)?.value || '';
     const expectedDay = part('weekday');
     const expectedMonth = part('month');
@@ -136,6 +195,25 @@ if (!match) {
 
     if (!/Alternative\.me Crypto Fear & Greed Index/i.test(String(data.footer?.compiled ?? ''))) {
       errors.push('Footer source list must include Alternative.me Crypto Fear & Greed Index when F&G is shown.');
+    }
+
+    const renesasExpectedTradeDate = getExpectedTradeDateForMarket({
+      timeZone: 'Asia/Tokyo',
+      closeHour: 15,
+      closeMinute: 30
+    }, now);
+
+    if (renesasExpectedTradeDate) {
+      const renesasStats = Array.isArray(data.renesas?.stats) ? data.renesas.stats : [];
+      const tradeDateStat = renesasStats.find((item) => /Latest Verified Trade Date/i.test(String(item?.key ?? '')));
+      const closeStat = renesasStats.find((item) => /6723\.T Close/i.test(String(item?.key ?? '')));
+      const tokyoYear = Number(renesasExpectedTradeDate.slice(0, 4));
+      const observedTradeDate = parseMonthDayForYear(`${tradeDateStat?.value ?? ''} ${tradeDateStat?.small ?? ''}`, tokyoYear);
+      const observedCloseDate = parseMonthDayForYear(String(closeStat?.small ?? ''), tokyoYear);
+
+      if (observedTradeDate !== renesasExpectedTradeDate || observedCloseDate !== renesasExpectedTradeDate) {
+        errors.push(`Renesas must use the latest Tokyo close once the Tokyo session has ended: expected ${renesasExpectedTradeDate}, got trade-date stat "${tradeDateStat?.value ?? ''} ${tradeDateStat?.small ?? ''}" and close stat "${closeStat?.small ?? ''}".`);
+      }
     }
 
     for (const storyRaw of data.stories ?? []) {

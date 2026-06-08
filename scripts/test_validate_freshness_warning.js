@@ -36,7 +36,7 @@ try {
   const warnRun = spawnSync(process.execPath, ['scripts/validate_dashboard.js'], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: process.env
+    env: { ...process.env, VALIDATE_NOW_ISO: '2026-06-08T00:00:00Z' }
   });
 
   assert(warnRun.status === 0, 'non-strict freshness should not fail validation');
@@ -45,7 +45,7 @@ try {
   const strictRun = spawnSync(process.execPath, ['scripts/validate_dashboard.js'], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { ...process.env, VALIDATE_STRICT_DATES: '1' }
+    env: { ...process.env, VALIDATE_STRICT_DATES: '1', VALIDATE_NOW_ISO: '2026-06-08T00:00:00Z' }
   });
 
   assert(strictRun.status !== 0, 'strict freshness mode should fail stale dates');

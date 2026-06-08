@@ -6,7 +6,9 @@ const {
   parseNasdaq,
   parseMarketWatch,
   parseDateLoose,
-  parseNumberFromText
+  parseNumberFromText,
+  getExpectedTradeDateForMarket,
+  assessTradeDateFreshness
 } = require('./fetch_quotes');
 
 function assert(condition, message) {
@@ -124,5 +126,22 @@ assert(mw.tradeDate === '2026-05-30', 'parseMarketWatch tradeDate should parse A
 
 assert(parseDateLoose('May 30, 2026 ET') === '2026-05-30', 'parseDateLoose should normalize TZ suffix');
 assert(parseNumberFromText('$1,234.56%') === 1234.56, 'parseNumberFromText should normalize money/percent text');
+
+const tokyoCloseDate = getExpectedTradeDateForMarket({
+  timeZone: 'Asia/Tokyo',
+  closeHour: 15,
+  closeMinute: 30
+}, new Date('2026-06-08T12:15:00Z'));
+assert(tokyoCloseDate === '2026-06-08', 'Tokyo close expectation should advance to the current Tokyo session date after the close');
+
+const renesasFreshness = assessTradeDateFreshness({
+  marketSchedule: {
+    label: 'Tokyo cash close',
+    timeZone: 'Asia/Tokyo',
+    closeHour: 15,
+    closeMinute: 30
+  }
+}, '2026-06-05', new Date('2026-06-08T12:15:00Z'));
+assert(renesasFreshness && renesasFreshness.isStale, 'Renesas freshness check should flag stale Tokyo dates after the local close');
 
 process.stdout.write('fetch_quotes parser tests passed\n');
