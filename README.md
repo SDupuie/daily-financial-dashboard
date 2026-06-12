@@ -22,6 +22,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
 
 1. Confirm dates first.
    - `masthead.date`: today.
+   - `footer.compiled`: must include today’s compile date.
+   - Never allow stale values such as `January 1` / year `2001` / prior-day date in `masthead.date` or `footer.compiled`.
    - `tape.label`: most recent market close, usually the prior weekday.
    - For non-U.S. listings, check the local market calendar/date before accepting any quote. Example: on a Monday morning U.S. run, Tokyo cash trading has already closed, so Renesas `6723.T` should normally use the Monday Tokyo close, not the prior Friday close.
    - If today is Monday or Friday, update `weekAhead`; otherwise leave `weekAhead` mostly unchanged unless a scheduled event has moved.
@@ -34,6 +36,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - In each `tape.rows[].note`, summarize only the relevant market commentary, catalyst, or major news snippet for that line item (and include pre-market context when useful).
    - Do not restate the row's last price, point change, or percent change in `tape.rows[].note`; those belong only in `last`, `delta`, and `pct`.
    - Do not name quote/news sources in `tape` notes. Keep all source attribution in `footer.compiled`.
+   - Do not use source-verification phrasing in `tape` notes such as `Reuters reported`, `Nikkei verified`, `Yahoo showed`, `fallback chain`, or similar retrieval/process commentary. Keep the note focused on the market move itself.
+   - This rule applies everywhere user-facing copy appears, not just `tape` notes: titles, headings, headlines, paragraphs, story bodies, stat labels, Renesas copy, crypto notes, ledes, and earnings text must not mention which source won, which source failed, or how the fallback chain behaved. Keep all source and retrieval/process commentary in `footer.compiled` only.
 
 3. Use this price-source hierarchy.
    - U.S. indices and equities: Yahoo Finance or a live finance quote tool. Cross-check major index closes with AP, CNBC, Reuters, MarketWatch, or TradingView when available.
@@ -70,11 +74,14 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Each `stories[]` item must include a direct `url` to the article, source page, or calendar page used for that item.
 
 5. Rewrite the JSON sections in this order.
-   - `masthead`: bump volume by 1, update date and subhead.
+   - `masthead`: bump volume by 1, set `masthead.date` to current run date format, update subhead.
+   - Set `footer.compiled` to match the same compile date as `masthead.date` and include the source list for all live fields.
    - `tape`: all refreshed closes.
    - `lede`: top market story from the latest close.
+   - In copy fields such as `masthead.subhead`, `lede.headline`, `lede.paragraphs`, `stories[].body`, `renesas`, `crypto.notes[]`, and `earnings.tiles[]`, write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
+   - Keep source attribution and retrieval/process commentary out of all user-facing copy fields. Do not mention outlet names, quote vendors, source winners/losers, stale-source problems, API failures, fallback chains, or verification steps in titles, headings, headlines, paragraphs, notes, stat labels, or story bodies. Put that information only in `footer.compiled`.
    - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, and Fed, each with a `url`.
-   - In `stories[]`, keep publisher attribution out of the `title`. Put source attribution only in the story body/subtext and in `footer.compiled`.
+   - In `stories[]`, keep publisher attribution out of the `title` and `body`. Put source attribution only in `footer.compiled`.
    - Do not include Renesas items in `stories` ("Across the Wires"); keep all Renesas coverage in the dedicated `renesas` section only.
    - Do not include placeholder stories that only say no update was found.
    - `renesas`: latest Tokyo price plus fresh news, or explicitly say no fresh company news was found.
@@ -96,6 +103,12 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Run `node scripts/test_fetch_quotes_exit_behavior.js`.
    - Run `node scripts/test_validate_freshness_warning.js`.
    - Run `node scripts/test_validate_market_dates.js`.
+   - Run a stale-date guard on the run fields:
+     - `rg -n "\"masthead\"|\"compiled\"|January 1|2001" daily_financial_news.html`
+     - If `masthead.date` or `footer.compiled` contains yesterday/default/placeholder text, edit JSON again before proceeding.
+   - Run an HTML-entity guard on human-readable copy:
+     - `rg -n "&amp;|&lt;|&gt;" daily_financial_news.html`
+     - If matches appear in normal text fields rather than intentional markup, replace them with plain characters before proceeding.
    - Run `git diff --check`.
    - Manually confirm that any non-U.S. listing uses the latest local-market close available for that market date. Example: if the run happens after Tokyo cash close, verify that `6723.T` is not still showing the prior Tokyo session unless the fallback notes explicitly document why newer data was unavailable.
    - Run a quick placeholder gate for completed reports (example):
