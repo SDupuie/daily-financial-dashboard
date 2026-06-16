@@ -162,22 +162,21 @@ github_api_get() {
 }
 
 parse_github_remote() {
-  local remote_url
+  local remote_url repo
   remote_url="$(git remote get-url "$REMOTE")"
 
-  if [[ "$remote_url" =~ ^https?://github\.com/([^/]+)/([^/]+?)(\.git)?$ ]]; then
+  if [[ "$remote_url" =~ ^https?://github\.com/([^/]+)/([^/]+)$ ]]; then
     GITHUB_OWNER="${BASH_REMATCH[1]}"
-    GITHUB_REPO="${BASH_REMATCH[2]}"
-    return 0
+    repo="${BASH_REMATCH[2]}"
+  elif [[ "$remote_url" =~ ^git@github\.com:([^/]+)/([^/]+)$ ]]; then
+    GITHUB_OWNER="${BASH_REMATCH[1]}"
+    repo="${BASH_REMATCH[2]}"
+  else
+    return 1
   fi
 
-  if [[ "$remote_url" =~ ^git@github\.com:([^/]+)/([^/]+?)(\.git)?$ ]]; then
-    GITHUB_OWNER="${BASH_REMATCH[1]}"
-    GITHUB_REPO="${BASH_REMATCH[2]}"
-    return 0
-  fi
-
-  return 1
+  GITHUB_REPO="${repo%.git}"
+  [[ -n "$GITHUB_OWNER" && -n "$GITHUB_REPO" ]]
 }
 
 build_pages_url() {
