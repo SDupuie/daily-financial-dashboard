@@ -35,6 +35,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - If stock/ETF DNS preflight fails, rerun quote pulls immediately with elevated network permissions rather than waiting for publish.
    - In each `tape.rows[].note`, summarize only the relevant market commentary, catalyst, or major news snippet for that line item (and include pre-market context when useful).
    - Do not restate the row's last price, point change, or percent change in `tape.rows[].note`; those belong only in `last`, `delta`, and `pct`.
+   - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` in any user-facing copy unless you directly verified that claim from a current primary or high-confidence market source for that exact instrument and session.
+   - If a move is strong but record status is not directly verified, use neutral wording such as `broad risk-on move`, `sharp rally`, `strong close`, `near recent highs`, or similar non-record phrasing.
    - Do not name quote/news sources in `tape` notes. Keep all source attribution in `footer.compiled`.
    - Do not use source-verification phrasing in `tape` notes such as `Reuters reported`, `Nikkei verified`, `Yahoo showed`, `fallback chain`, or similar retrieval/process commentary. Keep the note focused on the market move itself.
    - This rule applies everywhere user-facing copy appears, not just `tape` notes: titles, headings, headlines, paragraphs, story bodies, stat labels, Renesas copy, crypto notes, ledes, and earnings text must not mention which source won, which source failed, or how the fallback chain behaved. Keep all source and retrieval/process commentary in `footer.compiled` only.
@@ -80,6 +82,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - `lede`: top market story from the latest close.
    - In copy fields such as `masthead.subhead`, `lede.headline`, `lede.paragraphs`, `stories[].body`, `renesas`, `crypto.notes[]`, and `earnings.tiles[]`, write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
    - Keep source attribution and retrieval/process commentary out of all user-facing copy fields. Do not mention outlet names, quote vendors, source winners/losers, stale-source problems, API failures, fallback chains, or verification steps in titles, headings, headlines, paragraphs, notes, stat labels, or story bodies. Put that information only in `footer.compiled`.
+   - Treat `record`, `all-time`, `fresh high`, `record close`, `record low`, and similar superlatives as claims that require explicit verification. If you did not verify the claim directly for that instrument and session, rewrite to a neutral description.
    - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, and Fed, each with a `url`.
    - In `stories[]`, keep publisher attribution out of the `title` and `body`. Put source attribution only in `footer.compiled`.
    - Do not include Renesas items in `stories` ("Across the Wires"); keep all Renesas coverage in the dedicated `renesas` section only.
@@ -110,6 +113,9 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
      - `rg -n "&amp;|&lt;|&gt;" daily_financial_news.html`
      - If matches appear in normal text fields rather than intentional markup, replace them with plain characters before proceeding.
    - Run `git diff --check`.
+   - Run a superlative-claim gate on user-facing copy:
+     - `rg -n "record|all-time|fresh high|new high|record close|record low" daily_financial_news.html`
+     - For every match in user-facing copy, either confirm the claim from a direct source for that instrument/session or rewrite it to neutral wording before proceeding.
    - Manually confirm that any non-U.S. listing uses the latest local-market close available for that market date. Example: if the run happens after Tokyo cash close, verify that `6723.T` is not still showing the prior Tokyo session unless the fallback notes explicitly document why newer data was unavailable.
    - Run a quick placeholder gate for completed reports (example):
      - `rg -n "after-close expected|after-close report" daily_financial_news.html`
