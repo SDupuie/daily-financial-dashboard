@@ -19,5 +19,6 @@ assert(s.includes('--max-time "$CURL_MAX_TIME_SECONDS"'), 'curl calls must set m
 assert(s.includes('GITHUB_REPO="${repo%.git}"'), 'publish_main.sh must strip the optional .git suffix from GitHub remotes');
 assert(s.includes('^https?://github\\.com/([^/]+)/([^/]+)$'), 'publish_main.sh must parse HTTPS GitHub remotes without PCRE-only lazy quantifiers');
 assert(s.includes('^git@github\\.com:([^/]+)/([^/]+)$'), 'publish_main.sh must parse SSH GitHub remotes without PCRE-only lazy quantifiers');
+assert(s.includes('html.match(/<script type="application\\/json" id="dashboard-data">([\\s\\S]*?)<\\/script>/);'), 'publish_main.sh must extract dashboard JSON without requiring newlines around the script contents');
 
 process.stdout.write('publish timeout tests passed\n');

@@ -191,7 +191,7 @@ extract_dashboard_markers() {
   node -e '
 const fs = require("fs");
 const html = fs.readFileSync("daily_financial_news.html", "utf8");
-const m = html.match(/<script type="application\/json" id="dashboard-data">\n([\s\S]*?)\n<\/script>/);
+const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 if (!m) process.exit(1);
 const data = JSON.parse(m[1]);
 const date = (data.masthead && data.masthead.date) || "";
@@ -305,7 +305,7 @@ verify_pages_content() {
   if EXPECTED_DATE="$expected_date" EXPECTED_VOLUME="$expected_volume" node -e '
 const fs = require("fs");
 const html = fs.readFileSync(0, "utf8");
-const m = html.match(/<script type="application\/json" id="dashboard-data">\n([\s\S]*?)\n<\/script>/);
+const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 if (!m) process.exit(1);
 const data = JSON.parse(m[1]);
 const date = data?.masthead?.date || "";
