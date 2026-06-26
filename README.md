@@ -75,8 +75,8 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - Discard any story without a publication date from today or yesterday.
    - Each `stories[]` item must include a direct `url` to the article, source page, or calendar page used for that item.
    - For any `url` that renders as `READ MORE`, prefer a reader-facing article or HTML page, not a raw API/feed/download endpoint.
-   - Do not use machine-readable endpoints such as `query1.finance.yahoo.com`, `api.nasdaq.com`, JSON APIs, CSV downloads, or other raw data feeds as the `url` for article-style `stories[]` items or article-style `crypto.notes[]` items.
-   - API or market-data page URLs are allowed in `crypto.notes[]` only when the note is explicitly data-driven rather than article-driven, such as Fear & Greed, total market cap, or similar live-stat cards.
+   - Do not use machine-readable endpoints such as `query1.finance.yahoo.com`, `api.nasdaq.com`, JSON APIs, CSV downloads, or other raw data feeds as the `url` for any `stories[]` item or any `crypto.notes[]` item.
+   - Even for data-driven `crypto.notes[]` cards such as Fear & Greed, total market cap, or relative-strength snapshots, use a reader-facing source page rather than a raw API/feed/download endpoint.
 
 5. Rewrite the JSON sections in this order.
    - `masthead`: bump volume by 1, set `masthead.date` to current run date format, update subhead.
@@ -95,7 +95,7 @@ Do not touch the HTML, CSS, or JavaScript outside that block.
    - `crypto`: refreshed crypto tape plus up to six fresh crypto notes/stories. Notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation; do not merely restate the crypto tape quotes.
    - Each `crypto.notes[]` item must include a direct `url` so the rendered card can show a `READ MORE` link like `stories[]`.
    - If a `crypto.notes[]` item reads like a story, analysis, or company/market write-up, its `url` must be a reader-facing article or source page, not a raw API/feed/download endpoint.
-   - Use raw API endpoints in `crypto.notes[]` only for explicitly data-driven notes where the endpoint itself is the primary source being referenced, such as Alternative.me Fear & Greed or CoinGecko global market data.
+   - For explicitly data-driven `crypto.notes[]` notes, keep the data source attribution in `footer.compiled` but still use a reader-facing source page for the note `url`.
    - No static content in `crypto.notes`: rewrite the items daily from current sources, and do not keep evergreen explainers, placeholder updates, or unchanged notes just to fill the section.
   - `earnings`: reports from the past 48 hours and the next five calendar days.
   - For any company that reported after close on `yesterday` or `today`, replace schedule placeholders with actual reported data before publish (at minimum revenue, EPS, and guidance/reaction context when available).
