@@ -767,14 +767,14 @@
       .story-grid,
       .earnings-grid,
       .crypto-grid { grid-template-columns: 1fr; }
-      .premarket-board { grid-template-columns: 1fr; }
-      .future-card,
-      .future-card:nth-child(2n),
-      .future-card:nth-last-child(-n + 2) {
-        border-right: none;
+      .premarket { grid-template-columns: 1fr; }
+      .premarket-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .future-card {
+        border-right: 1px solid var(--line);
         border-bottom: 1px solid var(--line);
       }
-      .future-card:last-child { border-bottom: none; }
+      .future-card:nth-child(2n) { border-right: none; }
+      .future-card:nth-last-child(-n + 2) { border-bottom: none; }
       .premarket-item { grid-template-columns: 1fr; gap: 5px; }
       .table-card,
       .crypto-tape { overflow-x: auto; }
