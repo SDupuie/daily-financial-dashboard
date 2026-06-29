@@ -8,6 +8,8 @@
   const asObj = (v) => (v && typeof v === 'object' ? v : {});
   const asArr = (v) => (Array.isArray(v) ? v : []);
   const asText = (v) => String(v ?? '');
+  const INVERSE_TAPE_TICKERS = new Set(['VIX', 'UST10Y', 'UST30Y']);
+  const INVERSE_TAPE_NAMES = new Set(['vix', '10-yr treasury', '30-yr treasury']);
 
   const esc = (v) => asText(v).replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;',
@@ -19,6 +21,15 @@
 
   const inline = (v) => esc(v).replace(/&lt;(\/?)(strong|em)&gt;/g, '<$1$2>');
   const tone = (v) => (ALLOWED_TONES.has(v) ? v : '');
+  const inverseMoveTone = (v) => (v === 'up' ? 'down' : v === 'down' ? 'up' : v);
+
+  function tapeTone(row) {
+    const dir = tone(row.dir);
+    const ticker = asText(row.ticker).trim().toUpperCase();
+    const name = asText(row.name).trim().toLowerCase();
+    const isInverse = INVERSE_TAPE_TICKERS.has(ticker) || INVERSE_TAPE_NAMES.has(name);
+    return isInverse ? inverseMoveTone(dir) : dir;
+  }
 
   function setHtml(id, html) {
     const el = $(id);
@@ -79,12 +90,13 @@
     const rows = asArr(d.tape.rows);
     setHtml('tape-body', rows.map((rRaw) => {
       const r = asObj(rRaw);
+      const moveTone = tapeTone(r);
       return `
     <tr>
       <td data-label="Instrument" aria-label="Instrument ${esc(r.name)} ${esc(r.ticker)}"><span class="name">${esc(r.name)}</span><span class="ticker">${esc(r.ticker)}</span></td>
       <td data-label="Last" aria-label="Last ${esc(r.last)}">${esc(r.last)}</td>
-      <td data-label="Delta" aria-label="Delta ${esc(r.delta)}" class="${tone(r.dir)}">${esc(r.delta)}</td>
-      <td data-label="Percent" aria-label="Percent ${esc(r.pct)}" class="${tone(r.dir)}">${esc(r.pct)}</td>
+      <td data-label="Delta" aria-label="Delta ${esc(r.delta)}" class="${moveTone}">${esc(r.delta)}</td>
+      <td data-label="Percent" aria-label="Percent ${esc(r.pct)}" class="${moveTone}">${esc(r.pct)}</td>
       <td data-label="Note">${esc(r.note)}</td>
     </tr>`;
     }).join(''));

@@ -106,10 +106,29 @@ function testMissingSectionsDoesNotCrash() {
   assert(typeof elements.get('tape-body').innerHTML === 'string', 'tape-body should still render to a string');
 }
 
+function testInverseTapeRowsUseRiskTone() {
+  const d = baseData();
+  d.tape.rows = [
+    { name: 'S&P 500', ticker: 'SPX', last: '100', delta: '-1.00', pct: '-1.00%', dir: 'down', note: 'Stocks fell.' },
+    { name: 'VIX', ticker: 'VIX', last: '18', delta: '-0.48', pct: '-2.54%', dir: 'down', note: 'Vol eased.' },
+    { name: '10-Yr Treasury', ticker: 'UST10Y', last: '4.38%', delta: '-0.02', pct: '-0.45%', dir: 'down', note: 'Yields slipped.' },
+    { name: '30-Yr Treasury', ticker: 'UST30Y', last: '4.87%', delta: '+0.01', pct: '+0.21%', dir: 'up', note: 'Yields rose.' }
+  ];
+
+  const html = runRuntimeWithData(d).get('tape-body').innerHTML;
+
+  assert(html.includes('aria-label="Delta -1.00" class="down">-1.00'), 'standard down tape rows should stay red');
+  assert(html.includes('aria-label="Delta -0.48" class="up">-0.48'), 'VIX down move should render green');
+  assert(html.includes('aria-label="Percent -2.54%" class="up">-2.54%'), 'VIX percent down move should render green');
+  assert(html.includes('aria-label="Delta -0.02" class="up">-0.02'), '10-Yr Treasury down move should render green');
+  assert(html.includes('aria-label="Delta +0.01" class="down">+0.01'), '30-Yr Treasury up move should render red');
+}
+
 function main() {
   testHttpsOnlyStoryLinks();
   testInvalidJsonShowsBanner();
   testMissingSectionsDoesNotCrash();
+  testInverseTapeRowsUseRiskTone();
   process.stdout.write('dashboard_runtime tests passed\n');
 }
 
