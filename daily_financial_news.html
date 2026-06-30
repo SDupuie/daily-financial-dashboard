@@ -302,57 +302,67 @@
       border-bottom-color: var(--line);
     }
     .portfolio-section .section-note { text-align: left; }
-    .portfolio-section .table-card {
-      box-shadow: none;
+    .portfolio-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 10px;
     }
-    .portfolio-section table {
-      table-layout: fixed;
+    .portfolio-card {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 16px;
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-radius: var(--card-radius);
+      background: var(--panel);
     }
-    .portfolio-section th {
-      padding: 10px 14px;
-      background: #f8fafc;
-      color: var(--blue);
-      font-size: var(--label-size);
-      letter-spacing: var(--label-spacing);
+    .portfolio-card-main {
+      min-width: 0;
     }
-    .portfolio-section td {
-      padding: 11px 14px;
-      font-size: 13px;
-    }
-    .portfolio-section td.num {
-      color: var(--ink);
-    }
-    .portfolio-section td.num:not(.metric-primary) {
-      font-size: 13px;
+    .portfolio-card-title {
+      font-size: 14px;
       font-weight: 850;
+      line-height: 1.15;
     }
-    .portfolio-section td.price-cell {
-      line-height: 1.5;
+    .portfolio-card-ticker {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 6px;
+      color: #1f2937;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.02em;
     }
-    .portfolio-fixed-col {
-      width: clamp(118px, 12vw, 148px);
+    .portfolio-card-metrics {
+      display: grid;
+      gap: 8px;
+      justify-items: end;
+      text-align: right;
+      white-space: nowrap;
     }
-    .portfolio-class-col {
+    .portfolio-card-return {
+      justify-content: end;
       width: auto;
     }
-    .portfolio-section th.num {
-      white-space: normal;
-      line-height: 1.2;
+    .portfolio-card-return .metric-value,
+    .portfolio-card-return .metric-sep {
+      font-size: 13px;
     }
-    .portfolio-section td.num { white-space: nowrap; }
-    .portfolio-section .portfolio-asset-class {
-      display: table-cell;
-      margin-top: 0;
+    .portfolio-card-return-label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
     }
-    .portfolio-section td.entity-name {
-      font-size: 15px;
-      font-weight: 850;
-      line-height: 1.12;
-    }
-    .portfolio-section td.metric-primary {
+    .portfolio-card-price {
       font-size: 16px;
       font-weight: 900;
-      line-height: 1.1;
+      line-height: 1;
     }
     .portfolio-source-note {
       margin: 8px 0 0;
@@ -2755,6 +2765,16 @@
         ['IEF', '7-10Y U.S. Treasuries', 'ief'],
         ['BOXX', 'Cash / T-bill alternative', 'boxx']
       ];
+      const PORTFOLIO_ASSET_TITLES = {
+        VTI: 'U.S. Total Market Equity',
+        VEA: 'Developed ex-U.S. Equity',
+        VWO: 'Emerging Markets Equity',
+        VNQ: 'U.S. Real Estate',
+        DBC: 'Broad Commodities',
+        GLD: 'Gold',
+        IEF: '7-10Y U.S. Treasuries',
+        BOXX: 'Cash / T-Bill Alternative'
+      };
       const $ = (id) => document.getElementById(id);
       const asArr = (v) => Array.isArray(v) ? v : [];
       const asObj = (v) => v && typeof v === 'object' ? v : {};
@@ -3064,42 +3084,53 @@
         `, 'section-pre-market');
       }
 
-      function portfolioReturnCell(row, deltaKey, pctKey, toneKey) {
+      function portfolioMtdReturn(row) {
         if (!row) return '<span class="badge">Not in feed</span>';
-        const rowTone = tone(row[toneKey]);
-        return `<span class="metric-pair portfolio-return"><span class="metric-value ${rowTone}">${esc(row[deltaKey] || 'Unavailable')}</span><span class="metric-sep">/</span><span class="metric-value ${rowTone}">${esc(row[pctKey])}</span></span>`;
+        const rowTone = tone(row.mtdDir);
+        return `
+          <span class="metric-pair portfolio-card-return">
+            <span class="metric-value ${rowTone}">${esc(row.mtdPriceChange || 'Unavailable')}</span>
+            <span class="metric-sep">/</span>
+            <span class="metric-value ${rowTone}">${esc(row.mtdTR || 'Unavailable')}</span>
+            <span class="portfolio-card-return-label">MTD</span>
+          </span>
+        `;
       }
 
-      function portfolioPlainCell(row, valueKey) {
+      function portfolioPrice(row) {
         if (!row) return '<span class="badge">Not in feed</span>';
-        return esc(row[valueKey]);
+        return esc(row.price);
       }
 
-      function portfolioDividendCell(row) {
-        if (!row) return '<span class="badge">Not in feed</span>';
+      function portfolioDividendInfo(row) {
+        if (!row) return '';
         const dividends = asArr(row.dividends);
+        if (!dividends.length || row.monthDivPerShare === '$0.00') return '';
         const dates = dividends.map((dividend) => dividend.exDate).filter(Boolean).join(', ');
-        const tooltip = dates ? `Ex-date: ${dates}` : '';
-        const info = tooltip
-          ? `<span class="div-info" tabindex="0" role="img" aria-label="${esc(tooltip)}" data-tooltip="${esc(tooltip)}">i</span>`
-          : '';
-        return `<span class="dividend-value">${info}<span>${esc(row.monthDivPerShare)}</span></span>`;
+        const tooltip = dates
+          ? `MTD dividend ${row.monthDivPerShare} · Ex ${dates}`
+          : `MTD dividend ${row.monthDivPerShare}`;
+        return `<span class="div-info" tabindex="0" role="img" aria-label="${esc(tooltip)}" data-tooltip="${esc(tooltip)}">i</span>`;
       }
 
       function renderPortfolioUniverse(data) {
         const feedRows = asArr(data.assetAllocationPortfolio?.rows);
         const feedByTicker = new Map(feedRows.map((row) => [String(row.ticker).toUpperCase(), row]));
-        const rows = ETF_UNIVERSE.map(([ticker, sleeve, swatch]) => {
+        const cards = ETF_UNIVERSE.map(([ticker, sleeve, swatch]) => {
           const row = feedByTicker.get(ticker);
+          const title = PORTFOLIO_ASSET_TITLES[ticker] || row?.sleeve || sleeve;
           return `
-          <tr>
-            <td><div class="asset"><span class="swatch ${swatch}">&nbsp;</span><strong class="entity-name entity-name-lg">${ticker}</strong></div></td>
-            <td class="portfolio-asset-class entity-name">${esc(row?.sleeve || sleeve)}</td>
-            <td class="num price-cell metric-primary">${portfolioPlainCell(row, 'price')}</td>
-            <td class="num dividend-cell">${portfolioDividendCell(row)}</td>
-            <td class="num">${portfolioReturnCell(row, 'dailyPriceChange', 'dailyTR', 'dailyDir')}</td>
-            <td class="num">${portfolioReturnCell(row, 'mtdPriceChange', 'mtdTR', 'mtdDir')}</td>
-          </tr>
+          <article class="portfolio-card">
+            <span class="swatch ${swatch}">&nbsp;</span>
+            <div class="portfolio-card-main">
+              <div class="portfolio-card-title entity-name">${esc(title)}</div>
+              <div class="portfolio-card-ticker"><span>${esc(ticker)}</span>${portfolioDividendInfo(row)}</div>
+            </div>
+            <div class="portfolio-card-metrics">
+              ${portfolioMtdReturn(row)}
+              <div class="portfolio-card-price metric-primary">${portfolioPrice(row)}</div>
+            </div>
+          </article>
         `;
         }).join('');
         return `
@@ -3110,22 +3141,7 @@
                 <h2 class="section-title">Asset Allocation</h2>
               </div>
             </div>
-            <div class="table-card surface surface-clip">
-              <table>
-                <colgroup>
-                  <col class="portfolio-fixed-col">
-                  <col class="portfolio-class-col">
-                  <col class="portfolio-fixed-col">
-                  <col class="portfolio-fixed-col">
-                  <col class="portfolio-fixed-col">
-                  <col class="portfolio-fixed-col">
-                </colgroup>
-                <thead>
-                  <tr><th>ETF</th><th>Asset Class</th><th class="num">Price</th><th class="num">MTD Dividend</th><th class="num">Daily Return</th><th class="num">MTD Return</th></tr>
-                </thead>
-                <tbody>${rows}</tbody>
-              </table>
-            </div>
+            <div class="portfolio-grid">${cards}</div>
             ${feedRows.length ? '' : '<p class="portfolio-source-note">ETF market-data feed is unavailable; tracked instruments are shown without fabricated values.</p>'}
           </section>
         `;
