@@ -435,15 +435,15 @@
       max-width: 220px;
       padding: 7px 9px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--ink);
-      color: var(--panel);
+      border-radius: var(--card-radius);
+      background: var(--panel);
+      color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, sans-serif;
       font-size: 11px;
       font-weight: 750;
-      line-height: 1.25;
+      line-height: 1.35;
       text-align: left;
-      white-space: normal;
+      white-space: pre-line;
       box-shadow: var(--shadow);
       opacity: 0;
       pointer-events: none;
@@ -3107,7 +3107,7 @@
         if (!dividends.length || row.monthDivPerShare === '$0.00') return '';
         const dates = dividends.map((dividend) => dividend.exDate).filter(Boolean).join(', ');
         const tooltip = dates
-          ? `MTD dividend ${row.monthDivPerShare} · Ex ${dates}`
+          ? `MTD dividend ${row.monthDivPerShare}\nEx date ${dates}`
           : `MTD dividend ${row.monthDivPerShare}`;
         return `<span class="div-info" tabindex="0" role="img" aria-label="${esc(tooltip)}" data-tooltip="${esc(tooltip)}">i</span>`;
       }
