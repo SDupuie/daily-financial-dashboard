@@ -911,14 +911,21 @@
       .crypto-tape { overflow-x: auto; }
       table { min-width: 860px; }
       .tape-row {
-        grid-template-columns: 1fr;
-        gap: var(--gap-sm);
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "instrument quote"
+          "signal signal";
+        column-gap: var(--gap-md);
+        row-gap: var(--gap-sm);
         align-items: start;
       }
+      .tape-row .instrument { grid-area: instrument; }
+      .tape-row .tape-signal { grid-area: signal; }
       .quote-cluster {
-        min-width: 0;
-        justify-content: start;
-        justify-items: start;
+        grid-area: quote;
+        min-width: max-content;
+        justify-content: end;
+        justify-items: end;
       }
       .metric-pair { width: auto; }
       .week-row { grid-template-columns: 1fr; gap: var(--gap-xs); }
