@@ -3089,8 +3089,6 @@
         const rowTone = tone(row.mtdDir);
         return `
           <span class="metric-pair portfolio-card-return">
-            <span class="metric-value ${rowTone}">${esc(row.mtdPriceChange || 'Unavailable')}</span>
-            <span class="metric-sep">/</span>
             <span class="metric-value ${rowTone}">${esc(row.mtdTR || 'Unavailable')}</span>
             <span class="portfolio-card-return-label">MTD</span>
           </span>
