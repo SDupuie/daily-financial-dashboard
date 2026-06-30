@@ -203,6 +203,14 @@
       max-width: 460px;
       text-align: right;
     }
+    .section-context {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
     .table-card { overflow: hidden; }
     table {
       width: 100%;
@@ -350,19 +358,13 @@
     }
     .portfolio-card-return .metric-value,
     .portfolio-card-return .metric-sep {
-      font-size: 13px;
-    }
-    .portfolio-card-return-label {
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 900;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
+      font-size: 17px;
     }
     .portfolio-card-price {
-      font-size: 16px;
-      font-weight: 900;
-      line-height: 1;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
+      line-height: 1.05;
     }
     .portfolio-source-note {
       margin: 8px 0 0;
@@ -3090,7 +3092,6 @@
         return `
           <span class="metric-pair portfolio-card-return">
             <span class="metric-value ${rowTone}">${esc(row.mtdTR || 'Unavailable')}</span>
-            <span class="portfolio-card-return-label">MTD</span>
           </span>
         `;
       }
@@ -3138,6 +3139,7 @@
                 <div class="section-label">Portfolio</div>
                 <h2 class="section-title">Asset Allocation</h2>
               </div>
+              <div class="section-context">MTD Return</div>
             </div>
             <div class="portfolio-grid">${cards}</div>
             ${feedRows.length ? '' : '<p class="portfolio-source-note">ETF market-data feed is unavailable; tracked instruments are shown without fabricated values.</p>'}
