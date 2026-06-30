@@ -15,14 +15,8 @@ const DEFAULT_SYMBOLS = [
 ];
 
 const EQUITY_TYPES = new Set(['stock', 'etf']);
-const MARKET_SCHEDULES = {
-  '6723.T': {
-    label: 'Tokyo cash close',
-    timeZone: 'Asia/Tokyo',
-    closeHour: 15,
-    closeMinute: 30
-  }
-};
+// Optional per-symbol close-time overrides for non-U.S. markets; keep empty unless the dashboard actively needs one.
+const MARKET_SCHEDULES = {};
 
 const SOURCE_CHAIN = [
   {

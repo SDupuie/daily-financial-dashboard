@@ -22,6 +22,11 @@
       --card-padding: 18px;
       --card-radius: 8px;
       --card-body-line: 1.4;
+      --gap-xs: 6px;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 22px;
       --label-size: 10px;
       --label-weight: 900;
       --label-spacing: 0.14em;
@@ -43,7 +48,7 @@
     .topline {
       display: grid;
       grid-template-columns: 1fr auto 1fr;
-      gap: 20px;
+      gap: var(--gap-xl);
       align-items: center;
       border-top: 5px solid var(--ink);
       border-bottom: 1px solid var(--line);
@@ -130,9 +135,22 @@
       padding: var(--card-padding);
       display: grid;
       align-content: start;
-      gap: 10px;
+      gap: var(--gap-sm);
     }
-    .card-tall { min-height: 190px; }
+    /* Shared editorial/story card typography used by news, crypto notes, and earnings. */
+    .editorial-card h3 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 22px;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    .editorial-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: var(--card-body-line);
+    }
     .entity-name {
       min-width: 0;
       font-family: Georgia, "Times New Roman", serif;
@@ -168,6 +186,21 @@
       line-height: 1.1;
       white-space: nowrap;
     }
+    .quote-readout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 5px;
+      align-items: baseline;
+      justify-items: end;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+    /* Tape and crypto quotes share the stacked price-over-change readout. */
+    .quote-row {
+      display: grid;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+    }
     .section { margin-top: 34px; }
     .section-pre-market,
     .section-crypto,
@@ -177,7 +210,7 @@
       display: flex;
       align-items: end;
       justify-content: space-between;
-      gap: 18px;
+      gap: var(--gap-lg);
       margin-bottom: 14px;
       border-bottom: 1px solid var(--line);
       padding-bottom: 10px;
@@ -255,13 +288,10 @@
       border-bottom: 1px solid var(--line);
     }
     .tape-row {
-      display: grid;
-      grid-template-columns: 190px minmax(0, 1fr) 290px;
-      gap: 20px;
+      grid-template-columns: 190px minmax(0, 1fr) 170px;
+      gap: var(--gap-lg);
       align-items: center;
       padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      color: var(--ink);
     }
     .tape-row:last-child { border-bottom: none; }
     .tape-row.up { border-left: 3px solid var(--green); }
@@ -278,13 +308,7 @@
       line-height: 1.35;
     }
     .quote-cluster {
-      display: grid;
-      grid-template-columns: minmax(96px, 1fr) 136px;
-      gap: 22px;
-      align-items: baseline;
-      justify-items: end;
-      font-family: "SFMono-Regular", Consolas, monospace;
-      white-space: nowrap;
+      min-width: 150px;
     }
     .quote-last { text-align: right; }
     .metric-pair {
@@ -313,12 +337,12 @@
     .portfolio-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 10px;
+      gap: var(--gap-sm);
     }
     .portfolio-card {
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto;
-      gap: 12px;
+      gap: var(--gap-md);
       align-items: center;
       padding: 14px 16px;
       min-height: 88px;
@@ -477,7 +501,8 @@
     .earnings-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 14px;
+      gap: var(--gap-md);
+      align-items: start;
     }
     .crypto-grid {
       align-items: start;
@@ -485,19 +510,14 @@
     }
     .crypto-left {
       display: grid;
-      gap: 14px;
+      gap: var(--gap-md);
       align-items: start;
     }
     .crypto-notes {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-      align-items: stretch;
-    }
-    .story,
-    .earn,
-    .crypto-note {
-      min-height: 190px;
+      gap: var(--gap-md);
+      align-items: start;
     }
     .tag {
       color: var(--blue);
@@ -513,23 +533,6 @@
     .tag.fed,
     .tag.macro,
     .tag.crypto { color: var(--blue); }
-    .story h3,
-    .earn h3,
-    .crypto-note h3 {
-      margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      font-size: 22px;
-      line-height: 1.1;
-      letter-spacing: 0;
-    }
-    .story p,
-    .earn p,
-    .crypto-note p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: var(--card-body-line);
-    }
     .story-link {
       align-self: end;
       justify-self: start;
@@ -543,22 +546,11 @@
     }
     .crypto-tape { min-height: 190px; }
     .crypto-grid .crypto-tape { grid-column: 1; }
-    .crypto-tape h3 {
-      margin: 0;
-      padding: 14px 18px;
-      background: #eef1f6;
-      border-bottom: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.35;
-    }
     .crypto-row {
-      display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(218px, 230px);
-      gap: 16px;
+      gap: var(--gap-lg);
       align-items: baseline;
       padding: 12px 18px;
-      border-bottom: 1px solid var(--line);
     }
     .crypto-row .name {
       display: block;
@@ -567,20 +559,14 @@
       display: block;
     }
     .crypto-quote {
-      display: grid;
-      grid-template-columns: minmax(76px, 1fr) 126px;
-      gap: 14px;
-      align-items: baseline;
-      justify-items: end;
-      font-family: "SFMono-Regular", Consolas, monospace;
-      white-space: nowrap;
+      min-width: 150px;
     }
     .crypto-row .price { text-align: right; }
     .crypto-stat { min-height: 90px; }
     .crypto-stat-line {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      gap: 14px;
+      gap: var(--gap-md);
       align-items: start;
     }
     .crypto-stat-copy {
@@ -602,11 +588,144 @@
       white-space: nowrap;
     }
     .crypto-stat-values strong { text-align: right; }
+    .dominance-module {
+      display: grid;
+      gap: var(--gap-sm);
+      margin-top: 0;
+    }
+    .dominance-labels {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--gap-md);
+    }
+    .dominance-label {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .dominance-name {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.1;
+    }
+    .dominance-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      flex: 0 0 auto;
+    }
+    .dominance-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 850;
+      line-height: 1.1;
+    }
+    .dominance-bar {
+      display: flex;
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e5e7eb;
+    }
+    .dominance-segment.btc,
+    .dominance-dot.btc { background: #2563eb; }
+    .dominance-segment.eth,
+    .dominance-dot.eth { background: #16a34a; }
+    .dominance-segment.others,
+    .dominance-dot.others { background: #ef4444; }
+    .fear-greed-gauge {
+      position: relative;
+      width: min(190px, 100%);
+      height: 42px;
+      margin: 0;
+      overflow: visible;
+    }
+    .sentiment-stat .crypto-stat-line {
+      grid-template-columns: minmax(0, 1fr) 190px;
+      align-items: start;
+    }
+    .sentiment-stat .crypto-stat-values {
+      width: 190px;
+      justify-items: center;
+    }
+    .fear-greed-arc {
+      position: absolute;
+      top: -31px;
+      left: 50%;
+      width: 142px;
+      height: 142px;
+      border-radius: 50%;
+      background:
+        conic-gradient(
+          from 270deg,
+          #ef4444 0deg 45deg,
+          #f59e0b 45deg 81deg,
+          #facc15 81deg 99deg,
+          #84cc16 99deg 135deg,
+          #10b981 135deg 180deg,
+          transparent 180deg 360deg
+        );
+      transform: translateX(-50%);
+      -webkit-mask: radial-gradient(circle, transparent 0 55px, #000 56px 63px, transparent 64px);
+      mask: radial-gradient(circle, transparent 0 55px, #000 56px 63px, transparent 64px);
+    }
+    .fear-greed-pointer {
+      position: absolute;
+      top: 40px;
+      left: 50%;
+      z-index: 2;
+      width: 0;
+      height: 0;
+      transform: rotate(var(--pointer-angle));
+      transform-origin: 0 0;
+    }
+    .fear-greed-pointer::before {
+      content: "";
+      position: absolute;
+      top: -5px;
+      left: 57px;
+      width: 10px;
+      height: 10px;
+      border: 2px solid var(--panel);
+      border-radius: 50%;
+      background: var(--ink);
+      box-sizing: border-box;
+    }
+    .fear-greed-center {
+      position: absolute;
+      top: 0;
+      left: 50%;
+      z-index: 3;
+      display: grid;
+      justify-items: center;
+      transform: translateX(-50%);
+    }
+    .fear-greed-score {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 30px;
+      font-weight: 900;
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+    .fear-greed-label {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.1;
+      white-space: nowrap;
+    }
     .week { overflow: hidden; }
     .premarket {
       display: grid;
       grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
-      gap: 16px;
+      gap: var(--gap-lg);
       align-items: stretch;
     }
     .premarket-board,
@@ -691,7 +810,7 @@
     .premarket-item {
       display: grid;
       grid-template-columns: 120px minmax(0, 1fr);
-      gap: 14px;
+      gap: var(--gap-md);
       padding: var(--card-padding);
       border-bottom: 1px solid var(--line);
       align-content: start;
@@ -708,7 +827,7 @@
     .week-row {
       display: grid;
       grid-template-columns: 128px minmax(0, 1fr) 220px;
-      gap: 18px;
+      gap: var(--gap-lg);
       align-items: start;
       padding: var(--card-padding);
       border-bottom: 1px solid var(--line);
@@ -739,7 +858,7 @@
     }
     footer {
       display: grid;
-      gap: 10px;
+      gap: var(--gap-sm);
       color: var(--muted);
       border-top: 5px solid var(--ink);
       margin-top: 42px;
@@ -793,17 +912,16 @@
       table { min-width: 860px; }
       .tape-row {
         grid-template-columns: 1fr;
-        gap: 8px;
+        gap: var(--gap-sm);
         align-items: start;
       }
       .quote-cluster {
-        grid-template-columns: auto auto;
-        gap: 14px;
+        min-width: 0;
         justify-content: start;
         justify-items: start;
       }
       .metric-pair { width: auto; }
-      .week-row { grid-template-columns: 1fr; gap: 6px; }
+      .week-row { grid-template-columns: 1fr; gap: var(--gap-xs); }
       .week-tickers { text-align: left; }
     }
   </style>
@@ -1109,15 +1227,6 @@
         "delta": "+$0.0198"
       },
       {
-        "sym": "USDT",
-        "name": "Tether",
-        "sub": "USDT",
-        "price": "$0.999",
-        "chg": "+0.02%",
-        "dir": "up",
-        "delta": "+$0.0002"
-      },
-      {
         "sym": "F&G",
         "name": "Fear & Greed Index",
         "sub": "Extreme Fear",
@@ -1127,7 +1236,7 @@
       },
       {
         "sym": "IBIT",
-        "name": "iShares Bitcoin Trust",
+        "name": "Bitcoin ETF",
         "sub": "IBIT",
         "price": "$34.18",
         "chg": "+0.97%",
@@ -1153,6 +1262,11 @@
         "dir": "up"
       }
     ],
+    "dominance": {
+      "btc": "55.62%",
+      "eth": "8.91%",
+      "others": "35.46%"
+    },
     "notes": [
       {
         "kicker": "Flows",
@@ -3019,10 +3133,10 @@
               ${rows.map((row) => {
                 const rowTone = tapeTone(row, group);
                 return `
-                <article class="tape-row ${rowTone}">
+                <article class="quote-row tape-row ${rowTone}">
                   <div class="instrument"><strong class="entity-name entity-name-lg">${esc(row.name)}</strong><span class="entity-sub entity-sub-mono">${esc(row.ticker)}</span></div>
                   <div class="tape-signal">${esc(row.note)}</div>
-                  <div class="quote-cluster" aria-label="${esc(row.name)} quote">
+                  <div class="quote-cluster quote-readout" aria-label="${esc(row.name)} quote">
                     <div class="quote-last metric-primary">${esc(row.last)}</div>
                     <div class="metric-pair">
                       <div class="metric-value ${rowTone}">${esc(row.delta)}</div>
@@ -3151,7 +3265,7 @@
         const cards = asArr(data.stories).map((story) => {
           const url = safeUrl(story.url);
           return `
-            <article class="story surface card card-tall">
+            <article class="story editorial-card surface card">
               <div class="tag ${tone(story.tone)}">${esc(story.tag)}</div>
               <h3>${esc(story.title)}</h3>
               <p>${esc(story.body)}</p>
@@ -3166,36 +3280,95 @@
         const c = asObj(data.crypto);
         const sentiment = cryptoSentimentRow(data);
         const totalStat = cryptoTotalStatRow(data);
+        // Crypto stat graphics are derived only from embedded daily JSON; there are no runtime sidecar fetches.
+        const dominance = asObj(c.dominance);
+        const dominanceValue = (key) => String(dominance[key] || '').trim();
+        const hasDominance = ['btc', 'eth', 'others'].every((key) => dominanceValue(key));
         const rows = cryptoTapeRows(data).map((row) => {
           const rowTone = tone(row.dir);
           const sub = row.sub || row.sym || row.ticker || '';
           const change = `<div class="metric-pair"><div class="metric-value ${rowTone}">${esc(cryptoDelta(row, data))}</div><div class="metric-sep">/</div><div class="metric-value ${rowTone}">${esc(row.chg)}</div></div>`;
           return `
-            <div class="crypto-row">
+            <div class="quote-row crypto-row">
               <div class="name entity-name">${esc(row.name)}<span class="entity-sub">${esc(sub)}</span></div>
-              <div class="crypto-quote">
+              <div class="crypto-quote quote-readout">
                 <div class="price metric-primary">${esc(row.price)}</div>
                 ${change}
               </div>
             </div>
           `;
         }).join('');
+        const dominanceHtml = hasDominance
+          ? `
+            <div class="dominance-module">
+              <div class="dominance-labels">
+                <div class="dominance-label">
+                  <span class="dominance-name"><span class="dominance-dot btc"></span>Bitcoin</span>
+                  <span class="dominance-value">${esc(dominanceValue('btc'))}</span>
+                </div>
+                <div class="dominance-label">
+                  <span class="dominance-name"><span class="dominance-dot eth"></span>Ethereum</span>
+                  <span class="dominance-value">${esc(dominanceValue('eth'))}</span>
+                </div>
+                <div class="dominance-label">
+                  <span class="dominance-name"><span class="dominance-dot others"></span>Others</span>
+                  <span class="dominance-value">${esc(dominanceValue('others'))}</span>
+                </div>
+              </div>
+              <div class="dominance-bar" aria-label="Crypto market cap dominance">
+                <span class="dominance-segment btc" style="width: ${esc(dominanceValue('btc'))}"></span>
+                <span class="dominance-segment eth" style="width: ${esc(dominanceValue('eth'))}"></span>
+                <span class="dominance-segment others" style="width: ${esc(dominanceValue('others'))}"></span>
+              </div>
+            </div>
+          `
+          : '';
+        const sentimentScore = numericValue(sentiment?.price);
+        const sentimentLabel = sentiment?.sub || '';
+        const hasSentimentGauge = Number.isFinite(sentimentScore);
+        const gaugeScore = Math.max(0, Math.min(100, sentimentScore || 0));
+        const sentimentGaugeHtml = hasSentimentGauge
+          ? `
+            <div class="fear-greed-gauge" aria-label="Crypto Fear and Greed score ${esc(sentiment.price)}">
+              <div class="fear-greed-arc"></div>
+              <div class="fear-greed-pointer" style="--pointer-angle: ${Math.max(-180, Math.min(0, -180 + (gaugeScore * 1.8)))}deg"></div>
+              <div class="fear-greed-center">
+                <div class="fear-greed-score">${esc(sentiment.price)}</div>
+                ${sentimentLabel ? `<div class="fear-greed-label">${esc(sentimentLabel)}</div>` : ''}
+              </div>
+            </div>
+          `
+          : '';
         const cryptoStatCard = (stat, label) => {
           if (!stat) return '';
           const change = stat.delta || stat.chg || '';
+          const isSentiment = isCryptoSentimentRow(stat);
+          const isTotal = isCryptoTotalRow(stat);
+          const trendValue = numericValue(change);
+          const sentimentTrend = Number.isFinite(trendValue)
+            ? trendValue > 0 ? 'Improving' : trendValue < 0 ? 'Deteriorating' : 'Unchanged'
+            : stat.sub;
+          const subText = isSentiment ? sentimentTrend : stat.sub;
+          const valuesHtml = isSentiment
+            ? sentimentGaugeHtml
+            : `
+                <strong class="metric-primary">${esc(stat.price)}</strong>
+                ${change ? `<span class="metric-value ${tone(stat.dir)}">${esc(change)}</span>` : ''}
+              `;
+          const extra = isTotal ? dominanceHtml : '';
           return `
-          <div class="crypto-stat surface card">
+          <div class="crypto-stat surface card${isSentiment ? ' sentiment-stat' : ''}">
             <div class="tag crypto">${esc(label)}</div>
             <div class="crypto-stat-line">
               <div class="crypto-stat-copy">
                 <h3 class="entity-name">${esc(stat.name)}</h3>
-                <p class="entity-sub">${esc(stat.sub)}</p>
+                <p class="entity-sub">${esc(subText)}</p>
               </div>
               <div class="crypto-stat-values">
-                <strong class="metric-primary">${esc(stat.price)}</strong>
-                ${change ? `<span class="metric-value ${tone(stat.dir)}">${esc(change)}</span>` : ''}
+                ${valuesHtml}
               </div>
             </div>
+            ${extra}
           </div>
         `;
         };
@@ -3203,7 +3376,7 @@
         const notes = asArr(c.notes).map((note) => {
           const url = safeUrl(note.url);
           return `
-            <article class="crypto-note surface card card-tall">
+            <article class="crypto-note editorial-card surface card">
               <div class="tag crypto">${esc(note.kicker)}</div>
               <h3>${esc(note.title)}</h3>
               <p>${inline(note.body)}</p>
@@ -3214,11 +3387,10 @@
         return section('Digital Assets', 'Crypto', '', `
           <div class="story-grid crypto-grid">
             <div class="crypto-left">
+              ${statsHtml}
               <div class="crypto-tape surface surface-shadow surface-clip">
-                <h3>${esc(c.tapeHeader)}</h3>
                 ${rows}
               </div>
-              ${statsHtml}
             </div>
             <div class="crypto-notes">
               ${notes}
@@ -3247,7 +3419,7 @@
 
       function renderEarnings(data) {
         const cards = asArr(data.earnings?.tiles).map((tile) => `
-          <article class="earn surface card card-tall">
+          <article class="earn editorial-card surface card">
             <div class="tag ${tone(tile.tone)}">${esc(tile.co)}</div>
             <h3 class="${earningsMoveClass(tile)}">${esc(tile.move)}</h3>
             <p>${esc(tile.body)}</p>

@@ -4,7 +4,13 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..');
-const file = path.join(root, 'daily_financial_news.html');
+const inputFile = process.argv[2] || 'daily_financial_news.html';
+const file = path.resolve(root, inputFile);
+// Allow staging copies to be validated while keeping the checker scoped to this repository.
+if (!file.startsWith(`${root}${path.sep}`) && file !== root) {
+  console.error(`Refusing to validate a file outside this repository: ${inputFile}`);
+  process.exit(1);
+}
 const html = fs.readFileSync(file, 'utf8');
 const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 
@@ -22,63 +28,19 @@ function getNow() {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
-function getTimeZoneParts(timeZone, now) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    weekday: 'long',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(now);
-
-  const read = (type) => parts.find((part) => part.type === type)?.value || '';
-  return {
-    weekday: read('weekday'),
-    year: Number(read('year')),
-    month: Number(read('month')),
-    day: Number(read('day')),
-    hour: Number(read('hour')),
-    minute: Number(read('minute'))
-  };
-}
-
-function getExpectedTradeDateForMarket({ timeZone, closeHour, closeMinute }, now) {
-  const local = getTimeZoneParts(timeZone, now);
-  if (!['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].includes(local.weekday)) {
-    return null;
-  }
-
-  const afterClose = local.hour > closeHour ||
-    (local.hour === closeHour && local.minute >= closeMinute);
-  if (!afterClose) return null;
-
-  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`;
-}
-
-function parseMonthDayForYear(text, year) {
-  const match = String(text || '').match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})\b/i);
-  if (!match) return null;
-
-  const monthToken = match[1].slice(0, 3).toLowerCase();
-  const monthMap = {
-    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-    jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
-  };
-  const month = monthMap[monthToken];
-  const day = Number(match[2]);
-  if (!month || !Number.isFinite(day)) return null;
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
 if (!match) {
   errors.push('Could not find dashboard-data JSON block.');
 } else {
+  const dataBlock = match[1];
+  // This guard is intentionally scoped to the embedded data block so JS escape helpers do not false-positive.
+  const entityMatch = dataBlock.match(/&(amp|lt|gt);/);
+  if (entityMatch) {
+    errors.push(`Embedded dashboard JSON contains HTML entity "${entityMatch[0]}"; use normal text unless markup is intended.`);
+  }
+
   let data;
   try {
-    data = JSON.parse(match[1]);
+    data = JSON.parse(dataBlock);
   } catch (error) {
     errors.push(`Embedded dashboard JSON is invalid: ${error.message}`);
   }
@@ -88,6 +50,21 @@ if (!match) {
     const strictDates = process.env.VALIDATE_STRICT_DATES === '1';
     const tapeRows = data.tape?.rows ?? [];
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
+    const requireString = (value, label) => {
+      if (typeof value !== 'string' || value.trim() === '') {
+        errors.push(`${label} must be populated.`);
+      }
+    };
+    const requireHttpsUrl = (url, label) => {
+      const raw = String(url ?? '').trim();
+      let isHttps = false;
+      try {
+        isHttps = raw.length > 0 && new URL(raw).protocol === 'https:';
+      } catch (_error) {
+        isHttps = false;
+      }
+      if (!isHttps) errors.push(`${label} must include an HTTPS url.`);
+    };
 
     // Freshness advisory checks (strict only when VALIDATE_STRICT_DATES=1).
     const todayParts = new Intl.DateTimeFormat('en-US', {
@@ -119,6 +96,85 @@ if (!match) {
         errors.push(dateMsg);
       } else {
         warnings.push(dateMsg);
+      }
+    }
+
+    // Promoted-dashboard schema gates: catch old mockup/legacy sections and missing embedded production data.
+    if (data.lede) {
+      errors.push('Legacy lede section should not be present in the promoted dashboard data.');
+    }
+    if (data.renesas) {
+      errors.push('Legacy renesas section should not be present in the promoted dashboard data.');
+    }
+
+    requireString(data.opening?.headline, 'opening.headline');
+    requireString(data.opening?.deck, 'opening.deck');
+    const catalysts = Array.isArray(data.opening?.catalysts) ? data.opening.catalysts : [];
+    if (catalysts.length !== 4) {
+      errors.push('opening.catalysts must contain exactly four catalyst items.');
+    }
+    for (const [index, catalystRaw] of catalysts.entries()) {
+      const catalyst = catalystRaw && typeof catalystRaw === 'object' ? catalystRaw : {};
+      requireString(catalyst.label, `opening.catalysts[${index}].label`);
+      requireString(catalyst.body, `opening.catalysts[${index}].body`);
+    }
+
+    const staleTapeTickers = new Set(['6723.T', 'BZ', 'BTC', 'ETH', 'TOTAL']);
+    for (const ticker of tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase())) {
+      if (staleTapeTickers.has(ticker)) {
+        errors.push(`The Tape should not include stale or duplicated ticker ${ticker}.`);
+      }
+    }
+
+    const requiredTapeTickers = ['SPX', 'IXIC', 'DJI', 'RUT', 'MXEA', 'MXEF', 'FNER', 'GSCI', 'XAU', 'XAG', 'CL', 'VIX', 'MOVE', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
+    for (const ticker of requiredTapeTickers) {
+      if (!tapeTickerSet.has(ticker)) {
+        errors.push(`The Tape is missing required ticker ${ticker}.`);
+      }
+    }
+
+    // Runtime does not fetch sidecar files; pre-market futures must be embedded and chart-ready.
+    const futures = Array.isArray(data.preMarket?.futures) ? data.preMarket.futures : [];
+    if (futures.length !== 4) {
+      errors.push('preMarket.futures must contain exactly four index-futures rows.');
+    }
+    for (const [index, futureRaw] of futures.entries()) {
+      const future = futureRaw && typeof futureRaw === 'object' ? futureRaw : {};
+      requireString(future.label, `preMarket.futures[${index}].label`);
+      requireString(future.value, `preMarket.futures[${index}].value`);
+      requireString(future.body, `preMarket.futures[${index}].body`);
+      if (!Array.isArray(future.series) || future.series.length < 2) {
+        errors.push(`preMarket.futures[${index}].series must contain at least two chart points.`);
+      }
+    }
+
+    const preMarketStories = Array.isArray(data.preMarket?.stories) ? data.preMarket.stories : [];
+    if (preMarketStories.length < 1 || preMarketStories.length > 3) {
+      errors.push('preMarket.stories must contain one to three priority stories.');
+    }
+    for (const [index, storyRaw] of preMarketStories.entries()) {
+      const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
+      requireString(story.preMarketTag || story.tag, `preMarket.stories[${index}] tag`);
+      requireString(story.title, `preMarket.stories[${index}].title`);
+      requireString(story.body, `preMarket.stories[${index}].body`);
+      requireHttpsUrl(story.url, `preMarket.stories[${index}]`);
+    }
+
+    // Portfolio validation is instrument-level only; tactical weights/model outputs are intentionally out of scope here.
+    const portfolioRows = Array.isArray(data.assetAllocationPortfolio?.rows) ? data.assetAllocationPortfolio.rows : [];
+    const requiredPortfolioTickers = ['VTI', 'VEA', 'VWO', 'VNQ', 'DBC', 'GLD', 'IEF', 'BOXX'];
+    const portfolioTickerSet = new Set(portfolioRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
+    for (const ticker of requiredPortfolioTickers) {
+      if (!portfolioTickerSet.has(ticker)) {
+        errors.push(`assetAllocationPortfolio.rows is missing ${ticker}.`);
+      }
+    }
+    for (const rowRaw of portfolioRows) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+      const label = `assetAllocationPortfolio row ${row.ticker ?? '(unknown)'}`;
+      for (const key of ['ticker', 'sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']) {
+        requireString(row[key], `${label}.${key}`);
       }
     }
 
@@ -173,6 +229,14 @@ if (!match) {
       errors.push('Crypto notes must contain no more than six daily stories/items.');
     }
 
+    const cryptoTotal = (data.crypto?.tape ?? []).find(row => row.sym === 'TOTAL' || /(?:total )?crypto market cap/i.test(String(row?.name ?? '')));
+    if (!cryptoTotal) {
+      errors.push('Crypto tape is missing the Crypto Market Cap stat row.');
+    } else {
+      requireString(cryptoTotal.price, 'Crypto Market Cap price');
+      requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
+    }
+
     if (!fng) {
       errors.push('Crypto tape is missing the F&G row.');
     } else {
@@ -197,37 +261,53 @@ if (!match) {
       errors.push('Footer source list must include Alternative.me Crypto Fear & Greed Index when F&G is shown.');
     }
 
-    const renesasExpectedTradeDate = getExpectedTradeDateForMarket({
-      timeZone: 'Asia/Tokyo',
-      closeHour: 15,
-      closeMinute: 30
-    }, now);
-
-    if (renesasExpectedTradeDate) {
-      const renesasStats = Array.isArray(data.renesas?.stats) ? data.renesas.stats : [];
-      const tradeDateStat = renesasStats.find((item) => /Latest Verified Trade Date/i.test(String(item?.key ?? '')));
-      const closeStat = renesasStats.find((item) => /6723\.T Close/i.test(String(item?.key ?? '')));
-      const tokyoYear = Number(renesasExpectedTradeDate.slice(0, 4));
-      const observedTradeDate = parseMonthDayForYear(`${tradeDateStat?.value ?? ''} ${tradeDateStat?.small ?? ''}`, tokyoYear);
-      const observedCloseDate = parseMonthDayForYear(String(closeStat?.small ?? ''), tokyoYear);
-
-      if (observedTradeDate !== renesasExpectedTradeDate || observedCloseDate !== renesasExpectedTradeDate) {
-        errors.push(`Renesas must use the latest Tokyo close once the Tokyo session has ended: expected ${renesasExpectedTradeDate}, got trade-date stat "${tradeDateStat?.value ?? ''} ${tradeDateStat?.small ?? ''}" and close stat "${closeStat?.small ?? ''}".`);
+    const stories = Array.isArray(data.stories) ? data.stories : [];
+    if (stories.length < 8 || stories.length > 10) {
+      errors.push('stories must contain 8-10 fresh market/news items.');
+    }
+    const preMarketUrls = new Set(preMarketStories.map((story) => String(story?.url ?? '').trim()).filter(Boolean));
+    const preMarketTitles = new Set(preMarketStories.map((story) => String(story?.title ?? '').trim().toLowerCase()).filter(Boolean));
+    for (const storyRaw of stories) {
+      const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
+      requireString(story.tag, `Story "${story.title ?? '(untitled)'}" tag`);
+      requireString(story.title, 'stories[].title');
+      requireString(story.body, `Story "${story.title ?? '(untitled)'}" body`);
+      requireHttpsUrl(story.url, `Story "${story.title ?? '(untitled)'}"`);
+      const storyUrl = String(story.url ?? '').trim();
+      const storyTitle = String(story.title ?? '').trim().toLowerCase();
+      if (storyUrl && preMarketUrls.has(storyUrl)) {
+        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted Pre-Market URL.`);
+      }
+      if (storyTitle && preMarketTitles.has(storyTitle)) {
+        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted Pre-Market title.`);
       }
     }
 
-    for (const storyRaw of data.stories ?? []) {
-      const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
-      const url = String(story.url ?? '').trim();
-      let isHttps = false;
-      try {
-        isHttps = url.length > 0 && new URL(url).protocol === 'https:';
-      } catch (_error) {
-        isHttps = false;
-      }
-      if (!isHttps) {
-        errors.push(`Story "${story.title ?? '(untitled)'}" must include an HTTPS url.`);
-      }
+    for (const noteRaw of cryptoNotes) {
+      const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
+      requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
+    }
+
+    const earningsTiles = Array.isArray(data.earnings?.tiles) ? data.earnings.tiles : [];
+    if (!earningsTiles.length) {
+      errors.push('earnings.tiles must contain at least one earnings item.');
+    }
+    for (const [index, tileRaw] of earningsTiles.entries()) {
+      const tile = tileRaw && typeof tileRaw === 'object' ? tileRaw : {};
+      requireString(tile.co, `earnings.tiles[${index}].co`);
+      requireString(tile.move, `earnings.tiles[${index}].move`);
+      requireString(tile.body, `earnings.tiles[${index}].body`);
+    }
+
+    const weekRows = Array.isArray(data.weekAhead?.rows) ? data.weekAhead.rows : [];
+    if (!weekRows.length) {
+      errors.push('weekAhead.rows must contain at least one calendar row.');
+    }
+    for (const [index, rowRaw] of weekRows.entries()) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+      requireString(row.day, `weekAhead.rows[${index}].day`);
+      requireString(row.event, `weekAhead.rows[${index}].event`);
+      requireString(row.tickers, `weekAhead.rows[${index}].tickers`);
     }
   }
 }
