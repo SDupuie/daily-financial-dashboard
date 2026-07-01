@@ -65,6 +65,32 @@ if (!match) {
       }
       if (!isHttps) errors.push(`${label} must include an HTTPS url.`);
     };
+    const requireIsoDate = (value, label) => {
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        errors.push(`${label} must be an ISO date.`);
+      }
+    };
+    const validateDividendEvents = (events, label, { optional = false } = {}) => {
+      if (events === undefined && optional) return;
+      if (!Array.isArray(events)) {
+        errors.push(`${label} must be an array.`);
+        return;
+      }
+      events.forEach((eventRaw, eventIndex) => {
+        const event = eventRaw && typeof eventRaw === 'object' ? eventRaw : {};
+        requireIsoDate(event.exDate, `${label}[${eventIndex}].exDate`);
+        if (!Number.isFinite(Number(event.amount))) {
+          errors.push(`${label}[${eventIndex}].amount must be numeric.`);
+        }
+      });
+    };
+    const validateRequiredDividendBucket = (row, label, textKey, valueKey, eventsKey) => {
+      requireString(row[textKey], `${label}.${textKey}`);
+      if (!Number.isFinite(Number(row[valueKey]))) {
+        errors.push(`${label}.${valueKey} must be numeric.`);
+      }
+      validateDividendEvents(row[eventsKey], `${label}.${eventsKey}`);
+    };
 
     // Freshness advisory checks (strict only when VALIDATE_STRICT_DATES=1).
     const todayParts = new Intl.DateTimeFormat('en-US', {
@@ -147,6 +173,10 @@ if (!match) {
       if (!Array.isArray(future.series) || future.series.length < 2) {
         errors.push(`preMarket.futures[${index}].series must contain at least two chart points.`);
       }
+      // The browser renderer uses this field to draw the previous-close reference line.
+      if (!Number.isFinite(Number(future.raw?.previousClose))) {
+        errors.push(`preMarket.futures[${index}].raw.previousClose must be numeric for the futures close reference line.`);
+      }
     }
 
     const preMarketStories = Array.isArray(data.preMarket?.stories) ? data.preMarket.stories : [];
@@ -162,6 +192,30 @@ if (!match) {
     }
 
     // Portfolio validation is instrument-level only; tactical weights/model outputs are intentionally out of scope here.
+    const portfolio = data.assetAllocationPortfolio && typeof data.assetAllocationPortfolio === 'object'
+      ? data.assetAllocationPortfolio
+      : {};
+    const hasPortfolioReturn = portfolio.portfolioMtdReturnStatus !== undefined
+      || portfolio.portfolioMtdReturnValue !== undefined
+      || portfolio.portfolioMtdReturnAsOf !== undefined
+      || portfolio.portfolioMtdReturnStale !== undefined;
+    if (hasPortfolioReturn) {
+      // This proves only the sanitized display contract. It intentionally does
+      // not validate allocation weights, signals, or any source calculation.
+      if (!['available', 'unavailable'].includes(portfolio.portfolioMtdReturnStatus)) {
+        errors.push('assetAllocationPortfolio.portfolioMtdReturnStatus must be available or unavailable.');
+      }
+      if (portfolio.portfolioMtdReturnStatus === 'available' && !Number.isFinite(Number(portfolio.portfolioMtdReturnValue))) {
+        errors.push('assetAllocationPortfolio.portfolioMtdReturnValue must be finite when status is available.');
+      }
+      if (portfolio.portfolioMtdReturnStatus === 'unavailable' && portfolio.portfolioMtdReturnValue !== null) {
+        errors.push('assetAllocationPortfolio.portfolioMtdReturnValue must be null when status is unavailable.');
+      }
+      requireIsoDate(portfolio.portfolioMtdReturnAsOf, 'assetAllocationPortfolio.portfolioMtdReturnAsOf');
+      if (typeof portfolio.portfolioMtdReturnStale !== 'boolean') {
+        errors.push('assetAllocationPortfolio.portfolioMtdReturnStale must be boolean.');
+      }
+    }
     const portfolioRows = Array.isArray(data.assetAllocationPortfolio?.rows) ? data.assetAllocationPortfolio.rows : [];
     const requiredPortfolioTickers = ['VTI', 'VEA', 'VWO', 'VNQ', 'DBC', 'GLD', 'IEF', 'BOXX'];
     const portfolioTickerSet = new Set(portfolioRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
@@ -176,6 +230,23 @@ if (!match) {
       for (const key of ['ticker', 'sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']) {
         requireString(row[key], `${label}.${key}`);
       }
+      validateDividendEvents(row.dividends, `${label}.dividends`, { optional: true });
+      // The portfolio fetcher always emits these lookahead buckets; require
+      // them so stale pre-lookahead payloads cannot silently pass validation.
+      validateRequiredDividendBucket(
+        row,
+        label,
+        'upcomingCurrentMonthDividends',
+        'upcomingCurrentMonthDividendsValue',
+        'upcomingCurrentMonthDividendEvents'
+      );
+      validateRequiredDividendBucket(
+        row,
+        label,
+        'futureMonthDividends',
+        'futureMonthDividendsValue',
+        'futureMonthDividendEvents'
+      );
     }
 
     for (const rowRaw of tapeRows) {

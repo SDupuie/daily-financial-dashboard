@@ -117,7 +117,7 @@
     .catalyst-chip p {
       margin: 6px 0 0;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 14px;
       line-height: var(--card-body-line);
     }
     .up, .green { color: var(--green); }
@@ -236,14 +236,6 @@
       max-width: 460px;
       text-align: right;
     }
-    .section-context {
-      color: var(--blue);
-      font-size: var(--label-size);
-      font-weight: var(--label-weight);
-      letter-spacing: var(--label-spacing);
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
     .table-card { overflow: hidden; }
     table {
       width: 100%;
@@ -304,7 +296,7 @@
       overflow: hidden;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
-      font-size: 13px;
+      font-size: 14px;
       line-height: 1.35;
     }
     .quote-cluster {
@@ -334,6 +326,27 @@
       border-bottom-color: var(--line);
     }
     .portfolio-section .section-note { text-align: left; }
+    .portfolio-total-return {
+      display: grid;
+      justify-items: end;
+      gap: 2px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .portfolio-total-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 23px;
+      font-weight: 900;
+      line-height: 1.05;
+    }
+    .portfolio-total-label {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
     .portfolio-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -431,8 +444,18 @@
       gap: 6px;
       width: 100%;
     }
+    .dividend-badges {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
     .div-info {
       position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .div-info-button {
+      appearance: none;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -443,40 +466,69 @@
       color: var(--muted);
       background: #f8fafc;
       font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 900;
       line-height: 1;
       cursor: help;
       outline: none;
+      padding: 0;
     }
-    .div-info::after {
-      content: attr(data-tooltip);
+    .div-info-button--current {
+      border-color: #bfd4ff;
+      background: #f3f7ff;
+      color: var(--blue);
+    }
+    .div-info-button--upcoming {
+      border-color: #dfc26f;
+      background: #fff9e8;
+      color: #98710a;
+    }
+    .div-info-button--future {
+      border-color: #c9bff2;
+      background: #f6f3ff;
+      color: var(--violet);
+    }
+    .div-info-button:hover,
+    .div-info-button:focus-visible {
+      border-color: currentColor;
+    }
+    .div-tooltip {
       position: absolute;
-      right: 0;
+      left: 0;
       bottom: calc(100% + 8px);
       z-index: 5;
-      width: max-content;
-      max-width: 220px;
-      padding: 7px 9px;
+      display: grid;
+      gap: 5px;
+      min-width: 230px;
+      max-width: min(260px, calc(100vw - 32px));
+      padding: 9px 10px;
       border: 1px solid var(--line);
       border-radius: var(--card-radius);
       background: var(--panel);
       color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-      font-size: 11px;
-      font-weight: 750;
+      font-size: 11.5px;
+      font-weight: 650;
       line-height: 1.35;
       text-align: left;
-      white-space: pre-line;
+      white-space: normal;
       box-shadow: var(--shadow);
       opacity: 0;
       pointer-events: none;
       transform: translateY(3px);
       transition: opacity 120ms ease, transform 120ms ease;
     }
-    .div-info:hover::after,
-    .div-info:focus-visible::after {
+    .div-tooltip strong {
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 850;
+    }
+    .div-tooltip span { color: var(--muted); }
+    .div-info:hover .div-tooltip,
+    .div-info:focus-within .div-tooltip,
+    .div-info.is-open .div-tooltip {
       opacity: 1;
+      pointer-events: auto;
       transform: translateY(0);
     }
     .swatch {
@@ -769,11 +821,16 @@
       line-height: 1;
       margin-bottom: 6px;
     }
-    .future-card p,
-    .premarket-item p {
+    .future-card p {
       margin: 0;
       color: var(--muted);
       font-size: 13px;
+      line-height: var(--card-body-line);
+    }
+    .premarket-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
       line-height: var(--card-body-line);
     }
     .future-chart {
@@ -792,10 +849,6 @@
     }
     .future-spark.up { color: var(--green); }
     .future-spark.down { color: var(--red); }
-    .future-spark .spark-grid {
-      stroke: var(--line);
-      stroke-width: 1;
-    }
     .future-spark .spark-line {
       fill: none;
       stroke: currentColor;
@@ -803,9 +856,20 @@
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .future-spark .spark-line--above { stroke: var(--green); }
+    .future-spark .spark-line--below { stroke: var(--red); }
     .future-spark .spark-area {
       fill: currentColor;
       opacity: 0.08;
+    }
+    .future-spark .spark-area--above { fill: var(--green); }
+    .future-spark .spark-area--below { fill: var(--red); }
+    .future-spark .spark-reference {
+      stroke: var(--muted);
+      stroke-width: 1.2;
+      stroke-dasharray: 3 4;
+      stroke-linecap: round;
+      opacity: 0.7;
     }
     .premarket-item {
       display: grid;
@@ -820,7 +884,7 @@
     .premarket-item h3 {
       margin: 0 0 5px;
       font-family: Georgia, "Times New Roman", serif;
-      font-size: 19px;
+      font-size: 20px;
       line-height: 1.13;
       letter-spacing: 0;
     }
@@ -894,6 +958,14 @@
       }
       .catalyst-chip:last-child { border-bottom: none; }
       .section-head { align-items: start; flex-direction: column; }
+      .portfolio-section .section-head {
+        align-items: end;
+        flex-direction: row;
+        gap: var(--gap-md);
+      }
+      .portfolio-section .section-title {
+        font-size: clamp(24px, 7vw, 34px);
+      }
       .section-note { text-align: left; }
       .story-grid,
       .earnings-grid,
@@ -2666,6 +2738,10 @@
     "compiledAt": "2026-06-30T12:03:19.042Z",
     "source": "Yahoo Finance Chart API",
     "month": "2026-06",
+    "portfolioMtdReturnAsOf": "2026-06-30",
+    "portfolioMtdReturnValue": -0.010523,
+    "portfolioMtdReturnStatus": "available",
+    "portfolioMtdReturnStale": false,
     "rows": [
       {
         "ticker": "VTI",
@@ -2690,7 +2766,13 @@
             "exDate": "2026-06-26",
             "amount": 1.044
           }
-        ]
+        ],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "VEA",
@@ -2715,7 +2797,13 @@
             "exDate": "2026-06-18",
             "amount": 0.377
           }
-        ]
+        ],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "VWO",
@@ -2740,7 +2828,13 @@
             "exDate": "2026-06-18",
             "amount": 0.071
           }
-        ]
+        ],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "VNQ",
@@ -2765,7 +2859,13 @@
             "exDate": "2026-06-24",
             "amount": 0.855
           }
-        ]
+        ],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "DBC",
@@ -2785,7 +2885,13 @@
         "mtdDir": "down",
         "monthDivPerShare": "$0.00",
         "monthDivPerShareValue": 0,
-        "dividends": []
+        "dividends": [],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "GLD",
@@ -2805,7 +2911,13 @@
         "mtdDir": "down",
         "monthDivPerShare": "$0.00",
         "monthDivPerShareValue": 0,
-        "dividends": []
+        "dividends": [],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "IEF",
@@ -2830,7 +2942,13 @@
             "exDate": "2026-06-01",
             "amount": 0.317
           }
-        ]
+        ],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       },
       {
         "ticker": "BOXX",
@@ -2850,7 +2968,13 @@
         "mtdDir": "up",
         "monthDivPerShare": "$0.00",
         "monthDivPerShareValue": 0,
-        "dividends": []
+        "dividends": [],
+        "upcomingCurrentMonthDividends": "$0.00",
+        "upcomingCurrentMonthDividendsValue": 0,
+        "upcomingCurrentMonthDividendEvents": [],
+        "futureMonthDividends": "$0.00",
+        "futureMonthDividendsValue": 0,
+        "futureMonthDividendEvents": []
       }
     ]
   }
@@ -3035,6 +3159,15 @@
         return Number.isFinite(value) ? value : null;
       }
 
+      function formatSignedPercent(value) {
+        if (!Number.isFinite(value)) return 'Unavailable';
+        return `${new Intl.NumberFormat('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+          signDisplay: 'always'
+        }).format(value)}%`;
+      }
+
       function currencyDeltaFromText(deltaText) {
         const text = String(deltaText || '').trim();
         if (!text || text === 'Unavailable') return 'Unavailable';
@@ -3066,7 +3199,7 @@
         return formatCryptoCurrencyDelta(delta, price);
       }
 
-      function sparkline(series, dir) {
+      function sparkline(series, dir, previousClose) {
         const points = asArr(series).map((point) => {
           const price = Array.isArray(point) ? Number(point[1]) : Number(point?.price ?? point?.value);
           return Number.isFinite(price) ? price : null;
@@ -3076,22 +3209,60 @@
         const width = 220;
         const height = 76;
         const pad = 5;
-        const min = Math.min(...points);
-        const max = Math.max(...points);
+        const referencePrice = Number(previousClose);
+        const hasReference = Number.isFinite(referencePrice);
+        // Include previous close in the domain so the reference line is never clipped off-chart.
+        const scalePoints = hasReference ? points.concat(referencePrice) : points;
+        const min = Math.min(...scalePoints);
+        const max = Math.max(...scalePoints);
         const range = max - min || 1;
         const step = (width - pad * 2) / (points.length - 1);
+        const yForPrice = (price) => height - pad - ((price - min) / range) * (height - pad * 2);
         const coords = points.map((price, index) => {
           const x = pad + index * step;
-          const y = height - pad - ((price - min) / range) * (height - pad * 2);
-          return [x, y];
+          const y = yForPrice(price);
+          return { price, x, y };
         });
-        const polyline = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+        const polyline = coords.map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
         const area = `${pad},${height - pad} ${polyline} ${width - pad},${height - pad}`;
+        const referenceY = hasReference ? yForPrice(referencePrice) : null;
+        // Split segments at the previous-close crossing so green/red always reflects above/below close.
+        const splitSegments = hasReference
+          ? coords.slice(1).flatMap((end, index) => {
+            const start = coords[index];
+            const startDiff = start.price - referencePrice;
+            const endDiff = end.price - referencePrice;
+            const side = (diff, fallbackDiff) => (diff > 0 || (diff === 0 && fallbackDiff >= 0) ? 'above' : 'below');
+            const segment = (from, to, segmentSide) => ({ from, to, side: segmentSide });
+            if (startDiff === 0 || endDiff === 0 || Math.sign(startDiff) === Math.sign(endDiff)) {
+              return [segment(start, end, side(startDiff, endDiff))];
+            }
+            const ratio = (referencePrice - start.price) / (end.price - start.price);
+            const cross = {
+              price: referencePrice,
+              x: start.x + (end.x - start.x) * ratio,
+              y: referenceY
+            };
+            return [
+              segment(start, cross, side(startDiff, endDiff)),
+              segment(cross, end, side(endDiff, startDiff))
+            ];
+          })
+          : [];
+        const segmentAreas = splitSegments.map(({ from, to, side }) => `
+          <polygon class="spark-area spark-area--${side}" points="${from.x.toFixed(1)},${referenceY.toFixed(1)} ${from.x.toFixed(1)},${from.y.toFixed(1)} ${to.x.toFixed(1)},${to.y.toFixed(1)} ${to.x.toFixed(1)},${referenceY.toFixed(1)}"></polygon>
+        `).join('');
+        const segmentLines = splitSegments.map(({ from, to, side }) => `
+          <line class="spark-line spark-line--${side}" x1="${from.x.toFixed(1)}" y1="${from.y.toFixed(1)}" x2="${to.x.toFixed(1)}" y2="${to.y.toFixed(1)}"></line>
+        `).join('');
+        const referenceLine = hasReference
+          ? `<line class="spark-reference" x1="${pad}" y1="${referenceY.toFixed(1)}" x2="${width - pad}" y2="${referenceY.toFixed(1)}"></line>`
+          : '';
         return `
           <svg class="future-spark ${tone(dir)}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
-            <line class="spark-grid" x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}"></line>
-            <polygon class="spark-area" points="${area}"></polygon>
-            <polyline class="spark-line" points="${polyline}"></polyline>
+            ${hasReference ? segmentAreas : `<polygon class="spark-area" points="${area}"></polygon>`}
+            ${referenceLine}
+            ${hasReference ? segmentLines : `<polyline class="spark-line" points="${polyline}"></polyline>`}
           </svg>
         `;
       }
@@ -3176,7 +3347,7 @@
               <div class="label">${esc(item.label || item.name)}</div>
               <div class="value ${tone(item.dir)}">${isExternal ? '<span class="badge">External result</span>' : esc(value)}</div>
               <p>${esc(item.body || item.note || '')}</p>
-              <div class="future-chart">${sparkline(item.series, item.dir)}</div>
+              <div class="future-chart">${sparkline(item.series, item.dir, item.raw?.previousClose)}</div>
             </div>
           `;
         }).join('');
@@ -3222,15 +3393,117 @@
         return esc(row.price);
       }
 
+      function portfolioTotalReturn(data) {
+        const portfolio = asObj(data.assetAllocationPortfolio);
+        const value = Number(portfolio.portfolioMtdReturnValue);
+        // Portfolio-level return is a sanitized display export; tactical model details stay outside this repo.
+        const available = portfolio.portfolioMtdReturnStatus === 'available' && Number.isFinite(value);
+        const stale = portfolio.portfolioMtdReturnStale === true;
+        const asOf = String(portfolio.portfolioMtdReturnAsOf || '').trim();
+        const label = available && stale && asOf
+          ? `MTD Return · As of ${asOf}`
+          : available
+            ? 'MTD Return'
+            : 'MTD Return Unavailable';
+        const valueClass = available ? tone(value > 0 ? 'up' : value < 0 ? 'down' : 'flat') : 'flat';
+        return `
+          <div class="portfolio-total-return">
+            <div class="portfolio-total-value ${valueClass}">${available ? esc(formatSignedPercent(value)) : '--'}</div>
+            <div class="portfolio-total-label">${esc(label)}</div>
+          </div>
+        `;
+      }
+
+      function formatDividendCurrency(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || Math.abs(amount) < 0.00005) return '$0.00';
+        return `$${new Intl.NumberFormat('en-US', {
+          minimumFractionDigits: 4,
+          maximumFractionDigits: 4
+        }).format(amount)}`;
+      }
+
+      function sortedDividendEvents(events) {
+        return asArr(events)
+          .filter((event) => event && event.exDate)
+          .sort((a, b) => String(a.exDate).localeCompare(String(b.exDate)));
+      }
+
+      function sumDividendEvents(events) {
+        return asArr(events).reduce((sum, event) => {
+          const amount = Number(event?.amount);
+          return sum + (Number.isFinite(amount) ? amount : 0);
+        }, 0);
+      }
+
+      function dividendAmountText(row, textKey, valueKey, events) {
+        const value = Number(row?.[valueKey]);
+        const fallbackValue = sumDividendEvents(events);
+        const amount = Number.isFinite(value) ? value : fallbackValue;
+        const display = String(row?.[textKey] ?? '').trim();
+        if (!Number.isFinite(amount) || Math.abs(amount) < 0.00005) return '';
+        if (display && display !== '$0.00' && display !== 'Unavailable') return display;
+        return formatDividendCurrency(amount);
+      }
+
+      function dividendExDateText(events) {
+        const dates = sortedDividendEvents(events).map((event) => String(event.exDate));
+        if (dates.length === 1) return `Ex date ${dates[0]}`;
+        if (dates.length > 1) return `Ex dates ${dates.join(', ')}`;
+        return '';
+      }
+
+      function portfolioDividendBadge({ variant, title, ariaLabel, amount, events, inclusionText }) {
+        if (!amount) return '';
+        const exDateText = dividendExDateText(events);
+        return `
+          <span class="div-info div-info--${variant}" data-dividend-info>
+            <button class="div-info-button div-info-button--${variant}" type="button" aria-label="${esc(ariaLabel)}" aria-expanded="false" data-dividend-button>D</button>
+            <span class="div-tooltip" role="tooltip">
+              <strong>${esc(title)}</strong>
+              <span>${esc(amount)} / share</span>
+              ${exDateText ? `<span>${esc(exDateText)}</span>` : ''}
+              <span>${esc(inclusionText)}</span>
+            </span>
+          </span>
+        `;
+      }
+
       function portfolioDividendInfo(row) {
         if (!row) return '';
-        const dividends = asArr(row.dividends);
-        if (!dividends.length || row.monthDivPerShare === '$0.00') return '';
-        const dates = dividends.map((dividend) => dividend.exDate).filter(Boolean).join(', ');
-        const tooltip = dates
-          ? `MTD dividend ${row.monthDivPerShare}\nEx date ${dates}`
-          : `MTD dividend ${row.monthDivPerShare}`;
-        return `<span class="div-info" tabindex="0" role="img" aria-label="${esc(tooltip)}" data-tooltip="${esc(tooltip)}">i</span>`;
+        const currentEvents = sortedDividendEvents(row.dividends);
+        const upcomingEvents = sortedDividendEvents(row.upcomingCurrentMonthDividendEvents);
+        const futureEvents = sortedDividendEvents(row.futureMonthDividendEvents);
+        // Lookahead buckets are badges only; current/past ex-date dividends are the only MTD-return inputs.
+        // Render at most two dividend badges so the compact portfolio cards do
+        // not become a dividend calendar when several lookahead events exist.
+        const badges = [
+          portfolioDividendBadge({
+            variant: 'current',
+            title: 'Current Dividend',
+            ariaLabel: `Current Dividend details for ${row.ticker}`,
+            amount: dividendAmountText(row, 'monthDivPerShare', 'monthDivPerShareValue', currentEvents),
+            events: currentEvents,
+            inclusionText: 'Included in MTD return.'
+          }),
+          portfolioDividendBadge({
+            variant: 'upcoming',
+            title: 'Upcoming Dividend',
+            ariaLabel: `Upcoming Dividend details for ${row.ticker}`,
+            amount: dividendAmountText(row, 'upcomingCurrentMonthDividends', 'upcomingCurrentMonthDividendsValue', upcomingEvents),
+            events: upcomingEvents,
+            inclusionText: 'Not included in MTD return until the ex-date arrives.'
+          }),
+          portfolioDividendBadge({
+            variant: 'future',
+            title: 'Future Dividend',
+            ariaLabel: `Future Dividend details for ${row.ticker}`,
+            amount: dividendAmountText(row, 'futureMonthDividends', 'futureMonthDividendsValue', futureEvents),
+            events: futureEvents,
+            inclusionText: 'Not included in MTD return.'
+          })
+        ].filter(Boolean).slice(0, 2).join('');
+        return badges ? `<span class="dividend-badges">${badges}</span>` : '';
       }
 
       function renderPortfolioUniverse(data) {
@@ -3260,7 +3533,7 @@
                 <div class="section-label">Portfolio</div>
                 <h2 class="section-title">Asset Allocation</h2>
               </div>
-              <div class="section-context">MTD Return</div>
+              ${portfolioTotalReturn(data)}
             </div>
             <div class="portfolio-grid">${cards}</div>
             ${feedRows.length ? '' : '<p class="portfolio-source-note">ETF market-data feed is unavailable; tracked instruments are shown without fabricated values.</p>'}
@@ -3461,6 +3734,35 @@
         `;
       }
 
+      function closeDividendTooltips(except = null) {
+        document.querySelectorAll('.div-info.is-open').forEach((wrap) => {
+          if (wrap === except) return;
+          wrap.classList.remove('is-open');
+          wrap.querySelector('[data-dividend-button]')?.setAttribute('aria-expanded', 'false');
+        });
+      }
+
+      function routeDividendTooltipClick(event) {
+        const wrap = event.target.closest?.('[data-dividend-info]');
+        const button = event.target.closest?.('[data-dividend-button]');
+        if (!wrap) {
+          closeDividendTooltips();
+          return;
+        }
+        if (!button) return;
+        const shouldOpen = !wrap.classList.contains('is-open');
+        closeDividendTooltips(wrap);
+        wrap.classList.toggle('is-open', shouldOpen);
+        button.setAttribute('aria-expanded', String(shouldOpen));
+        if (!shouldOpen) button.blur?.();
+      }
+
+      function closeDividendTooltipsOnEscape(event) {
+        if (event.key !== 'Escape') return;
+        closeDividendTooltips();
+        event.target.closest?.('[data-dividend-button]')?.blur?.();
+      }
+
       function render(data) {
         renderHero(data);
         $('content').innerHTML = [
@@ -3481,6 +3783,9 @@
         if (!node) throw new Error('The dashboard-data JSON block was not found.');
         return JSON.parse(node.textContent || '{}');
       }
+
+      document.addEventListener('click', routeDividendTooltipClick);
+      document.addEventListener('keydown', closeDividendTooltipsOnEscape);
 
       try {
         render(loadData());

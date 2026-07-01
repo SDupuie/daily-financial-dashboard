@@ -153,6 +153,10 @@ function dayText(epochSeconds) {
   return new Date(epochSeconds * 1000).toISOString().slice(0, 10);
 }
 
+function dateText(date) {
+  return date.toISOString().slice(0, 10);
+}
+
 function validPriceRows(result) {
   const timestamps = result?.timestamp || [];
   const adjCloses = result?.indicators?.adjclose?.[0]?.adjclose || [];
@@ -171,16 +175,16 @@ function validPriceRows(result) {
   }).filter(Boolean);
 }
 
-function dividendsInMonth(result, monthStart, now) {
+function dividendEventsInRange(result, rangeStart, rangeEndExclusive) {
   const events = result?.events?.dividends || {};
-  const startMs = monthStart.getTime();
-  const endMs = now.getTime();
+  const startMs = rangeStart.getTime();
+  const endMs = rangeEndExclusive.getTime();
   return Object.values(events).map((event) => {
     const timestamp = Number(event?.date);
     const amount = Number(event?.amount);
     if (!Number.isFinite(timestamp) || !Number.isFinite(amount)) return null;
     const eventMs = timestamp * 1000;
-    if (eventMs < startMs || eventMs > endMs) return null;
+    if (eventMs < startMs || eventMs >= endMs) return null;
     return {
       exDate: dayText(timestamp),
       amount
@@ -188,12 +192,37 @@ function dividendsInMonth(result, monthStart, now) {
   }).filter(Boolean).sort((a, b) => a.exDate.localeCompare(b.exDate));
 }
 
+function bucketDividendEvents(events, observationDate, currentMonthEnd) {
+  return events.reduce((buckets, event) => {
+    if (!event?.exDate) return buckets;
+    if (event.exDate <= observationDate) {
+      buckets.current.push(event);
+    } else if (event.exDate <= currentMonthEnd) {
+      buckets.upcoming.push(event);
+    } else {
+      buckets.future.push(event);
+    }
+    return buckets;
+  }, {
+    current: [],
+    upcoming: [],
+    future: []
+  });
+}
+
+function sumDividends(events) {
+  return events.reduce((sum, event) => {
+    const amount = Number(event?.amount);
+    return sum + (Number.isFinite(amount) ? amount : 0);
+  }, 0);
+}
+
 function pctChange(current, base) {
   if (!Number.isFinite(current) || !Number.isFinite(base) || base === 0) return null;
   return ((current / base) - 1) * 100;
 }
 
-function parseHolding(holding, payload, monthStart, now) {
+function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookaheadEndExclusive) {
   const result = payload?.chart?.result?.[0];
   if (!result) {
     throw new Error(`${holding.symbol} response did not include chart data`);
@@ -210,12 +239,21 @@ function parseHolding(holding, payload, monthStart, now) {
   const priorMonthRows = prices.filter((row) => row.date < monthStartKey);
   const currentMonthRows = prices.filter((row) => row.date >= monthStartKey);
   const mtdBase = priorMonthRows[priorMonthRows.length - 1] || currentMonthRows[0] || previous;
-  const dividends = dividendsInMonth(result, monthStart, now);
+  const dividendBuckets = bucketDividendEvents(
+    dividendEventsInRange(result, monthStart, lookaheadEndExclusive),
+    dateText(now),
+    dateText(currentMonthEnd)
+  );
+  // Only current/past ex-date dividends feed the MTD dividend total. Upcoming
+  // and future buckets are display-only lookahead for dashboard badges.
+  const dividends = dividendBuckets.current;
   const dailyTRValue = pctChange(latest.price, previous.price);
   const mtdTRValue = pctChange(latest.price, mtdBase.price);
   const dailyPriceChangeValue = latest.close - previous.close;
   const mtdPriceChangeValue = latest.close - mtdBase.close;
-  const monthDivPerShareValue = dividends.reduce((sum, event) => sum + event.amount, 0);
+  const monthDivPerShareValue = sumDividends(dividends);
+  const upcomingCurrentMonthDividendsValue = sumDividends(dividendBuckets.upcoming);
+  const futureMonthDividendsValue = sumDividends(dividendBuckets.future);
   const metaPrice = Number(result?.meta?.regularMarketPrice);
   const priceValue = Number.isFinite(metaPrice) ? metaPrice : latest.close;
 
@@ -237,24 +275,41 @@ function parseHolding(holding, payload, monthStart, now) {
     mtdDir: direction(mtdTRValue),
     monthDivPerShare: asMoney(monthDivPerShareValue),
     monthDivPerShareValue,
-    dividends
+    dividends,
+    upcomingCurrentMonthDividends: asMoney(upcomingCurrentMonthDividendsValue),
+    upcomingCurrentMonthDividendsValue,
+    upcomingCurrentMonthDividendEvents: dividendBuckets.upcoming,
+    futureMonthDividends: asMoney(futureMonthDividendsValue),
+    futureMonthDividendsValue,
+    futureMonthDividendEvents: dividendBuckets.future
   };
 }
 
-async function fetchHolding(holding, args, period1, period2, monthStart, now) {
+async function fetchHolding(holding, args, period1, period2, monthStart, now, currentMonthEnd, lookaheadEndExclusive) {
   const payload = await fetchJson(chartUrl(holding.symbol, period1, period2), args.timeoutMs);
-  return parseHolding(holding, payload, monthStart, now);
+  return parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const now = new Date();
   const monthStart = utcDate(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const currentMonthEnd = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 1, 0);
+  const lookaheadEndExclusive = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 2, 1);
   const lookbackStart = utcDate(now.getUTCFullYear(), now.getUTCMonth() - 1, 20);
   const period1 = Math.floor(lookbackStart.getTime() / 1000);
-  const period2 = Math.floor((now.getTime() + 24 * 60 * 60 * 1000) / 1000);
+  const period2 = Math.floor(lookaheadEndExclusive.getTime() / 1000);
   const rows = await Promise.all(
-    HOLDINGS.map((holding) => fetchHolding(holding, args, period1, period2, monthStart, now))
+    HOLDINGS.map((holding) => fetchHolding(
+      holding,
+      args,
+      period1,
+      period2,
+      monthStart,
+      now,
+      currentMonthEnd,
+      lookaheadEndExclusive
+    ))
   );
   // Output is a staging payload for manual merge into dashboard-data, not a production runtime dependency.
   const output = {

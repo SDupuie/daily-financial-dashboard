@@ -18,6 +18,17 @@ Default file-change policy:
 - Prefer reusing an existing appropriate file over creating a new one.
 - If a new top-level directory seems necessary, ask the user first.
 
+## Modern JavaScript and Platform API Policy
+
+- Prefer modern JavaScript language features and native browser/platform APIs over custom wrappers, compatibility branches, or local abstractions.
+- Do not add compatibility code for browsers outside the project's current supported baseline. If a fallback is required for Safari/WebKit or another supported browser, document the concrete browser behavior it protects.
+- Do not recreate platform features such as native dialogs, form controls, pointer events, fetch cancellation, URL handling, dates/numbers via `Intl`, or browser file/download APIs unless the native feature fails a real dashboard requirement.
+- Keep code concise and direct. Add helpers only when they remove meaningful duplication, encode domain policy, or clarify a shared responsibility boundary.
+- Avoid defensive wrappers around standard APIs when the direct API call is readable and the failure mode is already outside the supported runtime contract.
+- Avoid boilerplate classes or framework-like component abstractions in the vanilla static dashboard unless the user explicitly asks for a broader architecture change.
+- Keep comments focused on intent, financial/data assumptions, browser-specific behavior, and non-obvious data flow. Do not duplicate comments for trivial one-line helpers or restate what a platform API already says.
+- Before adding a new custom UI abstraction, check whether current native browser capabilities can satisfy the requirement with less code and equal accessibility.
+
 ## External Project Boundary
 
 The Asset Allocation Dashboard is a separate project and may contain proprietary strategy/model logic.
@@ -36,8 +47,11 @@ For this repository:
 
 - Treat `daily_financial_news.html` as the source artifact for the current dashboard payload unless a task explicitly targets a generated mockup-only JSON file.
 - Keep provenance useful but not visually overwhelming. The visible footer should summarize source families; detailed source audits belong in documentation, validation output, or generated metadata rather than a long UI paragraph.
+- For story links, prefer reputable free-to-read or less paywalled articles when several sources cover the same basic story, without sacrificing source quality, timeliness, or originality.
 - Tape commentary should explain the factors driving recent action in that market. It should not merely restate last price, delta, or percent change.
 - Tape commentary should not contain source/citation language.
+- Asset Allocation dividend lookahead buckets are display-only; do not include upcoming or future ex-date events in current MTD dividend totals or returns.
+- Portfolio-level Asset Allocation return must come only from the sanitized local export. During local daily updates, refresh it via `http://127.0.0.1:2200/api/asset-market-data` before reading `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`; never call that endpoint from the published dashboard or use it for display data.
 - Keep removed or filtered dashboard items out of prominent visible summaries. For example, if a row is filtered out of the active mockup, do not foreground that row’s source details in the visible footer.
 - Crypto has its own section; do not duplicate crypto rows inside The Tape unless the user explicitly asks.
 - When labels are renamed, sweep generated data, fetch scripts, validation, mockups, and visible UI strings for stale wording.

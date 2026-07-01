@@ -2,68 +2,68 @@
   "SPX:stock": {
     "symbol": "SPX",
     "type": "stock",
-    "close": 7354.02,
-    "pctChange": -0.047165741757111364,
-    "pct": "-0.05%",
-    "tradeDate": "2026-06-26",
+    "close": 7440.43,
+    "pctChange": 1.1750057250389132,
+    "pct": "+1.18%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "IXIC:stock": {
     "symbol": "IXIC",
     "type": "stock",
-    "close": 25297.62,
-    "pctChange": -0.24047254063452186,
-    "pct": "-0.24%",
-    "tradeDate": "2026-06-26",
+    "close": 25820.14,
+    "pctChange": 2.0654966835827326,
+    "pct": "+2.07%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "DJI:stock": {
     "symbol": "DJI",
     "type": "stock",
-    "close": 51876.11,
-    "pctChange": -0.08573032797436653,
-    "pct": "-0.09%",
-    "tradeDate": "2026-06-26",
+    "close": 52182.74,
+    "pctChange": 0.5910792269201471,
+    "pct": "+0.59%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "RUT:stock": {
     "symbol": "RUT",
     "type": "stock",
-    "close": 3010.08,
-    "pctChange": 0.0738056499917412,
-    "pct": "+0.07%",
-    "tradeDate": "2026-06-26",
+    "close": 3010.42,
+    "pctChange": 0.011290189668697818,
+    "pct": "+0.01%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "VIX:stock": {
     "symbol": "VIX",
     "type": "stock",
-    "close": 18.41,
-    "pctChange": -2.541024657202286,
-    "pct": "-2.54%",
-    "tradeDate": "2026-06-26",
+    "close": 17.65,
+    "pctChange": -4.128192477897652,
+    "pct": "-4.13%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "CL:stock": {
     "symbol": "CL",
     "type": "stock",
-    "close": 69.23,
-    "pctChange": -3.74025984496374,
-    "pct": "-3.74%",
-    "tradeDate": "2026-06-26",
+    "close": 70.75,
+    "pctChange": 2.1955749954678776,
+    "pct": "+2.20%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "BZ:stock": {
     "symbol": "BZ",
@@ -79,45 +79,45 @@
   "XAU:stock": {
     "symbol": "XAU",
     "type": "stock",
-    "close": 4078.7,
-    "pctChange": 1.1958801928265725,
-    "pct": "+1.20%",
-    "tradeDate": "2026-06-26",
+    "close": 4022.3,
+    "pctChange": -1.3827911594120919,
+    "pct": "-1.38%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "XAG:stock": {
     "symbol": "XAG",
     "type": "stock",
-    "close": 59.22,
-    "pctChange": 1.4893389448898238,
-    "pct": "+1.49%",
-    "tradeDate": "2026-06-26",
+    "close": 58.17,
+    "pctChange": -1.7596295549274994,
+    "pct": "-1.76%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "IBIT:etf": {
     "symbol": "IBIT",
     "type": "etf",
-    "close": 33.85,
-    "pctChange": 0.9844809422757332,
-    "pct": "+0.98%",
-    "tradeDate": "2026-06-26",
+    "close": 34.18,
+    "pctChange": 0.974894670399999,
+    "pct": "+0.97%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
   "MSTR:stock": {
     "symbol": "MSTR",
     "type": "stock",
-    "close": 82.31,
-    "pctChange": -3.539205681068963,
-    "pct": "-3.54%",
-    "tradeDate": "2026-06-26",
+    "close": 92.68,
+    "pctChange": 12.598715896206864,
+    "pct": "+12.60%",
+    "tradeDate": "2026-06-29",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-29T20:34:17.317Z"
+    "verifiedAt": "2026-06-30T12:05:01.162Z"
   }
 }
