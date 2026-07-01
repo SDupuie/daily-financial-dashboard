@@ -959,9 +959,25 @@
       .catalyst-chip:last-child { border-bottom: none; }
       .section-head { align-items: start; flex-direction: column; }
       .portfolio-section .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         align-items: end;
-        flex-direction: row;
         gap: var(--gap-md);
+      }
+      .portfolio-total-return--long {
+        display: contents;
+      }
+      .portfolio-total-return--long .portfolio-total-value {
+        grid-column: 2;
+        grid-row: 1;
+        justify-self: end;
+      }
+      .portfolio-total-return--long .portfolio-total-label {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        justify-self: start;
+        text-align: left;
+        white-space: normal;
       }
       .portfolio-section .section-title {
         font-size: clamp(24px, 7vw, 34px);
@@ -3374,9 +3390,10 @@
           : available
             ? 'MTD Return'
             : 'MTD Return · Unavailable';
+        const labelClass = label === 'MTD Return' ? '' : ' portfolio-total-return--long';
         const valueClass = available ? tone(value > 0 ? 'up' : value < 0 ? 'down' : 'flat') : 'flat';
         return `
-          <div class="portfolio-total-return">
+          <div class="portfolio-total-return${labelClass}">
             <div class="portfolio-total-value ${valueClass}">${available ? esc(formatSignedPercent(value)) : '--'}</div>
             <div class="portfolio-total-label">${esc(label)}</div>
           </div>
