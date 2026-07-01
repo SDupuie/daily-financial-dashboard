@@ -67,6 +67,7 @@ Production is self-contained: the rendered dashboard reads only the embedded `da
    - Discard any story without a publication date from today or yesterday unless it is a standing calendar/source page.
    - Each `stories[]`, `preMarket.stories[]`, and `crypto.notes[]` item must include a direct `url`.
    - Do not repeat promoted `preMarket.stories[]` items in `stories[]`; use What’s Moving Today for additional market breadth.
+   - Keep crypto-specific headlines, ETF-flow stories, proxy-equity stories, stablecoin stories, and token/regulation stories out of `stories[]`; those belong in `crypto.notes[]` unless the user explicitly asks to feature crypto in What’s Moving Today.
    - When more than one reputable article covers the same basic story, prefer a free-to-read or less paywalled link. This is a preference, not a hard rule; use the paywalled source when it is clearly the best, original, or most reliable source.
    - For any `url` that renders as `READ MORE`, prefer a reader-facing article or HTML page, not a raw API/feed/download endpoint.
    - Do not use machine-readable endpoints such as `query1.finance.yahoo.com`, `api.nasdaq.com`, JSON APIs, CSV downloads, or other raw data feeds as `READ MORE` links.
@@ -77,8 +78,8 @@ Production is self-contained: the rendered dashboard reads only the embedded `da
    - `preMarket`: embed four futures rows and the top one to three priority overnight stories.
    - `tape`: refresh all required cross-asset rows and commentary.
    - `assetAllocationPortfolio`: embed instrument-level ETF rows with price, MTD dividend, daily return, and MTD return. Before reading the sanitized portfolio-level return export, refresh the Asset Allocation Dashboard export by calling `http://127.0.0.1:2200/api/asset-market-data`, then read `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. Treat `portfolioMtdReturnValue` as percentage points (`1.24` means `+1.24%`, `-0.35` means `-0.35%`). If the refresh call fails, fall back to the existing export file when present and embed `portfolioMtdReturnStale: true` with the export `asOf` date. Do not call `/api/asset-market-data` for display data; call it only to update the sanitized export. Keep any `upcomingCurrentMonthDividendEvents` or `futureMonthDividendEvents` as display-only lookahead; only current/past ex-date dividends belong in the MTD dividend total.
-   - `stories`: 8-10 fresh stories across markets, corporate, macro, geopolitics, crypto, Fed, and earnings.
-   - `crypto`: refreshed crypto quote rows, Crypto Market Cap stat, Fear & Greed stat, and up to six fresh crypto notes/stories.
+   - `stories`: exactly 9 fresh non-crypto stories across markets, corporate, macro, geopolitics, Fed, earnings, and other broad market themes.
+   - `crypto`: refreshed crypto quote rows, Crypto Market Cap stat, Fear & Greed stat, and 4 to 6 fresh crypto notes/stories.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
    - `weekAhead`: update on Mondays and Fridays.
    - `footer`: today’s compile date and concise source-family attribution.

@@ -333,8 +333,8 @@ if (!match) {
     }
 
     const stories = Array.isArray(data.stories) ? data.stories : [];
-    if (stories.length < 8 || stories.length > 10) {
-      errors.push('stories must contain 8-10 fresh market/news items.');
+    if (stories.length !== 9) {
+      errors.push('stories must contain exactly 9 fresh market/news items.');
     }
     const preMarketUrls = new Set(preMarketStories.map((story) => String(story?.url ?? '').trim()).filter(Boolean));
     const preMarketTitles = new Set(preMarketStories.map((story) => String(story?.title ?? '').trim().toLowerCase()).filter(Boolean));
@@ -344,6 +344,11 @@ if (!match) {
       requireString(story.title, 'stories[].title');
       requireString(story.body, `Story "${story.title ?? '(untitled)'}" body`);
       requireHttpsUrl(story.url, `Story "${story.title ?? '(untitled)'}"`);
+      const storyTag = String(story.tag ?? '').trim().toLowerCase();
+      const storyTone = String(story.tone ?? '').trim().toLowerCase();
+      if (storyTag === 'crypto' || storyTone === 'crypto') {
+        errors.push(`Story "${story.title ?? '(untitled)'}" should live in crypto.notes, not stories[].`);
+      }
       const storyUrl = String(story.url ?? '').trim();
       const storyTitle = String(story.title ?? '').trim().toLowerCase();
       if (storyUrl && preMarketUrls.has(storyUrl)) {
@@ -354,6 +359,9 @@ if (!match) {
       }
     }
 
+    if (cryptoNotes.length < 4 || cryptoNotes.length > 6) {
+      errors.push('crypto.notes must contain 4-6 fresh crypto notes/items.');
+    }
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
       requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
