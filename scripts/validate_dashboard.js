@@ -36,6 +36,11 @@ function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
 
+// Static guard: the optional live-refresh path must never point the published dashboard at a remote service.
+if (!html.includes("const LOCAL_MARKET_REFRESH_URL = 'http://127.0.0.1:2210/api/market-refresh';")) {
+  errors.push('LOCAL_MARKET_REFRESH_URL must target http://127.0.0.1:2210/api/market-refresh.');
+}
+
 if (!dashboardMatch) {
   errors.push('Could not find dashboard-data JSON block.');
 } else {

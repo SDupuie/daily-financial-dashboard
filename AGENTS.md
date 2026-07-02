@@ -6,6 +6,7 @@ Use the top-level files and directories according to their intended ownership:
 
 - `daily_financial_news.html`: Canonical generated dashboard artifact and embedded dashboard data used by the current static dashboard.
 - `index.html`: Root entry point for the published dashboard.
+- `launchd/`: Optional local-machine LaunchAgent templates for running dashboard helper scripts; not used by GitHub Pages at runtime.
 - `mockups/`: Visual or interaction mockups created for design exploration. Production must not depend on mockup files or sidecar JSON at runtime.
 - `scripts/`: Operational automation, data-fetch utilities, validation checks, publishing helpers, and tests for dashboard behavior.
 - `README.md`: Project documentation and operational notes.

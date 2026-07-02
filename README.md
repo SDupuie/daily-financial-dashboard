@@ -22,6 +22,17 @@ Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a da
 
 Production is self-contained: the rendered dashboard reads embedded `dashboard-data`, `tape-chart-data`, and `crypto-chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
 
+## Optional Local Quote Refresh
+
+Run `node scripts/local_quote_server.js` to start a read-only local helper at `http://127.0.0.1:2210`. It binds only to localhost, requires no secrets or paid API keys, and exposes:
+
+- `GET /health`
+- `GET /api/market-refresh`
+
+The static dashboard always renders embedded data first. When the local helper is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh`, merges refreshed quote rows and recent chart bars, and appends a small footer status after a successful refresh. GitHub Pages continues to work normally when the helper is not running.
+
+Use `node scripts/local_quote_server.js --port 2211` to choose another local port for direct testing; the published dashboard only auto-checks port `2210`.
+
 ## Daily Update Runbook
 
 1. Confirm dates first.

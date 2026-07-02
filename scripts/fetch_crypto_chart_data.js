@@ -287,6 +287,16 @@ async function main() {
   }
 }
 
+// The optional local quote server imports these helpers to keep crypto popup refreshes on the same Yahoo source contract.
+module.exports = {
+  DEFAULT_DAYS,
+  REQUEST_TIMEOUT_MS,
+  fetchYahooSeries,
+  isoDateFromDate,
+  readCryptoRows,
+  sleep
+};
+
 if (require.main === module) {
   main().catch((error) => {
     process.stderr.write(`fetch_crypto_chart_data failed: ${error.message}\n`);

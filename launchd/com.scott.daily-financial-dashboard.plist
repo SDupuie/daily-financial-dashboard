@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.scott.daily-financial-dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/node</string>
+      <string>/Users/Scott/Projects/Daily Financial Dashboard/scripts/local_quote_server.js</string>
+      <string>--port</string>
+      <string>2210</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/Scott/Projects/Daily Financial Dashboard</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/Scott/Library/Logs/DailyFinancialDashboard/dashboard.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/Scott/Library/Logs/DailyFinancialDashboard/dashboard.err.log</string>
+  </dict>
+</plist>

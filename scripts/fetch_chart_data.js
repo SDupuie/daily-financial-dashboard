@@ -499,6 +499,17 @@ async function main() {
   }
 }
 
+// The optional local quote server imports these helpers to avoid maintaining a second ticker/source routing map.
+module.exports = {
+  DEFAULT_DAYS,
+  REQUEST_TIMEOUT_MS,
+  fetchSeries,
+  isoDateFromDate,
+  quoteRowFromSeries,
+  readTapeRows,
+  sleep
+};
+
 if (require.main === module) {
   main().catch((error) => {
     process.stderr.write(`fetch_chart_data failed: ${error.message}\n`);
