@@ -30,7 +30,7 @@ Run `node scripts/local_quote_server.js` to start a read-only local helper at `h
 - `GET /health`
 - `GET /api/market-refresh`
 
-The static dashboard always keeps embedded data as the production fallback. When the local helper is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh`, merges refreshed quote rows and recent chart bars, stores the successful local refresh in browser `localStorage` for up to 12 hours, and appends a small footer status after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the helper again. GitHub Pages continues to work normally when the helper is not running.
+The static dashboard always keeps embedded data as the production fallback. When the local helper is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh` with `http://localhost:2210/api/market-refresh` as a loopback fallback, merges refreshed quote rows and recent chart bars, stores the successful local refresh in browser `localStorage` for up to 12 hours, and appends a small footer status after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the helper again. GitHub Pages continues to work normally when the helper is not running.
 
 Use `node scripts/local_quote_server.js --port 2211` to choose another local port for direct testing; the published dashboard only auto-checks port `2210`.
 

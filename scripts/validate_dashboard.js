@@ -37,8 +37,18 @@ function isFiniteNumber(value) {
 }
 
 // Static guard: the optional live-refresh path must never point the published dashboard at a remote service.
-if (!html.includes("const LOCAL_MARKET_REFRESH_URL = 'http://127.0.0.1:2210/api/market-refresh';")) {
-  errors.push('LOCAL_MARKET_REFRESH_URL must target http://127.0.0.1:2210/api/market-refresh.');
+const localRefreshUrls = [...html.matchAll(/https?:\/\/[^'"`\s]+\/api\/market-refresh/g)].map((match) => match[0]);
+const allowedLocalRefreshUrls = new Set([
+  'http://127.0.0.1:2210/api/market-refresh',
+  'http://localhost:2210/api/market-refresh'
+]);
+if (localRefreshUrls[0] !== 'http://127.0.0.1:2210/api/market-refresh') {
+  errors.push('The first local refresh URL must target http://127.0.0.1:2210/api/market-refresh.');
+}
+for (const url of localRefreshUrls) {
+  if (!allowedLocalRefreshUrls.has(url)) {
+    errors.push(`Unexpected local refresh URL: ${url}`);
+  }
 }
 
 if (!dashboardMatch) {
