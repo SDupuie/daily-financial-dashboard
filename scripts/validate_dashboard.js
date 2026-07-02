@@ -12,7 +12,10 @@ if (!file.startsWith(`${root}${path.sep}`) && file !== root) {
   process.exit(1);
 }
 const html = fs.readFileSync(file, 'utf8');
-const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
+const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
+const chartDataMatch = html.match(/<script type="application\/json" id="tape-chart-data">([\s\S]*?)<\/script>/);
+const cryptoChartDataMatch = html.match(/<script type="application\/json" id="crypto-chart-data">([\s\S]*?)<\/script>/);
+const minChartHistoryDays = 1826;
 
 const errors = [];
 const warnings = [];
@@ -28,10 +31,15 @@ function getNow() {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
-if (!match) {
+function isFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return false;
+  return Number.isFinite(Number(value));
+}
+
+if (!dashboardMatch) {
   errors.push('Could not find dashboard-data JSON block.');
 } else {
-  const dataBlock = match[1];
+  const dataBlock = dashboardMatch[1];
   // This guard is intentionally scoped to the embedded data block so JS escape helpers do not false-positive.
   const entityMatch = dataBlock.match(/&(amp|lt|gt);/);
   if (entityMatch) {
@@ -152,11 +160,189 @@ if (!match) {
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'IXIC', 'DJI', 'RUT', 'MXEA', 'MXEF', 'FNER', 'GSCI', 'XAU', 'XAG', 'CL', 'VIX', 'MOVE', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'MXEA', 'MXEF', 'FNER', 'GSCI', 'XAU', 'XAG', 'CL', 'VIX', 'MOVE', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
         errors.push(`The Tape is missing required ticker ${ticker}.`);
+      }
+    }
+    // Keep this map in lockstep with tape.rows[].sourceSymbol; popup charts use it as their source contract.
+    const expectedTapeSourceSymbols = new Map(Object.entries({
+      SPX: '^GSPC',
+      NDX: '^NDX',
+      DJI: '^DJI',
+      RUT: '^RUT',
+      MXEA: 'MSCI:990300',
+      MXEF: 'MSCI:891800',
+      FNER: '^FNER',
+      GSCI: 'GD=F',
+      XAU: 'GC=F',
+      XAG: 'SI=F',
+      CL: 'CL=F',
+      VIX: '^VIX',
+      MOVE: '^MOVE',
+      UST10Y: 'TREASURY:10Y',
+      UST30Y: 'TREASURY:30Y',
+      IEF: 'IEF',
+      AGG: 'AGG',
+      LQD: 'LQD',
+      HYG: 'HYG'
+    }));
+    for (const [index, row] of tapeRows.entries()) {
+      const ticker = String(row?.ticker ?? '').toUpperCase();
+      requireString(row?.sourceSymbol, `tape.rows[${index}].sourceSymbol`);
+      const expectedSource = expectedTapeSourceSymbols.get(ticker);
+      if (expectedSource && row.sourceSymbol !== expectedSource) {
+        errors.push(`tape.rows[${index}].sourceSymbol for ${ticker} must be ${expectedSource}.`);
+      }
+    }
+
+    if (!chartDataMatch) {
+      errors.push('Could not find tape-chart-data JSON block; production Tape charts must use embedded generated data.');
+    } else {
+      let chartData;
+      try {
+        chartData = JSON.parse(chartDataMatch[1]);
+      } catch (error) {
+        errors.push(`Embedded tape-chart-data JSON is invalid: ${error.message}`);
+      }
+
+      if (chartData) {
+        if (chartData.schemaVersion !== 1) {
+          errors.push('tape-chart-data.schemaVersion must be 1.');
+        }
+        if (!Array.isArray(chartData.series)) {
+          errors.push('tape-chart-data.series must be an array.');
+        }
+        if (!Number.isFinite(Number(chartData.range?.days)) || Number(chartData.range.days) < minChartHistoryDays) {
+          errors.push(`tape-chart-data.range.days must be at least ${minChartHistoryDays} so the 5Y chart shortcut has enough embedded history.`);
+        }
+        const chartSeries = Array.isArray(chartData.series) ? chartData.series : [];
+        const chartSeriesByTicker = new Map();
+        for (const [index, itemRaw] of chartSeries.entries()) {
+          const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
+          const ticker = String(item.ticker || '').toUpperCase();
+          const label = ticker || `tape-chart-data.series[${index}]`;
+          if (!ticker) errors.push(`tape-chart-data.series[${index}].ticker must be populated.`);
+          if (chartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded Tape chart series for ${ticker}.`);
+          chartSeriesByTicker.set(ticker, item);
+
+          const expectedSource = expectedTapeSourceSymbols.get(ticker);
+          if (!expectedSource) {
+            errors.push(`${label} is not a required Tape ticker.`);
+          } else if (item.sourceSymbol !== expectedSource) {
+            errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
+          }
+          if (!Array.isArray(item.bars) || item.bars.length < 2) {
+            errors.push(`${label}.bars must contain at least two daily bars for the popup chart.`);
+          } else {
+            for (const [barIndex, barRaw] of item.bars.entries()) {
+              const bar = barRaw && typeof barRaw === 'object' ? barRaw : {};
+              const barLabel = `${label}.bars[${barIndex}]`;
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
+                errors.push(`${barLabel}.time must be an ISO date.`);
+              }
+              for (const field of ['open', 'high', 'low', 'close']) {
+                if (!isFiniteNumber(bar[field])) {
+                  errors.push(`${barLabel}.${field} must be numeric.`);
+                }
+              }
+            }
+          }
+        }
+
+        for (const ticker of requiredTapeTickers) {
+          if (!chartSeriesByTicker.has(ticker)) {
+            errors.push(`Embedded Tape chart data is missing ${ticker}.`);
+          }
+        }
+
+        // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane popup layout.
+        for (const ticker of ['MXEA', 'MXEF', 'UST10Y', 'UST30Y', 'FNER', 'VIX', 'MOVE']) {
+          const item = chartSeriesByTicker.get(ticker);
+          if (item && item.noVolume !== true) {
+            errors.push(`Embedded Tape chart data for ${ticker} must mark noVolume true for the popup hint/volume-pane contract.`);
+          }
+        }
+      }
+    }
+
+    if (!cryptoChartDataMatch) {
+      errors.push('Could not find crypto-chart-data JSON block; production Crypto charts must use embedded generated data.');
+    } else {
+      let cryptoChartData;
+      try {
+        cryptoChartData = JSON.parse(cryptoChartDataMatch[1]);
+      } catch (error) {
+        errors.push(`Embedded crypto-chart-data JSON is invalid: ${error.message}`);
+      }
+
+      if (cryptoChartData) {
+        // Keep this map aligned with scripts/fetch_crypto_chart_data.js; the popup uses these Yahoo-backed sources.
+        const expectedCryptoSources = new Map(Object.entries({
+          BTC: 'BTC-USD',
+          ETH: 'ETH-USD',
+          SOL: 'SOL-USD',
+          XRP: 'XRP-USD',
+          IBIT: 'IBIT',
+          MSTR: 'MSTR'
+        }));
+        if (cryptoChartData.schemaVersion !== 1) {
+          errors.push('crypto-chart-data.schemaVersion must be 1.');
+        }
+        if (!Array.isArray(cryptoChartData.series)) {
+          errors.push('crypto-chart-data.series must be an array.');
+        }
+        if (!Number.isFinite(Number(cryptoChartData.range?.days)) || Number(cryptoChartData.range.days) < minChartHistoryDays) {
+          errors.push(`crypto-chart-data.range.days must be at least ${minChartHistoryDays} so crypto 5Y charts have enough embedded history.`);
+        }
+        const cryptoChartSeries = Array.isArray(cryptoChartData.series) ? cryptoChartData.series : [];
+        const cryptoChartSeriesByTicker = new Map();
+        for (const [index, itemRaw] of cryptoChartSeries.entries()) {
+          const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
+          const ticker = String(item.ticker || '').toUpperCase();
+          const label = ticker || `crypto-chart-data.series[${index}]`;
+          if (!ticker) errors.push(`crypto-chart-data.series[${index}].ticker must be populated.`);
+          if (cryptoChartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded Crypto chart series for ${ticker}.`);
+          cryptoChartSeriesByTicker.set(ticker, item);
+
+          const expectedSource = expectedCryptoSources.get(ticker);
+          if (!expectedSource) {
+            errors.push(`${label} is not a required Crypto chart ticker.`);
+          } else if (item.sourceSymbol !== expectedSource) {
+            errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
+          }
+          if (!Array.isArray(item.bars) || item.bars.length < 2) {
+            errors.push(`${label}.bars must contain at least two daily bars for the popup chart.`);
+          } else {
+            let previousTime = '';
+            for (const [barIndex, barRaw] of item.bars.entries()) {
+              const bar = barRaw && typeof barRaw === 'object' ? barRaw : {};
+              const barLabel = `${label}.bars[${barIndex}]`;
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
+                errors.push(`${barLabel}.time must be an ISO date.`);
+              }
+              if (previousTime && bar.time <= previousTime) {
+                errors.push(`${barLabel}.time must be strictly ascending.`);
+              }
+              previousTime = bar.time;
+              for (const field of ['open', 'high', 'low', 'close']) {
+                if (!isFiniteNumber(bar[field])) {
+                  errors.push(`${barLabel}.${field} must be numeric.`);
+                }
+              }
+              if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
+                errors.push(`${barLabel}.volume must be a non-negative number when present.`);
+              }
+            }
+          }
+        }
+        for (const ticker of expectedCryptoSources.keys()) {
+          if (!cryptoChartSeriesByTicker.has(ticker)) {
+            errors.push(`Embedded Crypto chart data is missing ${ticker}.`);
+          }
+        }
       }
     }
 

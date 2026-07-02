@@ -10,16 +10,16 @@
     "source": "Yahoo Finance Chart API",
     "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
-  "IXIC:stock": {
-    "symbol": "IXIC",
+  "NDX:stock": {
+    "symbol": "NDX",
     "type": "stock",
-    "close": 25820.14,
-    "pctChange": 2.0654966835827326,
-    "pct": "+2.07%",
-    "tradeDate": "2026-06-29",
+    "close": 30276.35,
+    "pctChange": 1.6846475935986027,
+    "pct": "+1.68%",
+    "tradeDate": "2026-06-30",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-06-30T12:05:01.162Z"
+    "verifiedAt": "2026-07-01T21:27:42.653Z"
   },
   "DJI:stock": {
     "symbol": "DJI",
@@ -119,5 +119,27 @@
     "freshness": null,
     "source": "Yahoo Finance Chart API",
     "verifiedAt": "2026-06-30T12:05:01.162Z"
+  },
+  "GSCI:stock": {
+    "symbol": "GSCI",
+    "type": "stock",
+    "close": 619.45,
+    "pctChange": 0.0807819678712206,
+    "pct": "+0.08%",
+    "tradeDate": "2026-06-30",
+    "freshness": null,
+    "source": "Yahoo Finance Chart API",
+    "verifiedAt": "2026-07-01T21:36:12.764Z"
+  },
+  "FNER:stock": {
+    "symbol": "FNER",
+    "type": "stock",
+    "close": 855.73,
+    "pctChange": -0.464103472100546,
+    "pct": "-0.46%",
+    "tradeDate": "2026-06-30",
+    "freshness": null,
+    "source": "Yahoo Finance Chart API",
+    "verifiedAt": "2026-07-01T21:39:58.897Z"
   }
 }

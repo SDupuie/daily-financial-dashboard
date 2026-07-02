@@ -10,7 +10,7 @@ This repository maintains `daily_financial_news.html`, the canonical static Dail
 
 ## Update Cadence
 
-Update `daily_financial_news.html` each market morning around 7:00 AM Central, before the U.S. open. Edit only the JSON inside:
+Update `daily_financial_news.html` each market morning around 7:00 AM Central, before the U.S. open. The main dashboard payload lives inside:
 
 ```html
 <!-- ============ DATA START — edit this block to update the dashboard ============ -->
@@ -18,9 +18,9 @@ Update `daily_financial_news.html` each market morning around 7:00 AM Central, b
 <!-- ============ DATA END ============ -->
 ```
 
-Do not touch the HTML, CSS, or JavaScript outside that block for a daily dashboard refresh.
+Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a daily dashboard refresh.
 
-Production is self-contained: the rendered dashboard reads only the embedded `dashboard-data` JSON block. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
+Production is self-contained: the rendered dashboard reads embedded `dashboard-data`, `tape-chart-data`, and `crypto-chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
 
 ## Daily Update Runbook
 
@@ -35,7 +35,7 @@ Production is self-contained: the rendered dashboard reads only the embedded `da
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
    - For stock/ETF quotes, use `node scripts/fetch_quotes.js --symbols IBIT:etf,MSTR:stock` or add the symbols needed for the run.
-   - For pre-market futures, asset-allocation ETF rows, asset-allocation portfolio summary, and cross-asset extras, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the embedded data block before publish.
+   - For pre-market futures, chart/quote data, asset-allocation ETF rows, and asset-allocation portfolio summary, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_chart_data.js` for full Tape chart bars and quote-row staging data, `node scripts/fetch_crypto_chart_data.js` for Crypto popup chart bars, and `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the appropriate embedded data block before publish.
    - Production data that must be embedded daily includes `preMarket.futures`, `preMarket.stories`, `assetAllocationPortfolio.rows`, and all rows needed by `tape.rows`.
    - In each `tape.rows[].note`, summarize the relevant market commentary or catalyst driving that market. Do not restate `last`, `delta`, or `pct`.
    - Do not name quote/news sources in visible copy. Keep source attribution and retrieval/process commentary in `footer.compiled`.
@@ -81,7 +81,7 @@ Production is self-contained: the rendered dashboard reads only the embedded `da
    - `stories`: exactly 9 fresh non-crypto stories across markets, corporate, macro, geopolitics, Fed, earnings, and other broad market themes.
    - `crypto`: refreshed crypto quote rows, Crypto Market Cap stat, Fear & Greed stat, and 4 to 6 fresh crypto notes/stories.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
-   - `weekAhead`: update on Mondays and Fridays.
+   - `weekAhead`: update on Mondays and Fridays. For full U.S. cash-market holidays, use a plain closure label such as `U.S. Markets Closed` in `tickers`; do not list separate exchange closures or append 24/7 assets such as `BTC`. Use the event text to explain why the closure matters for the week, and reserve instrument tickers for rows with an actual scheduled catalyst or market to watch.
    - `footer`: today’s compile date and concise source-family attribution.
    - Remove legacy sections that are not rendered, such as `lede` and `renesas`.
 
@@ -89,6 +89,7 @@ Production is self-contained: the rendered dashboard reads only the embedded `da
    - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
    - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
    - Do not write tautological market-status copy that states routine facts without saying why they matter.
+   - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
    - Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
    - Do not merely restate quote rows in notes or story bodies.
    - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises. When practical, set `moveRole` or `moveType` to `pending`, `reported`, `guidance`, `marketReaction`, or `surprise`.
