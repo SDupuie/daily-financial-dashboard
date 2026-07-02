@@ -231,6 +231,12 @@ function closeOnlyBar(time, close) {
   return { time, open: close, high: close, low: close, close };
 }
 
+function isUsableOhlc(open, high, low, close) {
+  if ([open, high, low, close].some((value) => value === null)) return false;
+  if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
+  return !(close > 0 && [open, high, low].some((value) => value <= 0));
+}
+
 function numberFormat(value, maximumFractionDigits = 2) {
   return new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 2,
@@ -307,25 +313,33 @@ function parseYahooSeries(row, payload, host) {
   const quote = result.indicators?.quote?.[0] || {};
   const volumes = Array.isArray(quote.volume) ? quote.volume : [];
   const hasRealVolume = volumes.some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
-  let priceOnly = false;
-
-  const bars = timestamps.map((timestamp, index) => {
+  const points = timestamps.map((timestamp, index) => {
     const close = asFiniteNumber(quote.close?.[index]);
     if (!Number.isFinite(timestamp) || close === null) return null;
 
     const open = asFiniteNumber(quote.open?.[index]);
     const high = asFiniteNumber(quote.high?.[index]);
     const low = asFiniteNumber(quote.low?.[index]);
-    const hasOhlc = open !== null && high !== null && low !== null;
-    // Some Yahoo index feeds return closes without complete OHLC or volume; synthesize candles so the popup can stay uniform.
-    const bar = hasOhlc
-      ? { time: isoDateFromEpochSeconds(timestamp), open, high, low, close }
-      : closeOnlyBar(isoDateFromEpochSeconds(timestamp), close);
-
-    if (!hasOhlc) priceOnly = true;
     const volume = asFiniteNumber(volumes[index]);
-    if (hasRealVolume && volume !== null) {
-      bar.volume = volume;
+    return {
+      time: isoDateFromEpochSeconds(timestamp),
+      open,
+      high,
+      low,
+      close,
+      hasOhlc: isUsableOhlc(open, high, low, close),
+      volume
+    };
+  }).filter(Boolean);
+  const priceOnly = !points.some((point) => point.hasOhlc);
+  // True close-only feeds get synthetic OHLC; mixed Yahoo feeds keep OHLC and drop isolated bad rows.
+  const bars = points.map((point) => {
+    if (!priceOnly && !point.hasOhlc) return null;
+    const bar = priceOnly
+      ? closeOnlyBar(point.time, point.close)
+      : { time: point.time, open: point.open, high: point.high, low: point.low, close: point.close };
+    if (hasRealVolume && point.volume !== null) {
+      bar.volume = point.volume;
     }
     return bar;
   }).filter(Boolean);

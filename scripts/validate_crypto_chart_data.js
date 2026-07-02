@@ -77,6 +77,16 @@ function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
 
+function isCoherentOhlc(bar) {
+  const open = Number(bar.open);
+  const high = Number(bar.high);
+  const low = Number(bar.low);
+  const close = Number(bar.close);
+  if (![open, high, low, close].every(Number.isFinite)) return false;
+  if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
+  return !(close > 0 && [open, high, low].some((value) => value <= 0));
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const errors = [];
@@ -152,8 +162,18 @@ function main() {
           errors.push(`${barLabel}.${key} must be numeric.`);
         }
       }
+      if (!isCoherentOhlc(bar)) {
+        errors.push(`${barLabel} has incoherent OHLC values.`);
+      }
       if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
         errors.push(`${barLabel}.volume must be a non-negative number when present.`);
+      }
+      // Close-only sources intentionally duplicate close into OHLC so chart rendering and readouts stay consistent.
+      if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
+        errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
+      }
+      if (item.noVolume && bar.volume !== undefined) {
+        errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
       }
     }
   }
