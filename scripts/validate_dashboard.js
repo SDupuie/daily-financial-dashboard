@@ -242,16 +242,31 @@ if (!dashboardMatch) {
           if (!Array.isArray(item.bars) || item.bars.length < 2) {
             errors.push(`${label}.bars must contain at least two daily bars for the popup chart.`);
           } else {
+            let previousTime = '';
             for (const [barIndex, barRaw] of item.bars.entries()) {
               const bar = barRaw && typeof barRaw === 'object' ? barRaw : {};
               const barLabel = `${label}.bars[${barIndex}]`;
               if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
                 errors.push(`${barLabel}.time must be an ISO date.`);
               }
+              if (previousTime && bar.time <= previousTime) {
+                errors.push(`${barLabel}.time must be strictly ascending.`);
+              }
+              previousTime = bar.time;
               for (const field of ['open', 'high', 'low', 'close']) {
                 if (!isFiniteNumber(bar[field])) {
                   errors.push(`${barLabel}.${field} must be numeric.`);
                 }
+              }
+              if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
+                errors.push(`${barLabel}.volume must be a non-negative number when present.`);
+              }
+              // Close-only sources intentionally duplicate close into OHLC so Lightweight Charts can render consistently.
+              if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
+                errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
+              }
+              if (item.noVolume && bar.volume !== undefined) {
+                errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
               }
             }
           }

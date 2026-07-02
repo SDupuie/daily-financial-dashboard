@@ -142,20 +142,6 @@ async function mapLimit(items, limit, worker) {
   return results;
 }
 
-function numberFormat(value, maximumFractionDigits = 2) {
-  return new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits
-  }).format(value);
-}
-
-function signedNumber(value) {
-  const formatted = numberFormat(Math.abs(value), 2);
-  if (value > 0) return `+${formatted}`;
-  if (value < 0) return `-${formatted}`;
-  return '0.00';
-}
-
 function signedPct(value) {
   return `${new Intl.NumberFormat('en-US', {
     minimumFractionDigits: 2,
@@ -335,7 +321,7 @@ function createServer(args) {
       const now = Date.now();
       if (!bypassCache && cachedPayload && args.cacheMs && now - cachedAt < args.cacheMs) {
         // Cache only server-side fetch work; browser responses are still no-store so the dashboard can retry after reloads.
-        sendJson(res, 200, { ...cachedPayload, cached: true });
+        sendJson(res, cachedPayload.ok ? 200 : 502, { ...cachedPayload, cached: true });
         return;
       }
 
@@ -344,13 +330,17 @@ function createServer(args) {
         inFlight = null;
       });
       const payload = await inFlight;
-      cachedPayload = payload;
+      const successCount = payload.tape.series.length + payload.crypto.series.length;
+      // Fresh and cached responses share this normalized shape; only the per-request cached flag changes.
+      const responsePayload = {
+        ...payload,
+        ok: Boolean(successCount)
+      };
+      cachedPayload = responsePayload;
       cachedAt = Date.now();
 
-      const successCount = payload.tape.series.length + payload.crypto.series.length;
-      sendJson(res, successCount ? 200 : 502, {
-        ...payload,
-        ok: Boolean(successCount),
+      sendJson(res, responsePayload.ok ? 200 : 502, {
+        ...responsePayload,
         cached: false
       });
     } catch (error) {
