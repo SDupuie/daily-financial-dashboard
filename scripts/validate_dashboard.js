@@ -31,6 +31,24 @@ function getNow() {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
+function chicagoIsoDate(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function allowedNewsDates(now) {
+  return new Set([
+    chicagoIsoDate(now),
+    chicagoIsoDate(new Date(now.getTime() - 24 * 60 * 60 * 1000))
+  ]);
+}
+
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
@@ -103,6 +121,20 @@ if (!dashboardMatch) {
         errors.push(`${label} must be an ISO date.`);
       }
     };
+    const validateStoryFreshness = (itemRaw, label) => {
+      const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
+      if (item.referencePage !== undefined && typeof item.referencePage !== 'boolean') {
+        errors.push(`${label}.referencePage must be boolean when provided.`);
+      }
+      if (item.referencePage === true) {
+        return;
+      }
+      requireIsoDate(item.publishedOn, `${label}.publishedOn`);
+      const publishedOn = String(item.publishedOn ?? '').trim();
+      if (publishedOn && !allowedStoryDates.has(publishedOn)) {
+        errors.push(`${label}.publishedOn must be today or yesterday in America/Chicago unless referencePage is true.`);
+      }
+    };
     const validateDividendEvents = (events, label, { optional = false } = {}) => {
       if (events === undefined && optional) return;
       if (!Array.isArray(events)) {
@@ -138,6 +170,7 @@ if (!dashboardMatch) {
     const expectedMonth = part('month');
     const expectedDate = part('day');
     const expectedYear = part('year');
+    const allowedStoryDates = allowedNewsDates(now);
     const mastheadDate = String(data.masthead?.date ?? '');
     const footerCompiled = String(data.footer?.compiled ?? '');
     const dateMsg = `Masthead/footer may be stale: expected ${expectedDay}, ${expectedMonth} ${expectedDate}, ${expectedYear}.`;
@@ -428,6 +461,7 @@ if (!dashboardMatch) {
       requireString(story.title, `preMarket.stories[${index}].title`);
       requireString(story.body, `preMarket.stories[${index}].body`);
       requireHttpsUrl(story.url, `preMarket.stories[${index}]`);
+      validateStoryFreshness(story, `preMarket.stories[${index}]`);
     }
 
     // Portfolio validation is instrument-level only; tactical weights/model outputs are intentionally out of scope here.
@@ -583,6 +617,7 @@ if (!dashboardMatch) {
       requireString(story.title, 'stories[].title');
       requireString(story.body, `Story "${story.title ?? '(untitled)'}" body`);
       requireHttpsUrl(story.url, `Story "${story.title ?? '(untitled)'}"`);
+      validateStoryFreshness(story, `Story "${story.title ?? '(untitled)'}"`);
       const storyTag = String(story.tag ?? '').trim().toLowerCase();
       const storyTone = String(story.tone ?? '').trim().toLowerCase();
       if (storyTag === 'crypto' || storyTone === 'crypto') {

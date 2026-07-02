@@ -77,7 +77,9 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
      - `crypto bitcoin [today] OR [yesterday]`
    - Add targeted searches only for gaps: Fed, oil, geopolitics, major earnings, semis/AI, crypto regulation, ETF flows, stablecoins, hacks/security, protocol updates, and market structure.
    - Discard any story without a publication date from today or yesterday unless it is a standing calendar/source page.
-   - Each `stories[]`, `preMarket.stories[]`, and `crypto.notes[]` item must include a direct `url`.
+   - Each `stories[]` and `preMarket.stories[]` item must include a direct `url` plus a `publishedOn` local date in `YYYY-MM-DD` format so validation can reject stale articles before commit.
+   - If a link is intentionally an evergreen reference page rather than a dated article, mark it with `referencePage: true`; use that exception sparingly for maintained calendars or official schedule pages, not ordinary news stories.
+   - Each `crypto.notes[]` item must include a direct `url`.
    - Do not repeat promoted `preMarket.stories[]` items in `stories[]`; use What’s Moving Today for additional market breadth.
    - Keep crypto-specific headlines, ETF-flow stories, proxy-equity stories, stablecoin stories, and token/regulation stories out of `stories[]`; those belong in `crypto.notes[]` unless the user explicitly asks to feature crypto in What’s Moving Today.
    - When more than one reputable article covers the same basic story, prefer a free-to-read or less paywalled link. This is a preference, not a hard rule; use the paywalled source when it is clearly the best, original, or most reliable source.
