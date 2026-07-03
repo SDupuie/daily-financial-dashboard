@@ -137,7 +137,7 @@ function parseSeries(payload) {
   const closes = result?.indicators?.quote?.[0]?.close || [];
   const points = timestamps.map((timestamp, index) => {
     const price = Number(closes[index]);
-    return Number.isFinite(timestamp) && Number.isFinite(price)
+    return Number.isFinite(timestamp) && Number.isFinite(price) && price > 0
       ? [timestamp, price]
       : null;
   }).filter(Boolean);
