@@ -88,6 +88,10 @@ These notes apply to dashboard reviews, audits, regression audits, refactoring r
 - Do not classify a finding as a new regression unless the immediately preceding change or current uncommitted diff clearly introduced it.
 - When a repeated pattern is found, complete a focused sweep for the same pattern before reporting.
 - Check stale UI labels, variable names, comments, test names, renamed fields, renamed controls, dead code, unreachable code, unused helpers, and documentation drift.
+- For refactor audits, run or approximate a mechanical declaration/reference sweep for touched JavaScript and embedded scripts. Investigate single-use or zero-use helpers, constants, local variables, event handlers, CSS hooks, data keys, and renderer helpers before reporting or removing them.
+- Audit user-facing and developer-facing diagnostic text, including validator errors, console messages, comments, README contracts, and runbook wording. Treat stale error text as a real finding when it would mislead the next maintenance pass even if behavior still validates.
+- After a rename or data-contract change, compare renderer permissiveness with the canonical contract. Flag leftover compatibility fallbacks, alternate legacy keys, default story/data sources, optional tag aliases, and broad `oldName || newName` patterns unless they are intentionally documented backward compatibility.
+- When a renderer fallback is intentionally kept, verify the validator and documentation name that fallback and explain why production still needs it. Otherwise, prefer making the renderer, validator, generated data, and documentation strict in the same direction.
 - When validation code changes, audit whether the validation could pass while the intended behavior remains broken.
 
 ## Audit Completeness Protocol
@@ -109,6 +113,7 @@ For broad dashboard audits, complete separate passes for:
 13. Dead code, stale references, and unused helpers
 14. Test and validation coverage gaps
 15. Documentation gaps that materially affect maintainability
+16. Renderer/validator/data-contract strictness, including legacy fallbacks and aliases
 
 Before reporting findings, create an internal checklist of the relevant passes. Do not produce the audit report until the in-scope passes have been completed.
 

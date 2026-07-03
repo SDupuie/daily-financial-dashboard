@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Tape Row Chart Discoverability Options</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --blue: #2457ff;
+      --red: #d64f45;
+      --green: #18885b;
+      --shadow: 0 14px 34px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 24px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    button { font: inherit; }
+
+    .page {
+      width: min(1280px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 26px 0 56px;
+    }
+
+    .topline {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: var(--gap-xl);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .topline .right { text-align: right; }
+
+    .brand {
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(34px, 6vw, 74px);
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 0.92;
+      text-align: center;
+      text-transform: none;
+    }
+
+    .brand span {
+      color: var(--blue);
+      font-style: italic;
+      font-weight: 500;
+    }
+
+    .opening-board {
+      padding: 22px 0 2px;
+    }
+
+    .opening-board h1 {
+      max-width: 900px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(25px, 3.2vw, 39px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.08;
+    }
+
+    .opening-deck {
+      max-width: 790px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .variant {
+      margin-top: 34px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-lg);
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .section-label,
+    .tape-group-label,
+    .mini-label {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 38px);
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .section-note {
+      max-width: 470px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .tape-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .tape-selector {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .tape-selector-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 12px;
+    }
+
+    .tape-selector-button[aria-selected="true"] {
+      border-color: var(--line);
+      background: #eef1f6;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
+    }
+
+    .tape-selector-count {
+      margin-left: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .tape-group-label {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-md);
+      align-items: center;
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .header-cue {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      justify-self: end;
+      min-height: 24px;
+      border: 1px solid #cfd8ff;
+      border-radius: 999px;
+      background: #f3f6ff;
+      color: var(--blue);
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 9px;
+      text-transform: none;
+    }
+
+    .header-cue svg,
+    .prompt-icon svg,
+    .row-affordance svg {
+      width: 15px;
+      height: 15px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .inline-chart-slot {
+      display: grid;
+      grid-template-rows: 0fr;
+      overflow: hidden;
+      border-bottom: 0 solid var(--line);
+      background: #f9fbfd;
+      opacity: 0;
+      transition: grid-template-rows 220ms ease, opacity 180ms ease, border-bottom-width 180ms ease;
+    }
+
+    .inline-chart-slot.is-open {
+      grid-template-rows: 1fr;
+      border-bottom-width: 1px;
+      opacity: 1;
+    }
+
+    .inline-chart-inner {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .chart-card {
+      display: grid;
+      grid-template-rows: auto minmax(180px, 1fr) auto;
+      min-height: 310px;
+      background: var(--panel);
+      transform: translateY(-14px);
+      transition: transform 220ms ease;
+    }
+
+    .inline-chart-slot.is-open .chart-card {
+      transform: translateY(0);
+    }
+
+    .chart-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-md);
+      align-items: start;
+      padding: 14px 20px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .chart-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .chart-meta {
+      margin-top: 5px;
+      color: #4b5563;
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 14px;
+    }
+
+    .chart-close {
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    .chart-close:hover,
+    .chart-close:focus-visible {
+      border-color: var(--ink);
+      outline: none;
+    }
+
+    .chart-stage {
+      position: relative;
+      min-height: 0;
+      padding: 0 8px;
+    }
+
+    .chart-svg {
+      width: 100%;
+      height: 100%;
+      min-height: 180px;
+      display: block;
+      background: #fff;
+    }
+
+    .chart-readout {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      align-items: center;
+      border-top: 1px solid var(--line);
+      padding: 9px 20px 15px;
+      color: #4b5563;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 16px;
+    }
+
+    .chart-readout strong {
+      color: var(--ink);
+      font-weight: 900;
+    }
+
+    .first-use-prompt {
+      display: none;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: var(--gap-sm);
+      align-items: center;
+      min-height: 42px;
+      border-bottom: 1px solid var(--line);
+      background: #f5f8ff;
+      color: #31405a;
+      padding: 8px 14px;
+    }
+
+    .first-use-prompt.is-visible {
+      display: grid;
+    }
+
+    .prompt-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border: 1px solid #cfd8ff;
+      border-radius: 7px;
+      background: #fff;
+      color: var(--blue);
+    }
+
+    .prompt-copy {
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 750;
+      line-height: 1.25;
+    }
+
+    .prompt-copy strong {
+      color: var(--ink);
+      font-weight: 900;
+    }
+
+    .quote-row {
+      display: grid;
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      text-align: left;
+    }
+
+    .quote-row:last-child { border-bottom: none; }
+
+    .tape-row {
+      grid-template-columns: 190px minmax(0, 1fr) 170px;
+      gap: var(--gap-lg);
+      align-items: center;
+      min-height: 76px;
+      padding: 12px 14px;
+      border-left: 3px solid transparent;
+      cursor: pointer;
+    }
+
+    .variant-hover .tape-row {
+      grid-template-columns: 190px minmax(0, 1fr) 170px 104px;
+    }
+
+    .tape-row.up { border-left-color: var(--green); }
+    .tape-row.down { border-left-color: var(--red); }
+    .tape-row.flat { border-left-color: transparent; }
+
+    .tape-row:hover,
+    .tape-row:focus-visible {
+      background: #fbfcff;
+      outline: none;
+    }
+
+    .variant-prompt .tape-row:hover,
+    .variant-prompt .tape-row:focus-visible,
+    .variant-header .tape-row:hover,
+    .variant-header .tape-row:focus-visible {
+      background: #f4f8ff;
+      box-shadow: inset 0 0 0 1px rgba(36, 87, 255, 0.12);
+    }
+
+    .tape-row[aria-selected="true"] {
+      background: #f1f6ff;
+      box-shadow: inset 0 0 0 1px rgba(36, 87, 255, 0.16);
+    }
+
+    .instrument {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .entity-name {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+
+    .entity-sub {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0.04em;
+      line-height: 1;
+    }
+
+    .tape-signal {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.35;
+    }
+
+    .quote-readout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 5px;
+      align-items: baseline;
+      justify-items: end;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .quote-last {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .metric-pair {
+      display: inline-flex;
+      justify-content: flex-end;
+      gap: 6px;
+      width: 100%;
+      white-space: nowrap;
+    }
+
+    .metric-value,
+    .metric-sep {
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .metric-sep { color: var(--muted); }
+    .metric-value.up { color: var(--green); }
+    .metric-value.down { color: var(--red); }
+    .metric-value.flat { color: var(--muted); }
+
+    .row-affordance {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      justify-self: end;
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1;
+      padding: 0 9px;
+      opacity: 0;
+      transform: translateX(4px);
+      transition: opacity 140ms ease, transform 140ms ease, color 140ms ease, border-color 140ms ease;
+    }
+
+    .variant-hover .tape-row:hover .row-affordance,
+    .variant-hover .tape-row:focus-visible .row-affordance,
+    .variant-hover .tape-row[aria-selected="true"] .row-affordance {
+      border-color: #cfd8ff;
+      color: var(--blue);
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    @media (max-width: 940px) {
+      .tape-row,
+      .variant-hover .tape-row {
+        grid-template-columns: minmax(0, 1fr) minmax(max-content, 170px);
+        grid-template-areas:
+          "instrument quote"
+          "signal signal"
+          "affordance affordance";
+        row-gap: var(--gap-sm);
+      }
+
+      .instrument { grid-area: instrument; }
+      .tape-signal { grid-area: signal; }
+      .quote-readout { grid-area: quote; }
+      .row-affordance {
+        grid-area: affordance;
+        justify-self: start;
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        width: calc(100% - 28px);
+        padding: 18px 0 44px;
+      }
+
+      .topline {
+        grid-template-columns: 1fr;
+        gap: var(--gap-sm);
+        text-align: center;
+      }
+
+      .topline .right { text-align: center; }
+
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
+
+      .section-note { text-align: left; }
+
+      .tape-toolbar {
+        align-items: stretch;
+        padding: 8px;
+      }
+
+      .tape-selector {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .tape-selector-button {
+        width: 100%;
+        justify-content: center;
+      }
+
+      .tape-group-label {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+
+      .header-cue {
+        justify-self: start;
+      }
+
+      .chart-card {
+        min-height: 300px;
+      }
+
+      .chart-head {
+        padding: 14px 14px 12px;
+      }
+
+      .chart-title {
+        font-size: 22px;
+      }
+
+      .chart-readout {
+        padding: 8px 14px 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="topline">
+        <div>Thursday, July 2, 2026</div>
+        <div class="brand">Daily <span>Financial</span> Dashboard</div>
+        <div class="right">Discoverability Study</div>
+      </div>
+
+      <section class="opening-board" aria-label="Opening note">
+        <h1>Three ways to make row-selected charts feel discoverable without adding a permanent chart button to every row.</h1>
+        <p class="opening-deck">Each option starts closed by default. Select any market row to open the inline chart directly below the Equities header.</p>
+      </section>
+    </header>
+
+    <main id="mockup-root"></main>
+  </div>
+
+  <script>
+    const variants = [
+      {
+        key: 'prompt',
+        className: 'variant-prompt',
+        eyebrow: 'Option 1',
+        title: 'First-use prompt slot',
+        note: 'A thin prompt under the group label makes the interaction obvious on first load, then gives way to the chart.',
+        headerCue: '',
+        prompt: 'Select a market row to view its chart.'
+      },
+      {
+        key: 'hover',
+        className: 'variant-hover',
+        eyebrow: 'Option 2',
+        title: 'Hover and focus reveal',
+        note: 'Rows stay quiet until hover or keyboard focus reveals a lightweight chart affordance.',
+        headerCue: '',
+        prompt: ''
+      },
+      {
+        key: 'header',
+        className: 'variant-header',
+        eyebrow: 'Option 3',
+        title: 'Header chart cue',
+        note: 'The group label owns the chart behavior, while row hover states confirm that rows are selectable.',
+        headerCue: 'Chart: select row',
+        prompt: ''
+      }
+    ];
+
+    const rows = [
+      { name: 'S&P 500', ticker: 'SPX', last: '7,452.98', delta: '-30.25', pct: '-0.40%', dir: 'down', source: '^GSPC', note: "Wednesday's slide looked more like a chip-led valuation reset than a full breadth break, leaving payrolls as the next test of whether buyers stay engaged outside semis." },
+      { name: 'Nasdaq 100', ticker: 'NDX', last: '29,220.91', delta: '-588.22', pct: '-1.97%', dir: 'down', source: '^NDX', note: "Semiconductors and AI-capex anxiety did the most damage here, so the jobs report now has to compete with an active unwind in this year's leadership trade." },
+      { name: 'Dow Industrials', ticker: 'DJI', last: '52,661.35', delta: '+356.11', pct: '+0.68%', dir: 'up', source: '^DJI', note: 'Financials and steadier cyclicals kept the Dow nearly flat, which says the broader tape can still absorb tech weakness if yields do not lurch higher again.' },
+      { name: 'Russell 2000', ticker: 'RUT', last: '2,981.49', delta: '-31.10', pct: '-1.03%', dir: 'down', source: '^RUT', note: 'Small caps faded with the broader risk tone and still need a cleaner post-payroll rate signal before domestic cyclicals can sustainably re-rate.' }
+    ];
+
+    const selected = new Map();
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+
+    function chartIcon() {
+      return `
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 16.5h14"></path>
+          <path d="M5 13l3-4 3 2 4-6"></path>
+          <path d="M15 5h-4"></path>
+          <path d="M15 5v4"></path>
+        </svg>
+      `;
+    }
+
+    function rowByTicker(ticker) {
+      return rows.find((row) => row.ticker === ticker);
+    }
+
+    function numericLast(row) {
+      const value = Number(String(row.last).replace(/[$,%]/g, '').replace(/,/g, '').replace(/[^0-9.-]/g, ''));
+      return Number.isFinite(value) ? value : 100;
+    }
+
+    function chartSvg(row) {
+      const width = 900;
+      const height = 220;
+      const pad = { top: 24, right: 42, bottom: 28, left: 28 };
+      const base = numericLast(row);
+      const direction = row.dir === 'down' ? -1 : 1;
+      const values = Array.from({ length: 36 }, (_item, index) => {
+        const drift = direction * base * (index / 35 - 0.55) * 0.08;
+        const wave = Math.sin(index * 0.52 + row.ticker.length) * base * 0.013;
+        return Math.max(0.01, base + drift + wave);
+      });
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = Math.max(0.01, max - min);
+      const xStep = (width - pad.left - pad.right) / Math.max(1, values.length - 1);
+      const y = (value) => pad.top + ((max - value) / span) * (height - pad.top - pad.bottom);
+      const points = values.map((value, index) => `${index ? 'L' : 'M'}${(pad.left + index * xStep).toFixed(1)} ${y(value).toFixed(1)}`).join(' ');
+      const area = `${points} L${width - pad.right} ${height - pad.bottom} L${pad.left} ${height - pad.bottom} Z`;
+      const tone = row.dir === 'down' ? '#d64f45' : '#18885b';
+      const fill = row.dir === 'down' ? 'rgba(214, 79, 69, 0.15)' : 'rgba(24, 136, 91, 0.15)';
+      return `
+        <svg class="chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(row.name)} chart preview">
+          <line x1="${pad.left}" x2="${width - pad.right}" y1="66" y2="66" stroke="#eef1f6"></line>
+          <line x1="${pad.left}" x2="${width - pad.right}" y1="116" y2="116" stroke="#eef1f6"></line>
+          <line x1="${pad.left}" x2="${width - pad.right}" y1="166" y2="166" stroke="#eef1f6"></line>
+          <path d="${area}" fill="${fill}"></path>
+          <path d="${points}" fill="none" stroke="${tone}" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></path>
+        </svg>
+      `;
+    }
+
+    function chartPanel(row) {
+      if (!row) return '';
+      return `
+        <div class="chart-card">
+          <header class="chart-head">
+            <div>
+              <h3 class="chart-title">${esc(row.name)}</h3>
+              <div class="chart-meta">${esc(row.ticker)} · ${esc(row.source)} · Daily OHLC</div>
+            </div>
+            <button class="chart-close" type="button" data-close aria-label="Close chart">&times;</button>
+          </header>
+          <div class="chart-stage">${chartSvg(row)}</div>
+          <div class="chart-readout">
+            <span>Last <strong>${esc(row.last)}</strong></span>
+            <span>Move <strong>${esc(row.delta)} / ${esc(row.pct)}</strong></span>
+            <span>Range <strong>3M</strong></span>
+          </div>
+        </div>
+      `;
+    }
+
+    function promptHtml(variant, isOpen) {
+      if (!variant.prompt) return '';
+      return `
+        <div class="first-use-prompt ${isOpen ? '' : 'is-visible'}">
+          <span class="prompt-icon">${chartIcon()}</span>
+          <span class="prompt-copy"><strong>${esc(variant.prompt)}</strong> Chart opens here.</span>
+        </div>
+      `;
+    }
+
+    function rowHtml(row, variant, activeTicker) {
+      const isSelected = row.ticker === activeTicker;
+      const affordance = variant.key === 'hover'
+        ? `<span class="row-affordance">${chartIcon()}<span>${isSelected ? 'Selected' : 'View chart'}</span></span>`
+        : '';
+      return `
+        <button class="quote-row tape-row ${esc(row.dir)}" type="button" data-variant="${esc(variant.key)}" data-ticker="${esc(row.ticker)}" aria-selected="${isSelected}">
+          <span class="instrument">
+            <strong class="entity-name">${esc(row.name)}</strong>
+            <span class="entity-sub">${esc(row.ticker)}</span>
+          </span>
+          <span class="tape-signal">${esc(row.note)}</span>
+          <span class="quote-readout" aria-label="${esc(row.name)} quote">
+            <span class="quote-last">${esc(row.last)}</span>
+            <span class="metric-pair">
+              <span class="metric-value ${esc(row.dir)}">${esc(row.delta)}</span>
+              <span class="metric-sep">/</span>
+              <span class="metric-value ${esc(row.dir)}">${esc(row.pct)}</span>
+            </span>
+          </span>
+          ${affordance}
+        </button>
+      `;
+    }
+
+    function variantHtml(variant) {
+      const activeTicker = selected.get(variant.key) || '';
+      const activeRow = rowByTicker(activeTicker);
+      const isOpen = Boolean(activeRow);
+      const headerCue = variant.headerCue
+        ? `<span class="header-cue">${chartIcon()}<span>${esc(isOpen ? `Chart: ${activeRow.ticker}` : variant.headerCue)}</span></span>`
+        : '';
+      return `
+        <section class="variant ${esc(variant.className)}" aria-labelledby="${esc(variant.key)}-title">
+          <div class="section-head">
+            <div>
+              <div class="section-label">${esc(variant.eyebrow)}</div>
+              <h2 class="section-title" id="${esc(variant.key)}-title">${esc(variant.title)}</h2>
+            </div>
+            <div class="section-note">${esc(variant.note)}</div>
+          </div>
+          <div class="surface">
+            <div class="tape-toolbar">
+              <div class="tape-selector" role="tablist" aria-label="${esc(variant.title)} tape sections">
+                <button class="tape-selector-button" type="button" role="tab" aria-selected="true">Equities<span class="tape-selector-count" aria-hidden="true">4</span></button>
+                <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Sectors<span class="tape-selector-count" aria-hidden="true">5</span></button>
+                <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Commodities<span class="tape-selector-count" aria-hidden="true">4</span></button>
+                <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Rates<span class="tape-selector-count" aria-hidden="true">5</span></button>
+              </div>
+            </div>
+            <section class="tape-group" role="tabpanel">
+              <div class="tape-group-label">
+                <span>Equities</span>
+                ${headerCue}
+              </div>
+              ${promptHtml(variant, isOpen)}
+              <div class="inline-chart-slot ${isOpen ? 'is-open' : ''}">
+                <div class="inline-chart-inner">${chartPanel(activeRow)}</div>
+              </div>
+              ${rows.map((row) => rowHtml(row, variant, activeTicker)).join('')}
+            </section>
+          </div>
+        </section>
+      `;
+    }
+
+    function render() {
+      document.getElementById('mockup-root').innerHTML = variants.map(variantHtml).join('');
+    }
+
+    document.addEventListener('click', (event) => {
+      const close = event.target.closest('[data-close]');
+      if (close) {
+        const section = close.closest('.variant');
+        const variant = variants.find((item) => section?.classList.contains(item.className));
+        if (variant) selected.delete(variant.key);
+        render();
+        return;
+      }
+
+      const row = event.target.closest('[data-ticker]');
+      if (!row) return;
+      const key = row.dataset.variant;
+      selected.set(key, selected.get(key) === row.dataset.ticker ? '' : row.dataset.ticker);
+      if (!selected.get(key)) selected.delete(key);
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

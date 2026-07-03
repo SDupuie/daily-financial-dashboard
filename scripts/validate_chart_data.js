@@ -56,15 +56,18 @@ function readChartableRows(file) {
     throw new Error(`Could not find dashboard-data JSON block in ${file}`);
   }
   const data = JSON.parse(match[1]);
+  // README Data Contracts make tape.rows the only chartable ticker source; section decides quoteRows shape.
   const tapeRows = Array.isArray(data.tape?.rows)
-    ? data.tape.rows.map((row) => ({ ...row, section: 'tape', ticker: row?.ticker }))
+    ? data.tape.rows
+      .filter((row) => String(row?.group ?? '') !== 'Crypto')
+      .map((row) => ({ ...row, section: 'tape', ticker: row?.ticker }))
     : [];
-  const cryptoRows = Array.isArray(data.crypto?.tape)
-    ? data.crypto.tape
-      .filter((row) => row?.sourceSymbol)
-      .map((row) => ({ ...row, section: 'crypto', ticker: row?.sym || row?.ticker }))
+  const cryptoTickerRows = Array.isArray(data.tape?.rows)
+    ? data.tape.rows
+      .filter((row) => String(row?.group ?? '') === 'Crypto' && row?.sourceSymbol)
+      .map((row) => ({ ...row, section: 'crypto', ticker: row?.ticker }))
     : [];
-  return [...tapeRows, ...cryptoRows];
+  return [...tapeRows, ...cryptoTickerRows];
 }
 
 function isIsoDate(value) {

@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Allocation Compact Chart Cards Mockup</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --blue: #2457ff;
+      --cyan: #087ea4;
+      --green: #18885b;
+      --red: #d64f45;
+      --gold: #a06b00;
+      --violet: #6b5bbd;
+      --shadow: 0 14px 34px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+      --card-radius: 8px;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .page {
+      width: min(1220px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 26px 0 52px;
+    }
+
+    .topline {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-lg);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+    }
+
+    .brand {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(31px, 5vw, 60px);
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 0.96;
+    }
+
+    .mockup-nav {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .mockup-nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: var(--panel);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .mockup-nav a.current {
+      border-color: rgba(36, 87, 255, 0.32);
+      background: #edf2ff;
+      color: var(--blue);
+    }
+
+    .section {
+      margin-top: 34px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-lg);
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .section-label,
+    .mini-label {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .section-label {
+      margin-bottom: 5px;
+    }
+
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 38px);
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .portfolio-total-return {
+      display: grid;
+      justify-items: end;
+      gap: 2px;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .portfolio-total-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 23px;
+      font-weight: 900;
+      line-height: 1.05;
+    }
+
+    .portfolio-total-label {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(330px, 0.54fr);
+      gap: var(--gap-md);
+      align-items: start;
+    }
+
+    .portfolio-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(244px, 1fr));
+      gap: var(--gap-sm);
+    }
+
+    .portfolio-card {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        "swatch title metrics"
+        "chart chart chart";
+      gap: 10px 12px;
+      align-items: center;
+      min-height: 132px;
+      border: 1px solid var(--line);
+      border-radius: var(--card-radius);
+      padding: 13px 14px 12px;
+      background: #ffffff;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .portfolio-card:hover,
+    .portfolio-card:focus-visible,
+    .portfolio-card.active {
+      border-color: rgba(36, 87, 255, 0.36);
+      background: #fbfcff;
+      outline: none;
+    }
+
+    .swatch {
+      grid-area: swatch;
+      width: 9px;
+      height: 44px;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+
+    .portfolio-card-main {
+      grid-area: title;
+      min-width: 0;
+    }
+
+    .portfolio-card-title {
+      font-size: 14px;
+      font-weight: 850;
+      line-height: 1.15;
+    }
+
+    .portfolio-card-ticker {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 6px;
+      color: #1f2937;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.02em;
+    }
+
+    .portfolio-card-metrics {
+      grid-area: metrics;
+      display: grid;
+      gap: 8px;
+      justify-items: end;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .metric-pair {
+      display: inline-flex;
+      justify-content: flex-end;
+      gap: 6px;
+      width: 100%;
+      white-space: nowrap;
+    }
+
+    .metric-value,
+    .metric-sep {
+      font-size: 17px;
+      font-weight: 850;
+    }
+
+    .metric-sep {
+      color: var(--muted);
+    }
+
+    .metric-value.up { color: var(--green); }
+    .metric-value.down { color: var(--red); }
+    .metric-value.flat { color: var(--muted); }
+
+    .portfolio-card-price {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 850;
+      line-height: 1.05;
+    }
+
+    .sparkline {
+      grid-area: chart;
+      width: 100%;
+      height: 56px;
+      overflow: visible;
+    }
+
+    .focus-panel {
+      position: sticky;
+      top: 18px;
+      display: grid;
+      gap: var(--gap-md);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      background: #fbfcff;
+    }
+
+    .focus-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-md);
+      align-items: start;
+    }
+
+    .focus-title {
+      margin: 2px 0 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 27px;
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .focus-ticker {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .range-control {
+      display: inline-flex;
+      justify-self: end;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      padding: 3px;
+    }
+
+    .range-control button {
+      min-width: 38px;
+      min-height: 28px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+
+    .range-control button[aria-pressed="true"] {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .focus-chart {
+      width: 100%;
+      aspect-ratio: 1.55 / 1;
+      min-height: 230px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #ffffff;
+    }
+
+    .focus-stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .stat {
+      display: grid;
+      gap: 2px;
+      border-top: 3px solid var(--line);
+      padding-top: 7px;
+    }
+
+    .stat strong {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 15px;
+      line-height: 1.1;
+    }
+
+    .stat span {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .source-note {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .vti { background: #2457ff; }
+    .vea { background: #087ea4; }
+    .vwo { background: #18885b; }
+    .vnq { background: #a06b00; }
+    .dbc { background: #d64f45; }
+    .gld { background: #c48a05; }
+    .ief { background: #6b5bbd; }
+    .boxx { background: #475569; }
+
+    @media (max-width: 920px) {
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .focus-panel {
+        position: static;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .page {
+        width: min(100% - 24px, 1220px);
+        padding-top: 14px;
+      }
+
+      .topline,
+      .section-head,
+      .focus-head {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+
+      .mockup-nav {
+        justify-content: flex-start;
+      }
+
+      .portfolio-total-return {
+        justify-items: start;
+        text-align: left;
+      }
+
+      .section {
+        padding: 12px;
+      }
+
+      .portfolio-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .focus-chart {
+        min-height: 210px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topline">
+      <div class="brand">Daily Financial Dashboard</div>
+      <nav class="mockup-nav" aria-label="Asset allocation chart mockups">
+        <a class="current" href="asset-allocation-compact-chart-cards.html">Compact</a>
+        <a href="asset-allocation-expanded-row-charts.html">Expanded Rows</a>
+        <a href="asset-allocation-chart-workbench.html">Workbench</a>
+      </nav>
+    </header>
+
+    <section class="section portfolio-section" aria-labelledby="portfolio-title">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Portfolio</div>
+          <h1 class="section-title" id="portfolio-title">Asset Allocation</h1>
+        </div>
+        <div class="portfolio-total-return">
+          <span class="portfolio-total-value">+0.00%</span>
+          <span class="portfolio-total-label">Portfolio MTD</span>
+        </div>
+      </div>
+
+      <div class="workspace">
+        <div class="portfolio-grid" id="portfolio-grid"></div>
+        <aside class="focus-panel" aria-live="polite">
+          <div class="focus-head">
+            <div>
+              <div class="mini-label">Selected Ticker</div>
+              <h2 class="focus-title" id="focus-title"></h2>
+              <div class="focus-ticker" id="focus-ticker"></div>
+            </div>
+            <div class="range-control" aria-label="Chart range" id="range-control">
+              <button type="button" data-range="30">1M</button>
+              <button type="button" data-range="90" aria-pressed="true">3M</button>
+              <button type="button" data-range="180">6M</button>
+              <button type="button" data-range="365">1Y</button>
+            </div>
+          </div>
+          <svg class="focus-chart" id="focus-chart" viewBox="0 0 520 330" role="img" aria-label="Selected ETF chart"></svg>
+          <div class="focus-stats" id="focus-stats"></div>
+        </aside>
+      </div>
+      <p class="source-note">Mockup-only sample paths for ticker chart layout exploration; no tactical weights or allocation calculations are shown.</p>
+    </section>
+  </main>
+
+  <script>
+    const assets = [
+      { ticker: 'VTI', title: 'U.S. Total Market', sleeve: 'U.S. total market equity', swatch: 'vti', price: '$326.44', daily: '-1.14%', mtd: '+0.00%', tone: 'flat', start: 100, drift: 0.18, wave: 5.2 },
+      { ticker: 'VEA', title: 'Developed ex-U.S.', sleeve: 'Developed ex-U.S. equity', swatch: 'vea', price: '$61.40', daily: '-1.01%', mtd: '+0.00%', tone: 'flat', start: 76, drift: 0.12, wave: 4.1 },
+      { ticker: 'VWO', title: 'Emerging Markets', sleeve: 'Emerging markets equity', swatch: 'vwo', price: '$55.98', daily: '-0.44%', mtd: '+0.00%', tone: 'flat', start: 62, drift: 0.15, wave: 6.4 },
+      { ticker: 'VNQ', title: 'U.S. Real Estate', sleeve: 'U.S. real estate', swatch: 'vnq', price: '$86.33', daily: '-1.75%', mtd: '+0.00%', tone: 'flat', start: 88, drift: -0.02, wave: 5.8 },
+      { ticker: 'DBC', title: 'Commodities', sleeve: 'Broad commodities', swatch: 'dbc', price: '$26.66', daily: '+0.38%', mtd: '+0.00%', tone: 'flat', start: 37, drift: 0.04, wave: 7.2 },
+      { ticker: 'GLD', title: 'Gold', sleeve: 'Gold', swatch: 'gld', price: '$368.38', daily: '-0.05%', mtd: '+0.00%', tone: 'flat', start: 118, drift: 0.23, wave: 5 },
+      { ticker: 'IEF', title: '7-10Y Treasuries', sleeve: '7-10Y U.S. Treasuries', swatch: 'ief', price: '$94.57', daily: '-0.52%', mtd: '+0.00%', tone: 'flat', start: 98, drift: -0.01, wave: 2.7 },
+      { ticker: 'BOXX', title: 'T-Bill Alternative', sleeve: 'Cash / T-bill alternative', swatch: 'boxx', price: '$117.09', daily: '-0.02%', mtd: '+0.00%', tone: 'flat', start: 112, drift: 0.035, wave: 0.8 }
+    ];
+
+    let activeTicker = 'VTI';
+    let activeRange = 90;
+
+    function series(asset, points = 365) {
+      return Array.from({ length: points }, (_, index) => {
+        const seasonal = Math.sin(index / 15 + asset.start / 17) * asset.wave;
+        const shorter = Math.cos(index / 7 + asset.wave) * asset.wave * 0.28;
+        return Math.max(1, asset.start + index * asset.drift + seasonal + shorter);
+      });
+    }
+
+    function pathFor(values, width, height, pad = 6) {
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = max - min || 1;
+      return values.map((value, index) => {
+        const x = pad + (index / Math.max(values.length - 1, 1)) * (width - pad * 2);
+        const y = pad + (1 - (value - min) / span) * (height - pad * 2);
+        return `${index ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`;
+      }).join(' ');
+    }
+
+    function colorFor(asset) {
+      return getComputedStyle(document.documentElement).getPropertyValue(`--${asset.swatch}`) || {
+        vti: '#2457ff',
+        vea: '#087ea4',
+        vwo: '#18885b',
+        vnq: '#a06b00',
+        dbc: '#d64f45',
+        gld: '#c48a05',
+        ief: '#6b5bbd',
+        boxx: '#475569'
+      }[asset.swatch];
+    }
+
+    function sparkline(asset) {
+      const values = series(asset, 92);
+      const stroke = colorFor(asset);
+      const line = pathFor(values, 230, 56, 5);
+      const area = `${line} L225 53 L5 53 Z`;
+      return `
+        <svg class="sparkline" viewBox="0 0 230 56" aria-label="${asset.ticker} compact chart">
+          <path d="${area}" fill="${stroke}" opacity="0.08"></path>
+          <path d="${line}" fill="none" stroke="${stroke}" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></path>
+        </svg>
+      `;
+    }
+
+    function renderCards() {
+      document.getElementById('portfolio-grid').innerHTML = assets.map((asset) => `
+        <button class="portfolio-card ${asset.ticker === activeTicker ? 'active' : ''}" type="button" data-ticker="${asset.ticker}" aria-pressed="${asset.ticker === activeTicker}">
+          <span class="swatch ${asset.swatch}"></span>
+          <span class="portfolio-card-main">
+            <span class="portfolio-card-title">${asset.title}</span>
+            <span class="portfolio-card-ticker">${asset.ticker}</span>
+          </span>
+          <span class="portfolio-card-metrics">
+            <span class="metric-pair"><span class="metric-value ${asset.tone}">${asset.mtd}</span><span class="metric-sep">/</span><span class="metric-value ${asset.daily.startsWith('-') ? 'down' : 'up'}">${asset.daily}</span></span>
+            <span class="portfolio-card-price">${asset.price}</span>
+          </span>
+          ${sparkline(asset)}
+        </button>
+      `).join('');
+    }
+
+    function renderFocus() {
+      const asset = assets.find((item) => item.ticker === activeTicker) || assets[0];
+      const values = series(asset).slice(-activeRange);
+      const stroke = colorFor(asset);
+      const line = pathFor(values, 520, 270, 24);
+      const area = `${line} L496 282 L24 282 Z`;
+      const first = values.at(0);
+      const last = values.at(-1);
+      const rangeReturn = ((last / first - 1) * 100);
+      const high = Math.max(...values);
+      const low = Math.min(...values);
+      document.getElementById('focus-title').textContent = asset.title;
+      document.getElementById('focus-ticker').textContent = `${asset.ticker} · ${asset.sleeve}`;
+      document.getElementById('focus-chart').innerHTML = `
+        <defs>
+          <linearGradient id="focus-fill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0" stop-color="${stroke}" stop-opacity="0.18"></stop>
+            <stop offset="1" stop-color="${stroke}" stop-opacity="0.01"></stop>
+          </linearGradient>
+        </defs>
+        <g stroke="#d9dee7" stroke-width="1">
+          <path d="M24 62 H496"></path>
+          <path d="M24 136 H496"></path>
+          <path d="M24 210 H496"></path>
+          <path d="M24 282 H496"></path>
+        </g>
+        <path d="${area}" fill="url(#focus-fill)"></path>
+        <path d="${line}" fill="none" stroke="${stroke}" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"></path>
+        <circle cx="496" cy="${line.split(' ').at(-1)}" r="5" fill="${stroke}"></circle>
+        <text x="24" y="316" fill="#626a75" font-size="12" font-weight="800">Indexed sample path</text>
+        <text x="496" y="316" fill="#111317" font-size="12" font-weight="900" text-anchor="end">${activeRange === 365 ? '1Y' : `${Math.round(activeRange / 30)}M`}</text>
+      `;
+      document.getElementById('focus-stats').innerHTML = [
+        ['Range', `${rangeReturn >= 0 ? '+' : ''}${rangeReturn.toFixed(1)}%`],
+        ['High', high.toFixed(1)],
+        ['Low', low.toFixed(1)]
+      ].map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`).join('');
+    }
+
+    document.getElementById('portfolio-grid').addEventListener('click', (event) => {
+      const card = event.target.closest('[data-ticker]');
+      if (!card) return;
+      activeTicker = card.dataset.ticker;
+      renderCards();
+      renderFocus();
+    });
+
+    document.getElementById('range-control').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-range]');
+      if (!button) return;
+      activeRange = Number(button.dataset.range);
+      document.querySelectorAll('[data-range]').forEach((node) => {
+        node.setAttribute('aria-pressed', String(node === button));
+      });
+      renderFocus();
+    });
+
+    renderCards();
+    renderFocus();
+  </script>
+</body>
+</html>

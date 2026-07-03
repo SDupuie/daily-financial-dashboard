@@ -7,7 +7,7 @@ const https = require('https');
 const REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'scripts', 'generated', 'premarket_futures.json');
 
-// Staging helper only: production reads embedded preMarket.futures from daily_financial_news.html.
+// Staging helper only: production reads embedded futuresModule.futures from daily_financial_news.html.
 const FUTURES = [
   { symbol: 'ES=F', label: 'S&P Futures', body: 'S&P 500 futures before the cash open.' },
   { symbol: 'NQ=F', label: 'Nasdaq Futures', body: 'Growth and AI tone before the cash open.' },
@@ -19,7 +19,8 @@ function parseArgs(argv) {
   const args = {
     output: DEFAULT_OUTPUT,
     timeoutMs: REQUEST_TIMEOUT_MS,
-    compact: false
+    compact: false,
+    mode: 'premarket'
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -38,6 +39,14 @@ function parseArgs(argv) {
       args.compact = true;
       continue;
     }
+    if (arg === '--session') {
+      args.mode = 'session';
+      continue;
+    }
+    if (arg === '--premarket') {
+      args.mode = 'premarket';
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -54,12 +63,15 @@ Options:
   --output PATH       JSON output path (default: scripts/generated/premarket_futures.json)
   --timeout-ms 10000  HTTP timeout in ms per request
   --compact           Print one-line symbol summary
+  --session           Scope series to 8:30 AM-3:00 PM Central; store official times as 9:30 AM-4:00 PM Eastern
+  --premarket         Use Yahoo's prior-close comparison (default)
   --help              Show this help
 `);
 }
 
-function yahooChartUrl(symbol) {
-  return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=5m`;
+function yahooChartUrl(symbol, args) {
+  const range = args.mode === 'session' ? '5d' : '1d';
+  return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=5m`;
 }
 
 function fetchJson(url, timeoutMs) {
@@ -122,6 +134,40 @@ function timeText(epochSeconds) {
   }).format(new Date(epochSeconds * 1000))}`;
 }
 
+function chicagoClockMinutes(epochSeconds) {
+  const seconds = Number(epochSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date(seconds * 1000));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return (hour % 24) * 60 + minute;
+}
+
+function chicagoIsoDate(epochSeconds) {
+  const seconds = Number(epochSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(seconds * 1000));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function isRegularSessionPoint(timestamp) {
+  const minutes = chicagoClockMinutes(timestamp);
+  return minutes !== null && minutes >= 8 * 60 + 30 && minutes <= 15 * 60;
+}
+
 function downsample(points, maxPoints = 72) {
   if (points.length <= maxPoints) return points;
   const step = (points.length - 1) / (maxPoints - 1);
@@ -131,62 +177,126 @@ function downsample(points, maxPoints = 72) {
   });
 }
 
-function parseSeries(payload) {
+function parsePricePoints(payload) {
   const result = payload?.chart?.result?.[0];
   const timestamps = result?.timestamp || [];
   const closes = result?.indicators?.quote?.[0]?.close || [];
-  const points = timestamps.map((timestamp, index) => {
+  return timestamps.map((timestamp, index) => {
     const price = Number(closes[index]);
     return Number.isFinite(timestamp) && Number.isFinite(price) && price > 0
       ? [timestamp, price]
       : null;
   }).filter(Boolean);
-
-  return downsample(points);
 }
 
-function parseFuture(spec, payload) {
+function regularSessionComparison(points, symbol) {
+  const sessions = new Map();
+  for (const point of points) {
+    const [timestamp] = point;
+    if (!isRegularSessionPoint(timestamp)) continue;
+    const date = chicagoIsoDate(timestamp);
+    if (!date) continue;
+    if (!sessions.has(date)) sessions.set(date, []);
+    sessions.get(date).push(point);
+  }
+
+  const sessionDates = [...sessions.keys()].sort().filter((date) => sessions.get(date).length >= 2);
+  if (sessionDates.length < 2) {
+    throw new Error(`${symbol} response did not include at least two regular-session windows`);
+  }
+
+  const sessionDate = sessionDates[sessionDates.length - 1];
+  const referenceDate = sessionDates[sessionDates.length - 2];
+  const sessionPoints = sessions.get(sessionDate);
+  const referencePoint = sessions.get(referenceDate).at(-1);
+  if (!sessionPoints?.length || !referencePoint) {
+    throw new Error(`${symbol} response did not include usable regular-session comparison points`);
+  }
+
+  return {
+    sessionDate,
+    sessionPoints,
+    referenceDate,
+    referenceTime: referencePoint[0],
+    referencePrice: referencePoint[1]
+  };
+}
+
+function parseFuture(spec, payload, args) {
   const meta = payload?.chart?.result?.[0]?.meta;
-  const price = Number(meta?.regularMarketPrice);
   const previousClose = Number(meta?.chartPreviousClose);
-  if (!Number.isFinite(price) || !Number.isFinite(previousClose)) {
+  const quotePrice = Number(meta?.regularMarketPrice);
+  if (!Number.isFinite(quotePrice) || !Number.isFinite(previousClose)) {
     throw new Error(`${spec.symbol} response was missing price metadata`);
   }
 
-  const delta = price - previousClose;
-  const pct = previousClose ? (delta / previousClose) * 100 : 0;
+  const pricePoints = parsePricePoints(payload);
+  const sessionComparison = args.mode === 'session'
+    ? regularSessionComparison(pricePoints, spec.symbol)
+    : null;
+  const comparisonPoints = sessionComparison ? sessionComparison.sessionPoints : pricePoints;
+  if (comparisonPoints.length < 2) {
+    throw new Error(`${spec.symbol} response did not include at least two chart points`);
+  }
+
+  const referencePrice = sessionComparison ? sessionComparison.referencePrice : previousClose;
+  const price = args.mode === 'session' ? comparisonPoints.at(-1)[1] : quotePrice;
+  const regularMarketTime = args.mode === 'session'
+    ? comparisonPoints.at(-1)[0]
+    : Number(meta?.regularMarketTime);
+  const referenceLabel = args.mode === 'session' ? 'prior 4 PM ET close' : 'prior close';
+  const delta = price - referencePrice;
+  const pct = referencePrice ? (delta / referencePrice) * 100 : 0;
 
   return {
     label: spec.label,
     symbol: spec.symbol,
     value: signedPct(pct),
     dir: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
-    body: `${numberFormat(2).format(price)} last · ${signedNumber(delta)} vs prior close · ${timeText(Number(meta?.regularMarketTime))}`,
-    series: parseSeries(payload),
+    body: `${numberFormat(2).format(price)} last · ${signedNumber(delta)} vs ${referenceLabel} · ${timeText(regularMarketTime)}`,
+    series: downsample(comparisonPoints),
     raw: {
-      price,
-      previousClose,
-      delta,
-      pct,
-      regularMarketTime: Number(meta?.regularMarketTime) || null,
+      instrumentType: meta?.instrumentType || null,
       exchangeName: meta?.exchangeName || null,
-      instrumentType: meta?.instrumentType || null
+      ...(sessionComparison ? {
+        marketTimeZone: 'America/New_York'
+      } : {}),
+      price,
+      regularMarketTime: Number(regularMarketTime) || null,
+      referencePrice,
+      referenceLabel,
+      ...(sessionComparison ? {
+        referenceDate: sessionComparison.referenceDate,
+        referenceTime: sessionComparison.referenceTime,
+        referenceCloseEastern: '4:00 PM ET'
+      } : {}),
+      previousClose,
+      ...(sessionComparison ? {
+        sessionDate: sessionComparison.sessionDate,
+        sessionStartEastern: '9:30 AM ET',
+        sessionEndEastern: '4:00 PM ET',
+        sessionOpen: comparisonPoints[0][1],
+        sessionOpenTime: comparisonPoints[0][0]
+      } : {}),
+      delta,
+      pct
     }
   };
 }
 
 async function fetchFuture(spec, args) {
-  const payload = await fetchJson(yahooChartUrl(spec.symbol), args.timeoutMs);
-  return parseFuture(spec, payload);
+  const payload = await fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
+  return parseFuture(spec, payload, args);
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const results = await Promise.all(FUTURES.map((spec) => fetchFuture(spec, args)));
-  // Output is a staging payload; the published page renders embedded preMarket.futures only.
+  // Output is a staging payload; the published page renders embedded futuresModule.futures only.
   const output = {
     compiledAt: new Date().toISOString(),
     source: 'Yahoo Finance Chart API',
+    mode: args.mode,
     futures: results
   };
 

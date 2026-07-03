@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Tape Crypto Stat Boxes Mockup</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --panel-soft: #eef4f6;
+      --blue: #2457ff;
+      --red: #d64f45;
+      --green: #18885b;
+      --gold: #b8860b;
+      --shadow: 0 10px 28px rgba(16, 24, 40, 0.06);
+      --card-radius: 8px;
+      --gap-xs: 6px;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 22px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--paper); color: var(--ink); }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      background: var(--paper);
+    }
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 26px 22px 60px;
+    }
+    .topline {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: var(--gap-xl);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .topline .right { text-align: right; }
+    .brand {
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(34px, 6vw, 76px);
+      font-weight: 900;
+      line-height: 0.92;
+      letter-spacing: 0;
+      text-align: center;
+      text-transform: none;
+    }
+    .brand span {
+      color: var(--blue);
+      font-style: italic;
+      font-weight: 500;
+    }
+    .opening-board { padding: 22px 0 0; }
+    .opening-main h1 {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 34px);
+      line-height: 1.12;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .opening-deck {
+      margin: 12px 0 0;
+      max-width: 900px;
+      color: var(--ink);
+      font-size: 16px;
+      line-height: 1.45;
+    }
+    .up, .green { color: var(--green); }
+    .down, .red { color: var(--red); }
+    .flat, .mix { color: var(--muted); }
+    .surface {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--card-radius);
+    }
+    .surface-shadow { box-shadow: var(--shadow); }
+    .surface-clip { overflow: hidden; }
+    .entity-name {
+      min-width: 0;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 15px;
+      font-weight: 850;
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+    .entity-name-lg {
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+    .entity-sub {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      font-size: 10.5px;
+      font-weight: 650;
+      line-height: 1.25;
+    }
+    .entity-sub-mono {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+    }
+    .metric-primary {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+      white-space: nowrap;
+    }
+    .metric-pair {
+      display: flex;
+      justify-content: end;
+      gap: 6px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .metric-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .quote-readout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 5px;
+      align-items: baseline;
+      justify-items: end;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+    .quote-row {
+      display: grid;
+      border-bottom: 1px solid var(--line);
+      color: var(--ink);
+    }
+    .instrument { display: grid; gap: 2px; }
+    .section { margin-top: 34px; }
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-lg);
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+    .section-label {
+      margin-bottom: 5px;
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+    .section-note {
+      max-width: 460px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+    .tape-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+    .tape-selector {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+    .tape-selector-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--ink);
+      cursor: default;
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 12px;
+    }
+    .tape-selector-button[aria-selected="true"] {
+      border-color: var(--line);
+      background: #eef1f6;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
+    }
+    .tape-selector-count {
+      margin-left: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .tape-group:last-child { border-bottom: none; }
+    .tape-group-label {
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+    .tape-stat-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+    .tape-stat-box {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-md);
+      align-items: start;
+      min-height: 132px;
+      padding: 14px 18px 14px 15px;
+      border-left: 3px solid transparent;
+      border-right: 1px solid var(--line);
+    }
+    .tape-stat-box:last-child { border-right: none; }
+    .tape-stat-box.up { border-left-color: var(--green); }
+    .tape-stat-box.down { border-left-color: var(--red); }
+    .tape-stat-copy {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+    .tape-stat-tag {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      line-height: 1;
+      text-transform: uppercase;
+    }
+    .tape-stat-title {
+      margin: 0;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 17px;
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: 0;
+    }
+    .tape-stat-note {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+    .tape-stat-values {
+      display: grid;
+      gap: 5px;
+      justify-items: end;
+      min-width: max-content;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+    .tape-stat-values .metric-primary { font-size: 20px; }
+    .stat-detail-row {
+      display: flex;
+      align-items: center;
+      justify-content: end;
+      gap: 6px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.1;
+    }
+    .dominance-module {
+      display: grid;
+      grid-column: 1 / -1;
+      gap: var(--gap-sm);
+      margin-top: 2px;
+    }
+    .dominance-labels {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--gap-md);
+    }
+    .dominance-label {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .dominance-name {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.1;
+    }
+    .dominance-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      flex: 0 0 auto;
+    }
+    .dominance-value {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 850;
+      line-height: 1.1;
+    }
+    .dominance-bar {
+      display: flex;
+      height: 12px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e5e7eb;
+    }
+    .dominance-segment.btc,
+    .dominance-dot.btc { background: #2563eb; }
+    .dominance-segment.eth,
+    .dominance-dot.eth { background: #16a34a; }
+    .dominance-segment.others,
+    .dominance-dot.others { background: #ef4444; }
+    .fear-greed-gauge {
+      position: relative;
+      width: 150px;
+      height: 44px;
+      margin: 0;
+      overflow: visible;
+    }
+    .fear-greed-arc {
+      position: absolute;
+      top: -24px;
+      left: 50%;
+      width: 118px;
+      height: 118px;
+      border-radius: 50%;
+      background:
+        conic-gradient(
+          from 270deg,
+          #ef4444 0deg 45deg,
+          #f59e0b 45deg 81deg,
+          #facc15 81deg 99deg,
+          #84cc16 99deg 135deg,
+          #10b981 135deg 180deg,
+          transparent 180deg 360deg
+        );
+      transform: translateX(-50%);
+      -webkit-mask: radial-gradient(circle, transparent 0 45px, #000 46px 53px, transparent 54px);
+      mask: radial-gradient(circle, transparent 0 45px, #000 46px 53px, transparent 54px);
+    }
+    .fear-greed-pointer {
+      position: absolute;
+      top: 34px;
+      left: 50%;
+      z-index: 2;
+      width: 0;
+      height: 0;
+      transform: rotate(var(--pointer-angle));
+      transform-origin: 0 0;
+    }
+    .fear-greed-pointer::before {
+      content: "";
+      position: absolute;
+      top: -5px;
+      left: 47px;
+      width: 10px;
+      height: 10px;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      background: var(--ink);
+      box-sizing: border-box;
+    }
+    .fear-greed-center {
+      position: absolute;
+      top: 1px;
+      left: 50%;
+      z-index: 3;
+      display: grid;
+      justify-items: center;
+      transform: translateX(-50%);
+    }
+    .fear-greed-score {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 28px;
+      font-weight: 900;
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+    .fear-greed-label {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.1;
+      white-space: nowrap;
+    }
+    .tape-row {
+      grid-template-columns: 190px minmax(0, 1fr) 170px 38px;
+      gap: var(--gap-lg);
+      align-items: center;
+      padding: 12px 14px;
+    }
+    .tape-row:last-child { border-bottom: none; }
+    .tape-row.up { border-left: 3px solid var(--green); }
+    .tape-row.down { border-left: 3px solid var(--red); }
+    .tape-row.flat,
+    .tape-row.mix { border-left: 3px solid transparent; }
+    .tape-signal {
+      display: -webkit-box;
+      overflow: hidden;
+      color: var(--ink);
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .tape-chart-button {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--blue);
+      padding: 0;
+    }
+    .tape-chart-button svg {
+      display: block;
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+    footer {
+      display: grid;
+      gap: var(--gap-sm);
+      margin-top: 42px;
+      border-top: 5px solid var(--ink);
+      padding-top: 16px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    @media (max-width: 900px) {
+      .tape-stat-box {
+        grid-template-columns: minmax(0, 1fr);
+        align-items: start;
+      }
+      .tape-stat-values { justify-items: start; }
+      .stat-detail-row { justify-content: start; }
+      .dominance-labels { gap: var(--gap-sm); }
+    }
+    @media (max-width: 760px) {
+      .page { padding: 18px 14px 44px; }
+      .topline {
+        grid-template-columns: 1fr;
+        text-align: center;
+      }
+      .topline .right { text-align: center; }
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
+      .section-note { text-align: left; }
+      .tape-toolbar {
+        align-items: stretch;
+        padding: 8px;
+      }
+      .tape-selector {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+      }
+      .tape-selector-button {
+        width: 100%;
+        justify-content: center;
+      }
+      .tape-stat-strip { grid-template-columns: 1fr; }
+      .tape-stat-box {
+        min-height: 0;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .tape-stat-box:last-child { border-bottom: none; }
+      .tape-row {
+        grid-template-columns: minmax(0, 1fr) auto 34px;
+        grid-template-areas:
+          "instrument quote chart"
+          "signal signal signal";
+        column-gap: var(--gap-md);
+        row-gap: var(--gap-sm);
+        align-items: start;
+      }
+      .tape-row .instrument { grid-area: instrument; }
+      .tape-row .tape-signal { grid-area: signal; }
+      .tape-row .tape-chart-button { grid-area: chart; }
+      .quote-readout {
+        grid-area: quote;
+        min-width: max-content;
+        justify-content: end;
+        justify-items: end;
+      }
+      .metric-pair { width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topline">
+      <div>Vol. I · No. 178</div>
+      <div class="brand">The Daily <span>Tape</span></div>
+      <div class="right">Thursday · July 2 · 2026</div>
+    </header>
+
+    <section class="opening-board" aria-label="Opening summary">
+      <div class="opening-main">
+        <h1>Jobs Day Setup · Chip Reset · Oil Cools</h1>
+        <p class="opening-deck">Crypto stays in the Tape as a tabbed risk sleeve, now with market-cap and sentiment context pinned above the instrument rows.</p>
+      </div>
+    </section>
+
+    <section class="section section-tape">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Market Record</div>
+          <h2 class="section-title">The Tape</h2>
+        </div>
+        <div class="section-note">Mockup view with the Crypto tab selected.</div>
+      </div>
+
+      <div class="tape-blotter surface surface-shadow surface-clip">
+        <div class="tape-toolbar">
+          <div class="tape-selector" role="tablist" aria-label="Tape sections">
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Equity<span class="tape-selector-count" aria-hidden="true">5</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Rates<span class="tape-selector-count" aria-hidden="true">4</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Commodities<span class="tape-selector-count" aria-hidden="true">3</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Global<span class="tape-selector-count" aria-hidden="true">2</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Credit<span class="tape-selector-count" aria-hidden="true">4</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Sectors<span class="tape-selector-count" aria-hidden="true">9</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="false">Alternatives<span class="tape-selector-count" aria-hidden="true">3</span></button>
+            <button class="tape-selector-button" type="button" role="tab" aria-selected="true">Crypto<span class="tape-selector-count" aria-hidden="true">7</span></button>
+          </div>
+        </div>
+
+        <section class="tape-group tape-panel" role="tabpanel" aria-labelledby="Crypto">
+          <div class="tape-group-label">Crypto</div>
+
+          <div class="tape-stat-strip" aria-label="Crypto market context">
+            <article class="tape-stat-box up">
+              <div class="tape-stat-copy">
+                <div class="tape-stat-tag">Market Cap</div>
+                <h3 class="tape-stat-title">Crypto Market Cap</h3>
+                <div class="tape-stat-note">Total market value across the crypto complex.</div>
+              </div>
+              <div class="tape-stat-values" aria-label="Crypto Market Cap quote">
+                <strong class="metric-primary">2.20T</strong>
+                <div class="metric-pair">
+                  <span class="metric-value up">+$83.87B</span>
+                  <span>/</span>
+                  <span class="metric-value up">+3.96%</span>
+                </div>
+              </div>
+              <div class="dominance-module">
+                <div class="dominance-labels">
+                  <div class="dominance-label">
+                    <div class="dominance-name"><div class="dominance-dot btc"></div>Bitcoin</div>
+                    <span class="dominance-value">55.78%</span>
+                  </div>
+                  <div class="dominance-label">
+                    <div class="dominance-name"><div class="dominance-dot eth"></div>Ethereum</div>
+                    <span class="dominance-value">9.03%</span>
+                  </div>
+                  <div class="dominance-label">
+                    <div class="dominance-name"><div class="dominance-dot others"></div>Others</div>
+                    <span class="dominance-value">35.19%</span>
+                  </div>
+                </div>
+                <div class="dominance-bar" aria-label="Crypto market cap dominance">
+                  <div class="dominance-segment btc" style="width: 55.78%"></div>
+                  <div class="dominance-segment eth" style="width: 9.03%"></div>
+                  <div class="dominance-segment others" style="width: 35.19%"></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="tape-stat-box up">
+              <div class="tape-stat-copy">
+                <div class="tape-stat-tag">Sentiment</div>
+                <h3 class="tape-stat-title">Fear &amp; Greed Index</h3>
+                <div class="tape-stat-note">Extreme Fear, but improving from the prior reading.</div>
+              </div>
+              <div class="tape-stat-values" aria-label="Fear and Greed Index score">
+                <div class="fear-greed-gauge" aria-label="Crypto Fear and Greed score 19">
+                  <div class="fear-greed-arc"></div>
+                  <div class="fear-greed-pointer" style="--pointer-angle: -145.8deg"></div>
+                  <div class="fear-greed-center">
+                    <div class="fear-greed-score">19</div>
+                    <div class="fear-greed-label">Extreme Fear</div>
+                  </div>
+                </div>
+                <div class="metric-pair">
+                  <span class="metric-value up">+8</span>
+                  <span>/</span>
+                  <span>Improving</span>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Bitcoin</strong><span class="entity-sub entity-sub-mono">BTC</span></div>
+            <div class="tape-signal">Bitcoin is carrying the rebound first, with dominance near 56% showing traders are adding risk through the deepest liquidity before trusting smaller tokens.</div>
+            <div class="quote-readout" aria-label="Bitcoin quote">
+              <div class="metric-primary">$61,247</div>
+              <div class="metric-pair"><span class="metric-value up">+$1,243.32</span><span>/</span><span class="metric-value up">+2.07%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Ethereum</strong><span class="entity-sub entity-sub-mono">ETH</span></div>
+            <div class="tape-signal">Ethereum is participating but not leading, so the bounce still looks more like a bitcoin-led stabilization trade than a broad smart-contract rotation.</div>
+            <div class="quote-readout" aria-label="Ethereum quote">
+              <div class="metric-primary">$1,647.98</div>
+              <div class="metric-pair"><span class="metric-value up">+$39.02</span><span>/</span><span class="metric-value up">+2.43%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Solana</strong><span class="entity-sub entity-sub-mono">SOL</span></div>
+            <div class="tape-signal">Solana is the high-beta leader in this tape, a sign traders are willing to chase upside pockets while broader altcoin conviction remains selective.</div>
+            <div class="quote-readout" aria-label="Solana quote">
+              <div class="metric-primary">$82.25</div>
+              <div class="metric-pair"><span class="metric-value up">+$4.87</span><span>/</span><span class="metric-value up">+6.29%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">XRP</strong><span class="entity-sub entity-sub-mono">XRP</span></div>
+            <div class="tape-signal">XRP is moving with the relief bid, but the signal is confirmation of broader crypto risk appetite rather than leadership on its own.</div>
+            <div class="quote-readout" aria-label="XRP quote">
+              <div class="metric-primary">$1.085</div>
+              <div class="metric-pair"><span class="metric-value up">+$0.0328</span><span>/</span><span class="metric-value up">+3.11%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Bitcoin ETF</strong><span class="entity-sub entity-sub-mono">IBIT</span></div>
+            <div class="tape-signal">IBIT keeps the listed-access read close to bitcoin itself, useful for seeing whether traditional accounts are buying the spot rebound or standing aside.</div>
+            <div class="quote-readout" aria-label="Bitcoin ETF quote">
+              <div class="metric-primary">$34.00</div>
+              <div class="metric-pair"><span class="metric-value up">+$0.71</span><span>/</span><span class="metric-value up">+2.13%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Ethereum ETF</strong><span class="entity-sub entity-sub-mono">ETHA</span></div>
+            <div class="tape-signal">ETHA is the listed-access read on ether demand, showing whether traditional accounts are adding spot ETH exposure alongside the token's rebound.</div>
+            <div class="quote-readout" aria-label="Ethereum ETF quote">
+              <div class="metric-primary">$12.19</div>
+              <div class="metric-pair"><span class="metric-value up">+$0.30</span><span>/</span><span class="metric-value up">+2.52%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+
+          <article class="quote-row tape-row up">
+            <div class="instrument"><strong class="entity-name entity-name-lg">Strategy Inc.</strong><span class="entity-sub entity-sub-mono">MSTR</span></div>
+            <div class="tape-signal">Strategy is amplifying the bitcoin rebound again, so its strength says equity-market crypto beta is coming back faster than spot exposure alone.</div>
+            <div class="quote-readout" aria-label="Strategy quote">
+              <div class="metric-primary">$93.39</div>
+              <div class="metric-pair"><span class="metric-value up">+$6.46</span><span>/</span><span class="metric-value up">+7.43%</span></div>
+            </div>
+            <span class="tape-chart-button" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19h16"></path><path d="M5 15l4-4 3 3 6-7"></path><path d="M15 7h3v3"></path></svg>
+            </span>
+          </article>
+        </section>
+      </div>
+    </section>
+
+    <footer>
+      <div>Mockup only · Production dashboard files and data paths unchanged</div>
+    </footer>
+  </main>
+</body>
+</html>

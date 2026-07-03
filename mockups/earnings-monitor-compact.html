@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Earnings Information Concepts Mockup</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --line-strong: #b7c0cc;
+      --panel: #ffffff;
+      --panel-soft: #f1f4f8;
+      --blue: #2457ff;
+      --red: #d64f45;
+      --green: #18885b;
+      --gold: #a66b00;
+      --shadow: 0 14px 34px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 24px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    .page {
+      width: min(1280px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 26px 0 56px;
+    }
+
+    .topline {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: var(--gap-xl);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .topline .right { text-align: right; }
+
+    .brand {
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(34px, 6vw, 74px);
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 0.92;
+      text-align: center;
+      text-transform: none;
+    }
+
+    .brand span {
+      color: var(--blue);
+      font-style: italic;
+      font-weight: 500;
+    }
+
+    .opening-board {
+      padding: 22px 0 2px;
+    }
+
+    .opening-board h1 {
+      max-width: 900px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(25px, 3.2vw, 39px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.08;
+    }
+
+    .opening-deck {
+      max-width: 790px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .section {
+      margin-top: 34px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-lg);
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .section-label,
+    .monitor-label,
+    .metric-label,
+    .flag {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 38px);
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .section-note {
+      max-width: 470px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .monitor {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      min-height: 420px;
+    }
+
+    .monitor-main {
+      min-width: 0;
+    }
+
+    .monitor-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .monitor-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .tab {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      cursor: default;
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 12px;
+    }
+
+    .tab[aria-selected="true"] {
+      border-color: var(--line);
+      background: #eef1f6;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
+    }
+
+    .tab-count {
+      margin-left: 6px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .monitor-asof {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .monitor-header,
+    .earnings-row {
+      display: grid;
+      grid-template-columns: minmax(170px, 1fr) minmax(170px, 0.9fr) minmax(170px, 0.9fr) minmax(150px, 0.75fr) minmax(150px, 0.8fr);
+      gap: var(--gap-md);
+      align-items: center;
+    }
+
+    .monitor-header {
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .earnings-row {
+      min-height: 92px;
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .earnings-row:last-child {
+      border-bottom: 0;
+    }
+
+    .company {
+      display: grid;
+      grid-template-columns: 10px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .status-rail {
+      width: 10px;
+      height: 48px;
+      border-radius: 3px;
+      background: var(--line-strong);
+    }
+
+    .status-rail.reported { background: var(--green); }
+    .status-rail.preview { background: var(--blue); }
+    .status-rail.watch { background: var(--gold); }
+
+    .company-name {
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 1.1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .company-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 8px;
+      align-items: center;
+      margin-top: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 22px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      line-height: 1;
+      padding: 0 8px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .pill.reported {
+      border-color: rgba(24, 136, 91, 0.24);
+      background: rgba(24, 136, 91, 0.09);
+      color: var(--green);
+    }
+
+    .pill.preview {
+      border-color: rgba(36, 87, 255, 0.22);
+      background: rgba(36, 87, 255, 0.08);
+      color: var(--blue);
+    }
+
+    .pill.watch {
+      border-color: rgba(166, 107, 0, 0.24);
+      background: rgba(166, 107, 0, 0.09);
+      color: var(--gold);
+    }
+
+    .pill.miss {
+      border-color: rgba(214, 79, 69, 0.24);
+      background: rgba(214, 79, 69, 0.09);
+      color: var(--red);
+    }
+
+    .pill.beat {
+      border-color: rgba(24, 136, 91, 0.24);
+      background: rgba(24, 136, 91, 0.09);
+      color: var(--green);
+    }
+
+    .pill.met {
+      border-color: rgba(98, 106, 117, 0.24);
+      background: rgba(98, 106, 117, 0.09);
+      color: var(--muted);
+    }
+
+    .pill.inline-pill {
+      width: max-content;
+    }
+
+    .metric-stack {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .metric-label {
+      color: var(--muted);
+    }
+
+    .metric-value {
+      overflow: hidden;
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 16px;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .metric-value.positive { color: var(--green); }
+    .metric-value.negative { color: var(--red); }
+    .metric-value.pending { color: var(--muted); }
+    .metric-sub {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 720;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .readthrough {
+      min-width: 0;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.34;
+    }
+
+    .readthrough strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      line-height: 1;
+      text-transform: uppercase;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--line-strong);
+      overflow: hidden;
+      font-size: 0;
+      line-height: 0;
+    }
+
+    .legend-dot.reported { background: var(--green); }
+    .legend-dot.preview { background: var(--blue); }
+    .legend-dot.watch { background: var(--gold); }
+
+    .calendar-board {
+      display: grid;
+      grid-template-columns: 1fr 1fr 2fr;
+      min-height: 315px;
+    }
+
+    .calendar-day {
+      display: grid;
+      align-content: start;
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .calendar-day:last-child {
+      border-right: 0;
+    }
+
+    .calendar-day-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      min-height: 54px;
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-soft);
+    }
+
+    .calendar-date {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 17px;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .calendar-count {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .calendar-stack {
+      display: grid;
+      gap: 0;
+    }
+
+    .calendar-item {
+      display: grid;
+      grid-template-columns: 10px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      min-height: 130px;
+      padding: 15px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .calendar-item:last-child {
+      border-bottom: 0;
+    }
+
+    .calendar-body {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .calendar-company {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 8px;
+      align-items: baseline;
+      min-width: 0;
+    }
+
+    .calendar-company strong {
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+
+    .calendar-company span {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .calendar-metric {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .calendar-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .scorecard-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap-md);
+    }
+
+    .scorecard {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      min-width: 0;
+      min-height: 315px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .scorecard-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-sm);
+      align-items: start;
+    }
+
+    .scorecard-title {
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 1.1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .scorecard-meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .scorecard-table {
+      display: grid;
+      border-top: 1px solid var(--line);
+    }
+
+    .scorecard-row {
+      display: grid;
+      grid-template-columns: minmax(78px, 0.75fr) minmax(0, 1fr);
+      gap: var(--gap-sm);
+      align-items: baseline;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .scorecard-row:last-child {
+      border-bottom: 0;
+    }
+
+    .scorecard-key {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .scorecard-val {
+      overflow: hidden;
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 900;
+      line-height: 1.25;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .scorecard-val.positive { color: var(--green); }
+    .scorecard-val.negative { color: var(--red); }
+    .scorecard-val.pending { color: var(--muted); }
+
+    .scorecard-note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    @media (max-width: 1080px) {
+      .monitor-header,
+      .earnings-row {
+        grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.85fr) minmax(150px, 0.85fr) minmax(120px, 0.7fr);
+      }
+
+      .earnings-row .reaction-cell {
+        grid-column: 2 / -1;
+      }
+
+      .calendar-board {
+        grid-template-columns: 1fr;
+      }
+
+      .calendar-day {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .calendar-day:last-child {
+        border-bottom: 0;
+      }
+
+      .scorecard-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 900px) {
+      .topline {
+        grid-template-columns: 1fr;
+        gap: 8px;
+        text-align: center;
+      }
+
+      .topline .right { text-align: center; }
+
+      .section-head {
+        display: grid;
+      }
+
+      .section-note {
+        max-width: none;
+        text-align: left;
+      }
+
+      .monitor-header {
+        display: none;
+      }
+
+      .earnings-row {
+        grid-template-columns: minmax(0, 1fr) minmax(170px, 0.8fr);
+        align-items: start;
+      }
+
+      .earnings-row .outcome-cell,
+      .earnings-row .reaction-cell {
+        grid-column: 1 / -1;
+        padding-top: 2px;
+      }
+
+      .calendar-stack {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .calendar-item {
+        border-right: 1px solid var(--line);
+      }
+
+      .calendar-item:last-child {
+        border-right: 0;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        width: min(100% - 28px, 1280px);
+        padding-top: 16px;
+      }
+
+      .opening-deck {
+        font-size: 14px;
+      }
+
+      .monitor-toolbar {
+        display: grid;
+      }
+
+      .monitor-asof {
+        white-space: normal;
+      }
+
+      .earnings-row {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+        min-height: 0;
+      }
+
+      .metric-sub,
+      .metric-value,
+      .company-name {
+        white-space: normal;
+      }
+
+      .calendar-day-head {
+        display: grid;
+      }
+
+      .calendar-stack,
+      .scorecard-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .calendar-item {
+        border-right: 0;
+      }
+
+      .scorecard-title,
+      .scorecard-val {
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topline" aria-label="Dashboard masthead">
+      <div>Daily Financial Dashboard</div>
+      <div class="brand">Morning <span>Tape</span></div>
+      <div class="right">Thu Jul 2, 2026</div>
+    </header>
+
+    <section class="opening-board" aria-labelledby="concept-title">
+      <h1 id="concept-title">Earnings Information Concepts</h1>
+      <p class="opening-deck">Three ways to make Earnings less news-like and more information-oriented. The important question is now explicit: what did investors expect, what happened, did the company beat or miss, and how did the market react?</p>
+    </section>
+
+    <section class="section" aria-labelledby="earnings-title">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Option 1 · Preferred</div>
+          <h2 class="section-title" id="earnings-title">Compact Monitor</h2>
+        </div>
+        <div class="section-note">Past 48 hours and next 5 trading days, organized around consensus, actual result, surprise, and market reaction.</div>
+      </div>
+
+      <div class="surface monitor">
+        <div class="monitor-main">
+          <div class="monitor-toolbar">
+            <div class="monitor-tabs" role="tablist" aria-label="Earnings view">
+              <button class="tab" type="button" role="tab" aria-selected="true">Monitor <span class="tab-count">4</span></button>
+              <button class="tab" type="button" role="tab" aria-selected="false">Reported <span class="tab-count">2</span></button>
+              <button class="tab" type="button" role="tab" aria-selected="false">Upcoming <span class="tab-count">2</span></button>
+            </div>
+            <div class="monitor-asof">UPDATED 2:04 PM CT</div>
+          </div>
+
+          <div class="monitor-header" aria-hidden="true">
+            <div>Company</div>
+            <div>Expectation</div>
+            <div>Actual / Guide</div>
+            <div>Outcome</div>
+            <div>Market Reaction</div>
+          </div>
+
+          <article class="earnings-row">
+            <div class="company">
+              <div class="status-rail reported" aria-hidden="true"></div>
+              <div>
+                <h3 class="company-name">Nike</h3>
+                <div class="company-meta"><span>NKE</span><span>Tue Jun 30</span><span>Q4</span></div>
+              </div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Consensus</div>
+              <div class="metric-value">$10.72B</div>
+              <div class="metric-sub">Revenue estimate</div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Reported</div>
+              <div class="metric-value">$10.97B</div>
+              <div class="metric-sub negative">China sales -12%</div>
+            </div>
+            <div class="metric-stack outcome-cell">
+              <span class="pill beat inline-pill">Beat</span>
+              <div class="metric-sub">Revenue ahead; China weak</div>
+            </div>
+            <div class="metric-stack reaction-cell">
+              <div class="metric-label">Shares</div>
+              <div class="metric-value negative">-4.2%</div>
+              <div class="metric-sub">Investors focused on demand reset</div>
+            </div>
+          </article>
+
+          <article class="earnings-row">
+            <div class="company">
+              <div class="status-rail reported" aria-hidden="true"></div>
+              <div>
+                <h3 class="company-name">General Mills</h3>
+                <div class="company-meta"><span>GIS</span><span>Wed Jul 1</span><span>Q4</span></div>
+              </div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Consensus</div>
+              <div class="metric-value">$0.91</div>
+              <div class="metric-sub">Adj. EPS estimate</div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Reported</div>
+              <div class="metric-value positive">$0.95</div>
+              <div class="metric-sub">FY27 guide $3.00-$3.20</div>
+            </div>
+            <div class="metric-stack outcome-cell">
+              <span class="pill beat inline-pill">Beat</span>
+              <div class="metric-sub">EPS ahead; guide cautious</div>
+            </div>
+            <div class="metric-stack reaction-cell">
+              <div class="metric-label">Shares</div>
+              <div class="metric-value positive">+1.8%</div>
+              <div class="metric-sub">Profit discipline offset demand concern</div>
+            </div>
+          </article>
+
+          <article class="earnings-row">
+            <div class="company">
+              <div class="status-rail preview" aria-hidden="true"></div>
+              <div>
+                <h3 class="company-name">FactSet</h3>
+                <div class="company-meta"><span>FDS</span><span>Thu Jul 2</span><span>Fiscal Q3</span></div>
+              </div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Consensus</div>
+              <div class="metric-value">$4.45</div>
+              <div class="metric-sub">Adj. EPS estimate</div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Result</div>
+              <div class="metric-value pending">Pending</div>
+              <div class="metric-sub">Reports Thu Jul 2</div>
+            </div>
+            <div class="metric-stack outcome-cell">
+              <span class="pill preview inline-pill">Preview</span>
+              <div class="metric-sub">Retention and workflow demand</div>
+            </div>
+            <div class="metric-stack reaction-cell">
+              <div class="metric-label">Reaction</div>
+              <div class="metric-value pending">Pending</div>
+              <div class="metric-sub">Watch data-spend read-through</div>
+            </div>
+          </article>
+
+          <article class="earnings-row">
+            <div class="company">
+              <div class="status-rail preview" aria-hidden="true"></div>
+              <div>
+                <h3 class="company-name">Constellation Brands</h3>
+                <div class="company-meta"><span>STZ</span><span>Thu Jul 2</span><span>Fiscal Q1</span></div>
+              </div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Consensus</div>
+              <div class="metric-value">$3.23</div>
+              <div class="metric-sub">Adj. EPS estimate</div>
+            </div>
+            <div class="metric-stack">
+              <div class="metric-label">Result</div>
+              <div class="metric-value pending">Pending</div>
+              <div class="metric-sub">Reports Thu Jul 2</div>
+            </div>
+            <div class="metric-stack outcome-cell">
+              <span class="pill preview inline-pill">Preview</span>
+              <div class="metric-sub">Beer depletion and pricing</div>
+            </div>
+            <div class="metric-stack reaction-cell">
+              <div class="metric-label">Reaction</div>
+              <div class="metric-value pending">Pending</div>
+              <div class="metric-sub">Watch consumer resilience</div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="calendar-title">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Option 2</div>
+          <h2 class="section-title" id="calendar-title">Calendar Strip</h2>
+        </div>
+        <div class="section-note">Best when the date sequence matters most. It makes reported versus upcoming names obvious, but gives less room to compare metrics across companies.</div>
+      </div>
+
+      <div class="surface calendar-board">
+        <section class="calendar-day" aria-labelledby="day-jun-30">
+          <div class="calendar-day-head">
+            <div class="calendar-date" id="day-jun-30">Tue Jun 30</div>
+            <div class="calendar-count">1 Reported</div>
+          </div>
+          <div class="calendar-stack">
+            <article class="calendar-item">
+              <div class="status-rail reported" aria-hidden="true"></div>
+              <div class="calendar-body">
+                <div class="calendar-company"><strong>Nike</strong><span>NKE · Q4</span></div>
+                <div><span class="pill reported">Reported</span></div>
+                <div class="calendar-metric">
+                  <div class="metric-label">Revenue</div>
+                  <div class="metric-value">$10.97B</div>
+                  <div class="metric-sub negative">China sales -12%</div>
+                </div>
+                <p class="calendar-note">Watch whether the brand reset is translating into durable demand.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="calendar-day" aria-labelledby="day-jul-1">
+          <div class="calendar-day-head">
+            <div class="calendar-date" id="day-jul-1">Wed Jul 1</div>
+            <div class="calendar-count">1 Reported</div>
+          </div>
+          <div class="calendar-stack">
+            <article class="calendar-item">
+              <div class="status-rail reported" aria-hidden="true"></div>
+              <div class="calendar-body">
+                <div class="calendar-company"><strong>General Mills</strong><span>GIS · Q4</span></div>
+                <div><span class="pill reported">Reported</span></div>
+                <div class="calendar-metric">
+                  <div class="metric-label">Adj. EPS</div>
+                  <div class="metric-value positive">$0.95</div>
+                  <div class="metric-sub">FY27 guide $3.00-$3.20</div>
+                </div>
+                <p class="calendar-note">Profit held up, but the consumer read still depends on volume and mix.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="calendar-day" aria-labelledby="day-jul-2">
+          <div class="calendar-day-head">
+            <div class="calendar-date" id="day-jul-2">Thu Jul 2</div>
+            <div class="calendar-count">2 Upcoming</div>
+          </div>
+          <div class="calendar-stack">
+            <article class="calendar-item">
+              <div class="status-rail preview" aria-hidden="true"></div>
+              <div class="calendar-body">
+                <div class="calendar-company"><strong>FactSet</strong><span>FDS · Fiscal Q3</span></div>
+                <div><span class="pill preview">Preview</span></div>
+                <div class="calendar-metric">
+                  <div class="metric-label">Adj. EPS Seen</div>
+                  <div class="metric-value">$4.45</div>
+                  <div class="metric-sub">Retention and workflow demand</div>
+                </div>
+                <p class="calendar-note">Data and desktop spend are the cleanest read-throughs.</p>
+              </div>
+            </article>
+            <article class="calendar-item">
+              <div class="status-rail preview" aria-hidden="true"></div>
+              <div class="calendar-body">
+                <div class="calendar-company"><strong>Constellation Brands</strong><span>STZ · Fiscal Q1</span></div>
+                <div><span class="pill preview">Preview</span></div>
+                <div class="calendar-metric">
+                  <div class="metric-label">Adj. EPS Seen</div>
+                  <div class="metric-value">$3.23</div>
+                  <div class="metric-sub">Beer depletion and pricing</div>
+                </div>
+                <p class="calendar-note">Upper-income demand and pricing discipline are the focus.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="scorecard-title">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Option 3</div>
+          <h2 class="section-title" id="scorecard-title">Scorecard Tiles</h2>
+        </div>
+        <div class="section-note">Closest to the current card footprint, but changes the inside of each card from a headline/body story into labeled financial facts.</div>
+      </div>
+
+      <div class="scorecard-grid">
+        <article class="scorecard">
+          <div class="scorecard-head">
+            <div>
+              <h3 class="scorecard-title">Nike</h3>
+              <div class="scorecard-meta">NKE · Tue Jun 30 · Q4</div>
+            </div>
+            <span class="pill reported">Reported</span>
+          </div>
+          <div class="scorecard-table">
+            <div class="scorecard-row">
+              <div class="scorecard-key">Expected</div>
+              <div class="scorecard-val">$10.72B rev.</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Actual</div>
+              <div class="scorecard-val">$10.97B rev.</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Outcome</div>
+              <div class="scorecard-val positive">Beat</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Reaction</div>
+              <div class="scorecard-val negative">-4.2%</div>
+            </div>
+          </div>
+          <p class="scorecard-note">Revenue beat was not enough; China sales and direct-channel demand drove the market reaction.</p>
+        </article>
+
+        <article class="scorecard">
+          <div class="scorecard-head">
+            <div>
+              <h3 class="scorecard-title">General Mills</h3>
+              <div class="scorecard-meta">GIS · Wed Jul 1 · Q4</div>
+            </div>
+            <span class="pill reported">Reported</span>
+          </div>
+          <div class="scorecard-table">
+            <div class="scorecard-row">
+              <div class="scorecard-key">Expected</div>
+              <div class="scorecard-val">$0.91 EPS</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Actual</div>
+              <div class="scorecard-val positive">$0.95 EPS</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Outcome</div>
+              <div class="scorecard-val positive">Beat</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Reaction</div>
+              <div class="scorecard-val positive">+1.8%</div>
+            </div>
+          </div>
+          <p class="scorecard-note">Profit beat helped, while the cautious FY27 EPS guide keeps the consumer read mixed.</p>
+        </article>
+
+        <article class="scorecard">
+          <div class="scorecard-head">
+            <div>
+              <h3 class="scorecard-title">FactSet</h3>
+              <div class="scorecard-meta">FDS · Thu Jul 2 · Fiscal Q3</div>
+            </div>
+            <span class="pill preview">Preview</span>
+          </div>
+          <div class="scorecard-table">
+            <div class="scorecard-row">
+              <div class="scorecard-key">Expected</div>
+              <div class="scorecard-val">$4.45</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Actual</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Outcome</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Reaction</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+          </div>
+          <p class="scorecard-note">Set the bar before the print: retention and data-spend commentary decide the read-through.</p>
+        </article>
+
+        <article class="scorecard">
+          <div class="scorecard-head">
+            <div>
+              <h3 class="scorecard-title">Constellation Brands</h3>
+              <div class="scorecard-meta">STZ · Thu Jul 2 · Fiscal Q1</div>
+            </div>
+            <span class="pill preview">Preview</span>
+          </div>
+          <div class="scorecard-table">
+            <div class="scorecard-row">
+              <div class="scorecard-key">Expected</div>
+              <div class="scorecard-val">$3.23</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Actual</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Outcome</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+            <div class="scorecard-row">
+              <div class="scorecard-key">Reaction</div>
+              <div class="scorecard-val pending">Pending</div>
+            </div>
+          </div>
+          <p class="scorecard-note">Beer depletion, pricing, and upper-income demand determine whether the setup clears the bar.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

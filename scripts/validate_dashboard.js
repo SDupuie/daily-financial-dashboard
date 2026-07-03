@@ -41,6 +41,22 @@ function chicagoIsoDate(date) {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+function chicagoClockMinutes(epochSeconds) {
+  const seconds = Number(epochSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date(seconds * 1000));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return (hour % 24) * 60 + minute;
+}
+
 function allowedNewsDates(now) {
   return new Set([
     chicagoIsoDate(now),
@@ -51,6 +67,15 @@ function allowedNewsDates(now) {
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
+}
+
+function numericPercent(value) {
+  const match = String(value ?? '').trim().match(/^([+-]?\d+(?:\.\d+)?)%$/);
+  return match ? Number(match[1]) : null;
+}
+
+function nearlyEqual(left, right, tolerance = 0.01) {
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) <= tolerance;
 }
 
 function isCoherentOhlc(bar) {
@@ -97,16 +122,10 @@ if (!dashboardMatch) {
 
   if (data) {
     const now = getNow();
-    const strictDates = process.env.VALIDATE_STRICT_DATES === '1';
     const tapeRows = data.tape?.rows ?? [];
-    const cryptoRows = data.crypto?.tape ?? [];
-    const cryptoStatRowPattern = /(?:fear\s*&?\s*greed|(?:total )?crypto market cap|altcoin season)/i;
-    const isCryptoStatRow = (row) => (
-      row?.sym === 'F&G'
-      || row?.sym === 'TOTAL'
-      || row?.sym === 'ALTSEASON'
-      || cryptoStatRowPattern.test(String(row?.name ?? ''))
-    );
+    // README Data Contracts split chartable crypto tickers from crypto-only section stats.
+    const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
+    const cryptoStatRows = data.crypto?.stats ?? [];
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
     const staticTickerNotePattern = /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains|quote recap|price recap|latest quote|latest close)/i;
     const requireString = (value, label) => {
@@ -114,6 +133,9 @@ if (!dashboardMatch) {
         errors.push(`${label} must be populated.`);
       }
     };
+    if (data.crypto && Object.prototype.hasOwnProperty.call(data.crypto, 'tape')) {
+      errors.push('crypto.tape is deprecated; crypto tickers belong in tape.rows and crypto-only stat rows belong in crypto.stats.');
+    }
     const validateTickerNote = ({ note, values, label }) => {
       requireString(note, `${label}.note`);
       const text = String(note ?? '').trim();
@@ -184,7 +206,7 @@ if (!dashboardMatch) {
       validateDividendEvents(row[eventsKey], `${label}.${eventsKey}`);
     };
 
-    // Freshness advisory checks (strict only when VALIDATE_STRICT_DATES=1).
+    // Dashboard dates are a hard contract because automation skip logic relies on them.
     const todayParts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/Chicago',
       weekday: 'long',
@@ -211,11 +233,7 @@ if (!dashboardMatch) {
       'i'
     ).test(footerCompiled);
     if (!mastheadLooksFresh || !footerLooksFresh) {
-      if (strictDates) {
-        errors.push(dateMsg);
-      } else {
-        warnings.push(dateMsg);
-      }
+      errors.push(dateMsg);
     }
 
     // Promoted-dashboard schema gates: catch old mockup/legacy sections and missing embedded production data.
@@ -238,7 +256,7 @@ if (!dashboardMatch) {
       requireString(catalyst.body, `opening.catalysts[${index}].body`);
     }
 
-    const staleTapeTickers = new Set(['6723.T', 'BZ', 'BTC', 'ETH', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
+    const staleTapeTickers = new Set(['6723.T', 'BZ', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
     for (const ticker of tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase())) {
       if (staleTapeTickers.has(ticker)) {
         errors.push(`The Tape should not include stale or duplicated ticker ${ticker}.`);
@@ -250,6 +268,13 @@ if (!dashboardMatch) {
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
         errors.push(`The Tape is missing required ticker ${ticker}.`);
+      }
+    }
+    const requiredCryptoTickers = ['BTC', 'ETH', 'SOL', 'XRP', 'IBIT', 'ETHA', 'MSTR'];
+    const cryptoTickerSet = new Set(cryptoTickerRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
+    for (const ticker of requiredCryptoTickers) {
+      if (!cryptoTickerSet.has(ticker)) {
+        errors.push(`The Tape Crypto group is missing required ticker ${ticker}.`);
       }
     }
     // Keep this map in lockstep with tape.rows[].sourceSymbol; embedded charts use it as their source contract.
@@ -296,12 +321,11 @@ if (!dashboardMatch) {
       }
     }
     const expectedCryptoSourceSymbols = new Map();
-    for (const [index, rowRaw] of cryptoRows.entries()) {
+    for (const [index, rowRaw] of cryptoTickerRows.entries()) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-      if (isCryptoStatRow(row)) continue;
-      const ticker = String(row.sym ?? row.ticker ?? '').toUpperCase();
+      const ticker = String(row.ticker ?? '').toUpperCase();
       if (!ticker) continue;
-      requireString(row.sourceSymbol, `crypto.tape[${index}].sourceSymbol`);
+      requireString(row.sourceSymbol, `tape.rows Crypto ${ticker}.sourceSymbol`);
       if (row.sourceSymbol) expectedCryptoSourceSymbols.set(ticker, row.sourceSymbol);
     }
     const expectedChartSourceSymbols = new Map([
@@ -436,7 +460,7 @@ if (!dashboardMatch) {
         };
         for (const row of tapeRows) {
           const ticker = String(row?.ticker ?? '').toUpperCase();
-          if (!ticker) continue;
+          if (!ticker || String(row?.group ?? '') === 'Crypto') continue;
           requireMatchingQuoteFields({
             dashboardRow: row,
             chartRow: chartTapeQuoteByTicker.get(ticker),
@@ -444,17 +468,30 @@ if (!dashboardMatch) {
             label: `tape.rows ${ticker}`
           });
         }
-        for (const rowRaw of cryptoRows) {
+        for (const rowRaw of cryptoTickerRows) {
           const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-          if (isCryptoStatRow(row)) continue;
-          const ticker = String(row.sym ?? row.ticker ?? '').toUpperCase();
+          const ticker = String(row.ticker ?? '').toUpperCase();
           if (!ticker) continue;
-          requireMatchingQuoteFields({
-            dashboardRow: row,
-            chartRow: chartCryptoQuoteByTicker.get(ticker),
-            fields: ['price', 'delta', 'chg', 'dir', 'asOf'],
-            label: `crypto.tape ${ticker}`
-          });
+          const chartRow = chartCryptoQuoteByTicker.get(ticker);
+          if (!chartRow) {
+            errors.push(`Embedded chart-data quoteRows is missing tape.rows Crypto ${ticker}.`);
+            continue;
+          }
+          const fieldPairs = [
+            // chart-data.quoteRows.crypto keeps its formatter names; embedded dashboard rows stay on Tape names.
+            ['last', 'price'],
+            ['delta', 'delta'],
+            ['pct', 'chg'],
+            ['dir', 'dir'],
+            ['asOf', 'asOf']
+          ];
+          for (const [dashboardField, chartField] of fieldPairs) {
+            const dashboardValue = String(row?.[dashboardField] ?? '');
+            const chartValue = String(chartRow?.[chartField] ?? '');
+            if (dashboardValue !== chartValue) {
+              errors.push(`tape.rows Crypto ${ticker}.${dashboardField} must match embedded chart-data quoteRows.crypto ${chartField} value "${chartValue}".`);
+            }
+          }
         }
 
         // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane chart layout.
@@ -467,36 +504,111 @@ if (!dashboardMatch) {
       }
     }
 
-    // Runtime does not fetch sidecar files; pre-market futures must be embedded and chart-ready.
-    const futures = Array.isArray(data.preMarket?.futures) ? data.preMarket.futures : [];
-    if (futures.length !== 4) {
-      errors.push('preMarket.futures must contain exactly four index-futures rows.');
+    const futuresModule = data.futuresModule && typeof data.futuresModule === 'object' ? data.futuresModule : {};
+    if (!data.futuresModule || typeof data.futuresModule !== 'object') {
+      errors.push('futuresModule must be populated.');
     }
+    requireString(futuresModule.sectionLabel, 'futuresModule.sectionLabel');
+    requireString(futuresModule.sectionTitle, 'futuresModule.sectionTitle');
+    const futuresSectionLabel = String(futuresModule.sectionLabel || '').trim();
+    const futuresSectionTitle = String(futuresModule.sectionTitle || '').trim();
+    const knownFuturesWindow = (
+      (futuresSectionLabel === 'Before The Open' && futuresSectionTitle === 'Pre-Market Futures')
+      || (futuresSectionLabel === 'After The Bell' && futuresSectionTitle === 'Session Futures')
+    );
+    if (!knownFuturesWindow) {
+      errors.push(`futuresModule section labels must be either Before The Open/Pre-Market Futures or After The Bell/Session Futures, got ${futuresSectionLabel}/${futuresSectionTitle}.`);
+    }
+
+    // Runtime does not fetch sidecar files; futures-module rows must be embedded and chart-ready.
+    const futures = Array.isArray(futuresModule.futures) ? futuresModule.futures : [];
+    if (futures.length !== 4) {
+      errors.push('futuresModule.futures must contain exactly four index-futures rows.');
+    }
+    const isSessionFutures = futuresSectionTitle === 'Session Futures';
     for (const [index, futureRaw] of futures.entries()) {
       const future = futureRaw && typeof futureRaw === 'object' ? futureRaw : {};
-      requireString(future.label, `preMarket.futures[${index}].label`);
-      requireString(future.value, `preMarket.futures[${index}].value`);
-      requireString(future.body, `preMarket.futures[${index}].body`);
+      requireString(future.label, `futuresModule.futures[${index}].label`);
+      requireString(future.value, `futuresModule.futures[${index}].value`);
+      requireString(future.body, `futuresModule.futures[${index}].body`);
+      let firstSeriesPrice = null;
+      let lastSeriesPrice = null;
       if (!Array.isArray(future.series) || future.series.length < 2) {
-        errors.push(`preMarket.futures[${index}].series must contain at least two chart points.`);
+        errors.push(`futuresModule.futures[${index}].series must contain at least two chart points.`);
+      } else if (isSessionFutures) {
+        // Session Futures should be a completed cash-session chart even when the afternoon update runs later.
+        for (const point of future.series) {
+          const minutes = chicagoClockMinutes(Array.isArray(point) ? point[0] : point?.time);
+          if (minutes === null || minutes < 8 * 60 + 30 || minutes > 15 * 60) {
+            errors.push(`futuresModule.futures[${index}].series contains a point outside the 8:30 AM-3:00 PM Central Session Futures window.`);
+            break;
+          }
+        }
+        const priceAt = (point) => Number(Array.isArray(point) ? point[1] : point?.price ?? point?.value);
+        firstSeriesPrice = priceAt(future.series[0]);
+        lastSeriesPrice = priceAt(future.series[future.series.length - 1]);
       }
-      // The browser renderer uses this field to draw the previous-close reference line.
+      // Keep the source prior close available for audit/provenance; Session Futures uses raw.referencePrice as its chart baseline.
       if (!Number.isFinite(Number(future.raw?.previousClose))) {
-        errors.push(`preMarket.futures[${index}].raw.previousClose must be numeric for the futures close reference line.`);
+        errors.push(`futuresModule.futures[${index}].raw.previousClose must be numeric for futures source prior-close provenance.`);
+      }
+      const referencePrice = Number(future.raw?.referencePrice ?? future.raw?.previousClose);
+      if (!Number.isFinite(referencePrice)) {
+        errors.push(`futuresModule.futures[${index}].raw reference price must be numeric for the futures chart baseline.`);
+      }
+      if (isSessionFutures) {
+        if (!Number.isFinite(Number(future.raw?.referencePrice))) {
+          errors.push(`futuresModule.futures[${index}].raw.referencePrice must be numeric for Session Futures.`);
+        }
+        if (!Number.isFinite(Number(future.raw?.sessionOpen))) {
+          errors.push(`futuresModule.futures[${index}].raw.sessionOpen must be numeric for Session Futures.`);
+        } else if (!nearlyEqual(Number(future.raw.sessionOpen), firstSeriesPrice, 0.001)) {
+          errors.push(`futuresModule.futures[${index}].raw.sessionOpen must match the first Session Futures chart point.`);
+        }
+        requireString(future.raw?.referenceDate, `futuresModule.futures[${index}].raw.referenceDate`);
+        requireString(future.raw?.referenceLabel, `futuresModule.futures[${index}].raw.referenceLabel`);
+        requireString(future.raw?.marketTimeZone, `futuresModule.futures[${index}].raw.marketTimeZone`);
+        requireString(future.raw?.sessionStartEastern, `futuresModule.futures[${index}].raw.sessionStartEastern`);
+        requireString(future.raw?.sessionEndEastern, `futuresModule.futures[${index}].raw.sessionEndEastern`);
+        requireString(future.raw?.referenceCloseEastern, `futuresModule.futures[${index}].raw.referenceCloseEastern`);
+        if (!/prior 4 PM ET close/i.test(String(future.raw?.referenceLabel || ''))) {
+          errors.push(`futuresModule.futures[${index}].raw.referenceLabel must store the official prior 4 PM ET close baseline.`);
+        }
+        if (!/prior 4 PM ET close/i.test(String(future.body || ''))) {
+          errors.push(`futuresModule.futures[${index}].body must describe Session Futures change as vs prior 4 PM ET close.`);
+        }
+        if (future.raw?.marketTimeZone !== 'America/New_York') {
+          errors.push(`futuresModule.futures[${index}].raw.marketTimeZone must store official market times in America/New_York.`);
+        }
+        if (future.raw?.sessionStartEastern !== '9:30 AM ET' || future.raw?.sessionEndEastern !== '4:00 PM ET' || future.raw?.referenceCloseEastern !== '4:00 PM ET') {
+          errors.push(`futuresModule.futures[${index}] official Session Futures times must be stored in Eastern time.`);
+        }
+        const expectedDelta = lastSeriesPrice - referencePrice;
+        const expectedPct = referencePrice ? (expectedDelta / referencePrice) * 100 : 0;
+        if (!nearlyEqual(Number(future.raw?.delta), expectedDelta, 0.01)) {
+          errors.push(`futuresModule.futures[${index}].raw.delta must match the Session Futures chart change.`);
+        }
+        if (!nearlyEqual(Number(future.raw?.pct), expectedPct, 0.001)) {
+          errors.push(`futuresModule.futures[${index}].raw.pct must match the Session Futures chart percent change.`);
+        }
+        const displayedPct = numericPercent(future.value);
+        if (displayedPct !== null && !nearlyEqual(displayedPct, expectedPct, 0.01)) {
+          errors.push(`futuresModule.futures[${index}].value must match the rounded Session Futures percent change.`);
+        }
       }
     }
 
-    const preMarketStories = Array.isArray(data.preMarket?.stories) ? data.preMarket.stories : [];
-    if (preMarketStories.length < 1 || preMarketStories.length > 3) {
-      errors.push('preMarket.stories must contain one to three priority stories.');
+    const futuresModuleStories = Array.isArray(futuresModule.stories) ? futuresModule.stories : [];
+    if (futuresModuleStories.length < 1 || futuresModuleStories.length > 3) {
+      errors.push('futuresModule.stories must contain one to three priority stories.');
     }
-    for (const [index, storyRaw] of preMarketStories.entries()) {
+    for (const [index, storyRaw] of futuresModuleStories.entries()) {
       const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
-      requireString(story.preMarketTag || story.tag, `preMarket.stories[${index}] tag`);
-      requireString(story.title, `preMarket.stories[${index}].title`);
-      requireString(story.body, `preMarket.stories[${index}].body`);
-      requireHttpsUrl(story.url, `preMarket.stories[${index}]`);
-      validateStoryFreshness(story, `preMarket.stories[${index}]`);
+      requireString(story.futuresModuleTag, `futuresModule.stories[${index}].futuresModuleTag`);
+      requireString(story.title, `futuresModule.stories[${index}].title`);
+      requireString(story.body, `futuresModule.stories[${index}].body`);
+      requireHttpsUrl(story.url, `futuresModule.stories[${index}]`);
+      validateStoryFreshness(story, `futuresModule.stories[${index}]`);
     }
 
     // Portfolio validation is instrument-level only; tactical weights/model outputs are intentionally out of scope here.
@@ -571,22 +683,21 @@ if (!dashboardMatch) {
 
     const cryptoHeader = String(data.crypto?.tapeHeader ?? '');
     const cryptoNotes = data.crypto?.notes ?? [];
-    const fng = (data.crypto?.tape ?? []).find(row => row.sym === 'F&G');
-    const altcoinSeason = (data.crypto?.tape ?? []).find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
+    const fng = cryptoStatRows.find(row => row.sym === 'F&G');
+    const altcoinSeason = cryptoStatRows.find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
     const staleFngPattern = /(numeric read|pull still failed|F&G ~|unavailable|not retrievable|not extractable)/i;
 
     if (staleFngPattern.test(cryptoHeader)) {
       errors.push('Crypto tape header contains stale F&G failure/unavailable language.');
     }
 
-    for (const rowRaw of cryptoRows) {
+    for (const rowRaw of cryptoTickerRows) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-      if (isCryptoStatRow(row)) continue;
-      const ticker = String(row.sym ?? row.ticker ?? row.name ?? '(unknown)').trim();
+      const ticker = String(row.ticker ?? row.name ?? '(unknown)').trim();
       validateTickerNote({
         note: row.note,
-        values: [row.price, row.delta, row.chg],
-        label: `crypto.tape ${ticker}`
+        values: [row.last, row.delta, row.pct],
+        label: `tape.rows Crypto ${ticker}`
       });
     }
 
@@ -599,9 +710,9 @@ if (!dashboardMatch) {
       if (staticTickerNotePattern.test(text)) {
         errors.push(`Crypto note "${note.title ?? '(untitled)'}" looks static, placeholder-like, or quote-recap-only.`);
       }
-      for (const rowRaw of cryptoRows) {
+      for (const rowRaw of cryptoTickerRows) {
         const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-        for (const value of [row.price, row.chg]) {
+        for (const value of [row.last, row.pct]) {
           if (value && !['Fear'].includes(String(value)) && text.includes(String(value))) {
             errors.push(`Crypto note "${note.title ?? '(untitled)'}" repeats crypto tape value "${value}".`);
           }
@@ -615,16 +726,16 @@ if (!dashboardMatch) {
       errors.push('Crypto notes must contain no more than six daily stories/items.');
     }
 
-    const cryptoTotal = (data.crypto?.tape ?? []).find(row => row.sym === 'TOTAL' || /(?:total )?crypto market cap/i.test(String(row?.name ?? '')));
+    const cryptoTotal = cryptoStatRows.find(row => row.sym === 'TOTAL' || /(?:total )?crypto market cap/i.test(String(row?.name ?? '')));
     if (!cryptoTotal) {
-      errors.push('Crypto tape is missing the Crypto Market Cap stat row.');
+      errors.push('crypto.stats is missing the Crypto Market Cap stat row.');
     } else {
       requireString(cryptoTotal.price, 'Crypto Market Cap price');
       requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
     }
 
     if (!fng) {
-      errors.push('Crypto tape is missing the F&G row.');
+      errors.push('crypto.stats is missing the F&G row.');
     } else {
       const fngPrice = String(fng.price ?? '').trim();
       const fngChange = String(fng.chg ?? '').trim();
@@ -644,7 +755,7 @@ if (!dashboardMatch) {
     }
 
     if (!altcoinSeason) {
-      errors.push('Crypto tape is missing the Altcoin Season Index stat row.');
+      errors.push('crypto.stats is missing the Altcoin Season Index stat row.');
     } else {
       const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
       const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
@@ -680,8 +791,8 @@ if (!dashboardMatch) {
     if (stories.length !== 9) {
       errors.push('stories must contain exactly 9 fresh market/news items.');
     }
-    const preMarketUrls = new Set(preMarketStories.map((story) => String(story?.url ?? '').trim()).filter(Boolean));
-    const preMarketTitles = new Set(preMarketStories.map((story) => String(story?.title ?? '').trim().toLowerCase()).filter(Boolean));
+    const futuresModuleUrls = new Set(futuresModuleStories.map((story) => String(story?.url ?? '').trim()).filter(Boolean));
+    const futuresModuleTitles = new Set(futuresModuleStories.map((story) => String(story?.title ?? '').trim().toLowerCase()).filter(Boolean));
     for (const storyRaw of stories) {
       const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
       requireString(story.tag, `Story "${story.title ?? '(untitled)'}" tag`);
@@ -696,11 +807,11 @@ if (!dashboardMatch) {
       }
       const storyUrl = String(story.url ?? '').trim();
       const storyTitle = String(story.title ?? '').trim().toLowerCase();
-      if (storyUrl && preMarketUrls.has(storyUrl)) {
-        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted Pre-Market URL.`);
+      if (storyUrl && futuresModuleUrls.has(storyUrl)) {
+        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted futures-module URL.`);
       }
-      if (storyTitle && preMarketTitles.has(storyTitle)) {
-        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted Pre-Market title.`);
+      if (storyTitle && futuresModuleTitles.has(storyTitle)) {
+        errors.push(`Story "${story.title ?? '(untitled)'}" duplicates a promoted futures-module title.`);
       }
     }
 

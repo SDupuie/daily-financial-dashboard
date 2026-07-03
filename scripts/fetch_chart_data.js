@@ -112,32 +112,36 @@ function readTapeRows(input) {
     throw new Error('dashboard-data tape.rows is empty or missing');
   }
   // sourceSymbol is the single dashboard-owned routing key for quote refreshes and embedded chart history.
+  // Crypto tickers share the canonical tape.rows contract, but keep their crypto quoteRows shape below.
   return rows.map((row, index) => ({
     index,
     section: 'tape',
     quoteShape: 'tape',
+    group: String(row?.group || '').trim(),
     name: String(row?.name || '').trim(),
     ticker: String(row?.ticker || '').trim().toUpperCase(),
     sourceSymbol: String(row?.sourceSymbol || '').trim(),
     note: String(row?.note || '').trim()
-  })).filter((row) => row.ticker && row.sourceSymbol);
+  })).filter((row) => row.ticker && row.sourceSymbol && row.group !== 'Crypto');
 }
 
 function readCryptoRows(input) {
   const data = readDashboardData(input);
-  const rows = Array.isArray(data.crypto?.tape) ? data.crypto.tape : [];
+  const rows = Array.isArray(data.tape?.rows) ? data.tape.rows : [];
+  // chart-data.quoteRows.crypto uses price/chg because the crypto refresh formatter predates the Tape merge.
   return rows.map((row, index) => {
-    const ticker = String(row?.sym || row?.ticker || '').trim().toUpperCase();
+    const ticker = String(row?.ticker || '').trim().toUpperCase();
     return {
       index,
       section: 'crypto',
       quoteShape: 'crypto',
+      group: String(row?.group || '').trim(),
       name: String(row?.name || ticker).trim(),
       ticker,
       sourceSymbol: String(row?.sourceSymbol || '').trim(),
       note: String(row?.note || '').trim()
     };
-  }).filter((row) => row.ticker && row.sourceSymbol);
+  }).filter((row) => row.ticker && row.sourceSymbol && row.group === 'Crypto');
 }
 
 function readChartableRows(input) {

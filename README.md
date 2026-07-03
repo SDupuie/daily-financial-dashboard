@@ -11,7 +11,7 @@ This repository maintains `daily_financial_news.html`, the canonical static Dail
 
 ## Update Cadence
 
-Update `daily_financial_news.html` each market morning around 7:00 AM Central, before the U.S. open. The main dashboard payload lives inside:
+Update `daily_financial_news.html` each market morning around 7:00 AM Central, before the U.S. open. When doing an afternoon refresh around 4:00 PM Central, switch the futures module from the morning setup view to the completed-session view. The main dashboard payload lives inside:
 
 ```html
 <!-- ============ DATA START — edit this block to update the dashboard ============ -->
@@ -22,6 +22,97 @@ Update `daily_financial_news.html` each market morning around 7:00 AM Central, b
 Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a daily dashboard refresh.
 
 Production is self-contained: the rendered dashboard reads embedded `dashboard-data` and `chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
+
+## Data Contracts
+
+This section is the canonical human-readable contract for dashboard data. Keep `scripts/validate_dashboard.js`, `scripts/validate_chart_data.js`, and fetch-script output in sync with this section whenever a payload shape changes.
+
+### Embedded `dashboard-data`
+
+- `masthead`: issue metadata for the visible header. `masthead.date` must be the dashboard date.
+- `opening`: market-open summary with `headline`, `deck`, and exactly four `catalysts[]` items.
+- `futuresModule`: the four-card futures module and its one to three promoted stories. Use `sectionLabel`/`sectionTitle` to distinguish morning `Before The Open` / `Pre-Market Futures` from afternoon `After The Bell` / `Session Futures`.
+- `tape`: the cross-asset Tape table. All ticker quote rows, including crypto tickers, live in `tape.rows[]`.
+- `assetAllocationPortfolio`: instrument-level ETF market data and sanitized portfolio-level summary fields only. Do not embed tactical model logic or derived allocation calculations.
+- `stories`: exactly nine broad-market, non-crypto story cards.
+- `crypto`: crypto section metadata, crypto-only stat rows, and crypto story notes. Crypto ticker quote rows do not live here.
+- `earnings`: recent and upcoming earnings rows.
+- `weekAhead`: scheduled market events and closures.
+- `footer`: compile date and concise source-family attribution.
+
+### `tape.rows[]`
+
+Each Tape row is a chartable quote row with this contract:
+
+```json
+{
+  "group": "Crypto",
+  "name": "Bitcoin",
+  "ticker": "BTC",
+  "last": "$61,406",
+  "delta": "+$1,403",
+  "pct": "+2.34%",
+  "dir": "up",
+  "note": "Ticker-specific daily market context.",
+  "sourceSymbol": "BTC-USD",
+  "asOf": "2026-07-03"
+}
+```
+
+- `group` is optional for existing non-crypto rows that are grouped by ticker lists in the renderer; crypto ticker rows must set `group: "Crypto"`.
+- `ticker` is the dashboard display/routing key. `sourceSymbol` is the fetch/chart source key.
+- `last`, `delta`, `pct`, `dir`, and `asOf` must match the embedded `chart-data.quoteRows` value for the row.
+- `note` must explain the factor driving that ticker or market today. It must not restate quote values or include source/citation language.
+- Deprecated: do not put ticker quote rows in `crypto.tape[]`.
+
+### `crypto`
+
+Crypto section data has this contract:
+
+```json
+{
+  "tapeHeader": "Crypto tape: bitcoin holds $61K while sentiment improves from extreme fear",
+  "stats": [
+    { "sym": "F&G", "name": "Fear & Greed Index", "sub": "Extreme Fear", "price": "21", "delta": "+2", "chg": "+2", "dir": "up" },
+    { "sym": "ALTSEASON", "name": "Altcoin Season Index", "sub": "Neutral", "price": "48", "delta": "Unchanged", "chg": "/100", "dir": "flat" },
+    { "sym": "TOTAL", "name": "Crypto Market Cap", "sub": "Expanding", "price": "2.21T", "delta": "+$43.86B", "chg": "+2.03%", "dir": "up" }
+  ],
+  "dominance": { "btc": "55.64%", "eth": "9.28%", "others": "35.08%" },
+  "notes": []
+}
+```
+
+- `crypto.stats[]` is for crypto-only section stat cards: Fear & Greed, Altcoin Season Index, and Crypto Market Cap.
+- `crypto.notes[]` holds four to six crypto-specific stories or notes with direct `url` and `publishedOn`.
+- `crypto.tape[]` is deprecated and validation should reject it.
+
+### `futuresModule`
+
+- `futuresModule.futures[]` must contain exactly four index-futures rows.
+- `futuresModule.stories[]` must contain one to three promoted stories, each with `futuresModuleTag`, `title`, `body`, `url`, and `publishedOn`.
+- Morning `Pre-Market Futures` rows chart the overnight Globex window from the prior futures reopen through the latest morning tick.
+- Afternoon `Session Futures` rows chart the regular market window, normally 9:30 AM to 4:00 PM Eastern, and compare the latest regular-session futures value with the prior trading day's official 4:00 PM Eastern futures close.
+- Dashboard display times should be local, but raw official session labels and fields must be stored in Eastern terms: `marketTimeZone: "America/New_York"`, `sessionStartEastern`, `sessionEndEastern`, `referenceCloseEastern`, and `referenceLabel: "prior 4 PM ET close"`.
+- `raw.referencePrice` is the comparison baseline used for Session Futures chart/reference calculations. Keep `raw.previousClose` as the source's futures prior close when available.
+
+### Embedded `chart-data`
+
+The `chart-data` block is generated chart history plus quote-row staging data:
+
+- `schemaVersion` must be `1`.
+- `range.days` must be at least `1826` so the 5Y chart shortcut has enough embedded history.
+- `series[]` must include every chartable ticker from `tape.rows[]`, with matching `ticker`, `section`, and `sourceSymbol`.
+- `quoteRows.tape[]` contains non-crypto Tape quote rows using `last`, `delta`, and `pct`.
+- `quoteRows.crypto[]` contains crypto Tape quote rows using the crypto refresh shape: `price`, `delta`, and `chg`. The dashboard maps these back onto `tape.rows[].last`, `delta`, and `pct`.
+- Published production renders from embedded `dashboard-data`; `quoteRows` is staging/refresh data and must stay in sync with the embedded Tape rows.
+
+## Futures Module Windows
+
+Use the same embedded `futuresModule` data block for both update windows; set the visible labels to match the update:
+
+- Morning update: `futuresModule.sectionLabel` = `Before The Open`; `futuresModule.sectionTitle` = `Pre-Market Futures`. Futures charts should cover the current overnight Globex session from the prior futures reopen, normally 5:00 PM Central / 6:00 PM Eastern, through the latest available morning tick.
+- Afternoon update: `futuresModule.sectionLabel` = `After The Bell`; `futuresModule.sectionTitle` = `Session Futures`. Run the update around 4:00 PM Central, but keep the futures charts scoped to regular market hours, normally 8:30 AM to 3:00 PM Central / 9:30 AM to 4:00 PM Eastern. Visible change values should compare the latest regular-session futures value with the prior trading day's official 4:00 PM Eastern futures close, matching the daily-change basis used by cash indexes. Store the official market-time contract in Eastern time, e.g. raw `referenceLabel` = `prior 4 PM ET close` and `marketTimeZone` = `America/New_York`. Use `node scripts/fetch_premarket_futures.js --session` for this completed-session futures payload.
+- Holiday or unusual-session updates should use the closest accurate window label and make the shortened or closed cash-market context clear in `footer.compiled`.
 
 ## Optional Local Quote Refresh
 
@@ -40,6 +131,7 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - `masthead.date`: today.
    - `footer.compiled`: must include today’s compile date.
    - Never allow stale values such as `January 1`, year `2001`, or a prior-day compile date in `masthead.date` or `footer.compiled`.
+   - Do not forward-date the dashboard on the prior evening, even for full-market holidays or after-close refreshes. If the local run date is `July 2`, keep `masthead.date` and the compile date on `July 2`; use `weekAhead`, stories, and `footer.compiled` to explain the next-day holiday context.
    - `tape.label`: current market-record context.
    - If today is Monday or Friday, update `weekAhead`; otherwise leave `weekAhead` mostly unchanged unless a scheduled event has moved.
 
@@ -47,10 +139,10 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
    - For stock/ETF quotes, use `node scripts/fetch_quotes.js --symbols IBIT:etf,ETHA:etf,MSTR:stock` or add the symbols needed for the run.
-   - For pre-market futures, chart/quote data, asset-allocation ETF rows, and asset-allocation portfolio summary, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_chart_data.js` for unified chart bars and quote-row staging data, and `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the appropriate embedded data block before publish.
-   - Production data that must be embedded daily includes `preMarket.futures`, `preMarket.stories`, `assetAllocationPortfolio.rows`, and all rows needed by `tape.rows`.
+   - For the futures module, chart/quote data, asset-allocation ETF rows, and asset-allocation portfolio summary, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_chart_data.js` for unified chart bars and quote-row staging data, and `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the appropriate embedded data block before publish.
+   - Production data that must be embedded daily includes `futuresModule.futures`, `futuresModule.stories`, `assetAllocationPortfolio.rows`, and all rows needed by `tape.rows`.
    - In each `tape.rows[].note`, summarize the relevant market commentary or catalyst driving that market. Do not restate `last`, `delta`, or `pct`.
-   - In each rendered `crypto.tape[]` ticker row, include a `note` for the collapsed Tape Crypto tab. Update these notes daily with ticker-specific context; do not reuse one generic crypto note across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible crypto tickers.
+   - In each `tape.rows[]` crypto ticker row (`group: "Crypto"`), include a `note` for the collapsed Tape Crypto tab. Update these notes daily with ticker-specific context; do not reuse one generic crypto note across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible crypto tickers.
    - Do not name quote/news sources in visible copy. Keep source attribution and retrieval/process commentary in `footer.compiled`.
    - Do not use source-verification phrasing such as `Reuters reported`, `Yahoo showed`, `fallback chain`, or similar process commentary in user-facing text.
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
@@ -74,15 +166,15 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - Use today and yesterday as explicit dates in every query.
    - Start with:
      - `stock market news [today] OR [yesterday]`
-     - `premarket futures [today]`
+     - Morning: `premarket futures [today]`; afternoon: `index futures after the bell [today]`
      - `earnings [today] OR [yesterday]`
      - `crypto bitcoin [today] OR [yesterday]`
    - Add targeted searches only for gaps: Fed, oil, geopolitics, major earnings, semis/AI, crypto regulation, ETF flows, stablecoins, hacks/security, protocol updates, and market structure.
    - Discard any story without a publication date from today or yesterday unless it is a standing calendar/source page.
-   - Each `stories[]` and `preMarket.stories[]` item must include a direct `url` plus a `publishedOn` local date in `YYYY-MM-DD` format so validation can reject stale articles before commit.
+   - Each `stories[]` and `futuresModule.stories[]` item must include a direct `url` plus a `publishedOn` local date in `YYYY-MM-DD` format so validation can reject stale articles before commit.
    - If a link is intentionally an evergreen reference page rather than a dated article, mark it with `referencePage: true`; use that exception sparingly for maintained calendars or official schedule pages, not ordinary news stories.
    - Each `crypto.notes[]` item must include a direct `url`.
-   - Do not repeat promoted `preMarket.stories[]` items in `stories[]`; use What’s Moving Today for additional market breadth.
+   - Do not repeat promoted `futuresModule.stories[]` items in `stories[]`; use What’s Moving Today for additional market breadth.
    - Keep crypto-specific headlines, ETF-flow stories, proxy-equity stories, stablecoin stories, and token/regulation stories out of `stories[]`; those belong in `crypto.notes[]` unless the user explicitly asks to feature crypto in What’s Moving Today.
    - When more than one reputable article covers the same basic story, prefer a free-to-read or less paywalled link. This is a preference, not a hard rule; use the paywalled source when it is clearly the best, original, or most reliable source.
    - For any `url` that renders as `READ MORE`, prefer a reader-facing article or HTML page, not a raw API/feed/download endpoint.
@@ -91,11 +183,11 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
 5. Rewrite the JSON sections in this order.
    - `masthead`: bump volume by 1 and set `masthead.date`.
    - `opening`: update `headline`, `deck`, and four concise catalyst items.
-   - `preMarket`: embed four futures rows and the top one to three priority overnight stories.
+   - `futuresModule`: embed four futures rows and the top one to three priority futures-module stories for the active morning or afternoon update window.
    - `tape`: refresh all required cross-asset rows and commentary.
    - `assetAllocationPortfolio`: embed instrument-level ETF rows with price, MTD dividend, daily return, and MTD return. Before reading the sanitized portfolio-level return export, refresh the Asset Allocation Dashboard export by calling `http://127.0.0.1:2200/api/asset-market-data`, then read `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. Treat `portfolioMtdReturnValue` as percentage points (`1.24` means `+1.24%`, `-0.35` means `-0.35%`). If the refresh call fails, fall back to the existing export file when present and embed `portfolioMtdReturnStale: true` with the export `asOf` date. Do not call `/api/asset-market-data` for display data; call it only to update the sanitized export. Keep any `upcomingCurrentMonthDividendEvents` or `futureMonthDividendEvents` as display-only lookahead; only current/past ex-date dividends belong in the MTD dividend total.
    - `stories`: exactly 9 fresh non-crypto stories across markets, corporate, macro, geopolitics, Fed, earnings, and other broad market themes.
-   - `crypto`: refreshed crypto quote rows, ticker-level `crypto.tape[].note` commentary for rows rendered in the collapsed Tape Crypto tab, Crypto Market Cap stat, Altcoin Season Index stat, Fear & Greed stat, and 4 to 6 fresh crypto notes/stories.
+   - `crypto`: crypto-only stat rows in `crypto.stats[]` for Crypto Market Cap, Altcoin Season Index, and Fear & Greed, plus 4 to 6 fresh crypto notes/stories. Crypto ticker quote rows and ticker-level commentary live in `tape.rows[]` with `group: "Crypto"`.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
    - `weekAhead`: update on Mondays and Fridays. For full U.S. cash-market holidays, use a plain closure label such as `U.S. Markets Closed` in `tickers`; do not list separate exchange closures or append 24/7 assets such as `BTC`. Use the event text to explain why the closure matters for the week, and reserve instrument tickers for rows with an actual scheduled catalyst or market to watch.
    - `footer`: today’s compile date and concise source-family attribution.
@@ -106,14 +198,14 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
    - Do not write tautological market-status copy that states routine facts without saying why they matter.
    - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
-   - Crypto ticker notes in `crypto.tape[].note` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
+   - Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
    - Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
    - Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
    - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises. When practical, set `moveRole` or `moveType` to `pending`, `reported`, `guidance`, `marketReaction`, or `surprise`.
 
 7. Validate before finishing.
    - Run `node scripts/validate_dashboard.js daily_financial_news.html`.
-   - Treat Tape ticker notes as a strict validation contract: every `tape.rows[].note` and rendered `crypto.tape[].note` must be populated, substantive, source-free, and not a quote recap.
+   - Treat Tape ticker notes as a strict validation contract: every `tape.rows[].note`, including rows with `group: "Crypto"`, must be populated, substantive, source-free, and not a quote recap.
    - Run a stale-date guard:
      - `rg -n "\"masthead\"|\"compiled\"|January 1|2001" daily_financial_news.html`
    - Run an HTML-entity guard:

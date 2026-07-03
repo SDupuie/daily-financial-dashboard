@@ -1,0 +1,1717 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Tape Lightweight Chart Popup Mockup</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --panel-soft: #eef4f6;
+      --blue: #2457ff;
+      --cyan: #087ea4;
+      --red: #d64f45;
+      --green: #18885b;
+      --gold: #a06b00;
+      --violet: #6b5bbd;
+      --shadow: 0 14px 34px rgba(16, 24, 40, 0.08);
+      --radius: 8px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 24px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .page {
+      width: min(1280px, calc(100% - 44px));
+      margin: 0 auto;
+      padding: 26px 0 56px;
+    }
+
+    .topline {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: var(--gap-xl);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .topline .right {
+      text-align: right;
+    }
+
+    .brand {
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(34px, 6vw, 74px);
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 0.92;
+      text-align: center;
+      text-transform: none;
+    }
+
+    .brand span {
+      color: var(--blue);
+      font-style: italic;
+      font-weight: 500;
+    }
+
+    .opening-board {
+      padding: 22px 0 2px;
+    }
+
+    .opening-board h1 {
+      max-width: 860px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(25px, 3.2vw, 39px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.08;
+    }
+
+    .opening-deck {
+      max-width: 760px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .section {
+      margin-top: 34px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-lg);
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .section-label,
+    .tape-group-label,
+    .mini-label {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 38px);
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .section-note {
+      max-width: 440px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .tape-workspace {
+      display: block;
+    }
+
+    .surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .tape-group {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tape-group:last-child {
+      border-bottom: none;
+    }
+
+    .tape-group-label {
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .tape-row {
+      display: grid;
+      grid-template-columns: 184px minmax(0, 1fr) 320px;
+      gap: var(--gap-lg);
+      align-items: center;
+      width: 100%;
+      min-height: 76px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-left: 3px solid transparent;
+      padding: 12px 14px 12px 11px;
+      background: var(--panel);
+      color: var(--ink);
+      text-align: left;
+    }
+
+    .tape-row:last-child {
+      border-bottom: none;
+    }
+
+    .tape-row.up {
+      border-left-color: var(--green);
+    }
+
+    .tape-row.down {
+      border-left-color: var(--red);
+    }
+
+    .tape-row.flat {
+      border-left-color: transparent;
+    }
+
+    .tape-row:hover,
+    .tape-row:focus-visible {
+      background: #fbfcff;
+      outline: none;
+    }
+
+    .instrument {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .entity-name {
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 900;
+      line-height: 1.15;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .entity-sub {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+    }
+
+    .tape-signal {
+      display: -webkit-box;
+      overflow: hidden;
+      color: var(--ink);
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+
+    .quote-cluster {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      min-width: 270px;
+    }
+
+    .inline-chart {
+      display: block;
+      width: 96px;
+      height: 38px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background:
+        linear-gradient(#edf1f6 1px, transparent 1px) 0 0 / 100% 18px,
+        #ffffff;
+    }
+
+    .inline-chart:hover,
+    .inline-chart:focus-visible {
+      border-color: rgba(36, 87, 255, 0.58);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(36, 87, 255, 0.12);
+    }
+
+    .inline-chart svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .quote-readout {
+      display: grid;
+      gap: 5px;
+      justify-items: end;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .quote-last {
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+      text-align: right;
+    }
+
+    .metric-pair {
+      display: inline-flex;
+      justify-content: flex-end;
+      gap: 6px;
+      width: 100%;
+      font-size: 13px;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .metric-sep {
+      color: var(--muted);
+    }
+
+    .metric-value.up {
+      color: var(--green);
+    }
+
+    .metric-value.down {
+      color: var(--red);
+    }
+
+    .metric-value.flat {
+      color: var(--muted);
+    }
+
+    .chart-panel {
+      display: none;
+    }
+
+    .chart-dialog {
+      width: min(1120px, calc(100% - 36px));
+      height: min(780px, calc(100dvh - 36px));
+      max-width: none;
+      max-height: none;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 0;
+      background: var(--panel);
+      box-shadow: 0 24px 70px rgba(16, 24, 40, 0.28);
+    }
+
+    .chart-dialog::backdrop {
+      background: rgba(17, 19, 23, 0.46);
+    }
+
+    .chart-dialog-shell {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      height: 100%;
+      min-height: 0;
+    }
+
+    .chart-dialog-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      border-bottom: 1px solid var(--line);
+      padding: 12px 14px;
+      background: #fbfcff;
+    }
+
+    .chart-dialog-title {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .chart-dialog-title h2 {
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 24px;
+      line-height: 1;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chart-dialog-symbol {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .close-modal {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #ffffff;
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    .close-modal:hover,
+    .close-modal:focus-visible {
+      border-color: rgba(36, 87, 255, 0.58);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(36, 87, 255, 0.12);
+    }
+
+    .local-chart-popover {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      background: #ffffff;
+    }
+
+    .local-chart-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      min-height: 48px;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 12px;
+      background: #ffffff;
+    }
+
+    .local-chart-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .local-chart-meta strong {
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+    }
+
+    .local-chart-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid rgba(24, 136, 91, 0.24);
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #edf9f4;
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .local-chart-chip.synthetic {
+      border-color: rgba(160, 107, 0, 0.26);
+      background: #fff8e7;
+      color: var(--gold);
+    }
+
+    .local-chart-range {
+      display: inline-grid;
+      grid-template-columns: repeat(9, minmax(38px, 1fr));
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #ffffff;
+    }
+
+    .local-chart-range button {
+      border: 0;
+      padding: 4px 8px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 850;
+      text-align: center;
+    }
+
+    .local-chart-range .active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .local-chart-canvas {
+      position: relative;
+      min-height: 0;
+    }
+
+    #lightweight-chart {
+      position: absolute;
+      inset: 0;
+    }
+
+    .local-chart-loading {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 22px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .local-chart-popover.ready .local-chart-loading {
+      display: none;
+    }
+
+    .local-chart-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      min-height: 42px;
+      border-top: 1px solid var(--line);
+      padding: 8px 12px;
+      background: #fbfcff;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .local-chart-values {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-weight: 850;
+    }
+
+    .local-chart-values strong {
+      color: var(--ink);
+    }
+
+    .chart-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .chart-title {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .chart-title h3 {
+      margin: 0;
+      overflow: hidden;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 24px;
+      line-height: 1.05;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chart-target {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .proxy-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid rgba(160, 107, 0, 0.24);
+      border-radius: 999px;
+      padding: 3px 9px;
+      background: #fff8e7;
+      color: #755000;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .proxy-chip.exact {
+      border-color: rgba(24, 136, 91, 0.22);
+      background: #edf9f4;
+      color: var(--green);
+    }
+
+    .chart-frame {
+      padding: 16px;
+    }
+
+    .chart-stage {
+      display: grid;
+      grid-template-rows: auto minmax(230px, 1fr) auto;
+      min-height: 344px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background:
+        linear-gradient(#eef2f7 1px, transparent 1px) 0 0 / 100% 48px,
+        linear-gradient(90deg, #eef2f7 1px, transparent 1px) 0 0 / 76px 100%,
+        #ffffff;
+    }
+
+    .chart-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      min-height: 45px;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.86);
+    }
+
+    .time-tabs {
+      display: inline-grid;
+      grid-template-columns: repeat(4, minmax(38px, 1fr));
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #ffffff;
+    }
+
+    .time-tabs span {
+      padding: 4px 9px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      text-align: center;
+    }
+
+    .time-tabs .active {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .tv-mark {
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .chart-canvas {
+      position: relative;
+      min-height: 230px;
+      padding: 12px;
+    }
+
+    .chart-canvas svg {
+      display: block;
+      width: 100%;
+      height: 230px;
+    }
+
+    .price-marker {
+      position: absolute;
+      right: 12px;
+      top: 34%;
+      min-width: 74px;
+      border-radius: 4px;
+      padding: 5px 7px;
+      background: var(--green);
+      color: #ffffff;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    .chart-axis {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--line);
+      padding: 8px 10px 10px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .chart-axis span:nth-child(n + 2) {
+      text-align: center;
+    }
+
+    .chart-axis span:last-child {
+      text-align: right;
+    }
+
+    .chart-details {
+      display: grid;
+      gap: 12px;
+      padding: 0 16px 16px;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .detail-item {
+      min-width: 0;
+      padding: 11px 12px;
+      border-right: 1px solid var(--line);
+      background: #fbfcff;
+    }
+
+    .detail-item:last-child {
+      border-right: none;
+    }
+
+    .detail-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .detail-item strong {
+      display: block;
+      overflow: hidden;
+      margin-top: 4px;
+      color: var(--ink);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      font-weight: 900;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .source-note {
+      min-height: 46px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .chart-actions {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: var(--gap-sm);
+      align-items: center;
+    }
+
+    .primary-link,
+    .secondary-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      border-radius: 999px;
+      padding: 8px 13px;
+      font-size: 13px;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .primary-link {
+      background: var(--ink);
+      color: #ffffff;
+    }
+
+    .primary-link::after,
+    .secondary-link::after {
+      margin-left: 7px;
+      content: ">";
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .secondary-link {
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+    }
+
+    .implementation-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--gap-md);
+      margin-top: 18px;
+    }
+
+    .implementation-card {
+      min-height: 108px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      background: var(--panel);
+    }
+
+    .implementation-card p {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    @media (max-width: 960px) {
+      .implementation-strip {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 700px) {
+      .page {
+        width: min(100% - 28px, 1280px);
+        padding-top: 16px;
+      }
+
+      .topline {
+        grid-template-columns: 1fr;
+        gap: 6px;
+        text-align: center;
+      }
+
+      .topline .right {
+        text-align: center;
+      }
+
+      .section-head {
+        display: grid;
+        gap: 8px;
+      }
+
+      .section-note {
+        max-width: none;
+        text-align: left;
+      }
+
+      .tape-row {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "instrument"
+          "quote"
+          "signal";
+        gap: 9px 12px;
+        min-height: 94px;
+      }
+
+      .instrument {
+        grid-area: instrument;
+      }
+
+      .tape-signal {
+        grid-area: signal;
+      }
+
+      .quote-cluster {
+        grid-area: quote;
+        grid-template-columns: 96px minmax(0, 1fr);
+        min-width: 0;
+        width: 100%;
+      }
+
+      .inline-chart {
+        width: 96px;
+        height: 34px;
+      }
+
+      .chart-title h3 {
+        font-size: 21px;
+      }
+
+      .chart-details {
+        padding: 0 12px 12px;
+      }
+
+      .chart-frame {
+        padding: 12px;
+      }
+
+      .detail-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .detail-item {
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .detail-item:last-child {
+        border-bottom: none;
+      }
+
+      .chart-actions {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topline">
+      <div>Monday Close</div>
+      <div class="brand">The Daily <span>Tape</span></div>
+      <div class="right">Lightweight Chart Concept</div>
+    </header>
+
+    <section class="opening-board">
+      <h1>Market rows stay newspaper-dense, while chart access becomes one clean popup.</h1>
+      <p class="opening-deck">This mockup replaces the embedded TradingView widget with a local candlestick and volume chart. The popup uses real daily candles where a row has a data feed and a generated fallback where we have not wired a provider yet.</p>
+    </section>
+
+    <section class="section" aria-labelledby="tape-title">
+      <div class="section-head">
+        <div>
+          <div class="section-label">Market Record</div>
+          <h2 class="section-title" id="tape-title">The Tape</h2>
+        </div>
+        <div class="section-note">The mini chart opens a local Lightweight Charts popup, avoiding saved layouts, login state, and embedded-symbol restrictions.</div>
+      </div>
+
+      <div class="tape-workspace">
+        <div class="surface" id="tape-list" aria-label="Tape rows with chart links"></div>
+
+        <aside class="surface chart-panel" aria-live="polite">
+          <div class="chart-head">
+            <div class="chart-title">
+              <div class="mini-label">Selected Chart</div>
+              <h3 id="chart-name">S&amp;P 500</h3>
+              <div class="chart-target" id="chart-symbol">SP:SPX</div>
+            </div>
+            <span class="proxy-chip exact" id="chart-kind">Exact</span>
+          </div>
+
+          <div class="chart-frame">
+            <div class="chart-stage">
+              <div class="chart-toolbar">
+                <div class="time-tabs" aria-hidden="true">
+                  <span>1D</span>
+                  <span class="active">1M</span>
+                  <span>6M</span>
+                  <span>1Y</span>
+                </div>
+                <div class="tv-mark">TradingView</div>
+              </div>
+              <div class="chart-canvas">
+                <svg viewBox="0 0 420 230" role="img" aria-label="Mock chart preview">
+                  <defs>
+                    <linearGradient id="area-up" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0" stop-color="#18885b" stop-opacity="0.22"></stop>
+                      <stop offset="1" stop-color="#18885b" stop-opacity="0"></stop>
+                    </linearGradient>
+                    <linearGradient id="area-down" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0" stop-color="#d64f45" stop-opacity="0.2"></stop>
+                      <stop offset="1" stop-color="#d64f45" stop-opacity="0"></stop>
+                    </linearGradient>
+                  </defs>
+                  <path id="chart-area" d="M8 163 L58 151 L102 158 L148 126 L192 132 L237 101 L282 108 L328 77 L372 83 L412 54 L412 216 L8 216 Z" fill="url(#area-up)"></path>
+                  <path id="chart-line" d="M8 163 L58 151 L102 158 L148 126 L192 132 L237 101 L282 108 L328 77 L372 83 L412 54" fill="none" stroke="#18885b" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"></path>
+                  <path d="M8 178 L412 178" fill="none" stroke="#626a75" stroke-dasharray="4 8" stroke-opacity="0.48" stroke-width="1.5"></path>
+                </svg>
+                <div class="price-marker" id="chart-price">7,440.43</div>
+              </div>
+              <div class="chart-axis" aria-hidden="true">
+                <span>Jun 3</span>
+                <span>Jun 10</span>
+                <span>Jun 20</span>
+                <span>Today</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-details">
+            <div class="detail-grid">
+              <div class="detail-item">
+                <span>Last</span>
+                <strong id="detail-last">7,440.43</strong>
+              </div>
+              <div class="detail-item">
+                <span>Move</span>
+                <strong id="detail-move">+86.41 / +1.18%</strong>
+              </div>
+              <div class="detail-item">
+                <span>Link Type</span>
+                <strong id="detail-kind">Exact index</strong>
+              </div>
+            </div>
+            <p class="source-note" id="chart-note">TradingView link uses the cash index symbol. Dashboard prices and provenance remain separate from the outbound chart destination.</p>
+            <div class="chart-actions">
+              <a class="primary-link" id="chart-link" href="plain-tradingview-chart.html?symbol=SP%3ASPX&amp;reference=SP%3ASPX&amp;name=S%26P%20500&amp;ticker=SPX&amp;kind=Exact%20index" target="_blank" rel="noopener noreferrer">Open plain chart</a>
+              <a class="secondary-link" id="symbol-link" href="https://www.tradingview.com/symbols/SP-SPX/" target="_blank" rel="noopener noreferrer">Symbol page</a>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="implementation-strip" aria-label="Implementation notes">
+        <div class="implementation-card">
+          <div class="mini-label">Placement</div>
+          <p>The quote area carries the mini chart and chart icon, so there is no separate sidebar competing for space.</p>
+        </div>
+        <div class="implementation-card">
+          <div class="mini-label">Mapping</div>
+          <p>Rows can point at Yahoo, Barchart, or another OHLC feed independently from the display ticker.</p>
+        </div>
+        <div class="implementation-card">
+          <div class="mini-label">Behavior</div>
+          <p>Opening the mini chart launches a focused chart dialog with fixed candles, volume, and crosshair styling.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog class="chart-dialog" id="chart-dialog" aria-labelledby="chart-dialog-title">
+    <div class="chart-dialog-shell">
+      <div class="chart-dialog-head">
+        <div class="chart-dialog-title">
+          <h2 id="chart-dialog-title">Chart</h2>
+          <div class="chart-dialog-symbol" id="chart-dialog-symbol"></div>
+        </div>
+        <button class="close-modal" id="close-chart-dialog" type="button" aria-label="Close chart">×</button>
+      </div>
+      <div class="local-chart-popover" id="local-chart-popover">
+        <div class="local-chart-toolbar">
+          <div class="local-chart-meta">
+            <strong id="local-chart-feed">^GSPC</strong>
+            <span id="local-chart-kind">Real OHLC + volume</span>
+            <span class="local-chart-chip" id="local-chart-chip">Live-ready data</span>
+        </div>
+          <div class="local-chart-range" aria-label="Chart range">
+            <button type="button" data-range="1D">1D</button>
+            <button type="button" data-range="5D">5D</button>
+            <button type="button" data-range="1M">1M</button>
+            <button class="active" type="button" data-range="3M">3M</button>
+            <button type="button" data-range="6M">6M</button>
+            <button type="button" data-range="YTD">YTD</button>
+            <button type="button" data-range="1Y">1Y</button>
+            <button type="button" data-range="5Y">5Y</button>
+            <button type="button" data-range="ALL">All</button>
+        </div>
+        </div>
+        <div class="local-chart-canvas">
+          <div id="lightweight-chart"></div>
+          <div class="local-chart-loading" id="local-chart-loading">Loading chart renderer...</div>
+        </div>
+        <div class="local-chart-footer">
+          <div class="local-chart-values" id="local-chart-values"></div>
+          <span id="local-chart-note">Candles and volume are rendered locally; data source is separate.</span>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    const realChartData = {
+      spx: [{"time":1773927000,"open":6583.12,"high":6636.74,"low":6557.82,"close":6606.49,"volume":5973390000},{"time":1774013400,"open":6594.66,"high":6594.66,"low":6473.52,"close":6506.48,"volume":10025820000},{"time":1774272600,"open":6574.96,"high":6651.62,"low":6565.55,"close":6581,"volume":6020650000},{"time":1774359000,"open":6552.09,"high":6595.75,"low":6525.11,"close":6556.37,"volume":5278580000},{"time":1774445400,"open":6598.35,"high":6633.94,"low":6568.41,"close":6591.9,"volume":4936720000},{"time":1774531800,"open":6555.86,"high":6573.22,"low":6473.79,"close":6477.16,"volume":4845560000},{"time":1774618200,"open":6453.89,"high":6453.89,"low":6356.08,"close":6368.85,"volume":5303490000},{"time":1774877400,"open":6403.37,"high":6427.31,"low":6316.91,"close":6343.72,"volume":5458640000},{"time":1774963800,"open":6395.88,"high":6539.05,"low":6395.88,"close":6528.52,"volume":6396100000},{"time":1775050200,"open":6556.56,"high":6609.67,"low":6554.29,"close":6575.32,"volume":5637260000},{"time":1775136600,"open":6512.61,"high":6601.91,"low":6474.94,"close":6582.69,"volume":4740740000},{"time":1775482200,"open":6587.66,"high":6618.13,"low":6579.72,"close":6611.83,"volume":3906440000},{"time":1775568600,"open":6601.93,"high":6618.26,"low":6534.55,"close":6616.85,"volume":4555680000},{"time":1775655000,"open":6754.36,"high":6793.5,"low":6740.28,"close":6782.81,"volume":5904880000},{"time":1775741400,"open":6783.69,"high":6835.31,"low":6761.55,"close":6824.66,"volume":4912410000},{"time":1775827800,"open":6839.24,"high":6845.77,"low":6808.46,"close":6816.89,"volume":4393220000},{"time":1776087000,"open":6806.47,"high":6887,"low":6790.02,"close":6886.24,"volume":4785840000},{"time":1776173400,"open":6910.2,"high":6969.42,"low":6905.17,"close":6967.38,"volume":5032380000},{"time":1776259800,"open":6978.17,"high":7026.24,"low":6967.13,"close":7022.95,"volume":5278610000},{"time":1776346200,"open":7037.78,"high":7051.23,"low":7008.52,"close":7041.28,"volume":5173650000},{"time":1776432600,"open":7074.55,"high":7147.52,"low":7074.55,"close":7126.06,"volume":6145300000},{"time":1776691800,"open":7117.05,"high":7122.65,"low":7084.41,"close":7109.14,"volume":4661130000},{"time":1776778200,"open":7122.64,"high":7137.27,"low":7050.2,"close":7064.01,"volume":5160270000},{"time":1776864600,"open":7102.91,"high":7138.64,"low":7102.91,"close":7137.9,"volume":4919460000},{"time":1776951000,"open":7118.8,"high":7147.78,"low":7046.55,"close":7108.4,"volume":5307260000},{"time":1777037400,"open":7136.48,"high":7168.59,"low":7112.82,"close":7165.08,"volume":4608830000},{"time":1777296600,"open":7152.72,"high":7178.74,"low":7146.72,"close":7173.91,"volume":4783750000},{"time":1777383000,"open":7133.74,"high":7152.52,"low":7115.17,"close":7138.8,"volume":4900650000},{"time":1777469400,"open":7131.61,"high":7145.63,"low":7107.86,"close":7135.95,"volume":5123100000},{"time":1777555800,"open":7161.75,"high":7219.83,"low":7126.15,"close":7209.01,"volume":5723790000},{"time":1777642200,"open":7234.54,"high":7272.52,"low":7229.32,"close":7230.12,"volume":4847390000},{"time":1777901400,"open":7228.38,"high":7244.54,"low":7174.12,"close":7200.75,"volume":5215480000},{"time":1777987800,"open":7233.62,"high":7273.26,"low":7233.62,"close":7259.22,"volume":5279760000},{"time":1778074200,"open":7294.14,"high":7369.22,"low":7294.14,"close":7365.12,"volume":6579640000},{"time":1778160600,"open":7376.78,"high":7385.02,"low":7321.25,"close":7337.11,"volume":6237040000},{"time":1778247000,"open":7362.97,"high":7401.5,"low":7362.97,"close":7398.93,"volume":5302740000},{"time":1778506200,"open":7385.31,"high":7428.97,"low":7384.2,"close":7412.84,"volume":5821910000},{"time":1778592600,"open":7390.63,"high":7409.57,"low":7338.54,"close":7400.96,"volume":5624790000},{"time":1778679000,"open":7409.12,"high":7460.04,"low":7375.13,"close":7444.25,"volume":5716600000},{"time":1778765400,"open":7454.4,"high":7517.12,"low":7454.4,"close":7501.24,"volume":5267050000},{"time":1778851800,"open":7445.11,"high":7454.85,"low":7397.5,"close":7408.5,"volume":5582070000},{"time":1779111000,"open":7415.07,"high":7434.06,"low":7353.17,"close":7403.05,"volume":5489500000},{"time":1779197400,"open":7375.75,"high":7395.32,"low":7333.68,"close":7353.61,"volume":5441140000},{"time":1779283800,"open":7369.19,"high":7435.69,"low":7357.46,"close":7432.97,"volume":5384150000},{"time":1779370200,"open":7410.78,"high":7465.96,"low":7389.48,"close":7445.72,"volume":5440620000},{"time":1779456600,"open":7468.82,"high":7506.32,"low":7463.29,"close":7473.47,"volume":4952440000},{"time":1779802200,"open":7511.79,"high":7539.09,"low":7501.1,"close":7519.12,"volume":5496060000},{"time":1779888600,"open":7526.01,"high":7530.72,"low":7499.72,"close":7520.36,"volume":5524250000},{"time":1779975000,"open":7519.82,"high":7568.72,"low":7508.04,"close":7563.63,"volume":5494860000},{"time":1780061400,"open":7579.33,"high":7599.38,"low":7563.55,"close":7580.06,"volume":7858290000},{"time":1780320600,"open":7582.29,"high":7617.66,"low":7562.61,"close":7599.96,"volume":6583960000},{"time":1780407000,"open":7595.4,"high":7620.9,"low":7582.99,"close":7609.78,"volume":5904410000},{"time":1780493400,"open":7605.31,"high":7605.35,"low":7551.22,"close":7553.68,"volume":5753860000},{"time":1780579800,"open":7516.54,"high":7598.19,"low":7516.54,"close":7584.31,"volume":5398910000},{"time":1780666200,"open":7537.36,"high":7541.81,"low":7368.63,"close":7383.74,"volume":5591290000},{"time":1780925400,"open":7440.57,"high":7466.81,"low":7395.13,"close":7405.73,"volume":4898180000},{"time":1781011800,"open":7438.66,"high":7483.15,"low":7237.85,"close":7386.65,"volume":6006390000},{"time":1781098200,"open":7350.54,"high":7396.56,"low":7265.93,"close":7266.99,"volume":5247300000},{"time":1781184600,"open":7287.67,"high":7412.68,"low":7257.33,"close":7394.3,"volume":5658920000},{"time":1781271000,"open":7410.85,"high":7456.4,"low":7363.01,"close":7431.46,"volume":4950530000},{"time":1781530200,"open":7516.75,"high":7577.92,"low":7516.75,"close":7554.29,"volume":5674670000},{"time":1781616600,"open":7548.78,"high":7564.96,"low":7508.68,"close":7511.35,"volume":5286210000},{"time":1781703000,"open":7524.5,"high":7532.17,"low":7402.61,"close":7420.1,"volume":5883740000},{"time":1781789400,"open":7487.36,"high":7511.07,"low":7468.32,"close":7500.58,"volume":9061110000},{"time":1782135000,"open":7500.44,"high":7530.01,"low":7460.01,"close":7472.79,"volume":5976740000},{"time":1782221400,"open":7366.51,"high":7424.17,"low":7347.6,"close":7365.46,"volume":5640530000},{"time":1782307800,"open":7370.88,"high":7428.06,"low":7336.82,"close":7358.22,"volume":5994860000},{"time":1782394200,"open":7404.91,"high":7419.08,"low":7323.5,"close":7357.49,"volume":5565760000},{"time":1782480600,"open":7312.74,"high":7392.95,"low":7294.18,"close":7354.02,"volume":9105600000},{"time":1782739800,"open":7391.88,"high":7444.32,"low":7348.88,"close":7440.43,"volume":5794570000},{"time":1782826200,"open":7441.27,"high":7508.29,"low":7438.04,"close":7499.36,"volume":6037540000},{"time":1782912600,"open":7478.84,"high":7521.81,"low":7449.63,"close":7505.36,"volume":1583626000}],
+      cl: [{"time":1773892800,"open":99.13,"high":101.48,"low":92.8,"close":96.14,"volume":118719},{"time":1773979200,"open":95,"high":99.67,"low":93.42,"close":98.32,"volume":461845},{"time":1774238400,"open":100.51,"high":101.67,"low":84.37,"close":88.13,"volume":666790},{"time":1774324800,"open":88.78,"high":93.36,"low":86.34,"close":92.35,"volume":420067},{"time":1774411200,"open":88.49,"high":91.73,"low":86.46,"close":90.32,"volume":405170},{"time":1774497600,"open":91.38,"high":95.44,"low":89.51,"close":94.48,"volume":350768},{"time":1774584000,"open":93.31,"high":101.24,"low":92.08,"close":99.64,"volume":374920},{"time":1774843200,"open":102.6,"high":105.36,"low":99.43,"close":102.88,"volume":374075},{"time":1774929600,"open":105.07,"high":106.86,"low":99.62,"close":101.38,"volume":495395},{"time":1775016000,"open":101.72,"high":103.31,"low":96.5,"close":100.12,"volume":434561},{"time":1775102400,"open":98.92,"high":113.97,"low":97.5,"close":111.54,"volume":0},{"time":1775448000,"open":112.96,"high":115.48,"low":108.89,"close":112.41,"volume":271742},{"time":1775534400,"open":112.62,"high":117.63,"low":109.2,"close":112.95,"volume":429331},{"time":1775620800,"open":108.74,"high":109.19,"low":91.05,"close":94.41,"volume":599576},{"time":1775707200,"open":96.78,"high":102.7,"low":95.25,"close":97.87,"volume":427201},{"time":1775793600,"open":98.23,"high":100.42,"low":95.51,"close":96.57,"volume":314855},{"time":1776052800,"open":102,"high":105.63,"low":97.03,"close":99.08,"volume":344337},{"time":1776139200,"open":97.99,"high":98,"low":91.06,"close":91.28,"volume":315821},{"time":1776225600,"open":92.02,"high":93.3,"low":86.96,"close":91.29,"volume":240397},{"time":1776312000,"open":91.47,"high":95.44,"low":90.52,"close":94.69,"volume":194354},{"time":1776398400,"open":93.18,"high":94.04,"low":80.56,"close":83.85,"volume":116624},{"time":1776657600,"open":89,"high":91.2,"low":87.02,"close":89.61,"volume":115578},{"time":1776744000,"open":87.89,"high":94.45,"low":87.76,"close":92.13,"volume":383596},{"time":1776830400,"open":90,"high":93.73,"low":87.64,"close":92.96,"volume":299675},{"time":1776916800,"open":92.9,"high":98.39,"low":92.3,"close":95.85,"volume":365210},{"time":1777003200,"open":96.62,"high":97.85,"low":92.68,"close":94.4,"volume":330280},{"time":1777262400,"open":95.6,"high":97.67,"low":94.59,"close":96.37,"volume":219055},{"time":1777348800,"open":96.67,"high":101.85,"low":96.24,"close":99.93,"volume":281078},{"time":1777435200,"open":99.71,"high":108.6,"low":98.42,"close":106.88,"volume":318841},{"time":1777521600,"open":109.07,"high":110.93,"low":103.34,"close":105.07,"volume":341994},{"time":1777608000,"open":105.14,"high":106.65,"low":99.3,"close":101.94,"volume":268707},{"time":1777867200,"open":99.73,"high":107.46,"low":99.11,"close":106.42,"volume":342843},{"time":1777953600,"open":104.93,"high":105.48,"low":101.08,"close":102.27,"volume":241150},{"time":1778040000,"open":102.7,"high":102.7,"low":88.66,"close":95.08,"volume":423491},{"time":1778126400,"open":96.3,"high":97.99,"low":89.85,"close":94.81,"volume":392091},{"time":1778212800,"open":98.25,"high":98.64,"low":93.82,"close":95.42,"volume":243423},{"time":1778472000,"open":98.19,"high":100.37,"low":96.13,"close":98.07,"volume":256251},{"time":1778558400,"open":98.39,"high":102.72,"low":98,"close":102.18,"volume":231747},{"time":1778644800,"open":102.16,"high":103.67,"low":100.56,"close":101.02,"volume":212582},{"time":1778731200,"open":101.02,"high":102.35,"low":99.39,"close":101.17,"volume":173862},{"time":1778817600,"open":102.06,"high":106,"low":101.48,"close":105.42,"volume":96552},{"time":1779076800,"open":106,"high":109.47,"low":102.65,"close":108.66,"volume":117910},{"time":1779163200,"open":107.11,"high":109.24,"low":106.76,"close":107.77,"volume":206472},{"time":1779249600,"open":104.12,"high":104.45,"low":96.94,"close":98.26,"volume":320034},{"time":1779336000,"open":98.95,"high":102.66,"low":95.76,"close":96.35,"volume":345482},{"time":1779422400,"open":98,"high":99.43,"low":94.73,"close":96.6,"volume":261142},{"time":1779768000,"open":93.88,"high":94.7,"low":89.41,"close":93.89,"volume":358867},{"time":1779854400,"open":93.39,"high":93.69,"low":87.77,"close":88.68,"volume":290948},{"time":1779940800,"open":89.11,"high":92.52,"low":87.11,"close":88.9,"volume":235145},{"time":1780027200,"open":88.55,"high":89.02,"low":86.35,"close":87.36,"volume":267803},{"time":1780286400,"open":88.5,"high":94.78,"low":88.45,"close":92.16,"volume":322039},{"time":1780372800,"open":92.45,"high":94,"low":90.12,"close":93.76,"volume":238146},{"time":1780459200,"open":93.45,"high":97,"low":93.45,"close":96.02,"volume":260613},{"time":1780545600,"open":95.75,"high":95.91,"low":91.91,"close":93.04,"volume":219500},{"time":1780632000,"open":92.82,"high":93.63,"low":89.68,"close":90.54,"volume":252903},{"time":1780891200,"open":93,"high":95.47,"low":90.39,"close":91.3,"volume":278650},{"time":1780977600,"open":91.28,"high":91.55,"low":85.95,"close":88.2,"volume":306101},{"time":1781064000,"open":89.4,"high":91.87,"low":87.39,"close":90.03,"volume":291935},{"time":1781150400,"open":92.25,"high":93.64,"low":85.74,"close":87.71,"volume":317151},{"time":1781236800,"open":86.64,"high":87.23,"low":83.2,"close":84.88,"volume":233924},{"time":1781496000,"open":81.4,"high":82.42,"low":79.7,"close":80.75,"volume":208395},{"time":1781582400,"open":81.1,"high":81.58,"low":75.52,"close":76.05,"volume":205050},{"time":1781668800,"open":76.59,"high":80.03,"low":74.59,"close":76.79,"volume":100474},{"time":1781755200,"open":75.53,"high":76.99,"low":73.58,"close":76.6,"volume":97813},{"time":1782100800,"open":78.93,"high":78.96,"low":74.45,"close":74.82,"volume":315903},{"time":1782187200,"open":74.14,"high":74.45,"low":72.48,"close":73.21,"volume":203509},{"time":1782273600,"open":73.13,"high":73.18,"low":69.63,"close":70.34,"volume":251403},{"time":1782360000,"open":69.95,"high":72.5,"low":68.9,"close":71.92,"volume":228065},{"time":1782446400,"open":71.44,"high":71.86,"low":68.56,"close":69.23,"volume":249316},{"time":1782705600,"open":70.5,"high":71.15,"low":69.32,"close":70.75,"volume":170488},{"time":1782792000,"open":70.43,"high":71.6,"low":69.22,"close":69.5,"volume":170488},{"time":1782878400,"open":69.98,"high":70.19,"low":68.03,"close":68.37,"volume":120900}]
+    };
+
+    const tapeGroups = [
+      {
+        label: 'Equities',
+        rows: [
+          {
+            name: 'S&P 500',
+            ticker: 'SPX',
+            last: '7,440.43',
+            delta: '+86.41',
+            pct: '+1.18%',
+            dir: 'up',
+            note: "Monday's rebound reset sentiment, but quarter-end follow-through still depends on calm oil and contained yields.",
+            tv: 'SP:SPX',
+            symbolPath: 'SP-SPX',
+            chartFeed: '^GSPC',
+            chartData: 'spx',
+            kind: 'Exact index',
+            disclosure: 'TradingView link uses the S&P 500 cash index symbol. Dashboard prices and provenance remain separate from the outbound chart destination.'
+          },
+          {
+            name: 'Nasdaq 100',
+            ticker: 'NDX',
+            last: '30,276.35',
+            delta: '+501.60',
+            pct: '+1.68%',
+            dir: 'up',
+            note: 'Large-cap growth is still doing the heavy lifting as AI and platform leaders try to carry the recovery into month-end.',
+            tv: 'NASDAQ:NDX',
+            embedTv: 'NASDAQ:QQQ',
+            symbolPath: 'NASDAQ-NDX',
+            kind: 'Exact index',
+            embedKind: 'ETF display proxy',
+            disclosure: 'TradingView target is the Nasdaq 100 cash index. The clean embedded chart uses QQQ as the display proxy to avoid TradingView embed restrictions.'
+          },
+          {
+            name: 'Russell 2000',
+            ticker: 'RUT',
+            last: '3,010.42',
+            delta: '+0.34',
+            pct: '+0.01%',
+            dir: 'up',
+            note: 'Small caps are still lagging the headline rally, showing that investors have not fully embraced broad domestic-risk beta.',
+            tv: 'TVC:RUT',
+            embedTv: 'AMEX:IWM',
+            symbolPath: 'TVC-RUT',
+            kind: 'Exact index',
+            embedKind: 'ETF display proxy',
+            disclosure: 'Verified TradingView symbol: TVC:RUT. The clean embedded chart uses IWM as the display proxy to avoid TradingView embed restrictions.'
+          },
+          {
+            name: 'Developed ex-U.S.',
+            ticker: 'VEA',
+            last: '70.62',
+            delta: '+0.26',
+            pct: '+0.37%',
+            dir: 'up',
+            note: 'Developed ex-U.S. equities are balancing softer oil against a sharp Asia chip selloff, keeping exporters and currency sensitivity in focus.',
+            tv: 'AMEX:VEA',
+            symbolPath: 'AMEX-VEA',
+            kind: 'Exact ETF',
+            disclosure: 'Verified TradingView symbol: AMEX:VEA.'
+          },
+          {
+            name: 'Emerging Markets',
+            ticker: 'VWO',
+            last: '58.99',
+            delta: '-0.24',
+            pct: '-0.40%',
+            dir: 'down',
+            note: 'Emerging markets have avoided a deeper stumble so far, but higher U.S. yields and semiconductor weakness still limit how much risk appetite can broaden.',
+            tv: 'AMEX:VWO',
+            symbolPath: 'AMEX-VWO',
+            kind: 'Exact ETF',
+            disclosure: 'Verified TradingView symbol: AMEX:VWO.'
+          }
+        ]
+      },
+      {
+        label: 'Commodities',
+        rows: [
+          {
+            name: '10-Yr Treasury',
+            ticker: 'UST10Y',
+            last: '4.38%',
+            delta: '0.00',
+            pct: '+0.00%',
+            dir: 'flat',
+            note: "The benchmark yield is anchored ahead of confidence data, JOLTS and Thursday's early payrolls report.",
+            tv: 'TVC:US10Y',
+            symbolPath: 'TVC-US10Y',
+            kind: 'Exact yield',
+            disclosure: 'TradingView target uses the 10-year Treasury yield chart.'
+          },
+          {
+            name: 'WTI Crude',
+            ticker: 'CL',
+            last: '70.75',
+            delta: '+1.52',
+            pct: '+2.20%',
+            dir: 'up',
+            note: 'Crude is settling into a calmer range as Hormuz fears fade and traders debate how quickly supply normalizes.',
+            tv: 'NYMEX:CL1!',
+            symbolPath: 'NYMEX-CL1!',
+            chartFeed: 'CL=F',
+            chartData: 'cl',
+            kind: 'Front future',
+            disclosure: 'TradingView target uses continuous front-month WTI crude futures.'
+          },
+          {
+            name: 'Gold',
+            ticker: 'XAU',
+            last: '4,022.30',
+            delta: '-56.40',
+            pct: '-1.38%',
+            dir: 'down',
+            note: 'Gold gave back part of its crisis bid as de-escalation eased the need for immediate hedge demand.',
+            tv: 'OANDA:XAUUSD',
+            symbolPath: 'XAUUSD',
+            kind: 'Spot metal',
+            disclosure: 'TradingView target uses spot gold vs U.S. dollar rather than COMEX futures.'
+          },
+          {
+            name: 'Silver',
+            ticker: 'XAG',
+            last: '58.17',
+            delta: '-1.04',
+            pct: '-1.76%',
+            dir: 'down',
+            note: 'Silver followed the geopolitical unwind lower, while its industrial link keeps it tied to the broader growth outlook.',
+            tv: 'OANDA:XAGUSD',
+            symbolPath: 'XAGUSD',
+            kind: 'Spot metal',
+            disclosure: 'TradingView target uses spot silver vs U.S. dollar rather than COMEX futures.'
+          },
+          {
+            name: 'Commodity Index',
+            ticker: 'DBC',
+            last: '26.50',
+            delta: '+0.05',
+            pct: '+0.21%',
+            dir: 'up',
+            note: 'Broad commodity index exposure is balancing softer crude against firmer metals, keeping the inflation signal cooler but not fully unwound.',
+            tv: 'AMEX:DBC',
+            symbolPath: 'AMEX-DBC',
+            kind: 'Exact ETF',
+            disclosure: 'TradingView target uses the DBC ETF feed directly.'
+          },
+          {
+            name: 'Commodity Strategy',
+            ticker: 'PDBC',
+            last: '15.83',
+            delta: '+0.05',
+            pct: '+0.32%',
+            dir: 'up',
+            note: 'Commodity strategy exposure is a useful check on whether energy weakness is being offset by metals, carry, and broader inflation hedging demand.',
+            tv: 'NASDAQ:PDBC',
+            symbolPath: 'NASDAQ-PDBC',
+            kind: 'Exact ETF',
+            disclosure: 'TradingView target uses the PDBC ETF feed directly.'
+          },
+          {
+            name: 'MOVE Index',
+            ticker: 'MOVE',
+            last: '68.14',
+            delta: '-1.88',
+            pct: '-2.68%',
+            dir: 'down',
+            note: 'Treasury volatility eased as oil posed less inflation shock, though payrolls kept rates event risk alive.',
+            tv: 'ICE:MOVE',
+            symbolPath: 'ICE-MOVE',
+            kind: 'Exact index',
+            disclosure: 'TradingView target uses the ICE Data Indices MOVE index feed.'
+          }
+        ]
+      },
+      {
+        label: 'Rates & Credit',
+        rows: [
+          {
+            name: 'Yield Curve',
+            ticker: 'USYC',
+            last: '10Y 4.48%',
+            delta: '+0.04',
+            pct: '+0.90%',
+            dir: 'down',
+            note: 'The Treasury curve is upward-sloping from the front end through the long bond, with the 10-year still high enough to keep duration and credit conditions in focus.',
+            tv: 'TVC:US10Y',
+            symbolPath: 'TVC-US10Y',
+            kind: 'Treasury.gov curve',
+            disclosure: 'Production uses Treasury.gov curve points; this external chart fallback opens the 10-year yield.'
+          },
+          {
+            name: '7-10Y Treasury ETF',
+            ticker: 'IEF',
+            last: '95.06',
+            delta: '+1.06',
+            pct: '+1.13%',
+            dir: 'up',
+            note: 'Intermediate Treasuries caught a duration bid as softer inflation and lower oil reduced near-term rate pressure.',
+            tv: 'NASDAQ:IEF',
+            symbolPath: 'NASDAQ-IEF',
+            kind: 'Exact ETF',
+            disclosure: 'TradingView link uses the ETF ticker directly.'
+          },
+          {
+            name: 'HY Corporate Bond',
+            ticker: 'HYG',
+            last: '80.01',
+            delta: '+0.07',
+            pct: '+0.09%',
+            dir: 'up',
+            note: 'High yield stayed steady as lower oil and equity rotation reduced macro stress, but risk appetite remained guarded.',
+            tv: 'AMEX:HYG',
+            symbolPath: 'AMEX-HYG',
+            kind: 'Exact ETF',
+            disclosure: 'TradingView link uses the ETF ticker directly.'
+          }
+        ]
+      }
+    ];
+
+    const linePaths = {
+      up: {
+        area: 'M8 163 L58 151 L102 158 L148 126 L192 132 L237 101 L282 108 L328 77 L372 83 L412 54 L412 216 L8 216 Z',
+        line: 'M8 163 L58 151 L102 158 L148 126 L192 132 L237 101 L282 108 L328 77 L372 83 L412 54'
+      },
+      down: {
+        area: 'M8 70 L58 86 L102 78 L148 103 L192 116 L237 132 L282 121 L328 154 L372 166 L412 182 L412 216 L8 216 Z',
+        line: 'M8 70 L58 86 L102 78 L148 103 L192 116 L237 132 L282 121 L328 154 L372 166 L412 182'
+      },
+      flat: {
+        area: 'M8 128 L58 124 L102 130 L148 126 L192 129 L237 127 L282 126 L328 130 L372 125 L412 128 L412 216 L8 216 Z',
+        line: 'M8 128 L58 124 L102 130 L148 126 L192 129 L237 127 L282 126 L328 130 L372 125 L412 128'
+      }
+    };
+
+    const allRows = tapeGroups.flatMap((group) => group.rows);
+    const rowByTicker = new Map(allRows.map((row) => [row.ticker, row]));
+    let externalChartData = {};
+    const chartDataReady = fetch('lightweight-chart-data.json')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        externalChartData = data?.symbols || {};
+      })
+      .catch(() => {
+        externalChartData = {};
+      });
+    const esc = (value) => String(value).replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+
+    function chartUrl(row) {
+      return `#chart-${encodeURIComponent(row.ticker)}`;
+    }
+
+    function symbolUrl(row) {
+      return `https://www.tradingview.com/symbols/${encodeURIComponent(row.symbolPath)}/`;
+    }
+
+    function miniChart(row) {
+      const paths = linePaths[row.dir] || linePaths.flat;
+      const tone = row.dir === 'down' ? '#d64f45' : row.dir === 'flat' ? '#626a75' : '#18885b';
+      const fill = row.dir === 'down' ? 'rgba(214, 79, 69, 0.14)' : row.dir === 'flat' ? 'rgba(98, 106, 117, 0.12)' : 'rgba(24, 136, 91, 0.14)';
+      return `
+        <a class="inline-chart" href="${esc(chartUrl(row))}" aria-label="Open ${esc(row.name)} local chart">
+          <svg viewBox="0 0 420 230" focusable="false">
+            <path d="${paths.area}" fill="${fill}"></path>
+            <path d="${paths.line}" fill="none" stroke="${tone}" stroke-linecap="round" stroke-linejoin="round" stroke-width="12"></path>
+          </svg>
+        </a>
+      `;
+    }
+
+    function renderTape() {
+      document.getElementById('tape-list').innerHTML = tapeGroups.map((group) => `
+        <section class="tape-group">
+          <div class="tape-group-label">${esc(group.label)}</div>
+          ${group.rows.map((row) => `
+            <article class="tape-row ${esc(row.dir)}" data-ticker="${esc(row.ticker)}">
+              <span class="instrument">
+                <strong class="entity-name">${esc(row.name)}</strong>
+                <span class="entity-sub">${esc(row.ticker)}</span>
+              </span>
+              <span class="tape-signal">${esc(row.note)}</span>
+              <span class="quote-cluster">
+                ${miniChart(row)}
+                <span class="quote-readout" aria-label="${esc(row.name)} quote">
+                  <span class="quote-last">${esc(row.last)}</span>
+                  <span class="metric-pair">
+                    <span class="metric-value ${esc(row.dir)}">${esc(row.delta)}</span>
+                    <span class="metric-sep">/</span>
+                    <span class="metric-value ${esc(row.dir)}">${esc(row.pct)}</span>
+                  </span>
+                </span>
+              </span>
+            </article>
+          `).join('')}
+        </section>
+      `).join('');
+
+    }
+
+    renderTape();
+
+    const chartDialog = document.getElementById('chart-dialog');
+    const chartDialogTitle = document.getElementById('chart-dialog-title');
+    const chartDialogSymbol = document.getElementById('chart-dialog-symbol');
+    const localChartPopover = document.getElementById('local-chart-popover');
+    const localChartFeed = document.getElementById('local-chart-feed');
+    const localChartKind = document.getElementById('local-chart-kind');
+    const localChartChip = document.getElementById('local-chart-chip');
+    const localChartValues = document.getElementById('local-chart-values');
+    const localChartNote = document.getElementById('local-chart-note');
+    const lightweightContainer = document.getElementById('lightweight-chart');
+    let activeChart;
+    let activeResizeObserver;
+    let activeCandleSeries;
+    let activeVolumeSeries;
+    let activePayload;
+    let activeRow;
+    let activeCandles = [];
+    let activeLatestCandle;
+    const rangeConfigs = {
+      '1D': { interval: '5m', source: 'intraday', tradingDays: 1 },
+      '5D': { interval: '30m', source: 'intraday', tradingDays: 5 },
+      '1M': { interval: '1D', source: 'daily', days: 31 },
+      '3M': { interval: '1D', source: 'daily', days: 92 },
+      '6M': { interval: '1D', source: 'daily', days: 183 },
+      YTD: { interval: '1D', source: 'daily', ytd: true },
+      '1Y': { interval: '1D', source: 'daily', days: 366 },
+      '5Y': { interval: '1D', source: 'daily', days: 366 * 5 },
+      ALL: { interval: '1D', source: 'daily' }
+    };
+
+    function formatCompact(value) {
+      return new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        maximumFractionDigits: 1
+      }).format(value || 0);
+    }
+
+    function formatPrice(value) {
+      return new Intl.NumberFormat('en-US', {
+        maximumFractionDigits: value >= 1000 ? 2 : 3
+      }).format(value || 0);
+    }
+
+    function generateFallbackData(row) {
+      const numericLast = Number(String(row.last).replace(/[$,%]/g, '').replace(/,/g, '')) || 100;
+      const direction = row.dir === 'down' ? -1 : row.dir === 'flat' ? 0.1 : 1;
+      const startTime = 1773892800;
+      return Array.from({ length: 72 }, (_, index) => {
+        const drift = direction * index * numericLast * 0.0018;
+        const wave = Math.sin(index * 0.48) * numericLast * 0.012;
+        const close = Math.max(0.01, numericLast * 0.88 + drift + wave);
+        const open = close - direction * numericLast * 0.004 + Math.cos(index * 0.33) * numericLast * 0.006;
+        const high = Math.max(open, close) + numericLast * (0.006 + (index % 5) * 0.001);
+        const low = Math.min(open, close) - numericLast * (0.006 + (index % 4) * 0.001);
+        return {
+          time: startTime + index * 86400,
+          open: Number(open.toFixed(2)),
+          high: Number(high.toFixed(2)),
+          low: Number(low.toFixed(2)),
+          close: Number(close.toFixed(2)),
+          volume: Math.round(900000 + Math.abs(Math.sin(index * 0.57)) * 4200000)
+        };
+      });
+    }
+
+    function chartPayload(row) {
+      const external = externalChartData[row.chartData];
+      const externalDaily = external?.daily;
+      const fallbackDaily = realChartData[row.chartData];
+      const dailyCandles = externalDaily || fallbackDaily;
+      if (row.chartData && dailyCandles) {
+        return {
+          candles: dailyCandles,
+          intraday: {
+            '5m': external?.intraday5m || [],
+            '30m': external?.intraday30m || []
+          },
+          feed: row.chartFeed,
+          label: 'Real OHLC + volume',
+          note: externalDaily
+            ? `${row.chartFeed} daily candles are loaded from the local mockup data file. A production version would request this shape from the selected market-data API.`
+            : `${row.chartFeed} daily candles are embedded for this mockup. A production version would request the same shape from the selected market-data API.`,
+          synthetic: false
+        };
+      }
+
+      return {
+        candles: generateFallbackData(row),
+        feed: row.chartFeed || row.tv,
+        label: 'Generated placeholder',
+        note: 'This row is using generated candles until an approved OHLC feed is mapped for the exact instrument.',
+        synthetic: true
+      };
+    }
+
+    function updateReadout(row, candle) {
+      const volumeText = candle.volume ? `Vol ${formatCompact(candle.volume)}` : 'Vol n/a';
+      localChartValues.innerHTML = `
+        <span>O <strong>${formatPrice(candle.open)}</strong></span>
+        <span>H <strong>${formatPrice(candle.high)}</strong></span>
+        <span>L <strong>${formatPrice(candle.low)}</strong></span>
+        <span>C <strong>${formatPrice(candle.close)}</strong></span>
+        <span>${volumeText}</span>
+      `;
+      chartDialogSymbol.textContent = `${row.ticker} · ${row.kind}`;
+    }
+
+    function clearLocalChart() {
+      if (activeResizeObserver) activeResizeObserver.disconnect();
+      activeResizeObserver = null;
+      if (activeChart) activeChart.remove();
+      activeChart = null;
+      activeCandleSeries = null;
+      activeVolumeSeries = null;
+      activePayload = null;
+      activeRow = null;
+      activeCandles = [];
+      activeLatestCandle = null;
+      lightweightContainer.replaceChildren();
+      localChartPopover.classList.remove('ready');
+    }
+
+    function intradayBarsForDay(day, barsPerDay, intervalSeconds, dayOffset) {
+      const bars = [];
+      const span = Math.max(0.01, day.close - day.open);
+      const startTime = day.time + 9.5 * 60 * 60 + dayOffset * 86400;
+      let previousClose = day.open;
+      for (let index = 0; index < barsPerDay; index += 1) {
+        const progress = barsPerDay === 1 ? 1 : index / (barsPerDay - 1);
+        const path = day.open + span * progress + Math.sin((index + dayOffset) * 0.9) * (day.high - day.low) * 0.08;
+        const close = index === barsPerDay - 1 ? day.close : Math.min(day.high, Math.max(day.low, path));
+        const open = previousClose;
+        const high = Math.min(day.high, Math.max(open, close) + (day.high - day.low) * 0.08);
+        const low = Math.max(day.low, Math.min(open, close) - (day.high - day.low) * 0.08);
+        bars.push({
+          time: Math.round(startTime + index * intervalSeconds),
+          open: Number(open.toFixed(2)),
+          high: Number(high.toFixed(2)),
+          low: Number(low.toFixed(2)),
+          close: Number(close.toFixed(2)),
+          volume: Math.round((day.volume || 0) / barsPerDay * (0.72 + Math.abs(Math.sin(index * 0.7)) * 0.62))
+        });
+        previousClose = close;
+      }
+      return bars;
+    }
+
+    function intradayCandles(dailyCandles, tradingDays, interval) {
+      const selectedDays = dailyCandles.slice(-tradingDays);
+      const barsPerDay = interval === '5m' ? 78 : 13;
+      const intervalSeconds = interval === '5m' ? 5 * 60 : 30 * 60;
+      return selectedDays.flatMap((day, dayIndex) => intradayBarsForDay(day, barsPerDay, intervalSeconds, dayIndex));
+    }
+
+    function candlesForRange(payload, rangeKey) {
+      const config = rangeConfigs[rangeKey] || rangeConfigs['3M'];
+      const dailyCandles = payload.candles;
+      if (config.source === 'intraday') {
+        const realIntraday = payload.intraday?.[config.interval] || [];
+        if (realIntraday.length) {
+          return {
+            candles: realIntraday,
+            interval: config.interval,
+            generatedIntraday: false,
+            intraday: true
+          };
+        }
+        return {
+          candles: intradayCandles(dailyCandles, config.tradingDays, config.interval),
+          interval: config.interval,
+          generatedIntraday: true,
+          intraday: true
+        };
+      }
+
+      if (rangeKey === 'ALL') {
+        return { candles: dailyCandles, interval: config.interval, generatedIntraday: false };
+      }
+
+      const lastTime = dailyCandles[dailyCandles.length - 1].time;
+      const firstTime = config.ytd
+        ? Date.UTC(new Date(lastTime * 1000).getUTCFullYear(), 0, 1) / 1000
+        : lastTime - config.days * 86400;
+      return {
+        candles: dailyCandles.filter((candle) => candle.time >= firstTime),
+        interval: config.interval,
+        generatedIntraday: false
+      };
+    }
+
+    function setActiveRange(rangeKey) {
+      document.querySelectorAll('.local-chart-range button').forEach((button) => {
+        button.classList.toggle('active', button.dataset.range === rangeKey);
+      });
+      if (!activeChart || !activePayload) return;
+      const selected = candlesForRange(activePayload, rangeKey);
+      activeCandles = selected.candles;
+      activeLatestCandle = activeCandles[activeCandles.length - 1];
+      activeCandleSeries.setData(activeCandles.map(({ time, open, high, low, close }) => ({
+        time,
+        open,
+        high,
+        low,
+        close
+      })));
+      activeVolumeSeries.setData(activeCandles.map((candle) => ({
+        time: candle.time,
+        value: candle.volume || 0,
+        color: candle.close >= candle.open ? 'rgba(15, 159, 117, 0.28)' : 'rgba(214, 79, 69, 0.28)'
+      })));
+      localChartKind.textContent = `${activePayload.label} · ${selected.interval}`;
+      localChartNote.textContent = selected.generatedIntraday
+        ? `${activePayload.feed} ${selected.interval} bars are generated from daily candles because no real intraday sample is loaded for this row. Production would request true intraday OHLCV from the data API.`
+        : selected.intraday
+          ? `${activePayload.feed} ${selected.interval} bars are loaded from the local mockup data file. Production would request true intraday OHLCV from the data API.`
+        : activePayload.note;
+      updateReadout(activeRow, activeLatestCandle);
+      activeChart.applyOptions({
+        timeScale: {
+          timeVisible: selected.interval !== '1D',
+          secondsVisible: false
+        }
+      });
+      activeChart.timeScale().fitContent();
+    }
+
+    function renderLocalChart(row) {
+      clearLocalChart();
+      const payload = chartPayload(row);
+      activePayload = payload;
+      activeRow = row;
+      const latest = payload.candles[payload.candles.length - 1];
+      localChartFeed.textContent = payload.feed || row.ticker;
+      localChartKind.textContent = payload.label;
+      localChartChip.textContent = payload.synthetic ? 'Mock data' : 'Live-ready data';
+      localChartChip.classList.toggle('synthetic', payload.synthetic);
+      localChartNote.textContent = payload.note;
+      updateReadout(row, latest);
+
+      if (!window.LightweightCharts) {
+        document.getElementById('local-chart-loading').textContent = 'Lightweight Charts did not load.';
+        return;
+      }
+
+      activeChart = window.LightweightCharts.createChart(lightweightContainer, {
+        autoSize: true,
+        layout: {
+          background: { color: '#ffffff' },
+          textColor: '#4b5563',
+          fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+        },
+        grid: {
+          vertLines: { color: '#edf1f6' },
+          horzLines: { color: '#edf1f6' }
+        },
+        rightPriceScale: {
+          borderColor: '#d9dee7',
+          scaleMargins: { top: 0.08, bottom: 0.28 }
+        },
+        timeScale: {
+          borderColor: '#d9dee7',
+          timeVisible: false,
+          secondsVisible: false
+        },
+        crosshair: {
+          mode: window.LightweightCharts.CrosshairMode.Normal
+        }
+      });
+
+      activeCandleSeries = activeChart.addCandlestickSeries({
+        upColor: '#0f9f75',
+        downColor: '#d64f45',
+        borderUpColor: '#0f9f75',
+        borderDownColor: '#d64f45',
+        wickUpColor: '#0f9f75',
+        wickDownColor: '#d64f45'
+      });
+
+      activeVolumeSeries = activeChart.addHistogramSeries({
+        color: 'rgba(98, 106, 117, 0.3)',
+        priceFormat: { type: 'volume' },
+        priceScaleId: ''
+      });
+
+      activeChart.priceScale('').applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 }
+      });
+
+      activeChart.subscribeCrosshairMove((param) => {
+        const point = param.seriesData.get(activeCandleSeries);
+        updateReadout(row, point || activeLatestCandle || latest);
+      });
+
+      setActiveRange('3M');
+      localChartPopover.classList.add('ready');
+
+      activeResizeObserver = new ResizeObserver(() => {
+        if (!activeChart) return;
+        activeChart.resize(lightweightContainer.clientWidth, lightweightContainer.clientHeight);
+      });
+      activeResizeObserver.observe(lightweightContainer);
+    }
+
+    document.querySelector('.local-chart-range').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-range]');
+      if (!button) return;
+      setActiveRange(button.dataset.range);
+    });
+
+    document.getElementById('tape-list').addEventListener('click', async (event) => {
+      const chartLink = event.target.closest('a.inline-chart');
+      if (!chartLink) return;
+      const row = rowByTicker.get(chartLink.closest('.tape-row')?.dataset.ticker) || allRows[0];
+      event.preventDefault();
+      chartDialogTitle.textContent = row.name;
+      if (typeof chartDialog.showModal === 'function') {
+        chartDialog.showModal();
+        await chartDataReady;
+        requestAnimationFrame(() => renderLocalChart(row));
+      } else {
+        window.open(chartLink.href, '_blank', 'noopener,noreferrer');
+      }
+    });
+
+    chartDialog.addEventListener('click', (event) => {
+      if (event.target === chartDialog) chartDialog.close();
+    });
+
+    document.getElementById('close-chart-dialog').addEventListener('click', () => {
+      chartDialog.close();
+    });
+
+    chartDialog.addEventListener('close', () => {
+      clearLocalChart();
+    });
+  </script>
+</body>
+</html>
