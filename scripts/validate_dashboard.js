@@ -533,20 +533,24 @@ if (!dashboardMatch) {
       requireString(future.body, `futuresModule.futures[${index}].body`);
       let firstSeriesPrice = null;
       let lastSeriesPrice = null;
+      let lastSeriesTime = null;
       if (!Array.isArray(future.series) || future.series.length < 2) {
         errors.push(`futuresModule.futures[${index}].series must contain at least two chart points.`);
-      } else if (isSessionFutures) {
-        // Session Futures should be a completed cash-session chart even when the afternoon update runs later.
-        for (const point of future.series) {
-          const minutes = chicagoClockMinutes(Array.isArray(point) ? point[0] : point?.time);
-          if (minutes === null || minutes < 8 * 60 + 30 || minutes > 15 * 60) {
-            errors.push(`futuresModule.futures[${index}].series contains a point outside the 8:30 AM-3:00 PM Central Session Futures window.`);
-            break;
-          }
-        }
         const priceAt = (point) => Number(Array.isArray(point) ? point[1] : point?.price ?? point?.value);
+        const timeAt = (point) => Number(Array.isArray(point) ? point[0] : point?.time);
         firstSeriesPrice = priceAt(future.series[0]);
         lastSeriesPrice = priceAt(future.series[future.series.length - 1]);
+        lastSeriesTime = timeAt(future.series[future.series.length - 1]);
+        if (isSessionFutures) {
+          // Session Futures should be a completed cash-session chart even when the afternoon update runs later.
+          for (const point of future.series) {
+            const minutes = chicagoClockMinutes(Array.isArray(point) ? point[0] : point?.time);
+            if (minutes === null || minutes < 8 * 60 + 30 || minutes > 15 * 60) {
+              errors.push(`futuresModule.futures[${index}].series contains a point outside the 8:30 AM-3:00 PM Central Session Futures window.`);
+              break;
+            }
+          }
+        }
       }
       // Keep the source prior close available for audit/provenance; Session Futures uses raw.referencePrice as its chart baseline.
       if (!Number.isFinite(Number(future.raw?.previousClose))) {
@@ -555,6 +559,28 @@ if (!dashboardMatch) {
       const referencePrice = Number(future.raw?.referencePrice ?? future.raw?.previousClose);
       if (!Number.isFinite(referencePrice)) {
         errors.push(`futuresModule.futures[${index}].raw reference price must be numeric for the futures chart baseline.`);
+      }
+      if (!Number.isFinite(Number(future.raw?.price))) {
+        errors.push(`futuresModule.futures[${index}].raw.price must be numeric.`);
+      } else if (lastSeriesPrice !== null && !nearlyEqual(Number(future.raw?.price), lastSeriesPrice, 0.01)) {
+        errors.push(`futuresModule.futures[${index}].raw.price must match the last futures chart point.`);
+      }
+      if (!Number.isFinite(Number(future.raw?.regularMarketTime))) {
+        errors.push(`futuresModule.futures[${index}].raw.regularMarketTime must be numeric.`);
+      } else if (lastSeriesTime !== null && Number(future.raw?.regularMarketTime) !== lastSeriesTime) {
+        errors.push(`futuresModule.futures[${index}].raw.regularMarketTime must match the last futures chart timestamp.`);
+      }
+      const expectedDelta = lastSeriesPrice === null ? null : lastSeriesPrice - referencePrice;
+      const expectedPct = lastSeriesPrice === null ? null : (referencePrice ? (expectedDelta / referencePrice) * 100 : 0);
+      if (expectedDelta !== null && !nearlyEqual(Number(future.raw?.delta), expectedDelta, 0.01)) {
+        errors.push(`futuresModule.futures[${index}].raw.delta must match the futures chart change.`);
+      }
+      if (expectedPct !== null && !nearlyEqual(Number(future.raw?.pct), expectedPct, 0.001)) {
+        errors.push(`futuresModule.futures[${index}].raw.pct must match the futures chart percent change.`);
+      }
+      const displayedPct = numericPercent(future.value);
+      if (displayedPct !== null && expectedPct !== null && !nearlyEqual(displayedPct, expectedPct, 0.01)) {
+        errors.push(`futuresModule.futures[${index}].value must match the rounded futures chart percent change.`);
       }
       if (isSessionFutures) {
         if (!Number.isFinite(Number(future.raw?.referencePrice))) {
@@ -582,18 +608,6 @@ if (!dashboardMatch) {
         }
         if (future.raw?.sessionStartEastern !== '9:30 AM ET' || future.raw?.sessionEndEastern !== '4:00 PM ET' || future.raw?.referenceCloseEastern !== '4:00 PM ET') {
           errors.push(`futuresModule.futures[${index}] official Session Futures times must be stored in Eastern time.`);
-        }
-        const expectedDelta = lastSeriesPrice - referencePrice;
-        const expectedPct = referencePrice ? (expectedDelta / referencePrice) * 100 : 0;
-        if (!nearlyEqual(Number(future.raw?.delta), expectedDelta, 0.01)) {
-          errors.push(`futuresModule.futures[${index}].raw.delta must match the Session Futures chart change.`);
-        }
-        if (!nearlyEqual(Number(future.raw?.pct), expectedPct, 0.001)) {
-          errors.push(`futuresModule.futures[${index}].raw.pct must match the Session Futures chart percent change.`);
-        }
-        const displayedPct = numericPercent(future.value);
-        if (displayedPct !== null && !nearlyEqual(displayedPct, expectedPct, 0.01)) {
-          errors.push(`futuresModule.futures[${index}].value must match the rounded Session Futures percent change.`);
         }
       }
     }

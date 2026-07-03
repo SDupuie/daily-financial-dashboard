@@ -189,6 +189,31 @@ function parsePricePoints(payload) {
   }).filter(Boolean);
 }
 
+function withLatestQuotePoint(points, quoteTime, quotePrice) {
+  const normalized = Array.isArray(points) ? points.slice() : [];
+  if (!Number.isFinite(quoteTime) || !Number.isFinite(quotePrice) || quotePrice <= 0) {
+    return normalized;
+  }
+  if (!normalized.length) {
+    return [[quoteTime, quotePrice]];
+  }
+
+  const lastPoint = normalized[normalized.length - 1];
+  const lastTime = Number(lastPoint?.[0]);
+  if (!Number.isFinite(lastTime)) {
+    normalized.push([quoteTime, quotePrice]);
+    return normalized;
+  }
+  if (quoteTime > lastTime) {
+    normalized.push([quoteTime, quotePrice]);
+    return normalized;
+  }
+  if (quoteTime === lastTime) {
+    normalized[normalized.length - 1] = [quoteTime, quotePrice];
+  }
+  return normalized;
+}
+
 function regularSessionComparison(points, symbol) {
   const sessions = new Map();
   for (const point of points) {
@@ -226,6 +251,7 @@ function parseFuture(spec, payload, args) {
   const meta = payload?.chart?.result?.[0]?.meta;
   const previousClose = Number(meta?.chartPreviousClose);
   const quotePrice = Number(meta?.regularMarketPrice);
+  const quoteTime = Number(meta?.regularMarketTime);
   if (!Number.isFinite(quotePrice) || !Number.isFinite(previousClose)) {
     throw new Error(`${spec.symbol} response was missing price metadata`);
   }
@@ -234,16 +260,16 @@ function parseFuture(spec, payload, args) {
   const sessionComparison = args.mode === 'session'
     ? regularSessionComparison(pricePoints, spec.symbol)
     : null;
-  const comparisonPoints = sessionComparison ? sessionComparison.sessionPoints : pricePoints;
+  const comparisonPoints = sessionComparison
+    ? sessionComparison.sessionPoints
+    : withLatestQuotePoint(pricePoints, quoteTime, quotePrice);
   if (comparisonPoints.length < 2) {
     throw new Error(`${spec.symbol} response did not include at least two chart points`);
   }
 
   const referencePrice = sessionComparison ? sessionComparison.referencePrice : previousClose;
-  const price = args.mode === 'session' ? comparisonPoints.at(-1)[1] : quotePrice;
-  const regularMarketTime = args.mode === 'session'
-    ? comparisonPoints.at(-1)[0]
-    : Number(meta?.regularMarketTime);
+  const price = comparisonPoints.at(-1)[1];
+  const regularMarketTime = comparisonPoints.at(-1)[0];
   const referenceLabel = args.mode === 'session' ? 'prior 4 PM ET close' : 'prior close';
   const delta = price - referencePrice;
   const pct = referencePrice ? (delta / referencePrice) * 100 : 0;
@@ -270,6 +296,8 @@ function parseFuture(spec, payload, args) {
         referenceTime: sessionComparison.referenceTime,
         referenceCloseEastern: '4:00 PM ET'
       } : {}),
+      quotePrice,
+      quoteTime: Number.isFinite(quoteTime) ? quoteTime : null,
       previousClose,
       ...(sessionComparison ? {
         sessionDate: sessionComparison.sessionDate,
