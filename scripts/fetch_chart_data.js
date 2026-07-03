@@ -10,9 +10,27 @@ const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'scripts', 'generated', 'char
 const DEFAULT_DAYS = 1826;
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const TREASURY_FIELDS = new Map([
+  ['TREASURY:CURVE', 'BC_10YEAR'],
+  ['TREASURY:3M', 'BC_3MONTH'],
   ['TREASURY:10Y', 'BC_10YEAR'],
   ['TREASURY:30Y', 'BC_30YEAR']
 ]);
+const TREASURY_CURVE_POINTS = [
+  { label: '1M', field: 'BC_1MONTH', years: 1 / 12 },
+  { label: '1.5M', field: 'BC_1_5MONTH', years: 1.5 / 12 },
+  { label: '2M', field: 'BC_2MONTH', years: 2 / 12 },
+  { label: '3M', field: 'BC_3MONTH', years: 3 / 12 },
+  { label: '4M', field: 'BC_4MONTH', years: 4 / 12 },
+  { label: '6M', field: 'BC_6MONTH', years: 0.5 },
+  { label: '1Y', field: 'BC_1YEAR', years: 1 },
+  { label: '2Y', field: 'BC_2YEAR', years: 2 },
+  { label: '3Y', field: 'BC_3YEAR', years: 3 },
+  { label: '5Y', field: 'BC_5YEAR', years: 5 },
+  { label: '7Y', field: 'BC_7YEAR', years: 7 },
+  { label: '10Y', field: 'BC_10YEAR', years: 10 },
+  { label: '20Y', field: 'BC_20YEAR', years: 20 },
+  { label: '30Y', field: 'BC_30YEAR', years: 30 }
+];
 
 function parseArgs(argv) {
   const args = {
@@ -69,7 +87,7 @@ function printHelp() {
 
 Options:
   --input PATH        Dashboard HTML to read (default: daily_financial_news.html)
-  --output PATH       JSON output path (default: scripts/generated/chart_data.json)
+  --output PATH       Unified chart JSON output path (default: scripts/generated/chart_data.json)
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
   --delay-ms 250      Delay between source requests
@@ -78,25 +96,52 @@ Options:
 `);
 }
 
-function readTapeRows(input) {
+function readDashboardData(input) {
   const html = fs.readFileSync(input, 'utf8');
   const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
   if (!match) {
     throw new Error(`Could not find dashboard-data JSON block in ${input}`);
   }
-  const data = JSON.parse(match[1]);
+  return JSON.parse(match[1]);
+}
+
+function readTapeRows(input) {
+  const data = readDashboardData(input);
   const rows = Array.isArray(data.tape?.rows) ? data.tape.rows : [];
   if (!rows.length) {
     throw new Error('dashboard-data tape.rows is empty or missing');
   }
-  // sourceSymbol is the single dashboard-owned routing key for quote refreshes and popup chart history.
+  // sourceSymbol is the single dashboard-owned routing key for quote refreshes and embedded chart history.
   return rows.map((row, index) => ({
     index,
+    section: 'tape',
+    quoteShape: 'tape',
     name: String(row?.name || '').trim(),
     ticker: String(row?.ticker || '').trim().toUpperCase(),
     sourceSymbol: String(row?.sourceSymbol || '').trim(),
     note: String(row?.note || '').trim()
   })).filter((row) => row.ticker && row.sourceSymbol);
+}
+
+function readCryptoRows(input) {
+  const data = readDashboardData(input);
+  const rows = Array.isArray(data.crypto?.tape) ? data.crypto.tape : [];
+  return rows.map((row, index) => {
+    const ticker = String(row?.sym || row?.ticker || '').trim().toUpperCase();
+    return {
+      index,
+      section: 'crypto',
+      quoteShape: 'crypto',
+      name: String(row?.name || ticker).trim(),
+      ticker,
+      sourceSymbol: String(row?.sourceSymbol || '').trim(),
+      note: String(row?.note || '').trim()
+    };
+  }).filter((row) => row.ticker && row.sourceSymbol);
+}
+
+function readChartableRows(input) {
+  return [...readTapeRows(input), ...readCryptoRows(input)];
 }
 
 function sleep(ms) {
@@ -109,16 +154,6 @@ function isoDateFromDate(date) {
 
 function isoDateFromEpochSeconds(value) {
   return isoDateFromDate(new Date(value * 1000));
-}
-
-function yyyymmdd(date) {
-  return isoDateFromDate(date).replaceAll('-', '');
-}
-
-function yyyymmToIsoDate(value) {
-  const raw = String(value || '').trim();
-  if (!/^\d{8}$/.test(raw)) return null;
-  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
 }
 
 function monthKeysBetween(startDate, endDate) {
@@ -188,19 +223,6 @@ function yahooChartUrl(host, symbol, startDate, endDate) {
   return `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?${params.toString()}`;
 }
 
-function msciGraphUrl(sourceSymbol, startDate, endDate) {
-  const code = sourceSymbol.replace(/^MSCI:/, '');
-  // MSCI's graph endpoint provides USD standard index levels only; the chart renderer treats them as close-only bars.
-  const params = new URLSearchParams({
-    currency_symbol: 'USD',
-    index_variant: 'STRD',
-    index_codes: code,
-    start_date: yyyymmdd(startDate),
-    end_date: yyyymmdd(endDate)
-  });
-  return `https://app2.msci.com/products/service/index/indexmaster/getLevelDataForGraph?${params.toString()}`;
-}
-
 function treasuryXmlUrl(monthKey) {
   const params = new URLSearchParams({
     data: 'daily_treasury_yield_curve',
@@ -264,6 +286,52 @@ function direction(value) {
   return value > 0 ? 'up' : 'down';
 }
 
+function signedBasisPoints(value) {
+  const rounded = Math.round(value);
+  if (rounded > 0) return `+${rounded} bp`;
+  if (rounded < 0) return `${rounded} bp`;
+  return '0 bp';
+}
+
+function formatCryptoPrice(value) {
+  const price = Number(value);
+  if (!Number.isFinite(price)) return 'Unavailable';
+  const decimals = price >= 10000 ? 0 : price >= 2 ? 2 : 4;
+  return `$${new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  }).format(price)}`;
+}
+
+function formatCryptoDelta(delta, price) {
+  if (!Number.isFinite(delta)) return 'Unavailable';
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
+  const decimals = Math.abs(delta) >= 100 ? 0 : price >= 2 ? 2 : 4;
+  return `${sign}$${new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  }).format(Math.abs(delta))}`;
+}
+
+function treasuryCurveSpreadBpFromEntry(entry) {
+  const twoYear = asFiniteNumber(entry?.BC_2YEAR);
+  const tenYear = asFiniteNumber(entry?.BC_10YEAR);
+  return twoYear === null || tenYear === null ? null : (tenYear - twoYear) * 100;
+}
+
+function treasuryCurveSpreadMetric(latestEntry, previousEntry, comparisonLabel) {
+  const valueBp = treasuryCurveSpreadBpFromEntry(latestEntry);
+  if (valueBp === null) return null;
+  const previousValueBp = treasuryCurveSpreadBpFromEntry(previousEntry);
+  return {
+    label: '2s10s',
+    valueBp,
+    previousValueBp,
+    deltaBp: previousValueBp === null ? null : valueBp - previousValueBp,
+    comparison: comparisonLabel
+  };
+}
+
 function quoteRowFromSeries(item) {
   const bars = item.bars || [];
   const latest = bars[bars.length - 1];
@@ -275,6 +343,20 @@ function quoteRowFromSeries(item) {
   const delta = latest.close - previous.close;
   const pct = previous.close ? (delta / previous.close) * 100 : 0;
   const isYield = item.unit === 'percent_yield';
+  if (item.sourceSymbol === 'TREASURY:CURVE' && item.curveSpread?.label && Number.isFinite(item.curveSpread.valueBp)) {
+    const deltaBp = item.curveSpread.deltaBp;
+    return {
+      name: item.name,
+      ticker: item.ticker,
+      last: `${item.curveSpread.label} ${signedBasisPoints(item.curveSpread.valueBp)}`,
+      delta: Number.isFinite(deltaBp) ? signedBasisPoints(deltaBp) : 'n/a',
+      pct: item.curveSpread.comparison || '1D',
+      dir: Number.isFinite(deltaBp) ? direction(deltaBp) : 'flat',
+      note: item.note,
+      sourceSymbol: item.sourceSymbol,
+      asOf: latest.time
+    };
+  }
   return {
     name: item.name,
     ticker: item.ticker,
@@ -284,6 +366,29 @@ function quoteRowFromSeries(item) {
     dir: direction(pct),
     note: item.note,
     sourceSymbol: item.sourceSymbol,
+    asOf: latest.time
+  };
+}
+
+function cryptoQuoteRowFromSeries(item) {
+  const bars = item.bars || [];
+  const latest = bars[bars.length - 1];
+  const previous = bars[bars.length - 2];
+  if (!latest || !previous) {
+    throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
+  }
+
+  const delta = latest.close - previous.close;
+  const pct = previous.close ? (delta / previous.close) * 100 : 0;
+  return {
+    sym: item.ticker,
+    ticker: item.ticker,
+    name: item.name,
+    sub: item.ticker,
+    price: formatCryptoPrice(latest.close),
+    delta: formatCryptoDelta(delta, latest.close),
+    chg: signedPct(pct),
+    dir: direction(pct),
     asOf: latest.time
   };
 }
@@ -362,34 +467,6 @@ function parseYahooSeries(row, payload, host) {
   };
 }
 
-async function fetchMsciSeries(row, args, startDate, endDate) {
-  const payload = await fetchJson(msciGraphUrl(row.sourceSymbol, startDate, endDate), args, {
-    'Referer': 'https://www.msci.com/'
-  });
-  const levels = Array.isArray(payload?.indexes?.INDEX_LEVELS) ? payload.indexes.INDEX_LEVELS : [];
-  const bars = levels.map((level) => {
-    const time = yyyymmToIsoDate(level?.calc_date);
-    const close = asFiniteNumber(level?.level_eod);
-    return time && close !== null ? closeOnlyBar(time, close) : null;
-  }).filter(Boolean);
-
-  if (!bars.length) {
-    throw new Error(`${row.sourceSymbol} response did not include usable MSCI levels`);
-  }
-
-  return {
-    ...seriesBase(row),
-    source: 'MSCI index graph endpoint',
-    sourceKey: 'msci_graph',
-    dataKind: 'close',
-    priceOnly: true,
-    noVolume: true,
-    currency: payload?.ISO_currency_symbol || 'USD',
-    exchangeTimezoneName: null,
-    bars: uniqueBars(bars)
-  };
-}
-
 async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthCache) {
   const field = TREASURY_FIELDS.get(row.sourceSymbol);
   if (!field) {
@@ -408,16 +485,31 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
     monthEntries.push(...treasuryMonthCache.get(monthKey));
   }
 
-  const bars = monthEntries.map((entry) => {
+  const filteredEntries = monthEntries.filter((entry) => (
+    entry.time && entry.time >= isoDateFromDate(startDate) && entry.time <= isoDateFromDate(endDate)
+  )).sort((a, b) => a.time.localeCompare(b.time));
+  const bars = filteredEntries.map((entry) => {
     const close = asFiniteNumber(entry[field]);
     return entry.time && close !== null ? closeOnlyBar(entry.time, close) : null;
-  }).filter((bar) => bar && bar.time >= isoDateFromDate(startDate) && bar.time <= isoDateFromDate(endDate));
+  }).filter(Boolean);
 
   if (!bars.length) {
     throw new Error(`${row.sourceSymbol} response did not include usable Treasury yield history`);
   }
 
-  return {
+  const latestCurveEntry = row.sourceSymbol === 'TREASURY:CURVE' ? filteredEntries.at(-1) : null;
+  const previousDailyCurveEntry = row.sourceSymbol === 'TREASURY:CURVE'
+    ? filteredEntries.filter((entry) => entry.time && entry.time < latestCurveEntry?.time).at(-1)
+    : null;
+  const previousCurveEntry = row.sourceSymbol === 'TREASURY:CURVE'
+    ? treasuryCurveEntryNearMonthAgo(filteredEntries, latestCurveEntry?.time)
+    : null;
+  const curve = latestCurveEntry ? treasuryCurvePointsFromEntry(latestCurveEntry) : [];
+  if (row.sourceSymbol === 'TREASURY:CURVE' && curve.length < 2) {
+    throw new Error(`${row.sourceSymbol} response did not include usable Treasury curve points`);
+  }
+
+  const series = {
     ...seriesBase(row),
     source: 'Treasury.gov Daily Treasury Yield Curve Rate Data',
     sourceKey: 'treasury_yield_curve',
@@ -428,6 +520,39 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
     exchangeTimezoneName: null,
     bars: uniqueBars(bars)
   };
+  if (curve.length) {
+    series.curveDate = latestCurveEntry.time;
+    series.curvePoints = curve;
+    series.previousCurveDate = previousCurveEntry?.time || null;
+    series.previousCurveLabel = '1M ago';
+    series.previousCurvePoints = previousCurveEntry ? treasuryCurvePointsFromEntry(previousCurveEntry) : [];
+    series.curveSpread = treasuryCurveSpreadMetric(latestCurveEntry, previousDailyCurveEntry, '1D');
+  }
+  return series;
+}
+
+function isoDateMonthsAgo(isoDate, months) {
+  const source = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(source.getTime())) return null;
+  const targetMonth = source.getUTCMonth() - months;
+  const target = new Date(Date.UTC(source.getUTCFullYear(), targetMonth, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(source.getUTCDate(), lastDay));
+  return isoDateFromDate(target);
+}
+
+function treasuryCurveEntryNearMonthAgo(entries, latestIsoDate) {
+  const targetIsoDate = latestIsoDate ? isoDateMonthsAgo(latestIsoDate, 1) : null;
+  if (!targetIsoDate) return null;
+  const targetTime = new Date(`${targetIsoDate}T00:00:00Z`).getTime();
+  return entries
+    .filter((entry) => entry.time && entry.time < latestIsoDate)
+    .reduce((best, entry) => {
+      const distance = Math.abs(new Date(`${entry.time}T00:00:00Z`).getTime() - targetTime);
+      if (!best || distance < best.distance) return { entry, distance };
+      if (distance === best.distance && entry.time < best.entry.time) return { entry, distance };
+      return best;
+    }, null)?.entry || null;
 }
 
 function parseTreasuryXml(xml) {
@@ -435,13 +560,24 @@ function parseTreasuryXml(xml) {
   const propertyBlocks = xml.match(/<m:properties>[\s\S]*?<\/m:properties>/g) || [];
   for (const block of propertyBlocks) {
     const time = extractXmlField(block, 'NEW_DATE')?.slice(0, 10) || null;
-    entries.push({
-      time,
-      BC_10YEAR: extractXmlField(block, 'BC_10YEAR'),
-      BC_30YEAR: extractXmlField(block, 'BC_30YEAR')
-    });
+    const entry = { time };
+    for (const point of TREASURY_CURVE_POINTS) {
+      entry[point.field] = extractXmlField(block, point.field);
+    }
+    entries.push(entry);
   }
   return entries.filter((entry) => entry.time);
+}
+
+function treasuryCurvePointsFromEntry(entry) {
+  return TREASURY_CURVE_POINTS.map((point) => {
+    const value = asFiniteNumber(entry[point.field]);
+    return value === null ? null : {
+      label: point.label,
+      years: point.years,
+      value
+    };
+  }).filter(Boolean);
 }
 
 function extractXmlField(block, field) {
@@ -454,15 +590,13 @@ function seriesBase(row) {
   return {
     ticker: row.ticker,
     name: row.name,
+    section: row.section || 'tape',
     sourceSymbol: row.sourceSymbol,
     note: row.note
   };
 }
 
 async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
-  if (row.sourceSymbol.startsWith('MSCI:')) {
-    return fetchMsciSeries(row, args, startDate, endDate);
-  }
   if (row.sourceSymbol.startsWith('TREASURY:')) {
     return fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthCache);
   }
@@ -471,7 +605,7 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const inputRows = readTapeRows(args.input);
+  const inputRows = readChartableRows(args.input);
   const endDate = new Date();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
@@ -483,6 +617,8 @@ async function main() {
     if (args.delayMs) await sleep(args.delayMs);
   }
 
+  const tapeSeries = series.filter((item) => item.section !== 'crypto');
+  const cryptoSeries = series.filter((item) => item.section === 'crypto');
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -492,13 +628,12 @@ async function main() {
       startDate: isoDateFromDate(startDate),
       endDate: isoDateFromDate(endDate)
     },
-    sourceFamilies: [
-      'Yahoo Finance Chart API',
-      'MSCI index graph endpoint',
-      'Treasury.gov Daily Treasury Yield Curve Rate Data'
-    ],
+    sourceFamilies: Array.from(new Set(series.map((item) => item.source).filter(Boolean))),
     // quoteRows are staging output for daily updates; the published dashboard still renders quotes from dashboard-data.
-    quoteRows: series.map(quoteRowFromSeries),
+    quoteRows: {
+      tape: tapeSeries.map(quoteRowFromSeries),
+      crypto: cryptoSeries.map(cryptoQuoteRowFromSeries)
+    },
     series
   };
 
@@ -517,9 +652,12 @@ async function main() {
 module.exports = {
   DEFAULT_DAYS,
   REQUEST_TIMEOUT_MS,
+  cryptoQuoteRowFromSeries,
   fetchSeries,
   isoDateFromDate,
   quoteRowFromSeries,
+  readChartableRows,
+  readCryptoRows,
   readTapeRows,
   sleep
 };

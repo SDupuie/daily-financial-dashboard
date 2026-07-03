@@ -4,7 +4,6 @@ const http = require('http');
 const path = require('path');
 
 const chartData = require('./fetch_chart_data');
-const cryptoChartData = require('./fetch_crypto_chart_data');
 
 const HOST = '127.0.0.1';
 const DEFAULT_PORT = 2210;
@@ -142,104 +141,32 @@ async function mapLimit(items, limit, worker) {
   return results;
 }
 
-function signedPct(value) {
-  return `${new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-    signDisplay: 'always'
-  }).format(value)}%`;
-}
-
-function direction(value) {
-  if (!Number.isFinite(value) || Math.abs(value) < 0.005) return 'flat';
-  return value > 0 ? 'up' : 'down';
-}
-
-function formatCryptoPrice(value) {
-  const price = Number(value);
-  if (!Number.isFinite(price)) return 'Unavailable';
-  const decimals = price >= 10000 ? 0 : price >= 2 ? 2 : 4;
-  return `$${new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals
-  }).format(price)}`;
-}
-
-function formatCryptoDelta(delta, price) {
-  if (!Number.isFinite(delta)) return 'Unavailable';
-  const sign = delta > 0 ? '+' : delta < 0 ? '-' : '';
-  const decimals = Math.abs(delta) >= 100 ? 0 : price >= 2 ? 2 : 4;
-  return `${sign}$${new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals
-  }).format(Math.abs(delta))}`;
-}
-
-function cryptoQuoteRowFromSeries(item) {
-  const bars = item.bars || [];
-  const latest = bars[bars.length - 1];
-  const previous = bars[bars.length - 2];
-  if (!latest || !previous) {
-    throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
-  }
-
-  const delta = latest.close - previous.close;
-  const pct = previous.close ? (delta / previous.close) * 100 : 0;
-  return {
-    sym: item.ticker,
-    ticker: item.ticker,
-    name: item.name,
-    sub: item.ticker,
-    price: formatCryptoPrice(latest.close),
-    delta: formatCryptoDelta(delta, latest.close),
-    chg: signedPct(pct),
-    dir: direction(pct),
-    asOf: latest.time
-  };
-}
-
-async function fetchTapePayload(args, startDate, endDate) {
-  const rows = chartData.readTapeRows(args.input);
+async function fetchChartPayload(args, startDate, endDate) {
+  const rows = chartData.readChartableRows(args.input);
   const treasuryMonthCache = new Map();
   const errors = [];
   const results = await mapLimit(rows, args.concurrency, async (row) => {
     try {
       return await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache);
     } catch (error) {
-      errors.push({ section: 'tape', ticker: row.ticker, message: error.message });
+      errors.push({ section: row.section || 'chart', ticker: row.ticker, message: error.message });
       return null;
     }
   });
   const series = results.filter(Boolean);
-  const quoteRows = [];
+  const quoteRows = {
+    tape: [],
+    crypto: []
+  };
   for (const item of series) {
     try {
-      quoteRows.push(chartData.quoteRowFromSeries(item));
+      if (item.section === 'crypto') {
+        quoteRows.crypto.push(chartData.cryptoQuoteRowFromSeries(item));
+      } else {
+        quoteRows.tape.push(chartData.quoteRowFromSeries(item));
+      }
     } catch (error) {
-      errors.push({ section: 'tape', ticker: item.ticker, message: error.message });
-    }
-  }
-  return { series, quoteRows, errors };
-}
-
-async function fetchCryptoPayload(args, startDate, endDate) {
-  const rows = cryptoChartData.readCryptoRows(args.input);
-  const errors = [];
-  const results = await mapLimit(rows, args.concurrency, async (row) => {
-    try {
-      return await cryptoChartData.fetchYahooSeries(row, sourceArgs(args), startDate, endDate);
-    } catch (error) {
-      errors.push({ section: 'crypto', ticker: row.ticker, message: error.message });
-      return null;
-    }
-  });
-  const series = results.filter(Boolean);
-  const quoteRows = [];
-  for (const item of series) {
-    try {
-      quoteRows.push(cryptoQuoteRowFromSeries(item));
-    } catch (error) {
-      errors.push({ section: 'crypto', ticker: item.ticker, message: error.message });
+      errors.push({ section: item.section || 'chart', ticker: item.ticker, message: error.message });
     }
   }
   return { series, quoteRows, errors };
@@ -248,11 +175,7 @@ async function fetchCryptoPayload(args, startDate, endDate) {
 async function buildMarketRefresh(args) {
   const endDate = new Date();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
-  const [tape, crypto] = await Promise.all([
-    fetchTapePayload(args, startDate, endDate),
-    fetchCryptoPayload(args, startDate, endDate)
-  ]);
-  const errors = [...tape.errors, ...crypto.errors];
+  const chart = await fetchChartPayload(args, startDate, endDate);
 
   return {
     schemaVersion: 1,
@@ -263,20 +186,12 @@ async function buildMarketRefresh(args) {
       startDate: chartData.isoDateFromDate(startDate),
       endDate: chartData.isoDateFromDate(endDate)
     },
-    sourceFamilies: [
-      'Yahoo Finance Chart API',
-      'MSCI index graph endpoint',
-      'Treasury.gov Daily Treasury Yield Curve Rate Data'
-    ],
-    tape: {
-      quoteRows: tape.quoteRows,
-      series: tape.series
-    },
-    crypto: {
-      quoteRows: crypto.quoteRows,
-      series: crypto.series
-    },
-    errors
+    sourceFamilies: Array.from(new Set(chart.series
+      .map((item) => item.source)
+      .filter(Boolean))),
+    quoteRows: chart.quoteRows,
+    series: chart.series,
+    errors: chart.errors
   };
 }
 
@@ -330,7 +245,7 @@ function createServer(args) {
         inFlight = null;
       });
       const payload = await inFlight;
-      const successCount = payload.tape.series.length + payload.crypto.series.length;
+      const successCount = payload.series.length;
       // Fresh and cached responses share this normalized shape; only the per-request cached flag changes.
       const responsePayload = {
         ...payload,

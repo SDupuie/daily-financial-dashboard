@@ -120,26 +120,37 @@
     "source": "Yahoo Finance Chart API",
     "verifiedAt": "2026-06-30T12:05:01.162Z"
   },
-  "GSCI:stock": {
-    "symbol": "GSCI",
-    "type": "stock",
-    "close": 619.45,
-    "pctChange": 0.0807819678712206,
-    "pct": "+0.08%",
-    "tradeDate": "2026-06-30",
+  "DBC:etf": {
+    "symbol": "DBC",
+    "type": "etf",
+    "close": 26.5049991607666,
+    "pctChange": 0.20793344514458278,
+    "pct": "+0.21%",
+    "tradeDate": "2026-07-02",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-07-01T21:36:12.764Z"
+    "verifiedAt": "2026-07-02T17:08:55.256Z"
   },
-  "FNER:stock": {
-    "symbol": "FNER",
-    "type": "stock",
-    "close": 855.73,
-    "pctChange": -0.464103472100546,
-    "pct": "-0.46%",
-    "tradeDate": "2026-06-30",
+  "PDBC:etf": {
+    "symbol": "PDBC",
+    "type": "etf",
+    "close": 15.829999923706055,
+    "pctChange": 0.3168579948096667,
+    "pct": "+0.32%",
+    "tradeDate": "2026-07-02",
     "freshness": null,
     "source": "Yahoo Finance Chart API",
-    "verifiedAt": "2026-07-01T21:39:58.897Z"
+    "verifiedAt": "2026-07-02T17:08:55.256Z"
+  },
+  "ETHA:etf": {
+    "symbol": "ETHA",
+    "type": "etf",
+    "close": 12.19,
+    "pctChange": 2.523122190059666,
+    "pct": "+2.52%",
+    "tradeDate": "2026-07-01",
+    "freshness": null,
+    "source": "Yahoo Finance Chart API",
+    "verifiedAt": "2026-07-02T18:47:40.551Z"
   }
 }

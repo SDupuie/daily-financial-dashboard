@@ -13,8 +13,7 @@ if (!file.startsWith(`${root}${path.sep}`) && file !== root) {
 }
 const html = fs.readFileSync(file, 'utf8');
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-const chartDataMatch = html.match(/<script type="application\/json" id="tape-chart-data">([\s\S]*?)<\/script>/);
-const cryptoChartDataMatch = html.match(/<script type="application\/json" id="crypto-chart-data">([\s\S]*?)<\/script>/);
+const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const minChartHistoryDays = 1826;
 
 const errors = [];
@@ -100,10 +99,38 @@ if (!dashboardMatch) {
     const now = getNow();
     const strictDates = process.env.VALIDATE_STRICT_DATES === '1';
     const tapeRows = data.tape?.rows ?? [];
+    const cryptoRows = data.crypto?.tape ?? [];
+    const cryptoStatRowPattern = /(?:fear\s*&?\s*greed|(?:total )?crypto market cap|altcoin season)/i;
+    const isCryptoStatRow = (row) => (
+      row?.sym === 'F&G'
+      || row?.sym === 'TOTAL'
+      || row?.sym === 'ALTSEASON'
+      || cryptoStatRowPattern.test(String(row?.name ?? ''))
+    );
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
+    const staticTickerNotePattern = /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains|quote recap|price recap|latest quote|latest close)/i;
     const requireString = (value, label) => {
       if (typeof value !== 'string' || value.trim() === '') {
         errors.push(`${label} must be populated.`);
+      }
+    };
+    const validateTickerNote = ({ note, values, label }) => {
+      requireString(note, `${label}.note`);
+      const text = String(note ?? '').trim();
+      if (!text) return;
+      if (text.split(/\s+/).length < 12) {
+        errors.push(`${label}.note must include substantive daily market context, not a short label.`);
+      }
+      if (sourcePattern.test(text)) {
+        errors.push(`${label}.note contains source/citation or process language.`);
+      }
+      if (staticTickerNotePattern.test(text)) {
+        errors.push(`${label}.note looks static, placeholder-like, or quote-recap-only.`);
+      }
+      for (const value of values) {
+        if (value && value !== '0.00' && text.includes(String(value))) {
+          errors.push(`${label}.note repeats row value "${value}".`);
+        }
       }
     };
     const requireHttpsUrl = (url, label) => {
@@ -211,35 +238,48 @@ if (!dashboardMatch) {
       requireString(catalyst.body, `opening.catalysts[${index}].body`);
     }
 
-    const staleTapeTickers = new Set(['6723.T', 'BZ', 'BTC', 'ETH', 'TOTAL']);
+    const staleTapeTickers = new Set(['6723.T', 'BZ', 'BTC', 'ETH', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
     for (const ticker of tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase())) {
       if (staleTapeTickers.has(ticker)) {
         errors.push(`The Tape should not include stale or duplicated ticker ${ticker}.`);
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'MXEA', 'MXEF', 'FNER', 'GSCI', 'XAU', 'XAG', 'CL', 'VIX', 'MOVE', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'SMH', 'VGT', 'VAW', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
         errors.push(`The Tape is missing required ticker ${ticker}.`);
       }
     }
-    // Keep this map in lockstep with tape.rows[].sourceSymbol; popup charts use it as their source contract.
+    // Keep this map in lockstep with tape.rows[].sourceSymbol; embedded charts use it as their source contract.
     const expectedTapeSourceSymbols = new Map(Object.entries({
       SPX: '^GSPC',
       NDX: '^NDX',
       DJI: '^DJI',
       RUT: '^RUT',
-      MXEA: 'MSCI:990300',
-      MXEF: 'MSCI:891800',
-      FNER: '^FNER',
-      GSCI: 'GD=F',
+      VEA: 'VEA',
+      VWO: 'VWO',
+      VOX: 'VOX',
+      VCR: 'VCR',
+      VDC: 'VDC',
+      VDE: 'VDE',
+      VFH: 'VFH',
+      VHT: 'VHT',
+      VIS: 'VIS',
+      SMH: 'SMH',
+      VGT: 'VGT',
+      VAW: 'VAW',
+      VPU: 'VPU',
+      DBC: 'DBC',
+      PDBC: 'PDBC',
       XAU: 'GC=F',
       XAG: 'SI=F',
       CL: 'CL=F',
       VIX: '^VIX',
+      USYC: 'TREASURY:CURVE',
       MOVE: '^MOVE',
+      UST3M: 'TREASURY:3M',
       UST10Y: 'TREASURY:10Y',
       UST30Y: 'TREASURY:30Y',
       IEF: 'IEF',
@@ -255,45 +295,58 @@ if (!dashboardMatch) {
         errors.push(`tape.rows[${index}].sourceSymbol for ${ticker} must be ${expectedSource}.`);
       }
     }
+    const expectedCryptoSourceSymbols = new Map();
+    for (const [index, rowRaw] of cryptoRows.entries()) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+      if (isCryptoStatRow(row)) continue;
+      const ticker = String(row.sym ?? row.ticker ?? '').toUpperCase();
+      if (!ticker) continue;
+      requireString(row.sourceSymbol, `crypto.tape[${index}].sourceSymbol`);
+      if (row.sourceSymbol) expectedCryptoSourceSymbols.set(ticker, row.sourceSymbol);
+    }
+    const expectedChartSourceSymbols = new Map([
+      ...expectedTapeSourceSymbols.entries(),
+      ...expectedCryptoSourceSymbols.entries()
+    ]);
 
     if (!chartDataMatch) {
-      errors.push('Could not find tape-chart-data JSON block; production Tape charts must use embedded generated data.');
+      errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
     } else {
       let chartData;
       try {
         chartData = JSON.parse(chartDataMatch[1]);
       } catch (error) {
-        errors.push(`Embedded tape-chart-data JSON is invalid: ${error.message}`);
+        errors.push(`Embedded chart-data JSON is invalid: ${error.message}`);
       }
 
       if (chartData) {
         if (chartData.schemaVersion !== 1) {
-          errors.push('tape-chart-data.schemaVersion must be 1.');
+          errors.push('chart-data.schemaVersion must be 1.');
         }
         if (!Array.isArray(chartData.series)) {
-          errors.push('tape-chart-data.series must be an array.');
+          errors.push('chart-data.series must be an array.');
         }
         if (!Number.isFinite(Number(chartData.range?.days)) || Number(chartData.range.days) < minChartHistoryDays) {
-          errors.push(`tape-chart-data.range.days must be at least ${minChartHistoryDays} so the 5Y chart shortcut has enough embedded history.`);
+          errors.push(`chart-data.range.days must be at least ${minChartHistoryDays} so the 5Y chart shortcut has enough embedded history.`);
         }
         const chartSeries = Array.isArray(chartData.series) ? chartData.series : [];
         const chartSeriesByTicker = new Map();
         for (const [index, itemRaw] of chartSeries.entries()) {
           const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
           const ticker = String(item.ticker || '').toUpperCase();
-          const label = ticker || `tape-chart-data.series[${index}]`;
-          if (!ticker) errors.push(`tape-chart-data.series[${index}].ticker must be populated.`);
-          if (chartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded Tape chart series for ${ticker}.`);
+          const label = ticker || `chart-data.series[${index}]`;
+          if (!ticker) errors.push(`chart-data.series[${index}].ticker must be populated.`);
+          if (chartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded chart series for ${ticker}.`);
           chartSeriesByTicker.set(ticker, item);
 
-          const expectedSource = expectedTapeSourceSymbols.get(ticker);
+          const expectedSource = expectedChartSourceSymbols.get(ticker);
           if (!expectedSource) {
-            errors.push(`${label} is not a required Tape ticker.`);
+            errors.push(`${label} is not a required chart ticker.`);
           } else if (item.sourceSymbol !== expectedSource) {
             errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
           }
           if (!Array.isArray(item.bars) || item.bars.length < 2) {
-            errors.push(`${label}.bars must contain at least two daily bars for the popup chart.`);
+            errors.push(`${label}.bars must contain at least two daily bars for the inline chart.`);
           } else {
             let previousTime = '';
             for (const [barIndex, barRaw] of item.bars.entries()) {
@@ -326,107 +379,89 @@ if (!dashboardMatch) {
               }
             }
           }
-        }
-
-        for (const ticker of requiredTapeTickers) {
-          if (!chartSeriesByTicker.has(ticker)) {
-            errors.push(`Embedded Tape chart data is missing ${ticker}.`);
-          }
-        }
-
-        // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane popup layout.
-        for (const ticker of ['MXEA', 'MXEF', 'UST10Y', 'UST30Y', 'FNER', 'VIX', 'MOVE']) {
-          const item = chartSeriesByTicker.get(ticker);
-          if (item && item.noVolume !== true) {
-            errors.push(`Embedded Tape chart data for ${ticker} must mark noVolume true for the popup hint/volume-pane contract.`);
-          }
-        }
-      }
-    }
-
-    if (!cryptoChartDataMatch) {
-      errors.push('Could not find crypto-chart-data JSON block; production Crypto charts must use embedded generated data.');
-    } else {
-      let cryptoChartData;
-      try {
-        cryptoChartData = JSON.parse(cryptoChartDataMatch[1]);
-      } catch (error) {
-        errors.push(`Embedded crypto-chart-data JSON is invalid: ${error.message}`);
-      }
-
-      if (cryptoChartData) {
-        // Keep this map aligned with scripts/fetch_crypto_chart_data.js; the popup uses these Yahoo-backed sources.
-        const expectedCryptoSources = new Map(Object.entries({
-          BTC: 'BTC-USD',
-          ETH: 'ETH-USD',
-          SOL: 'SOL-USD',
-          XRP: 'XRP-USD',
-          IBIT: 'IBIT',
-          MSTR: 'MSTR'
-        }));
-        if (cryptoChartData.schemaVersion !== 1) {
-          errors.push('crypto-chart-data.schemaVersion must be 1.');
-        }
-        if (!Array.isArray(cryptoChartData.series)) {
-          errors.push('crypto-chart-data.series must be an array.');
-        }
-        if (!Number.isFinite(Number(cryptoChartData.range?.days)) || Number(cryptoChartData.range.days) < minChartHistoryDays) {
-          errors.push(`crypto-chart-data.range.days must be at least ${minChartHistoryDays} so crypto 5Y charts have enough embedded history.`);
-        }
-        const cryptoChartSeries = Array.isArray(cryptoChartData.series) ? cryptoChartData.series : [];
-        const cryptoChartSeriesByTicker = new Map();
-        for (const [index, itemRaw] of cryptoChartSeries.entries()) {
-          const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
-          const ticker = String(item.ticker || '').toUpperCase();
-          const label = ticker || `crypto-chart-data.series[${index}]`;
-          if (!ticker) errors.push(`crypto-chart-data.series[${index}].ticker must be populated.`);
-          if (cryptoChartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded Crypto chart series for ${ticker}.`);
-          cryptoChartSeriesByTicker.set(ticker, item);
-
-          const expectedSource = expectedCryptoSources.get(ticker);
-          if (!expectedSource) {
-            errors.push(`${label} is not a required Crypto chart ticker.`);
-          } else if (item.sourceSymbol !== expectedSource) {
-            errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
-          }
-          if (!Array.isArray(item.bars) || item.bars.length < 2) {
-            errors.push(`${label}.bars must contain at least two daily bars for the popup chart.`);
-          } else {
-            let previousTime = '';
-            for (const [barIndex, barRaw] of item.bars.entries()) {
-              const bar = barRaw && typeof barRaw === 'object' ? barRaw : {};
-              const barLabel = `${label}.bars[${barIndex}]`;
-              if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
-                errors.push(`${barLabel}.time must be an ISO date.`);
+          if (item.sourceSymbol === 'TREASURY:CURVE') {
+            const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
+            if (curvePoints.length < 2) {
+              errors.push(`${label}.curvePoints must contain the current Treasury curve for the inline chart.`);
+            }
+            const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
+            if (curveSpread.label !== '2s10s') {
+              errors.push(`${label}.curveSpread.label must be 2s10s so the row does not duplicate the 10Y Treasury quote.`);
+            }
+            if (!isFiniteNumber(curveSpread.valueBp)) {
+              errors.push(`${label}.curveSpread.valueBp must be numeric.`);
+            }
+            for (const [pointIndex, pointRaw] of curvePoints.entries()) {
+              const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
+              if (typeof point.label !== 'string' || point.label.trim() === '') {
+                errors.push(`${label}.curvePoints[${pointIndex}].label must be populated.`);
               }
-              if (previousTime && bar.time <= previousTime) {
-                errors.push(`${barLabel}.time must be strictly ascending.`);
+              if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
+                errors.push(`${label}.curvePoints[${pointIndex}].years must be positive.`);
               }
-              previousTime = bar.time;
-              for (const field of ['open', 'high', 'low', 'close']) {
-                if (!isFiniteNumber(bar[field])) {
-                  errors.push(`${barLabel}.${field} must be numeric.`);
-                }
-              }
-              if (!isCoherentOhlc(bar)) {
-                errors.push(`${barLabel} has incoherent OHLC values.`);
-              }
-              if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
-                errors.push(`${barLabel}.volume must be a non-negative number when present.`);
-              }
-              // Close-only sources intentionally duplicate close into OHLC so chart rendering and readouts stay consistent.
-              if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
-                errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
-              }
-              if (item.noVolume && bar.volume !== undefined) {
-                errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
+              if (!isFiniteNumber(point.value)) {
+                errors.push(`${label}.curvePoints[${pointIndex}].value must be numeric.`);
               }
             }
           }
         }
-        for (const ticker of expectedCryptoSources.keys()) {
-          if (!cryptoChartSeriesByTicker.has(ticker)) {
-            errors.push(`Embedded Crypto chart data is missing ${ticker}.`);
+
+        for (const ticker of expectedChartSourceSymbols.keys()) {
+          if (!chartSeriesByTicker.has(ticker)) {
+            errors.push(`Embedded chart data is missing ${ticker}.`);
+          }
+        }
+
+        const usycQuoteRow = chartData.quoteRows?.tape?.find((row) => row?.ticker === 'USYC');
+        if (usycQuoteRow && !/^2s10s [+-]\d+ bp$/.test(String(usycQuoteRow.last || ''))) {
+          errors.push('Embedded chart-data quoteRows.tape USYC.last must show 2s10s spread instead of repeating the 10Y yield.');
+        }
+
+        const chartTapeQuoteRows = Array.isArray(chartData.quoteRows?.tape) ? chartData.quoteRows.tape : [];
+        const chartCryptoQuoteRows = Array.isArray(chartData.quoteRows?.crypto) ? chartData.quoteRows.crypto : [];
+        const chartTapeQuoteByTicker = new Map(chartTapeQuoteRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+        const chartCryptoQuoteByTicker = new Map(chartCryptoQuoteRows.map((row) => [String(row?.ticker || row?.sym || '').toUpperCase(), row]));
+        const requireMatchingQuoteFields = ({ dashboardRow, chartRow, fields, label }) => {
+          if (!chartRow) {
+            errors.push(`Embedded chart-data quoteRows is missing ${label}.`);
+            return;
+          }
+          for (const field of fields) {
+            const dashboardValue = String(dashboardRow?.[field] ?? '');
+            const chartValue = String(chartRow?.[field] ?? '');
+            if (dashboardValue !== chartValue) {
+              errors.push(`${label}.${field} must match embedded chart-data quoteRows value "${chartValue}".`);
+            }
+          }
+        };
+        for (const row of tapeRows) {
+          const ticker = String(row?.ticker ?? '').toUpperCase();
+          if (!ticker) continue;
+          requireMatchingQuoteFields({
+            dashboardRow: row,
+            chartRow: chartTapeQuoteByTicker.get(ticker),
+            fields: ['last', 'delta', 'pct', 'dir', 'asOf'],
+            label: `tape.rows ${ticker}`
+          });
+        }
+        for (const rowRaw of cryptoRows) {
+          const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+          if (isCryptoStatRow(row)) continue;
+          const ticker = String(row.sym ?? row.ticker ?? '').toUpperCase();
+          if (!ticker) continue;
+          requireMatchingQuoteFields({
+            dashboardRow: row,
+            chartRow: chartCryptoQuoteByTicker.get(ticker),
+            fields: ['price', 'delta', 'chg', 'dir', 'asOf'],
+            label: `crypto.tape ${ticker}`
+          });
+        }
+
+        // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane chart layout.
+        for (const ticker of ['USYC', 'UST3M', 'UST10Y', 'UST30Y', 'VIX', 'MOVE']) {
+          const item = chartSeriesByTicker.get(ticker);
+          if (item && item.noVolume !== true) {
+            errors.push(`Embedded Tape chart data for ${ticker} must mark noVolume true for the chart hint/volume-pane contract.`);
           }
         }
       }
@@ -524,28 +559,35 @@ if (!dashboardMatch) {
 
     for (const rowRaw of tapeRows) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-      const note = String(row.note ?? '');
-
-      if (sourcePattern.test(note)) {
-        errors.push(`Tape note for ${row.name} contains source/citation language.`);
-      }
-
-      for (const value of [row.last, row.delta, row.pct]) {
-        if (value && value !== '0.00' && note.includes(String(value))) {
-          errors.push(`Tape note for ${row.name} repeats row value "${value}".`);
-        }
+      validateTickerNote({
+        note: row.note,
+        values: [row.last, row.delta, row.pct],
+        label: `tape.rows ${row.ticker ?? row.name ?? '(unknown)'}`
+      });
+      if (row.ticker === 'USYC' && !/^2s10s [+-]\d+ bp$/.test(String(row.last || ''))) {
+        errors.push('Tape row USYC.last must show 2s10s spread instead of repeating the 10Y yield.');
       }
     }
 
     const cryptoHeader = String(data.crypto?.tapeHeader ?? '');
     const cryptoNotes = data.crypto?.notes ?? [];
-    const cryptoRows = data.crypto?.tape ?? [];
     const fng = (data.crypto?.tape ?? []).find(row => row.sym === 'F&G');
+    const altcoinSeason = (data.crypto?.tape ?? []).find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
     const staleFngPattern = /(numeric read|pull still failed|F&G ~|unavailable|not retrievable|not extractable)/i;
-    const staticCryptoPattern = /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains)/i;
 
     if (staleFngPattern.test(cryptoHeader)) {
       errors.push('Crypto tape header contains stale F&G failure/unavailable language.');
+    }
+
+    for (const rowRaw of cryptoRows) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+      if (isCryptoStatRow(row)) continue;
+      const ticker = String(row.sym ?? row.ticker ?? row.name ?? '(unknown)').trim();
+      validateTickerNote({
+        note: row.note,
+        values: [row.price, row.delta, row.chg],
+        label: `crypto.tape ${ticker}`
+      });
     }
 
     for (const noteRaw of cryptoNotes) {
@@ -554,7 +596,7 @@ if (!dashboardMatch) {
       if (staleFngPattern.test(text)) {
         errors.push(`Crypto note "${note.title ?? '(untitled)'}" contains stale F&G failure/unavailable language.`);
       }
-      if (staticCryptoPattern.test(text)) {
+      if (staticTickerNotePattern.test(text)) {
         errors.push(`Crypto note "${note.title ?? '(untitled)'}" looks static, placeholder-like, or quote-recap-only.`);
       }
       for (const rowRaw of cryptoRows) {
@@ -601,8 +643,37 @@ if (!dashboardMatch) {
       }
     }
 
+    if (!altcoinSeason) {
+      errors.push('Crypto tape is missing the Altcoin Season Index stat row.');
+    } else {
+      const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
+      const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
+
+      if (!/^\d{1,3}$/.test(altcoinSeasonPrice)) {
+        errors.push('Altcoin Season Index price must be a numeric 0-100 reading, not a placeholder.');
+      } else {
+        const value = Number(altcoinSeasonPrice);
+        if (value < 0 || value > 100) {
+          errors.push('Altcoin Season Index price must be between 0 and 100.');
+        }
+      }
+
+      if (!altcoinSeason.sub || /^unavailable$/i.test(String(altcoinSeason.sub))) {
+        errors.push('Altcoin Season Index classification must be populated.');
+      }
+      if (!String(altcoinSeason.delta ?? '').trim()) {
+        errors.push('Altcoin Season Index change must be populated for the stat-card value line.');
+      }
+      if (!/^\/?100$/.test(altcoinSeasonRange)) {
+        errors.push('Altcoin Season Index chg must show the /100 range label.');
+      }
+    }
+
     if (!/Alternative\.me Crypto Fear & Greed Index/i.test(String(data.footer?.compiled ?? ''))) {
       errors.push('Footer source list must include Alternative.me Crypto Fear & Greed Index when F&G is shown.');
+    }
+    if (!/CoinMarketCap Altcoin Season Index/i.test(String(data.footer?.compiled ?? ''))) {
+      errors.push('Footer source list must include CoinMarketCap Altcoin Season Index when Altcoin Season is shown.');
     }
 
     const stories = Array.isArray(data.stories) ? data.stories : [];

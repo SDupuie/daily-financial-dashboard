@@ -21,7 +21,7 @@ Update `daily_financial_news.html` each market morning around 7:00 AM Central, b
 
 Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a daily dashboard refresh.
 
-Production is self-contained: the rendered dashboard reads embedded `dashboard-data`, `tape-chart-data`, and `crypto-chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
+Production is self-contained: the rendered dashboard reads embedded `dashboard-data` and `chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
 
 ## Optional Local Quote Refresh
 
@@ -46,24 +46,26 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
 2. Refresh prices before reading news.
    - Never reuse prices already in the file.
    - Use exact retrieved prices. Use `~` only after exhausting that row's source hierarchy with two attempts per source.
-   - For stock/ETF quotes, use `node scripts/fetch_quotes.js --symbols IBIT:etf,MSTR:stock` or add the symbols needed for the run.
-   - For pre-market futures, chart/quote data, asset-allocation ETF rows, and asset-allocation portfolio summary, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_chart_data.js` for full Tape chart bars and quote-row staging data, `node scripts/fetch_crypto_chart_data.js` for Crypto popup chart bars, and `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the appropriate embedded data block before publish.
+   - For stock/ETF quotes, use `node scripts/fetch_quotes.js --symbols IBIT:etf,ETHA:etf,MSTR:stock` or add the symbols needed for the run.
+   - For pre-market futures, chart/quote data, asset-allocation ETF rows, and asset-allocation portfolio summary, helper scripts can generate staging JSON under `scripts/generated/`. Use `node scripts/fetch_chart_data.js` for unified chart bars and quote-row staging data, and `node scripts/fetch_asset_allocation_summary.js` for the sanitized portfolio MTD return export. Merge final helper output into the appropriate embedded data block before publish.
    - Production data that must be embedded daily includes `preMarket.futures`, `preMarket.stories`, `assetAllocationPortfolio.rows`, and all rows needed by `tape.rows`.
    - In each `tape.rows[].note`, summarize the relevant market commentary or catalyst driving that market. Do not restate `last`, `delta`, or `pct`.
+   - In each rendered `crypto.tape[]` ticker row, include a `note` for the collapsed Tape Crypto tab. Update these notes daily with ticker-specific context; do not reuse one generic crypto note across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible crypto tickers.
    - Do not name quote/news sources in visible copy. Keep source attribution and retrieval/process commentary in `footer.compiled`.
    - Do not use source-verification phrasing such as `Reuters reported`, `Yahoo showed`, `fallback chain`, or similar process commentary in user-facing text.
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
 
 3. Use this price-source hierarchy.
    - U.S. indices and equities: Yahoo Finance or a live finance quote tool; cross-check major index closes with AP, CNBC, Reuters, MarketWatch, or TradingView when available.
-   - International indexes such as MSCI EAFE and MSCI EM: official MSCI pages/endpoints first, then clearly labeled high-confidence backups.
-   - Real estate and broad commodity indexes: official index families or Yahoo/MarketWatch quote pages when available.
+   - International equity ETFs such as VEA and VWO: Yahoo Finance chart/quote data first, then clearly labeled high-confidence backups.
+   - Sector and commodity ETFs: Yahoo Finance or MarketWatch quote pages when available.
    - Treasury yields: Treasury.gov daily rates first; Trading Economics or CNBC as backup.
    - Rates volatility and bond proxies: use the configured dashboard source or ETF quote source and label proxy rows clearly.
    - WTI: CME/NYMEX where available; MarketWatch, Trading Economics, or Reuters as backup.
    - Gold and silver: GoldPrice.org spot close or MarketWatch futures close. State which one is used in `footer.compiled`.
    - Crypto majors: CoinGecko or CoinMarketCap.
    - Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
+   - Altcoin Season Index: CoinMarketCap Altcoin Season Index. Populate the stat-card `delta` from the prior historical reading when available; otherwise use a clear `n/a` rather than fabricating a change.
    - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2` first, then the Alternative.me page if the API fails.
    - Asset Allocation Portfolio rows: instrument-level ETF market data only. Do not import or recreate tactical allocation/model logic from the separate Asset Allocation Dashboard.
    - For every quote row, follow its full fallback chain before `~`; if no same-day close is available, use the latest verified close and make the trade date clear in the row or footer.
@@ -93,7 +95,7 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - `tape`: refresh all required cross-asset rows and commentary.
    - `assetAllocationPortfolio`: embed instrument-level ETF rows with price, MTD dividend, daily return, and MTD return. Before reading the sanitized portfolio-level return export, refresh the Asset Allocation Dashboard export by calling `http://127.0.0.1:2200/api/asset-market-data`, then read `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. Treat `portfolioMtdReturnValue` as percentage points (`1.24` means `+1.24%`, `-0.35` means `-0.35%`). If the refresh call fails, fall back to the existing export file when present and embed `portfolioMtdReturnStale: true` with the export `asOf` date. Do not call `/api/asset-market-data` for display data; call it only to update the sanitized export. Keep any `upcomingCurrentMonthDividendEvents` or `futureMonthDividendEvents` as display-only lookahead; only current/past ex-date dividends belong in the MTD dividend total.
    - `stories`: exactly 9 fresh non-crypto stories across markets, corporate, macro, geopolitics, Fed, earnings, and other broad market themes.
-   - `crypto`: refreshed crypto quote rows, Crypto Market Cap stat, Fear & Greed stat, and 4 to 6 fresh crypto notes/stories.
+   - `crypto`: refreshed crypto quote rows, ticker-level `crypto.tape[].note` commentary for rows rendered in the collapsed Tape Crypto tab, Crypto Market Cap stat, Altcoin Season Index stat, Fear & Greed stat, and 4 to 6 fresh crypto notes/stories.
    - `earnings`: reports from the past 48 hours and the next five calendar days.
    - `weekAhead`: update on Mondays and Fridays. For full U.S. cash-market holidays, use a plain closure label such as `U.S. Markets Closed` in `tickers`; do not list separate exchange closures or append 24/7 assets such as `BTC`. Use the event text to explain why the closure matters for the week, and reserve instrument tickers for rows with an actual scheduled catalyst or market to watch.
    - `footer`: today’s compile date and concise source-family attribution.
@@ -104,12 +106,14 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
    - Do not write tautological market-status copy that states routine facts without saying why they matter.
    - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
+   - Crypto ticker notes in `crypto.tape[].note` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
    - Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
-   - Do not merely restate quote rows in notes or story bodies.
+   - Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
    - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises. When practical, set `moveRole` or `moveType` to `pending`, `reported`, `guidance`, `marketReaction`, or `surprise`.
 
 7. Validate before finishing.
    - Run `node scripts/validate_dashboard.js daily_financial_news.html`.
+   - Treat Tape ticker notes as a strict validation contract: every `tape.rows[].note` and rendered `crypto.tape[].note` must be populated, substantive, source-free, and not a quote recap.
    - Run a stale-date guard:
      - `rg -n "\"masthead\"|\"compiled\"|January 1|2001" daily_financial_news.html`
    - Run an HTML-entity guard:
