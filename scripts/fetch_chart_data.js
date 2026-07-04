@@ -505,8 +505,12 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
   const previousDailyCurveEntry = row.sourceSymbol === 'TREASURY:CURVE'
     ? filteredEntries.filter((entry) => entry.time && entry.time < latestCurveEntry?.time).at(-1)
     : null;
-  const previousCurveEntry = row.sourceSymbol === 'TREASURY:CURVE'
-    ? treasuryCurveEntryNearMonthAgo(filteredEntries, latestCurveEntry?.time)
+  // Treasury skips weekends and holidays, so comparison snapshots use the nearest available curve date.
+  const comparisonCurveEntries = row.sourceSymbol === 'TREASURY:CURVE'
+    ? [
+        { label: '1M ago', entry: treasuryCurveEntryNearMonthsAgo(filteredEntries, latestCurveEntry?.time, 1) },
+        { label: '6M ago', entry: treasuryCurveEntryNearMonthsAgo(filteredEntries, latestCurveEntry?.time, 6) }
+      ].filter((comparison) => comparison.entry)
     : null;
   const curve = latestCurveEntry ? treasuryCurvePointsFromEntry(latestCurveEntry) : [];
   if (row.sourceSymbol === 'TREASURY:CURVE' && curve.length < 2) {
@@ -527,9 +531,11 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
   if (curve.length) {
     series.curveDate = latestCurveEntry.time;
     series.curvePoints = curve;
-    series.previousCurveDate = previousCurveEntry?.time || null;
-    series.previousCurveLabel = '1M ago';
-    series.previousCurvePoints = previousCurveEntry ? treasuryCurvePointsFromEntry(previousCurveEntry) : [];
+    series.comparisonCurves = comparisonCurveEntries.map((comparison) => ({
+      label: comparison.label,
+      date: comparison.entry.time,
+      points: treasuryCurvePointsFromEntry(comparison.entry)
+    }));
     series.curveSpread = treasuryCurveSpreadMetric(latestCurveEntry, previousDailyCurveEntry, '1D');
   }
   return series;
@@ -545,8 +551,8 @@ function isoDateMonthsAgo(isoDate, months) {
   return isoDateFromDate(target);
 }
 
-function treasuryCurveEntryNearMonthAgo(entries, latestIsoDate) {
-  const targetIsoDate = latestIsoDate ? isoDateMonthsAgo(latestIsoDate, 1) : null;
+function treasuryCurveEntryNearMonthsAgo(entries, latestIsoDate, months) {
+  const targetIsoDate = latestIsoDate ? isoDateMonthsAgo(latestIsoDate, months) : null;
   if (!targetIsoDate) return null;
   const targetTime = new Date(`${targetIsoDate}T00:00:00Z`).getTime();
   return entries

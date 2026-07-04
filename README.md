@@ -36,7 +36,7 @@ This section is the canonical human-readable contract for dashboard data. Keep `
 - `assetAllocationPortfolio`: instrument-level ETF market data and sanitized portfolio-level summary fields only. Do not embed tactical model logic or derived allocation calculations.
 - `stories`: exactly nine broad-market, non-crypto story cards.
 - `crypto`: crypto section metadata, crypto-only stat rows, and crypto story notes. Crypto ticker quote rows do not live here.
-- `earnings`: recent and upcoming earnings rows.
+- `earnings.week`: canonical Monday-Friday earnings monitor payload.
 - `weekAhead`: scheduled market events and closures.
 - `footer`: compile date and concise source-family attribution.
 
@@ -95,6 +95,148 @@ Crypto section data has this contract:
 - Dashboard display times should be local, but raw official session labels and fields must be stored in Eastern terms: `marketTimeZone: "America/New_York"`, `sessionStartEastern`, `sessionEndEastern`, `referenceCloseEastern`, and `referenceLabel: "prior 4 PM ET close"`.
 - `raw.referencePrice` is the comparison baseline used for Session Futures chart/reference calculations. Keep `raw.previousClose` as the source's futures prior close when available.
 
+### Earnings Monitor Contract
+
+The richer earnings monitor uses this contract as the canonical deterministic method. The production dashboard consumes the canonical earnings week payload from embedded `dashboard-data.earnings.week`; provider sidecars are build-time inputs only. The goal is to let providers collect data and let AI write concise interpretation only after the numeric facts are fixed.
+
+Source hierarchy:
+
+1. Finnhub primary: calendar slate, company profile, market cap, timing, EPS estimate, EPS actual, revenue estimate, and revenue actual when Finnhub has the row.
+2. Finnhub profile recovery: if Finnhub has the earnings row but `profile2` returns an empty profile, use Finnhub `stock/metric` only for market cap and EarningsAPI calendar only for company name. Successful Finnhub metric market caps are cached in `scripts/generated/finnhub_metric_cache.json` to reduce repeated rate-limit exposure. EPS, revenue, timing, and slate still remain Finnhub.
+3. EarningsAPI secondary: missing ticker/date discovery and row-level specifics only for Finnhub-missing display candidates. Use the EarningsAPI company endpoint for row specifics; treat the EarningsAPI calendar endpoint as discovery only except for the profile-empty company-name recovery above.
+4. SEC/company release resolution: official actuals, fiscal-period confirmation, timing when needed, and EPS basis notes for queued company-release tasks.
+5. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
+
+Do not use metered EarningsAPI calls to audit every Finnhub-covered row. EarningsAPI is limited to Finnhub-missing display candidates plus the narrow company-name recovery for Finnhub-covered rows whose Finnhub profile is empty. EarningsAPI must never override a Finnhub-covered row's EPS, revenue, timing, or slate.
+
+Canonical row shape:
+
+```json
+{
+  "symbol": "GIS",
+  "company": "General Mills, Inc.",
+  "reportDate": "2026-07-01",
+  "reportTiming": "bmo",
+  "fiscalYear": 2026,
+  "fiscalQuarter": 4,
+  "marketCap": 21000000000,
+  "eps": {
+    "estimate": 0.80,
+    "actual": 0.95,
+    "result": "beat",
+    "basis": "adjusted_non_gaap",
+    "note": ""
+  },
+  "revenue": {
+    "estimate": 4590000000,
+    "actual": 4600000000,
+    "result": "beat",
+    "note": ""
+  },
+  "outcome": {
+    "overall": "beat",
+    "guide": "FY27 EPS guide $3.00-$3.20",
+    "interpretation": "Profit outlook carried the read."
+  },
+  "reaction": {
+    "basis": "same_day_close",
+    "percent": 8.5,
+    "status": "computed",
+    "note": "Guide and profit read drove rally."
+  },
+  "sourceStatus": "verified",
+  "sourceSummary": {
+    "primary": "finnhub",
+    "fallbacks": [],
+    "reaction": "yahoo"
+  },
+  "sourceAudit": {
+    "selectedSources": {
+      "slate": "finnhub",
+      "company": "finnhubProfile",
+      "marketCap": "finnhubProfile",
+      "timing": "finnhub",
+      "eps": {
+        "estimate": "finnhub",
+        "actual": "finnhub"
+      },
+      "revenue": {
+        "estimate": "finnhub",
+        "actual": "finnhub"
+      },
+      "reaction": "yahoo"
+    }
+  }
+}
+```
+
+Allowed `reportTiming` values are `bmo`, `amc`, `dmh`, and `unknown`. Allowed metric `result` values are `beat`, `miss`, `met`, `not_compared`, and `pending`. Allowed `outcome.overall` values are `beat`, `miss`, `mixed`, `met`, `eps_only_beat`, `eps_only_miss`, `pending`, and `unverified`. Allowed `reaction.basis` values are `same_day_close`, `next_session_close`, `during_market_close`, and `unavailable`. Allowed `reaction.status` values are `computed`, `unavailable`, and `pending`. Allowed `sourceSummary.primary` values are `finnhub`, `earningsApiCompany`, and `sec_company_release`. The dashboard consumes this canonical row contract directly and derives display labels, tones, and compact metric text at render time. The source artifact keeps field-level selected sources in `sourceAudit`; dashboard-visible provenance uses compact `sourceSummary` plus `sourceStatus`. Audit snapshots should preserve provider identity by section name, but metric values still use canonical `eps` and `revenue` objects rather than provider field names.
+
+EarningsAPI budget policy:
+
+- Treat the monthly quota as a scarce secondary-recovery budget, not a primary data source.
+- Query EarningsAPI calendar at most once per weekday in the target week during a normal weekly discovery pass.
+- Query EarningsAPI company rows only for Finnhub-missing display candidates.
+- Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
+- Keep a monthly call counter and stop optional calls before the limit. Preserve reserve capacity for urgent secondary-recovery checks.
+
+Update methodology:
+
+Treat weekly slate construction and post-report result refresh as separate jobs. The weekly slate job builds the five calendar cards and expected reporting universe; the result-refresh job updates only rows whose report window has arrived or passed. Do not keep probing calendar/discovery endpoints for the same static week slate during every dashboard refresh.
+
+Weekly slate construction:
+
+1. Run once for the target Monday-Friday week, normally on Monday morning or when intentionally rebuilding the week.
+2. Fetch Finnhub earnings calendar for the Monday-Friday target week.
+3. Fetch Finnhub profiles for Finnhub rows and filter display eligibility by market cap, country/exchange/profile quality, and watchlist rules.
+4. If Finnhub fails, returns zero usable rows, or returns fewer than the configured minimum usable rows, fail closed instead of promoting a secondary source into the whole slate. The default minimum is `max(1, weekdays * 2)`, so the normal Monday-Friday strip requires at least 10 Finnhub rows before any EarningsAPI secondary-recovery calls. Use `--min-finnhub-rows 1` only for intentional holiday-week or diagnostic runs.
+5. Fetch EarningsAPI calendar for the same five weekdays as a one-time coverage check for the slate build. Do not repeat this call during ordinary result refreshes for the same week.
+6. For Finnhub rows with empty Finnhub profile data, read cached Finnhub `stock/metric` market cap first, then fetch the metric endpoint with conservative retry/backoff if uncached; use the matching EarningsAPI calendar row for company name only. This may make a Finnhub-covered row display-eligible, but it must not change Finnhub EPS, revenue, timing, or outcome.
+7. Compare EarningsAPI-discovered symbols against Finnhub. Queue only Finnhub-missing display candidates as `secondaryRecoveryCandidates`.
+8. For each queued candidate, fetch the EarningsAPI company endpoint and select the row matching the report date. Use that row for EPS/revenue estimates and actuals only after the date is consistent.
+9. Persist the canonical `earnings_week.json` with the built slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes.
+
+Post-report result refresh:
+
+1. Run `scripts/refresh_earnings_results.js` against the existing canonical `earnings_week.json`; do not rebuild the slate unless the user explicitly requests it or validation proves the slate is unusable.
+2. Select only rows whose report timing has arrived or passed, plus unresolved rows with `companyReleaseTasks`.
+3. Refresh actual EPS/revenue from the row's primary deterministic source: Finnhub for Finnhub-covered rows, EarningsAPI company endpoint for previously recovered EarningsAPI rows, and SEC/company release only for official resolution tasks. Do not call EarningsAPI calendar in this phase.
+4. Create `companyReleaseTasks` only for recovered rows with missing actuals or missing timing. Do not use company-release resolution to recover analyst estimates.
+5. Resolve `companyReleaseTasks` against SEC/company release into `earnings_company_release_resolutions.json`.
+6. Apply resolved company-release facts back into the canonical `earnings_week.json` rows with `scripts/apply_company_release_resolutions.js`. The dashboard should not merge the sidecar at render time.
+7. Compute EPS and revenue beat/miss mechanically from numeric estimate and actual values. If revenue estimate is unavailable, produce an EPS-only outcome and mark revenue `not_compared`.
+8. Compute market reaction from Yahoo using timing-aware rules once the needed close is available: BMO/DMH = report-date close vs previous trading-day close; AMC = next trading-day close vs report-date close; unknown = unavailable.
+9. Let AI write only narrative fields such as `outcome.interpretation`, `outcome.guide`, `reaction.note`, `eps.note`, and `revenue.note` into `earnings_narrative.json`, using the verified numeric row plus any official-release guidance text. AI must not invent data, dates, estimates, actuals, or reaction values.
+10. Apply narrative back into the canonical `earnings_week.json` rows with `scripts/apply_earnings_narrative.js`. The dashboard should not carry ticker-specific commentary maps.
+11. Embed the validated canonical payload into `daily_financial_news.html` with `scripts/embed_earnings_week.js`. The published dashboard should not fetch `scripts/generated/earnings_week.json` at runtime.
+
+Company-release resolution sidecar shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-04T13:00:00.000Z",
+  "sourceArtifact": "scripts/generated/earnings_week.json",
+  "sourceGeneratedAt": "2026-07-04T12:08:47.592Z",
+  "sourceRange": {
+    "from": "2026-06-29",
+    "to": "2026-07-03"
+  },
+  "companyReleaseResolutions": [],
+  "summary": {
+    "total": 0,
+    "resolved": 0,
+    "needsReview": 0,
+    "unresolved": 0
+  },
+  "outputPath": "/Users/Scott/Projects/Daily Financial Dashboard/scripts/generated/earnings_company_release_resolutions.json"
+}
+```
+
+The company-release sidecar is not a dashboard runtime input. It must identify the exact canonical earnings week artifact it was derived from with `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`; `scripts/validate_company_release_resolutions.js` verifies those fields against the week file before any apply step uses the sidecar. Every `companyReleaseTasks[]` entry must have exactly one matching `companyReleaseResolutions[]` entry. A dashboard-ready `earnings_week.json` with company-release tasks must also include `companyReleaseApply`, every task must be applied with no skipped tasks, and the matching canonical row must contain the applied `sourceAudit.companyReleaseResolution`. SEC/company-release resolution may carry recovered estimates forward only from the EarningsAPI company endpoint, not the EarningsAPI calendar discovery row.
+
+The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`. `scripts/apply_earnings_narrative.js` rejects narrative generated from a different earnings week artifact before writing any canonical rows.
+
 ### Embedded `chart-data`
 
 The `chart-data` block is generated chart history plus quote-row staging data:
@@ -104,6 +246,8 @@ The `chart-data` block is generated chart history plus quote-row staging data:
 - `series[]` must include every chartable ticker from `tape.rows[]`, with matching `ticker`, `section`, and `sourceSymbol`.
 - `quoteRows.tape[]` contains non-crypto Tape quote rows using `last`, `delta`, and `pct`.
 - `quoteRows.crypto[]` contains crypto Tape quote rows using the crypto refresh shape: `price`, `delta`, and `chg`. The dashboard maps these back onto `tape.rows[].last`, `delta`, and `pct`.
+- Treasury yield-curve series must include `curveDate`, current `curvePoints[]`, `comparisonCurves[]` entries labeled `1M ago` and `6M ago`, and a `curveSpread` object for the 2s10s display row.
+- Each `comparisonCurves[].points[]` array must match the current curve's maturity labels in order so the renderer can draw historical lines maturity-for-maturity.
 - Published production renders from embedded `dashboard-data`; `quoteRows` is staging/refresh data and must stay in sync with the embedded Tape rows.
 
 ## Futures Module Windows
@@ -121,7 +265,7 @@ Run `node scripts/local_quote_server.js` to start a read-only local helper at `h
 - `GET /health`
 - `GET /api/market-refresh`
 
-The static dashboard always keeps embedded data as the production fallback. When the local helper is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh` with `http://localhost:2210/api/market-refresh` as a loopback fallback, merges refreshed quote rows and recent chart bars, stores the successful local refresh in browser `localStorage` for up to 12 hours, and appends a small footer status after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the helper again. GitHub Pages continues to work normally when the helper is not running.
+The static dashboard always keeps embedded data as the production fallback. When the local helper is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh` with `http://localhost:2210/api/market-refresh` as a loopback fallback, merges refreshed quote rows and recent chart data, stores the successful local refresh in browser `localStorage` for up to 12 hours, and appends a small footer status after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the helper again. GitHub Pages continues to work normally when the helper is not running.
 
 Use `node scripts/local_quote_server.js --port 2211` to choose another local port for direct testing; the published dashboard only auto-checks port `2210`.
 
@@ -177,6 +321,8 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - Do not repeat promoted `futuresModule.stories[]` items in `stories[]`; use What’s Moving Today for additional market breadth.
    - Keep crypto-specific headlines, ETF-flow stories, proxy-equity stories, stablecoin stories, and token/regulation stories out of `stories[]`; those belong in `crypto.notes[]` unless the user explicitly asks to feature crypto in What’s Moving Today.
    - When more than one reputable article covers the same basic story, prefer a free-to-read or less paywalled link. This is a preference, not a hard rule; use the paywalled source when it is clearly the best, original, or most reliable source.
+   - Match each `stories[]` and `futuresModule.stories[]` headline/body to the linked article's main reported theme. Do not use a company-specific article to support a broader market, sector, or macro claim unless that broader frame is the article's clear primary thrust.
+   - If the best available article supports only a narrower company, earnings, product, or subtheme angle, narrow the card copy to that scope or choose a different link.
    - For any `url` that renders as `READ MORE`, prefer a reader-facing article or HTML page, not a raw API/feed/download endpoint.
    - Do not use machine-readable endpoints such as `query1.finance.yahoo.com`, `api.nasdaq.com`, JSON APIs, CSV downloads, or other raw data feeds as `READ MORE` links.
 
@@ -188,7 +334,7 @@ Use `node scripts/local_quote_server.js --port 2211` to choose another local por
    - `assetAllocationPortfolio`: embed instrument-level ETF rows with price, MTD dividend, daily return, and MTD return. Before reading the sanitized portfolio-level return export, refresh the Asset Allocation Dashboard export by calling `http://127.0.0.1:2200/api/asset-market-data`, then read `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. Treat `portfolioMtdReturnValue` as percentage points (`1.24` means `+1.24%`, `-0.35` means `-0.35%`). If the refresh call fails, fall back to the existing export file when present and embed `portfolioMtdReturnStale: true` with the export `asOf` date. Do not call `/api/asset-market-data` for display data; call it only to update the sanitized export. Keep any `upcomingCurrentMonthDividendEvents` or `futureMonthDividendEvents` as display-only lookahead; only current/past ex-date dividends belong in the MTD dividend total.
    - `stories`: exactly 9 fresh non-crypto stories across markets, corporate, macro, geopolitics, Fed, earnings, and other broad market themes.
    - `crypto`: crypto-only stat rows in `crypto.stats[]` for Crypto Market Cap, Altcoin Season Index, and Fear & Greed, plus 4 to 6 fresh crypto notes/stories. Crypto ticker quote rows and ticker-level commentary live in `tape.rows[]` with `group: "Crypto"`.
-   - `earnings`: reports from the past 48 hours and the next five calendar days.
+   - `earnings.week`: canonical Monday-Friday earnings monitor payload. Follow the Earnings Monitor Contract above: Finnhub primary, EarningsAPI secondary for Finnhub-missing display candidates, SEC/company release for official resolution, and Yahoo for market reaction.
    - `weekAhead`: update on Mondays and Fridays. For full U.S. cash-market holidays, use a plain closure label such as `U.S. Markets Closed` in `tickers`; do not list separate exchange closures or append 24/7 assets such as `BTC`. Use the event text to explain why the closure matters for the week, and reserve instrument tickers for rows with an actual scheduled catalyst or market to watch.
    - `footer`: today’s compile date and concise source-family attribution.
    - Remove legacy sections that are not rendered, such as `lede` and `renesas`.

@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
 const defaultChartData = path.resolve(root, 'scripts', 'generated', 'chart_data.json');
 const MIN_CHART_HISTORY_DAYS = 1826;
+const REQUIRED_YIELD_CURVE_COMPARISON_LABELS = ['1M ago', '6M ago'];
 
 function parseArgs(argv) {
   const args = {
@@ -77,6 +78,52 @@ function isIsoDate(value) {
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
+}
+
+function validateYieldCurvePointSet(errors, label, fieldName, points, referencePoints = null) {
+  if (points.length < 2) {
+    errors.push(`${label}.${fieldName} must contain a Treasury curve.`);
+  }
+  if (referencePoints && points.length !== referencePoints.length) {
+    errors.push(`${label}.${fieldName} must match the current Treasury curve maturity count.`);
+  }
+  for (const [pointIndex, pointRaw] of points.entries()) {
+    const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
+    const referencePoint = referencePoints?.[pointIndex];
+    if (typeof point.label !== 'string' || point.label.trim() === '') {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must be populated.`);
+    }
+    if (referencePoint && point.label !== referencePoint.label) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must match current curve maturity ${referencePoint.label}.`);
+    }
+    if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].years must be positive.`);
+    }
+    if (!isFiniteNumber(point.value)) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].value must be numeric.`);
+    }
+  }
+}
+
+function validateYieldCurveComparisons(errors, label, item, curvePoints) {
+  const comparisonCurves = Array.isArray(item.comparisonCurves) ? item.comparisonCurves : [];
+  if (!Array.isArray(item.comparisonCurves)) {
+    errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
+  }
+  // The renderer assumes these labels exist and that each comparison shares the current curve maturity order.
+  for (const expectedLabel of REQUIRED_YIELD_CURVE_COMPARISON_LABELS) {
+    const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expectedLabel);
+    if (comparisonIndex < 0) {
+      errors.push(`${label}.comparisonCurves must include ${expectedLabel}.`);
+      continue;
+    }
+    const comparison = comparisonCurves[comparisonIndex];
+    if (!isIsoDate(comparison.date)) {
+      errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
+    }
+    const points = Array.isArray(comparison.points) ? comparison.points : [];
+    validateYieldCurvePointSet(errors, label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
+  }
 }
 
 function isCoherentOhlc(bar) {
@@ -159,27 +206,14 @@ function main() {
     }
     if (item.sourceSymbol === 'TREASURY:CURVE') {
       const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
-      if (curvePoints.length < 2) {
-        errors.push(`${label}.curvePoints must contain the current Treasury curve.`);
-      }
+      validateYieldCurvePointSet(errors, label, 'curvePoints', curvePoints);
+      validateYieldCurveComparisons(errors, label, item, curvePoints);
       const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
       if (curveSpread.label !== '2s10s') {
         errors.push(`${label}.curveSpread.label must be 2s10s.`);
       }
       if (!isFiniteNumber(curveSpread.valueBp)) {
         errors.push(`${label}.curveSpread.valueBp must be numeric.`);
-      }
-      for (const [pointIndex, pointRaw] of curvePoints.entries()) {
-        const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
-        if (typeof point.label !== 'string' || point.label.trim() === '') {
-          errors.push(`${label}.curvePoints[${pointIndex}].label must be populated.`);
-        }
-        if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
-          errors.push(`${label}.curvePoints[${pointIndex}].years must be positive.`);
-        }
-        if (!isFiniteNumber(point.value)) {
-          errors.push(`${label}.curvePoints[${pointIndex}].value must be numeric.`);
-        }
       }
     }
     if (!Array.isArray(item.bars) || item.bars.length < 2) {

@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { validateEarningsWeekPayload } = require('./validate_earnings_week');
 
 const root = path.resolve(__dirname, '..');
 const inputFile = process.argv[2] || 'daily_financial_news.html';
@@ -15,6 +16,7 @@ const html = fs.readFileSync(file, 'utf8');
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const minChartHistoryDays = 1826;
+const requiredYieldCurveComparisonLabels = ['1M ago', '6M ago'];
 
 const errors = [];
 const warnings = [];
@@ -67,6 +69,73 @@ function allowedNewsDates(now) {
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
+}
+
+function isIsoDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function dateFromIso(value) {
+  return new Date(`${value}T00:00:00Z`);
+}
+
+function addDays(value, days) {
+  const date = dateFromIso(value);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function isMondayFridayRange(range) {
+  if (!range || !isIsoDate(range.from) || !isIsoDate(range.to)) return false;
+  return dateFromIso(range.from).getUTCDay() === 1
+    && dateFromIso(range.to).getUTCDay() === 5
+    && addDays(range.from, 4) === range.to;
+}
+
+function validateYieldCurvePointSet(label, fieldName, points, referencePoints = null) {
+  if (points.length < 2) {
+    errors.push(`${label}.${fieldName} must contain a Treasury curve for the inline chart.`);
+  }
+  if (referencePoints && points.length !== referencePoints.length) {
+    errors.push(`${label}.${fieldName} must match the current Treasury curve maturity count.`);
+  }
+  for (const [pointIndex, pointRaw] of points.entries()) {
+    const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
+    const referencePoint = referencePoints?.[pointIndex];
+    if (typeof point.label !== 'string' || point.label.trim() === '') {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must be populated.`);
+    }
+    if (referencePoint && point.label !== referencePoint.label) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must match current curve maturity ${referencePoint.label}.`);
+    }
+    if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].years must be positive.`);
+    }
+    if (!isFiniteNumber(point.value)) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].value must be numeric.`);
+    }
+  }
+}
+
+function validateYieldCurveComparisons(label, item, curvePoints) {
+  const comparisonCurves = Array.isArray(item.comparisonCurves) ? item.comparisonCurves : [];
+  if (!Array.isArray(item.comparisonCurves)) {
+    errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
+  }
+  // The renderer assumes these labels exist and that each comparison shares the current curve maturity order.
+  for (const expectedLabel of requiredYieldCurveComparisonLabels) {
+    const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expectedLabel);
+    if (comparisonIndex < 0) {
+      errors.push(`${label}.comparisonCurves must include ${expectedLabel}.`);
+      continue;
+    }
+    const comparison = comparisonCurves[comparisonIndex];
+    if (!isIsoDate(comparison.date)) {
+      errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
+    }
+    const points = Array.isArray(comparison.points) ? comparison.points : [];
+    validateYieldCurvePointSet(label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
+  }
 }
 
 function numericPercent(value) {
@@ -405,27 +474,14 @@ if (!dashboardMatch) {
           }
           if (item.sourceSymbol === 'TREASURY:CURVE') {
             const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
-            if (curvePoints.length < 2) {
-              errors.push(`${label}.curvePoints must contain the current Treasury curve for the inline chart.`);
-            }
+            validateYieldCurvePointSet(label, 'curvePoints', curvePoints);
+            validateYieldCurveComparisons(label, item, curvePoints);
             const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
             if (curveSpread.label !== '2s10s') {
               errors.push(`${label}.curveSpread.label must be 2s10s so the row does not duplicate the 10Y Treasury quote.`);
             }
             if (!isFiniteNumber(curveSpread.valueBp)) {
               errors.push(`${label}.curveSpread.valueBp must be numeric.`);
-            }
-            for (const [pointIndex, pointRaw] of curvePoints.entries()) {
-              const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
-              if (typeof point.label !== 'string' || point.label.trim() === '') {
-                errors.push(`${label}.curvePoints[${pointIndex}].label must be populated.`);
-              }
-              if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
-                errors.push(`${label}.curvePoints[${pointIndex}].years must be positive.`);
-              }
-              if (!isFiniteNumber(point.value)) {
-                errors.push(`${label}.curvePoints[${pointIndex}].value must be numeric.`);
-              }
             }
           }
         }
@@ -534,21 +590,23 @@ if (!dashboardMatch) {
       let firstSeriesPrice = null;
       let lastSeriesPrice = null;
       let lastSeriesTime = null;
-      if (!Array.isArray(future.series) || future.series.length < 2) {
-        errors.push(`futuresModule.futures[${index}].series must contain at least two chart points.`);
-        const priceAt = (point) => Number(Array.isArray(point) ? point[1] : point?.price ?? point?.value);
-        const timeAt = (point) => Number(Array.isArray(point) ? point[0] : point?.time);
+      const priceAt = (point) => Number(Array.isArray(point) ? point[1] : point?.price ?? point?.value);
+      const timeAt = (point) => Number(Array.isArray(point) ? point[0] : point?.time);
+      if (Array.isArray(future.series) && future.series.length) {
         firstSeriesPrice = priceAt(future.series[0]);
         lastSeriesPrice = priceAt(future.series[future.series.length - 1]);
         lastSeriesTime = timeAt(future.series[future.series.length - 1]);
-        if (isSessionFutures) {
-          // Session Futures should be a completed cash-session chart even when the afternoon update runs later.
-          for (const point of future.series) {
-            const minutes = chicagoClockMinutes(Array.isArray(point) ? point[0] : point?.time);
-            if (minutes === null || minutes < 8 * 60 + 30 || minutes > 15 * 60) {
-              errors.push(`futuresModule.futures[${index}].series contains a point outside the 8:30 AM-3:00 PM Central Session Futures window.`);
-              break;
-            }
+      }
+      if (!Array.isArray(future.series) || future.series.length < 2) {
+        errors.push(`futuresModule.futures[${index}].series must contain at least two chart points.`);
+      }
+      if (isSessionFutures && Array.isArray(future.series)) {
+        // Session Futures should be a completed cash-session chart even when the afternoon update runs later.
+        for (const point of future.series) {
+          const minutes = chicagoClockMinutes(Array.isArray(point) ? point[0] : point?.time);
+          if (minutes === null || minutes < 8 * 60 + 30 || minutes > 15 * 60) {
+            errors.push(`futuresModule.futures[${index}].series contains a point outside the 8:30 AM-3:00 PM Central Session Futures window.`);
+            break;
           }
         }
       }
@@ -837,15 +895,16 @@ if (!dashboardMatch) {
       requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
     }
 
-    const earningsTiles = Array.isArray(data.earnings?.tiles) ? data.earnings.tiles : [];
-    if (!earningsTiles.length) {
-      errors.push('earnings.tiles must contain at least one earnings item.');
-    }
-    for (const [index, tileRaw] of earningsTiles.entries()) {
-      const tile = tileRaw && typeof tileRaw === 'object' ? tileRaw : {};
-      requireString(tile.co, `earnings.tiles[${index}].co`);
-      requireString(tile.move, `earnings.tiles[${index}].move`);
-      requireString(tile.body, `earnings.tiles[${index}].body`);
+    const earningsWeek = data.earnings?.week;
+    if (earningsWeek && typeof earningsWeek === 'object' && !Array.isArray(earningsWeek)) {
+      for (const error of validateEarningsWeekPayload(earningsWeek, { requireNarrative: true })) {
+        errors.push(`earnings.week: ${error}`);
+      }
+      if (!isMondayFridayRange(earningsWeek.range)) {
+        errors.push('earnings.week.range must cover exactly Monday through Friday.');
+      }
+    } else {
+      errors.push('earnings.week is required.');
     }
 
     const weekRows = Array.isArray(data.weekAhead?.rows) ? data.weekAhead.rows : [];

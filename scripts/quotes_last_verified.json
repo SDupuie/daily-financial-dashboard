@@ -152,5 +152,16 @@
     "freshness": null,
     "source": "Yahoo Finance Chart API",
     "verifiedAt": "2026-07-02T18:47:40.551Z"
+  },
+  "FDS:stock": {
+    "symbol": "FDS",
+    "type": "stock",
+    "close": 245.55,
+    "pctChange": 6.723748738520345,
+    "pct": "+6.72%",
+    "tradeDate": "2026-07-01",
+    "freshness": null,
+    "source": "Yahoo Finance Chart API",
+    "verifiedAt": "2026-07-03T15:13:41.086Z"
   }
 }
