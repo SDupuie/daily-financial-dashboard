@@ -2,12 +2,25 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  cryptoQuoteRowFromSeries,
+  quoteRowFromSeries
+} = require('./fetch_chart_data');
 
 const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
-const defaultChartData = path.resolve(root, 'scripts', 'generated', 'chart_data.json');
+const defaultChartData = path.resolve(root, 'generated', 'chart_data.json');
 const MIN_CHART_HISTORY_DAYS = 1826;
-const REQUIRED_YIELD_CURVE_COMPARISON_LABELS = ['1M ago', '6M ago'];
+// Treasury skips weekends and holidays, so comparison dates are validated as broad windows rather than exact offsets.
+const REQUIRED_YIELD_CURVE_COMPARISONS = [
+  { label: '1M ago', minDays: 20, maxDays: 45 },
+  { label: '6M ago', minDays: 150, maxDays: 215 }
+];
+const RECOGNIZED_SERIES_SOURCES = new Set([
+  'Yahoo Finance Chart API',
+  'Yahoo Finance Chart API + Finnhub Quote API',
+  'Treasury.gov Daily Treasury Yield Curve Rate Data'
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -80,6 +93,23 @@ function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
 
+function isoDayGap(laterDate, earlierDate) {
+  if (!isIsoDate(laterDate) || !isIsoDate(earlierDate)) return null;
+  const later = Date.parse(`${laterDate}T00:00:00Z`);
+  const earlier = Date.parse(`${earlierDate}T00:00:00Z`);
+  if (!Number.isFinite(later) || !Number.isFinite(earlier)) return null;
+  return Math.round((later - earlier) / 86400000);
+}
+
+function yieldCurvePointsKey(points) {
+  // Duplicate comparison curves can render as one line even when their labels differ.
+  return JSON.stringify(points.map((point) => [
+    String(point?.label || ''),
+    Number(point?.years),
+    Number(point?.value)
+  ]));
+}
+
 function validateYieldCurvePointSet(errors, label, fieldName, points, referencePoints = null) {
   if (points.length < 2) {
     errors.push(`${label}.${fieldName} must contain a Treasury curve.`);
@@ -111,7 +141,10 @@ function validateYieldCurveComparisons(errors, label, item, curvePoints) {
     errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
   }
   // The renderer assumes these labels exist and that each comparison shares the current curve maturity order.
-  for (const expectedLabel of REQUIRED_YIELD_CURVE_COMPARISON_LABELS) {
+  const seenDates = new Map();
+  const seenPointSets = new Map();
+  for (const expected of REQUIRED_YIELD_CURVE_COMPARISONS) {
+    const expectedLabel = expected.label;
     const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expectedLabel);
     if (comparisonIndex < 0) {
       errors.push(`${label}.comparisonCurves must include ${expectedLabel}.`);
@@ -120,9 +153,23 @@ function validateYieldCurveComparisons(errors, label, item, curvePoints) {
     const comparison = comparisonCurves[comparisonIndex];
     if (!isIsoDate(comparison.date)) {
       errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
+    } else {
+      if (seenDates.has(comparison.date)) {
+        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be distinct from ${seenDates.get(comparison.date)}.`);
+      }
+      seenDates.set(comparison.date, expectedLabel);
+      const ageDays = isoDayGap(item.curveDate, comparison.date);
+      if (ageDays === null || ageDays < expected.minDays || ageDays > expected.maxDays) {
+        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be ${expectedLabel} relative to curveDate.`);
+      }
     }
     const points = Array.isArray(comparison.points) ? comparison.points : [];
     validateYieldCurvePointSet(errors, label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
+    const pointKey = yieldCurvePointsKey(points);
+    if (seenPointSets.has(pointKey)) {
+      errors.push(`${label}.comparisonCurves[${comparisonIndex}].points must be distinct from ${seenPointSets.get(pointKey)}.`);
+    }
+    seenPointSets.set(pointKey, expectedLabel);
   }
 }
 
@@ -134,6 +181,14 @@ function isCoherentOhlc(bar) {
   if (![open, high, low, close].every(Number.isFinite)) return false;
   if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
+}
+
+function isCloseOnlyPlaceholderBar(bar) {
+  return bar?.volume === undefined
+    && isFiniteNumber(bar?.open)
+    && Number(bar.open) === Number(bar.high)
+    && Number(bar.high) === Number(bar.low)
+    && Number(bar.low) === Number(bar.close);
 }
 
 function main() {
@@ -171,6 +226,18 @@ function main() {
   }
 
   const series = Array.isArray(chartData.series) ? chartData.series : [];
+  const expectedSourceFamilies = new Set(series.map((item) => item?.source).filter(Boolean));
+  const sourceFamilies = Array.isArray(chartData.sourceFamilies) ? chartData.sourceFamilies : [];
+  if (!Array.isArray(chartData.sourceFamilies)) {
+    errors.push('sourceFamilies must list the source strings used by series[].');
+  }
+  for (const source of expectedSourceFamilies) {
+    if (!sourceFamilies.includes(source)) errors.push(`sourceFamilies must include ${source}.`);
+  }
+  for (const source of sourceFamilies) {
+    if (!expectedSourceFamilies.has(source)) errors.push(`sourceFamilies contains unused source ${source}.`);
+  }
+
   const seriesByTicker = new Map();
   for (const [index, itemRaw] of series.entries()) {
     const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
@@ -192,7 +259,7 @@ function main() {
       errors.push(`${label}.section must be ${expectedSection}.`);
     }
 
-    if (!['Yahoo Finance Chart API', 'Treasury.gov Daily Treasury Yield Curve Rate Data'].includes(item.source)) {
+    if (!RECOGNIZED_SERIES_SOURCES.has(item.source)) {
       errors.push(`${label}.source is not recognized.`);
     }
     if (!['ohlc', 'close'].includes(item.dataKind)) {
@@ -251,6 +318,10 @@ function main() {
       if (item.noVolume && bar.volume !== undefined) {
         errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
       }
+      // Non-price-only OHLC series must not publish the latest row as a quote-only synthetic candle.
+      if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
+        errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
+      }
     }
   }
 
@@ -292,6 +363,15 @@ function main() {
     if (!isIsoDate(row.asOf)) {
       errors.push(`${label}.asOf must be an ISO date.`);
     }
+    const seriesItem = seriesByTicker.get(ticker);
+    const expected = seriesItem ? quoteRowFromSeries(seriesItem) : null;
+    if (expected) {
+      for (const field of ['last', 'delta', 'pct', 'dir', 'asOf']) {
+        if (String(row?.[field] ?? '') !== String(expected[field] ?? '')) {
+          errors.push(`${label}.${field} must match the latest generated series bar-derived value "${expected[field]}".`);
+        }
+      }
+    }
   }
 
   for (const [index, rowRaw] of cryptoQuoteRows.entries()) {
@@ -320,6 +400,15 @@ function main() {
     }
     if (!isIsoDate(row.asOf)) {
       errors.push(`${label}.asOf must be an ISO date.`);
+    }
+    const seriesItem = seriesByTicker.get(ticker);
+    const expected = seriesItem ? cryptoQuoteRowFromSeries(seriesItem) : null;
+    if (expected) {
+      for (const [field, expectedField] of [['price', 'price'], ['delta', 'delta'], ['chg', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']]) {
+        if (String(row?.[field] ?? '') !== String(expected[expectedField] ?? '')) {
+          errors.push(`${label}.${field} must match the latest generated crypto series bar-derived value "${expected[expectedField]}".`);
+        }
+      }
     }
   }
 

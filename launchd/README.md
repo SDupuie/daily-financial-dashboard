@@ -1,9 +1,10 @@
 # LaunchAgent Template
 
-This folder contains the tracked backup template for the optional local quote refresh helper. It documents the known launch configuration, but it does not indicate whether the agent is installed or currently active.
+This folder contains the tracked backup template for the optional local market refresh helper. It documents the known launch configuration, but it does not indicate whether the agent is installed or currently active.
 
-- `com.scott.daily-financial-dashboard.plist` runs `scripts/local_quote_server.js` with Node on port `2210`.
+- `com.scott.daily-financial-dashboard.plist` runs `scripts/local_market_server.js` with Node on port `2210`.
 - The server binds to `127.0.0.1` only and exposes `GET /health` plus `GET /api/market-refresh`.
+- `GET /api/market-refresh` now returns quote-row staging, chart series, and `cryptoStats` staging for the `crypto.stats[]` cards.
 - Logs are written to `~/Library/Logs/DailyFinancialDashboard/`.
 
 Install or refresh the LaunchAgent:

@@ -9,7 +9,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/usr/local/bin/node</string>
-      <string>/Users/Scott/Projects/Daily Financial Dashboard/scripts/local_quote_server.js</string>
+      <string>/Users/Scott/Projects/Daily Financial Dashboard/scripts/local_market_server.js</string>
       <string>--port</string>
       <string>2210</string>
     </array>

@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cue Button Treatment</title>
+  <style>
+    :root {
+      --paper: #f7f8fa;
+      --ink: #111317;
+      --muted: #626a75;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --panel-soft: #eef4f6;
+      --blue: #2457ff;
+      --blue-soft: #f3f6ff;
+      --blue-line: #b9c8ff;
+      --green: #18885b;
+      --red: #d64f45;
+      --shadow: 0 10px 28px rgba(16, 24, 40, 0.06);
+      --radius: 8px;
+      --label-size: 10px;
+      --label-weight: 900;
+      --label-spacing: 0.14em;
+      --gap-sm: 10px;
+      --gap-md: 14px;
+      --gap-lg: 18px;
+      --gap-xl: 22px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    button { font: inherit; }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 26px 22px 56px;
+    }
+
+    .topline {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: var(--gap-xl);
+      align-items: center;
+      border-top: 5px solid var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding: 16px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .topline .right { text-align: right; }
+
+    .brand {
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(34px, 6vw, 72px);
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 0.92;
+      text-align: center;
+      text-transform: none;
+    }
+
+    .brand span {
+      color: var(--blue);
+      font-style: italic;
+      font-weight: 500;
+    }
+
+    .opening-board {
+      padding: 24px 0 2px;
+    }
+
+    .opening-board h1 {
+      max-width: 860px;
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(25px, 3vw, 38px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1.1;
+    }
+
+    .opening-board p {
+      max-width: 760px;
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .mockup-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--gap-lg);
+      margin-top: 28px;
+    }
+
+    .mockup {
+      min-width: 0;
+    }
+
+    .mockup-tape {
+      grid-column: 1 / -1;
+    }
+
+    .mockup-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: var(--gap-md);
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+    }
+
+    .section-label,
+    .tape-group-label,
+    .tag {
+      color: var(--blue);
+      font-size: var(--label-size);
+      font-weight: var(--label-weight);
+      letter-spacing: var(--label-spacing);
+      text-transform: uppercase;
+    }
+
+    .section-title {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(24px, 3vw, 36px);
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .state-stack {
+      display: grid;
+      gap: var(--gap-md);
+    }
+
+    .state {
+      background: var(--panel);
+    }
+
+    .tape-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+      padding: 8px 10px;
+    }
+
+    .tape-selector {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .tape-selector-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 12px;
+    }
+
+    .tape-selector-button.is-active {
+      border-color: var(--line);
+      background: #eef1f6;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+    }
+
+    .tape-selector-count {
+      margin-left: 5px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .state-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--gap-md);
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+      padding: 10px 14px;
+    }
+
+    .cue-action,
+    .cue-status {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      justify-self: end;
+      min-height: 32px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 0 10px 0 8px;
+      white-space: nowrap;
+    }
+
+    .cue-action {
+      border: 1px solid var(--blue-line);
+      background: linear-gradient(#ffffff, var(--blue-soft));
+      color: var(--blue);
+      cursor: pointer;
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+    }
+
+    .cue-action:hover,
+    .cue-action:focus-visible {
+      border-color: var(--blue);
+      outline: none;
+    }
+
+    .cue-status {
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      color: var(--muted);
+    }
+
+    .cue-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      background: rgba(36, 87, 255, 0.1);
+      color: var(--blue);
+    }
+
+    .cue-status .cue-icon {
+      background: var(--panel);
+      color: var(--muted);
+    }
+
+    .cue-icon svg {
+      width: 14px;
+      height: 14px;
+      display: block;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .tape-row {
+      display: grid;
+      grid-template-columns: 155px minmax(0, 1fr) 130px;
+      gap: var(--gap-lg);
+      align-items: center;
+      width: 100%;
+      border: 0;
+      border-left: 3px solid var(--green);
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      padding: 12px 14px;
+      color: var(--ink);
+      text-align: left;
+    }
+
+    .tape-row.down { border-left-color: var(--red); }
+    .tape-row:last-child { border-bottom: 0; }
+
+    .entity-name {
+      display: block;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 16px;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: 1.1;
+    }
+
+    .entity-sub {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 10.5px;
+      font-weight: 650;
+      line-height: 1.25;
+    }
+
+    .tape-signal {
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .quote-readout {
+      display: grid;
+      gap: 5px;
+      justify-items: end;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .metric-primary {
+      color: var(--ink);
+      font-size: 16px;
+      font-weight: 900;
+      line-height: 1.1;
+    }
+
+    .metric-value {
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .up { color: var(--green); }
+    .down { color: var(--red); }
+
+    .earnings-calendar {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .earnings-day {
+      display: grid;
+      grid-template-rows: auto minmax(56px, 1fr) auto;
+      min-height: 136px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      padding: 0;
+      text-align: left;
+    }
+
+    .earnings-day:last-child { border-right: 0; }
+
+    .earnings-day.is-selected {
+      box-shadow: inset 0 0 0 2px var(--blue);
+    }
+
+    .earnings-day-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--gap-sm);
+      min-height: 48px;
+      border-bottom: 1px solid var(--line);
+      background: #eef1f6;
+      padding: 10px 12px;
+    }
+
+    .earnings-day.is-selected .earnings-day-head {
+      background: rgba(36, 87, 255, 0.08);
+    }
+
+    .earnings-date {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+      min-width: 0;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .earnings-weekday { font-size: 17px; }
+
+    .earnings-monthday {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 14px;
+    }
+
+    .earnings-count {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      line-height: 1.1;
+      text-align: right;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .earnings-chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-content: start;
+      gap: 6px;
+      padding: 12px;
+    }
+
+    .earnings-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      border: 1px solid rgba(15, 159, 143, 0.22);
+      border-radius: 999px;
+      background: rgba(15, 159, 143, 0.1);
+      color: #087464;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 10px;
+      font-weight: 900;
+      padding: 0 8px;
+    }
+
+    .earnings-footer {
+      min-height: 32px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfe;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+      line-height: 1.3;
+      padding: 8px 12px;
+    }
+
+    @media (max-width: 880px) {
+      .mockup-grid { grid-template-columns: 1fr; }
+      .tape-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas:
+          "instrument quote"
+          "signal signal";
+      }
+      .tape-row .instrument { grid-area: instrument; }
+      .tape-row .tape-signal { grid-area: signal; }
+      .tape-row .quote-readout { grid-area: quote; }
+      .tape-toolbar {
+        align-items: stretch;
+      }
+      .tape-selector {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+      }
+      .tape-selector-button {
+        width: 100%;
+      }
+      .earnings-calendar { grid-template-columns: 1fr; }
+      .earnings-day,
+      .earnings-day:last-child {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .earnings-day:last-child { border-bottom: 0; }
+    }
+
+    @media (max-width: 620px) {
+      .page { padding: 18px 14px 44px; }
+      .topline { grid-template-columns: 1fr; text-align: center; }
+      .topline .right { text-align: center; }
+      .mockup-head,
+      .state-header {
+        align-items: start;
+        grid-template-columns: 1fr;
+      }
+      .cue-action,
+      .cue-status {
+        justify-self: start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="topline">
+      <div>Vol. I · No. 182</div>
+      <div class="brand">The Daily <span>Tape</span></div>
+      <div class="right">Friday · July 3 · 2026</div>
+    </header>
+
+    <section class="opening-board">
+      <h1>Cue Button Treatment</h1>
+      <p>Preferred cue styling for the chart and earnings controls in their default and selected states.</p>
+    </section>
+
+    <div class="mockup-grid">
+      <section class="mockup mockup-tape">
+        <div class="mockup-head">
+          <div>
+            <div class="section-label">Market Record</div>
+            <h2 class="section-title">The Tape</h2>
+          </div>
+        </div>
+        <div class="state-stack">
+          <article class="surface state">
+            <div class="tape-toolbar">
+              <div class="tape-selector" role="tablist" aria-label="Tape sections">
+                <button class="tape-selector-button" type="button">Equities <span class="tape-selector-count">7</span></button>
+                <button class="tape-selector-button is-active" type="button">Sectors <span class="tape-selector-count">11</span></button>
+                <button class="tape-selector-button" type="button">Commodities <span class="tape-selector-count">5</span></button>
+                <button class="tape-selector-button" type="button">Rates &amp; Credit <span class="tape-selector-count">9</span></button>
+                <button class="tape-selector-button" type="button">Crypto <span class="tape-selector-count">7</span></button>
+              </div>
+              <button class="cue-action" type="button">
+                <span class="cue-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4 18h16"></path><path d="m7 15 4-4 3 3 5-7"></path><path d="M15 7h4v4"></path></svg>
+                </span>
+                <span>Show chart</span>
+              </button>
+            </div>
+            <div class="state-header">
+              <div class="tape-group-label">Sectors</div>
+            </div>
+            <button class="tape-row" type="button">
+              <span class="instrument"><strong class="entity-name">Consumer Staples</strong><span class="entity-sub">VDC</span></span>
+              <span class="tape-signal">Staples led as investors favored earnings durability and pricing discipline.</span>
+              <span class="quote-readout">
+                <span class="metric-primary">230.45</span>
+                <span class="metric-value up">+4.50 / +1.99%</span>
+              </span>
+            </button>
+            <button class="tape-row down" type="button">
+              <span class="instrument"><strong class="entity-name">Technology</strong><span class="entity-sub">VGT</span></span>
+              <span class="tape-signal">Technology stayed under pressure as investors demanded clearer proof from AI spending.</span>
+              <span class="quote-readout">
+                <span class="metric-primary">114.64</span>
+                <span class="metric-value down">-2.58 / -2.20%</span>
+              </span>
+            </button>
+          </article>
+
+          <article class="surface state">
+            <div class="tape-toolbar">
+              <div class="tape-selector" role="tablist" aria-label="Tape sections">
+                <button class="tape-selector-button" type="button">Equities <span class="tape-selector-count">7</span></button>
+                <button class="tape-selector-button is-active" type="button">Sectors <span class="tape-selector-count">11</span></button>
+                <button class="tape-selector-button" type="button">Commodities <span class="tape-selector-count">5</span></button>
+                <button class="tape-selector-button" type="button">Rates &amp; Credit <span class="tape-selector-count">9</span></button>
+                <button class="tape-selector-button" type="button">Crypto <span class="tape-selector-count">7</span></button>
+              </div>
+              <span class="cue-status" aria-live="polite">
+                <span class="cue-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M4 18h16"></path><path d="m7 15 4-4 3 3 5-7"></path><path d="M15 7h4v4"></path></svg>
+                </span>
+                <span>Chart: Technology</span>
+              </span>
+            </div>
+            <div class="state-header">
+              <div class="tape-group-label">Sectors</div>
+            </div>
+            <button class="tape-row down" type="button">
+              <span class="instrument"><strong class="entity-name">Technology</strong><span class="entity-sub">VGT</span></span>
+              <span class="tape-signal">Selected chart row keeps the status cue in the toolbar while the group label stays compact.</span>
+              <span class="quote-readout">
+                <span class="metric-primary">114.64</span>
+                <span class="metric-value down">-2.58 / -2.20%</span>
+              </span>
+            </button>
+          </article>
+        </div>
+      </section>
+
+      <section class="mockup">
+        <div class="mockup-head">
+          <div>
+            <div class="section-label">Single Stocks</div>
+            <h2 class="section-title">Earnings</h2>
+          </div>
+          <button class="cue-action" type="button">
+            <span class="cue-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h3"></path><path d="M13 14h3"></path><path d="M8 18h3"></path></svg>
+            </span>
+            <span>Choose a day</span>
+          </button>
+        </div>
+        <div class="state-stack">
+          <article class="surface state">
+            <div class="earnings-calendar">
+              <button class="earnings-day" type="button">
+                <span class="earnings-day-head">
+                  <span class="earnings-date"><span class="earnings-weekday">Mon</span><span class="earnings-monthday">Jun 29</span></span>
+                  <span class="earnings-count">2 companies</span>
+                </span>
+                <span class="earnings-chips"><span class="earnings-chip">AVAV</span><span class="earnings-chip">CNXC</span></span>
+                <span class="earnings-footer">2 after close</span>
+              </button>
+              <button class="earnings-day is-selected" type="button">
+                <span class="earnings-day-head">
+                  <span class="earnings-date"><span class="earnings-weekday">Wed</span><span class="earnings-monthday">Jul 1</span></span>
+                  <span class="earnings-count">6 companies</span>
+                </span>
+                <span class="earnings-chips"><span class="earnings-chip">GIS</span><span class="earnings-chip">FDS</span><span class="earnings-chip">MSM</span><span class="earnings-chip">UNF</span></span>
+                <span class="earnings-footer">4 before open; 2 after close</span>
+              </button>
+              <button class="earnings-day" type="button">
+                <span class="earnings-day-head">
+                  <span class="earnings-date"><span class="earnings-weekday">Thu</span><span class="earnings-monthday">Jul 2</span></span>
+                  <span class="earnings-count">1 company</span>
+                </span>
+                <span class="earnings-chips"><span class="earnings-chip">LNN</span></span>
+                <span class="earnings-footer">1 before open</span>
+              </button>
+            </div>
+          </article>
+
+          <article class="surface state">
+            <div class="state-header">
+              <div>
+                <div class="tag">6 companies</div>
+                <strong class="entity-name">Wednesday, Jul 1</strong>
+              </div>
+              <span class="cue-status" aria-live="polite">
+                <span class="cue-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M3 10h18"></path><path d="M8 14h3"></path><path d="M13 14h3"></path><path d="M8 18h3"></path></svg>
+                </span>
+                <span>Showing Wed Jul 1</span>
+              </span>
+            </div>
+            <button class="tape-row" type="button">
+              <span class="instrument"><strong class="entity-name">General Mills Inc</strong><span class="entity-sub">GIS · Before open</span></span>
+              <span class="tape-signal">Profit outlook carried the read.</span>
+              <span class="quote-readout">
+                <span class="metric-primary up">+8.5%</span>
+                <span class="metric-value">Guide drove rally</span>
+              </span>
+            </button>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

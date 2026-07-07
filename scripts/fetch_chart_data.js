@@ -6,15 +6,17 @@ const https = require('https');
 
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
-const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'scripts', 'generated', 'chart_data.json');
+const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'chart_data.json');
 const DEFAULT_DAYS = 1826;
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
+const FINNHUB_HOST = 'finnhub.io';
 const TREASURY_FIELDS = new Map([
   ['TREASURY:CURVE', 'BC_10YEAR'],
   ['TREASURY:3M', 'BC_3MONTH'],
   ['TREASURY:10Y', 'BC_10YEAR'],
   ['TREASURY:30Y', 'BC_30YEAR']
 ]);
+let envLoaded = false;
 const TREASURY_CURVE_POINTS = [
   { label: '1M', field: 'BC_1MONTH', years: 1 / 12 },
   { label: '1.5M', field: 'BC_1_5MONTH', years: 1.5 / 12 },
@@ -87,13 +89,29 @@ function printHelp() {
 
 Options:
   --input PATH        Dashboard HTML to read (default: daily_financial_news.html)
-  --output PATH       Unified chart JSON output path (default: scripts/generated/chart_data.json)
+  --output PATH       Unified chart JSON output path (default: generated/chart_data.json)
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
   --delay-ms 250      Delay between source requests
   --compact           Print one-line series summary
   --help              Show this help
 `);
+}
+
+function loadEnv(file = path.resolve(process.cwd(), '.env')) {
+  if (envLoaded) return;
+  envLoaded = true;
+  if (!fs.existsSync(file)) return;
+  const text = fs.readFileSync(file, 'utf8');
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const index = trimmed.indexOf('=');
+    if (index < 0) continue;
+    const key = trimmed.slice(0, index).trim();
+    const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, '');
+    if (key && !process.env[key]) process.env[key] = value;
+  }
 }
 
 function readDashboardData(input) {
@@ -227,6 +245,14 @@ function yahooChartUrl(host, symbol, startDate, endDate) {
   return `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?${params.toString()}`;
 }
 
+function finnhubQuoteUrl(symbol, token) {
+  const params = new URLSearchParams({
+    symbol,
+    token
+  });
+  return `https://${FINNHUB_HOST}/api/v1/quote?${params.toString()}`;
+}
+
 function treasuryXmlUrl(monthKey) {
   const params = new URLSearchParams({
     data: 'daily_treasury_yield_curve',
@@ -261,6 +287,96 @@ function isUsableOhlc(open, high, low, close) {
   if ([open, high, low, close].some((value) => value === null)) return false;
   if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
+}
+
+function supportsFinnhubQuote(row) {
+  // Finnhub quote fallback is only for plain U.S. symbols; pseudo-sources, futures, Treasury, and crypto stay on their native fetch paths.
+  return row?.section !== 'crypto' && /^[A-Z][A-Z0-9.]*$/.test(String(row?.sourceSymbol || ''));
+}
+
+function finnhubQuoteToken() {
+  loadEnv();
+  return String(process.env.FINNHUB_API_KEY || '').trim();
+}
+
+function finnhubQuoteBarFromPayload(payload) {
+  const open = asFiniteNumber(payload?.o);
+  const high = asFiniteNumber(payload?.h);
+  const low = asFiniteNumber(payload?.l);
+  const close = asFiniteNumber(payload?.c);
+  const timestamp = asFiniteNumber(payload?.t);
+  if (!timestamp || !isUsableOhlc(open, high, low, close)) return null;
+  return {
+    time: isoDateFromEpochSeconds(timestamp),
+    open,
+    high,
+    low,
+    close,
+    latestQuoteSource: 'Finnhub Quote API'
+  };
+}
+
+async function fetchFinnhubQuoteBar(row, args) {
+  const token = finnhubQuoteToken();
+  if (!token || !supportsFinnhubQuote(row)) return null;
+  try {
+    const payload = await fetchJson(finnhubQuoteUrl(row.sourceSymbol, token), args, {
+      'Accept': 'application/json'
+    });
+    return finnhubQuoteBarFromPayload(payload);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function mergeFinnhubQuoteBar(series, quoteBar, volumeByDate = null) {
+  if (!quoteBar || !Array.isArray(series?.bars) || series.priceOnly || series.dataKind !== 'ohlc') return series;
+  const bars = [...series.bars];
+  const lastIndex = bars.length - 1;
+  const latest = bars[lastIndex];
+  if (!latest || quoteBar.time < latest.time) return series;
+
+  // Finnhub quote repairs OHLC only; keep Yahoo's same-date volume when Yahoo supplied it in the raw payload.
+  const yahooVolume = volumeByDate?.get?.(quoteBar.time);
+  const existingVolume = quoteBar.time === latest.time ? latest.volume : yahooVolume;
+  const mergedQuoteBar = existingVolume === undefined ? quoteBar : { ...quoteBar, volume: existingVolume };
+  if (quoteBar.time === latest.time) {
+    bars[lastIndex] = mergedQuoteBar;
+  } else {
+    bars.push(mergedQuoteBar);
+  }
+
+  return {
+    ...series,
+    source: series.source === 'Yahoo Finance Chart API'
+      ? 'Yahoo Finance Chart API + Finnhub Quote API'
+      : series.source,
+    latestQuoteSource: 'Finnhub Quote API',
+    bars: uniqueBars(bars)
+  };
+}
+
+function yahooLatestCloseDate(payload) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const closes = Array.isArray(result?.indicators?.quote?.[0]?.close)
+    ? result.indicators.quote[0].close
+    : [];
+  for (let index = timestamps.length - 1; index >= 0; index -= 1) {
+    if (Number.isFinite(Number(timestamps[index])) && asFiniteNumber(closes[index]) !== null) {
+      return isoDateFromEpochSeconds(timestamps[index]);
+    }
+  }
+  return '';
+}
+
+function shouldUseFinnhubQuoteFallback(series, yahooPayload) {
+  if (!Array.isArray(series?.bars) || series.priceOnly || series.dataKind !== 'ohlc') return false;
+  const seriesLatestDate = String(series.bars.at(-1)?.time || '');
+  const yahooLatestDate = yahooLatestCloseDate(yahooPayload);
+  // Call Finnhub only when Yahoo exposed a newer close than the usable OHLC bars we could build.
+  // This catches malformed latest Yahoo candles without making Finnhub a second quote authority.
+  return Boolean(seriesLatestDate && yahooLatestDate && yahooLatestDate > seriesLatestDate);
 }
 
 function numberFormat(value, maximumFractionDigits = 2) {
@@ -397,18 +513,51 @@ function cryptoQuoteRowFromSeries(item) {
   };
 }
 
+function deriveQuoteRowsFromSeries(series) {
+  // Keep every downstream price view reproducible from the canonical series payload rather than
+  // letting quoteRows drift into a separately maintained market-data store.
+  const tape = [];
+  const crypto = [];
+  for (const item of Array.isArray(series) ? series : []) {
+    if (item?.section === 'crypto') {
+      crypto.push(cryptoQuoteRowFromSeries(item));
+      continue;
+    }
+    tape.push(quoteRowFromSeries(item));
+  }
+  return { tape, crypto };
+}
+
 async function fetchYahooSeries(row, args, startDate, endDate) {
   const errors = [];
   // Yahoo occasionally fails one chart host while the other is healthy, so keep both as equivalent fallbacks.
   for (const host of YAHOO_HOSTS) {
     try {
       const payload = await fetchJson(yahooChartUrl(host, row.sourceSymbol, startDate, endDate), args);
-      return parseYahooSeries(row, payload, host);
+      const series = parseYahooSeries(row, payload, host);
+      const quoteBar = shouldUseFinnhubQuoteFallback(series, payload)
+        ? await fetchFinnhubQuoteBar(row, args)
+        : null;
+      return mergeFinnhubQuoteBar(series, quoteBar, yahooVolumeByDate(payload));
     } catch (error) {
       errors.push(`${host}: ${error.message}`);
     }
   }
   throw new Error(errors.join(' | '));
+}
+
+function yahooVolumeByDate(payload) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const volumes = Array.isArray(result?.indicators?.quote?.[0]?.volume)
+    ? result.indicators.quote[0].volume
+    : [];
+  return new Map(timestamps.map((timestamp, index) => {
+    const volume = asFiniteNumber(volumes[index]);
+    return Number.isFinite(timestamp) && volume !== null
+      ? [isoDateFromEpochSeconds(timestamp), volume]
+      : null;
+  }).filter(Boolean));
 }
 
 function parseYahooSeries(row, payload, host) {
@@ -627,8 +776,7 @@ async function main() {
     if (args.delayMs) await sleep(args.delayMs);
   }
 
-  const tapeSeries = series.filter((item) => item.section !== 'crypto');
-  const cryptoSeries = series.filter((item) => item.section === 'crypto');
+  const quoteRows = deriveQuoteRowsFromSeries(series);
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -640,10 +788,7 @@ async function main() {
     },
     sourceFamilies: Array.from(new Set(series.map((item) => item.source).filter(Boolean))),
     // quoteRows are staging output for daily updates; the published dashboard still renders quotes from dashboard-data.
-    quoteRows: {
-      tape: tapeSeries.map(quoteRowFromSeries),
-      crypto: cryptoSeries.map(cryptoQuoteRowFromSeries)
-    },
+    quoteRows,
     series
   };
 
@@ -658,17 +803,21 @@ async function main() {
   }
 }
 
-// The optional local quote server imports these helpers to avoid maintaining a second ticker/source routing map.
+// The optional local market server imports these helpers to avoid maintaining a second ticker/source routing map.
 module.exports = {
   DEFAULT_DAYS,
   REQUEST_TIMEOUT_MS,
+  deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,
   fetchSeries,
+  finnhubQuoteBarFromPayload,
   isoDateFromDate,
+  mergeFinnhubQuoteBar,
   quoteRowFromSeries,
   readChartableRows,
   readCryptoRows,
   readTapeRows,
+  shouldUseFinnhubQuoteFallback,
   sleep
 };
 

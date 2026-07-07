@@ -5,6 +5,7 @@
 Use the top-level files and directories according to their intended ownership:
 
 - `daily_financial_news.html`: Canonical generated dashboard artifact and embedded dashboard data used by the current static dashboard.
+- `generated/`: Ignored local staging/cache artifacts produced by fetchers and consumed by update or validation scripts; not source code and not a published runtime dependency.
 - `index.html`: Root entry point for the published dashboard.
 - `launchd/`: Optional local-machine LaunchAgent templates for running dashboard helper scripts; not used by GitHub Pages at runtime.
 - `mockups/`: Visual or interaction mockups created for design exploration. Production must not depend on mockup files or sidecar JSON at runtime.
@@ -124,6 +125,16 @@ When reporting a broad audit, include an `Audit Coverage` section listing:
 - Files sampled only
 - Areas that could not be fully verified
 - Confidence level: High / Medium / Low
+
+## Audit Output Format
+
+For every actionable audit finding, include:
+
+- `Preferred fix`: the concrete code, data, validation, or documentation change recommended.
+- `Why this fix`: why this is the smallest canonical solution and what drift, regression, or user-visible risk it removes.
+- `Verification`: the specific test, validation command, browser check, or focused sweep that should prove the fix.
+
+Keep findings ordered by severity with file/line references first. Keep remediation concise, but do not omit the preferred solution for actionable items.
 
 ## Changed Contract Matrix
 

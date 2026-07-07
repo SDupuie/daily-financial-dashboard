@@ -3,6 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { validateEarningsWeekPayload } = require('./validate_earnings_week');
+const {
+  cryptoQuoteRowFromSeries,
+  quoteRowFromSeries
+} = require('./fetch_chart_data');
 
 const root = path.resolve(__dirname, '..');
 const inputFile = process.argv[2] || 'daily_financial_news.html';
@@ -17,9 +21,16 @@ const dashboardMatch = html.match(/<script type="application\/json" id="dashboar
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const minChartHistoryDays = 1826;
 const requiredYieldCurveComparisonLabels = ['1M ago', '6M ago'];
+const recognizedChartSources = new Set([
+  'Yahoo Finance Chart API',
+  'Yahoo Finance Chart API + Finnhub Quote API',
+  'Treasury.gov Daily Treasury Yield Curve Rate Data'
+]);
 
 const errors = [];
 const warnings = [];
+const MONDAY_MORNING_NEWS_START_MINUTES = 6 * 60 + 45;
+const MONDAY_MORNING_NEWS_END_MINUTES = 7 * 60 + 30;
 
 function escRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -43,6 +54,27 @@ function chicagoIsoDate(date) {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+function chicagoDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  return {
+    weekday: part('weekday'),
+    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
+    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
+  };
+}
+
 function chicagoClockMinutes(epochSeconds) {
   const seconds = Number(epochSeconds);
   if (!Number.isFinite(seconds)) return null;
@@ -60,10 +92,21 @@ function chicagoClockMinutes(epochSeconds) {
 }
 
 function allowedNewsDates(now) {
-  return new Set([
-    chicagoIsoDate(now),
+  const current = chicagoDateParts(now);
+  const allowed = new Set([
+    current.isoDate,
     chicagoIsoDate(new Date(now.getTime() - 24 * 60 * 60 * 1000))
   ]);
+  // Calendar-date freshness stays on explicit local dates; the Saturday exception is limited to the scheduled Monday morning dashboard window.
+  if (
+    current.weekday === 'Mon' &&
+    current.clockMinutes !== null &&
+    current.clockMinutes >= MONDAY_MORNING_NEWS_START_MINUTES &&
+    current.clockMinutes <= MONDAY_MORNING_NEWS_END_MINUTES
+  ) {
+    allowed.add(chicagoIsoDate(new Date(now.getTime() - 48 * 60 * 60 * 1000)));
+  }
+  return allowed;
 }
 
 function isFiniteNumber(value) {
@@ -73,6 +116,55 @@ function isFiniteNumber(value) {
 
 function isIsoDate(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function isIsoDateTime(value) {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function normalizeStoryTitle(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function canonicalStoryUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$)/i.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
+    url.searchParams.sort();
+    url.hostname = url.hostname.toLowerCase();
+    if (url.pathname !== '/') {
+      url.pathname = url.pathname.replace(/\/+$/, '');
+    }
+    return url.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function storyIdentity(story) {
+  const url = canonicalStoryUrl(story?.url);
+  if (url) return `url:${url}`;
+  const title = normalizeStoryTitle(story?.title);
+  return title ? `title:${title}` : '';
+}
+
+function dashboardNewsItems(data) {
+  return [
+    ...(Array.isArray(data?.stories) ? data.stories : []),
+    ...(Array.isArray(data?.crypto?.notes) ? data.crypto.notes : [])
+  ];
 }
 
 function dateFromIso(value) {
@@ -157,6 +249,37 @@ function isCoherentOhlc(bar) {
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
 }
 
+function isCloseOnlyPlaceholderBar(bar) {
+  return bar?.volume === undefined
+    && isFiniteNumber(bar?.open)
+    && Number(bar.open) === Number(bar.high)
+    && Number(bar.high) === Number(bar.low)
+    && Number(bar.low) === Number(bar.close);
+}
+
+function countMatches(pattern) {
+  return [...html.matchAll(pattern)].length;
+}
+
+function requireOrderedMarkerSequence(markers, bounds = {}) {
+  const { minIndex = -1, maxIndex = Number.POSITIVE_INFINITY } = bounds;
+  let previousIndex = minIndex;
+  for (const marker of markers) {
+    const index = html.indexOf(marker);
+    if (index < 0) {
+      errors.push(`Missing required dashboard shell marker: ${marker}`);
+      continue;
+    }
+    if (index <= previousIndex) {
+      errors.push(`Dashboard shell marker is out of order: ${marker}`);
+    }
+    if (index >= maxIndex) {
+      errors.push(`Dashboard shell marker appears in the runtime script region: ${marker}`);
+    }
+    previousIndex = index;
+  }
+}
+
 // Static guard: the optional live-refresh path must never point the published dashboard at a remote service.
 const localRefreshUrls = [...html.matchAll(/https?:\/\/[^'"`\s]+\/api\/market-refresh/g)].map((match) => match[0]);
 const allowedLocalRefreshUrls = new Set([
@@ -171,6 +294,55 @@ for (const url of localRefreshUrls) {
     errors.push(`Unexpected local refresh URL: ${url}`);
   }
 }
+
+const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);
+const chartDataScriptCount = countMatches(/<script type="application\/json" id="chart-data">[\s\S]*?<\/script>/g);
+if (dashboardDataScriptCount !== 1) {
+  errors.push(`Expected exactly 1 dashboard-data JSON block; found ${dashboardDataScriptCount}.`);
+}
+if (chartDataScriptCount !== 1) {
+  errors.push(`Expected exactly 1 chart-data JSON block; found ${chartDataScriptCount}.`);
+}
+
+const dataStartIndex = html.indexOf('<!-- ============ DATA START');
+const dataEndIndex = html.indexOf('<!-- ============ DATA END ============ -->');
+const chartDataIndex = html.indexOf('<script type="application/json" id="chart-data">');
+const runtimeScriptIndex = html.indexOf('(function () {');
+
+if (dataStartIndex < 0) {
+  errors.push('Could not find the DATA START marker.');
+}
+if (dataEndIndex < 0) {
+  errors.push('Could not find the DATA END marker.');
+}
+if (chartDataIndex < 0) {
+  errors.push('Could not find the chart-data shell position.');
+}
+if (runtimeScriptIndex < 0) {
+  errors.push('Could not find the dashboard runtime bootstrap script.');
+}
+if (dataStartIndex >= 0 && dataEndIndex >= 0 && dataStartIndex >= dataEndIndex) {
+  errors.push('DATA START must appear before DATA END.');
+}
+if (dataEndIndex >= 0 && chartDataIndex >= 0 && chartDataIndex <= dataEndIndex) {
+  errors.push('chart-data must appear after the DATA END marker.');
+}
+if (chartDataIndex >= 0 && runtimeScriptIndex >= 0 && chartDataIndex >= runtimeScriptIndex) {
+  errors.push('chart-data must appear before the dashboard runtime bootstrap script.');
+}
+
+requireOrderedMarkerSequence([
+  '<div class="page" id="app">',
+  '<div id="mast-vol">',
+  '<div class="right" id="mast-date">',
+  '<h1 id="hero-headline">',
+  '<div id="hero-copy"></div>',
+  '<main id="content"></main>',
+  '<footer id="footer"></footer>'
+], {
+  minIndex: chartDataIndex,
+  maxIndex: runtimeScriptIndex >= 0 ? runtimeScriptIndex : Number.POSITIVE_INFINITY
+});
 
 if (!dashboardMatch) {
   errors.push('Could not find dashboard-data JSON block.');
@@ -250,7 +422,7 @@ if (!dashboardMatch) {
       requireIsoDate(item.publishedOn, `${label}.publishedOn`);
       const publishedOn = String(item.publishedOn ?? '').trim();
       if (publishedOn && !allowedStoryDates.has(publishedOn)) {
-        errors.push(`${label}.publishedOn must be today or yesterday in America/Chicago unless referencePage is true.`);
+        errors.push(`${label}.publishedOn must follow the local calendar-date freshness rule in America/Chicago (today/yesterday, plus Saturday during the scheduled Monday morning dashboard window) unless referencePage is true.`);
       }
     };
     const validateDividendEvents = (events, label, { optional = false } = {}) => {
@@ -291,6 +463,9 @@ if (!dashboardMatch) {
     const allowedStoryDates = allowedNewsDates(now);
     const mastheadDate = String(data.masthead?.date ?? '');
     const footerCompiled = String(data.footer?.compiled ?? '');
+    if (!isIsoDateTime(data.editionId)) {
+      errors.push('dashboard-data.editionId must be a populated ISO timestamp.');
+    }
     const dateMsg = `Masthead/footer may be stale: expected ${expectedDay}, ${expectedMonth} ${expectedDate}, ${expectedYear}.`;
 
     const mastheadLooksFresh = new RegExp(
@@ -423,6 +598,17 @@ if (!dashboardMatch) {
           errors.push(`chart-data.range.days must be at least ${minChartHistoryDays} so the 5Y chart shortcut has enough embedded history.`);
         }
         const chartSeries = Array.isArray(chartData.series) ? chartData.series : [];
+        const expectedSourceFamilies = new Set(chartSeries.map((item) => item?.source).filter(Boolean));
+        const sourceFamilies = Array.isArray(chartData.sourceFamilies) ? chartData.sourceFamilies : [];
+        if (!Array.isArray(chartData.sourceFamilies)) {
+          errors.push('chart-data.sourceFamilies must list the source strings used by chart-data.series.');
+        }
+        for (const source of expectedSourceFamilies) {
+          if (!sourceFamilies.includes(source)) errors.push(`chart-data.sourceFamilies must include ${source}.`);
+        }
+        for (const source of sourceFamilies) {
+          if (!expectedSourceFamilies.has(source)) errors.push(`chart-data.sourceFamilies contains unused source ${source}.`);
+        }
         const chartSeriesByTicker = new Map();
         for (const [index, itemRaw] of chartSeries.entries()) {
           const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
@@ -437,6 +623,9 @@ if (!dashboardMatch) {
             errors.push(`${label} is not a required chart ticker.`);
           } else if (item.sourceSymbol !== expectedSource) {
             errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
+          }
+          if (!recognizedChartSources.has(item.source)) {
+            errors.push(`${label}.source is not recognized.`);
           }
           if (!Array.isArray(item.bars) || item.bars.length < 2) {
             errors.push(`${label}.bars must contain at least two daily bars for the inline chart.`);
@@ -470,6 +659,10 @@ if (!dashboardMatch) {
               if (item.noVolume && bar.volume !== undefined) {
                 errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
               }
+              // Guard the embedded artifact against quote-only latest bars masquerading as OHLC candles.
+              if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
+                errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
+              }
             }
           }
           if (item.sourceSymbol === 'TREASURY:CURVE') {
@@ -501,6 +694,31 @@ if (!dashboardMatch) {
         const chartCryptoQuoteRows = Array.isArray(chartData.quoteRows?.crypto) ? chartData.quoteRows.crypto : [];
         const chartTapeQuoteByTicker = new Map(chartTapeQuoteRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
         const chartCryptoQuoteByTicker = new Map(chartCryptoQuoteRows.map((row) => [String(row?.ticker || row?.sym || '').toUpperCase(), row]));
+        for (const [ticker, item] of chartSeriesByTicker.entries()) {
+          if (item?.section === 'crypto') {
+            const chartRow = chartCryptoQuoteByTicker.get(ticker);
+            const expected = cryptoQuoteRowFromSeries(item);
+            if (!chartRow || !expected) continue;
+            for (const [chartField, expectedField] of [['price', 'price'], ['delta', 'delta'], ['chg', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']]) {
+              const actual = String(chartRow?.[chartField] ?? '');
+              const derived = String(expected?.[expectedField] ?? '');
+              if (actual !== derived) {
+                errors.push(`Embedded chart-data quoteRows.crypto ${ticker}.${chartField} must match the latest embedded series bar-derived value "${derived}".`);
+              }
+            }
+            continue;
+          }
+          const chartRow = chartTapeQuoteByTicker.get(ticker);
+          const expected = quoteRowFromSeries(item);
+          if (!chartRow || !expected) continue;
+          for (const field of ['last', 'delta', 'pct', 'dir', 'asOf']) {
+            const actual = String(chartRow?.[field] ?? '');
+            const derived = String(expected?.[field] ?? '');
+            if (actual !== derived) {
+              errors.push(`Embedded chart-data quoteRows.tape ${ticker}.${field} must match the latest embedded series bar-derived value "${derived}".`);
+            }
+          }
+        }
         const requireMatchingQuoteFields = ({ dashboardRow, chartRow, fields, label }) => {
           if (!chartRow) {
             errors.push(`Embedded chart-data quoteRows is missing ${label}.`);
@@ -863,6 +1081,53 @@ if (!dashboardMatch) {
     if (stories.length !== 9) {
       errors.push('stories must contain exactly 9 fresh market/news items.');
     }
+    const trackedNewsItems = dashboardNewsItems(data);
+    const storyIds = trackedNewsItems.map(storyIdentity).filter(Boolean);
+    if (storyIds.length !== trackedNewsItems.length) {
+      errors.push('Each stories[] and crypto.notes[] item must have a usable URL or title for scheduled New-pill tracking.');
+    }
+    if (new Set(storyIds).size !== storyIds.length) {
+      errors.push('stories[] and crypto.notes[] items must have unique scheduled New-pill identities.');
+    }
+    const newsBaseline = data.newsBaseline && typeof data.newsBaseline === 'object' && !Array.isArray(data.newsBaseline)
+      ? data.newsBaseline
+      : null;
+    if (!newsBaseline) {
+      errors.push('newsBaseline must be embedded so scheduled New-pill tracking survives manual updates and fresh checkouts.');
+    } else {
+      if (newsBaseline.lastScheduledUpdateAt !== null && !isIsoDateTime(newsBaseline.lastScheduledUpdateAt)) {
+        errors.push('newsBaseline.lastScheduledUpdateAt must be null or an ISO timestamp.');
+      }
+      for (const key of ['previousScheduledStoryIds', 'currentScheduledStoryIds']) {
+        if (!Array.isArray(newsBaseline[key])) {
+          errors.push(`newsBaseline.${key} must be an array.`);
+          continue;
+        }
+        const seenIds = new Set();
+        for (const [index, id] of newsBaseline[key].entries()) {
+          if (typeof id !== 'string' || id.trim() === '') {
+            errors.push(`newsBaseline.${key}[${index}] must be a non-empty string.`);
+            continue;
+          }
+          if (seenIds.has(id)) {
+            errors.push(`newsBaseline.${key} contains duplicate story id "${id}".`);
+          }
+          seenIds.add(id);
+        }
+      }
+    }
+    const previousScheduledStoryIds = new Set(Array.isArray(newsBaseline?.previousScheduledStoryIds) ? newsBaseline.previousScheduledStoryIds : []);
+    const currentScheduledStoryIds = new Set(Array.isArray(newsBaseline?.currentScheduledStoryIds) ? newsBaseline.currentScheduledStoryIds : []);
+    const comparisonStoryIds = previousScheduledStoryIds.size ? previousScheduledStoryIds : currentScheduledStoryIds;
+    const validateNewPillState = (item, label) => {
+      if (item.isNewSinceScheduledUpdate !== undefined && typeof item.isNewSinceScheduledUpdate !== 'boolean') {
+        errors.push(`${label}.isNewSinceScheduledUpdate must be boolean when present.`);
+      }
+      const expectedNew = comparisonStoryIds.size > 0 && !comparisonStoryIds.has(storyIdentity(item));
+      if (Boolean(item.isNewSinceScheduledUpdate) !== expectedNew) {
+        errors.push(`${label} has stale isNewSinceScheduledUpdate state for the embedded scheduled baseline.`);
+      }
+    };
     const futuresModuleUrls = new Set(futuresModuleStories.map((story) => String(story?.url ?? '').trim()).filter(Boolean));
     const futuresModuleTitles = new Set(futuresModuleStories.map((story) => String(story?.title ?? '').trim().toLowerCase()).filter(Boolean));
     for (const storyRaw of stories) {
@@ -877,6 +1142,7 @@ if (!dashboardMatch) {
       if (storyTag === 'crypto' || storyTone === 'crypto') {
         errors.push(`Story "${story.title ?? '(untitled)'}" should live in crypto.notes, not stories[].`);
       }
+      validateNewPillState(story, `Story "${story.title ?? '(untitled)'}"`);
       const storyUrl = String(story.url ?? '').trim();
       const storyTitle = String(story.title ?? '').trim().toLowerCase();
       if (storyUrl && futuresModuleUrls.has(storyUrl)) {
@@ -893,6 +1159,7 @@ if (!dashboardMatch) {
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
       requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
+      validateNewPillState(note, `Crypto note "${note.title ?? '(untitled)'}"`);
     }
 
     const earningsWeek = data.earnings?.week;

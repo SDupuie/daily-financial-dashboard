@@ -2,9 +2,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const {
+  computeEarningsSourceStatus,
+  computeEarningsWeekCounts
+} = require('./earnings_week_contract');
 
 const root = path.resolve(__dirname, '..');
-const defaultInput = path.resolve(root, 'scripts', 'generated', 'earnings_week.json');
+const defaultInput = path.resolve(root, 'generated', 'earnings_week.json');
+const defaultReleaseInput = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 
 const TIMINGS = new Set(['bmo', 'amc', 'dmh', 'unknown']);
 const OUTCOMES = new Set([
@@ -28,6 +33,8 @@ const REACTION_BASES = new Set([
 const REACTION_STATUSES = new Set(['computed', 'unavailable', 'pending']);
 const SECONDARY_RECOVERY_PRIORITIES = new Set(['high', 'normal']);
 const SOURCE_SUMMARY_PRIMARIES = new Set(['finnhub', 'earningsApiCompany', 'sec_company_release']);
+const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
+const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
 const NUMBER_TOLERANCE = 0.0001;
 const PCT_TOLERANCE = 0.03;
 const TOP_LEVEL_FIELDS = new Set([
@@ -42,6 +49,16 @@ const TOP_LEVEL_FIELDS = new Set([
   'outputPath',
   'companyReleaseApply',
   'narrativeApply'
+]);
+const RELEASE_TOP_LEVEL_FIELDS = new Set([
+  'schemaVersion',
+  'generatedAt',
+  'sourceArtifact',
+  'sourceGeneratedAt',
+  'sourceRange',
+  'companyReleaseResolutions',
+  'summary',
+  'outputPath'
 ]);
 const ROW_FIELDS = new Set([
   'symbol',
@@ -77,15 +94,24 @@ const FORBIDDEN_ROW_FIELDS = [
 ];
 
 function parseArgs(argv) {
+  const mode = argv[0] === 'release' ? 'release' : 'week';
+  const offset = mode === 'release' || argv[0] === 'week' ? 1 : 0;
   const args = {
-    input: defaultInput,
+    mode,
+    input: mode === 'release' ? defaultReleaseInput : defaultInput,
+    week: defaultInput,
     requireNarrative: false
   };
 
-  for (let i = 0; i < argv.length; i += 1) {
+  for (let i = offset; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || defaultInput);
+      args.input = path.resolve(process.cwd(), argv[i + 1] || args.input);
+      i += 1;
+      continue;
+    }
+    if (arg === '--week') {
+      args.week = path.resolve(process.cwd(), argv[i + 1] || defaultInput);
       i += 1;
       continue;
     }
@@ -94,7 +120,7 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--help' || arg === '-h') {
-      printHelp();
+      printHelp(mode);
       process.exit(0);
     }
   }
@@ -102,11 +128,22 @@ function parseArgs(argv) {
   return args;
 }
 
-function printHelp() {
-  process.stdout.write(`Usage: node scripts/validate_earnings_week.js [options]
+function printHelp(mode = 'week') {
+  if (mode === 'release') {
+    process.stdout.write(`Usage: node scripts/earnings_week.js validate-release [options]
 
 Options:
-  --input PATH      Generated earnings week JSON (default: scripts/generated/earnings_week.json)
+  --input PATH      Company-release resolutions JSON (default: generated/earnings_company_release_resolutions.json)
+  --week PATH       Earnings week JSON with companyReleaseTasks (default: generated/earnings_week.json)
+  --help            Show this help
+`);
+    return;
+  }
+
+  process.stdout.write(`Usage: node scripts/earnings_week.js validate [options]
+
+Options:
+  --input PATH      Generated earnings week JSON (default: generated/earnings_week.json)
   --require-narrative
                     Require applied narrative for every display-eligible row
   --help           Show this help
@@ -432,8 +469,18 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
     errors.push(`${label}.sourceAudit.finnhubCalendar must be populated.`);
   } else {
     const calendar = audit.finnhubCalendar;
-    if (calendar.reportDate !== row.reportDate) errors.push(`${label}.finnhubCalendar.reportDate must match row.reportDate.`);
-    if (calendar.reportTiming !== row.reportTiming) errors.push(`${label}.finnhubCalendar.reportTiming must match row.reportTiming.`);
+    const conflict = isObject(audit.providerDateConflict) ? audit.providerDateConflict : null;
+    const conflictSelectedDate = conflict?.selectedDate || '';
+    const conflictFinnhubDates = Array.isArray(conflict?.candidates?.finnhub)
+      ? conflict.candidates.finnhub.map((item) => item.reportDate)
+      : [];
+    if (conflict) {
+      if (conflictSelectedDate !== row.reportDate) errors.push(`${label}.providerDateConflict.selectedDate must match row.reportDate.`);
+      if (!conflictFinnhubDates.includes(calendar.reportDate)) errors.push(`${label}.finnhubCalendar.reportDate must match a providerDateConflict Finnhub candidate.`);
+    } else if (calendar.reportDate !== row.reportDate) {
+      errors.push(`${label}.finnhubCalendar.reportDate must match row.reportDate.`);
+    }
+    if (!conflict && calendar.reportTiming !== row.reportTiming) errors.push(`${label}.finnhubCalendar.reportTiming must match row.reportTiming.`);
     validateAuditMetricSnapshot(errors, calendar, `${label}.sourceAudit.finnhubCalendar`);
     if (!nearlyEqualNullable(calendar.eps?.estimate, row.eps?.estimate)) errors.push(`${label}.eps.estimate must match Finnhub calendar.`);
     if (!nearlyEqualNullable(calendar.eps?.actual, row.eps?.actual)) errors.push(`${label}.eps.actual must match Finnhub calendar.`);
@@ -443,18 +490,36 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
   const profileName = audit.finnhubProfile?.name || '';
   const hasMetricMarketCap = isObject(audit.finnhubMetric) && isFiniteNumber(audit.finnhubMetric.marketCap);
   const hasEarningsApiCompany = isObject(audit.earningsApiCalendar) && typeof audit.earningsApiCalendar.company === 'string' && audit.earningsApiCalendar.company.trim();
+  const conflict = isObject(audit.providerDateConflict) ? audit.providerDateConflict : null;
+  const conflictDate = conflict?.selectedDate || row.reportDate;
+  const conflictEarningsApi = Array.isArray(conflict?.candidates?.earningsApiCalendar)
+    ? conflict.candidates.earningsApiCalendar.find((item) => item.reportDate === conflictDate)
+    : null;
+  const conflictNasdaq = Array.isArray(conflict?.candidates?.nasdaq)
+    ? conflict.candidates.nasdaq.find((item) => item.reportDate === conflictDate)
+    : null;
+  const conflictCompany = conflictEarningsApi?.company || conflictNasdaq?.company || '';
+  const conflictMarketCap = conflictNasdaq?.marketCap;
   if (selected.company === 'earningsApiCalendar') {
     if (!hasEarningsApiCompany) errors.push(`${label}.sourceAudit.earningsApiCalendar.company must be populated for company-name recovery.`);
     if (row.company !== audit.earningsApiCalendar?.company) errors.push(`${label}.company must match EarningsAPI calendar company when selected.`);
+  } else if (selected.company === 'providerDateConflict') {
+    if (!conflictCompany) errors.push(`${label}.providerDateConflict must include a selected-date company for company recovery.`);
+    if (row.company !== conflictCompany) errors.push(`${label}.company must match providerDateConflict selected-date company.`);
   }
   if (selected.marketCap === 'finnhubMetric') {
     if (!hasMetricMarketCap) errors.push(`${label}.sourceAudit.finnhubMetric.marketCap must be populated for market-cap recovery.`);
     if (!nearlyEqualNullable(audit.finnhubMetric?.marketCap, row.marketCap)) errors.push(`${label}.marketCap must match Finnhub metric marketCap.`);
+  } else if (selected.marketCap === 'providerDateConflict') {
+    if (!isFiniteNumber(conflictMarketCap)) errors.push(`${label}.providerDateConflict must include selected-date Nasdaq marketCap for market-cap recovery.`);
+    if (!nearlyEqualNullable(conflictMarketCap, row.marketCap)) errors.push(`${label}.marketCap must match providerDateConflict Nasdaq marketCap.`);
   }
+  // Mirror buildRows source precedence exactly; this keeps identity recovery
+  // explicit instead of accepting broad legacy aliases or oldName || newName drift.
   const expectedSources = {
     slate: 'finnhub',
-    company: profileName ? 'finnhubProfile' : hasEarningsApiCompany ? 'earningsApiCalendar' : 'symbol',
-    marketCap: isFiniteNumber(audit.finnhubProfile?.marketCap) ? 'finnhubProfile' : hasMetricMarketCap ? 'finnhubMetric' : 'none',
+    company: profileName ? 'finnhubProfile' : hasEarningsApiCompany ? 'earningsApiCalendar' : conflictCompany ? 'providerDateConflict' : 'symbol',
+    marketCap: isFiniteNumber(audit.finnhubProfile?.marketCap) ? 'finnhubProfile' : hasMetricMarketCap ? 'finnhubMetric' : isFiniteNumber(conflictMarketCap) ? 'providerDateConflict' : 'none',
     timing: row.reportTiming === 'unknown' ? 'none' : 'finnhub',
     eps: {
       estimate: expectedSource(row.eps?.estimate, 'finnhub'),
@@ -587,6 +652,7 @@ function validateSourceSummary(errors, row, label) {
   if (selected.slate === 'finnhub') {
     expectedPrimary = 'finnhub';
     if (selected.company === 'earningsApiCalendar') expectedFallbacks.push('earningsApiCalendar');
+    if (selected.company === 'providerDateConflict' || selected.marketCap === 'providerDateConflict') expectedFallbacks.push('providerDateConflict');
     if (selected.marketCap === 'finnhubMetric') expectedFallbacks.push('finnhubMetric');
   } else if (selected.slate === 'earningsApiCalendar' && isObject(row.sourceAudit?.companyReleaseResolution)) {
     expectedPrimary = 'sec_company_release';
@@ -603,14 +669,6 @@ function validateSourceSummary(errors, row, label) {
   if (expectedPrimary && !arraysEqual(summary.fallbacks, expectedFallbacks)) {
     errors.push(`${label}.sourceSummary.fallbacks must be ${expectedFallbacks.join(',') || 'empty'}.`);
   }
-}
-
-function expectedSourceStatus(row) {
-  if (row.reportTiming === 'unknown') return 'partial';
-  if (!isFiniteNumber(row.eps?.estimate) || !isFiniteNumber(row.eps?.actual)) return 'partial';
-  if (!isFiniteNumber(row.revenue?.estimate) || !isFiniteNumber(row.revenue?.actual)) return 'partial';
-  if (row.reaction?.status !== 'computed') return 'partial';
-  return 'verified';
 }
 
 function validateRow(errors, rowRaw, index, range) {
@@ -651,7 +709,7 @@ function validateRow(errors, rowRaw, index, range) {
     if (typeof row.outcome.interpretation !== 'string') errors.push(`${label}.outcome.interpretation must be a string.`);
   }
   if (!SOURCE_STATUSES.has(row.sourceStatus)) errors.push(`${label}.sourceStatus is invalid.`);
-  const expectedStatus = expectedSourceStatus(row);
+  const expectedStatus = computeEarningsSourceStatus(row);
   if (row.sourceStatus !== expectedStatus) errors.push(`${label}.sourceStatus must be ${expectedStatus}.`);
 
   const expectedOutcome = expectedCombinedOutcome(row.eps?.result, row.revenue?.result);
@@ -682,17 +740,9 @@ function validateSummary(errors, data) {
     errors.push('summary.counts must be an object.');
     return;
   }
-  const expected = {
-    total: rows.length,
-    verified: rows.filter((row) => row?.sourceStatus === 'verified').length,
-    partial: rows.filter((row) => row?.sourceStatus === 'partial').length,
-    reactionComputed: rows.filter((row) => row?.reaction?.status === 'computed').length,
-    missingTiming: rows.filter((row) => row?.reportTiming === 'unknown').length,
-    missingRevenue: rows.filter((row) => row?.revenue?.estimate === null && row?.revenue?.actual === null).length,
-    missingMarketCap: rows.filter((row) => row?.marketCap === null).length,
-    secondaryRecoveryCandidates: secondaryRecoveryCandidates.length,
-    companyReleaseTasks: companyReleaseTasks.length
-  };
+  // Reuse the generator's count rules so validation fails on stale embedded
+  // metadata instead of re-encoding a parallel summary contract here.
+  const expected = computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks);
   for (const [field, value] of Object.entries(expected)) {
     if (counts[field] !== value) errors.push(`summary.counts.${field} must be ${value}.`);
   }
@@ -886,6 +936,132 @@ function validateCompanyReleaseTasks(errors, data) {
   });
 }
 
+function validateReleaseSidecarMetadata(errors, data, week, options = {}) {
+  for (const field of Object.keys(data)) {
+    if (!RELEASE_TOP_LEVEL_FIELDS.has(field)) errors.push(`${field} is not a valid top-level company-release sidecar field.`);
+  }
+
+  const expectedSourceArtifact = options.sourceArtifact || path.relative(root, options.weekPath || defaultInput);
+  if (data.sourceArtifact !== expectedSourceArtifact) {
+    errors.push(`sourceArtifact must be ${expectedSourceArtifact}.`);
+  }
+  if (!isIsoDateTime(data.sourceGeneratedAt)) {
+    errors.push('sourceGeneratedAt must be an ISO timestamp.');
+  } else if (data.sourceGeneratedAt !== week.generatedAt) {
+    errors.push('sourceGeneratedAt must match the source earnings week generatedAt.');
+  }
+
+  if (!isObject(data.sourceRange)) {
+    errors.push('sourceRange must be populated.');
+  } else {
+    if (!isIsoDate(data.sourceRange.from)) errors.push('sourceRange.from must be an ISO date.');
+    if (!isIsoDate(data.sourceRange.to)) errors.push('sourceRange.to must be an ISO date.');
+    if (isIsoDate(data.sourceRange.from) && isIsoDate(data.sourceRange.to) && compareIsoDate(data.sourceRange.from, data.sourceRange.to) > 0) {
+      errors.push('sourceRange.from must be on or before sourceRange.to.');
+    }
+    if (data.sourceRange.from !== week.range?.from) errors.push('sourceRange.from must match the source earnings week range.from.');
+    if (data.sourceRange.to !== week.range?.to) errors.push('sourceRange.to must match the source earnings week range.to.');
+  }
+
+  if (typeof data.outputPath !== 'string' || !data.outputPath.trim()) {
+    errors.push('outputPath must be populated.');
+  }
+}
+
+function validateReleaseReaction(errors, item, label) {
+  const reaction = item.reaction;
+  if (!isObject(reaction)) {
+    errors.push(`${label}.reaction must be an object.`);
+    return;
+  }
+  if (!REACTION_BASES.has(reaction.basis)) errors.push(`${label}.reaction.basis is invalid.`);
+  if (!nullableNumber(reaction.percent)) errors.push(`${label}.reaction.percent must be numeric or null.`);
+  if (!REACTION_STATUSES.has(reaction.status)) errors.push(`${label}.reaction.status is invalid.`);
+  if (typeof reaction.note !== 'string') errors.push(`${label}.reaction.note must be a string.`);
+  if (reaction.basis === 'unavailable') {
+    if (reaction.percent !== null) errors.push(`${label}.reaction.percent must be null when unavailable.`);
+    return;
+  }
+  for (const field of ['fromDate', 'toDate']) {
+    if (!isIsoDate(reaction[field])) errors.push(`${label}.reaction.${field} must be an ISO date.`);
+  }
+  for (const field of ['fromClose', 'toClose']) {
+    if (!isFiniteNumber(reaction[field])) errors.push(`${label}.reaction.${field} must be numeric.`);
+  }
+  const expectedPct = pctChange(reaction.fromClose, reaction.toClose);
+  if (expectedPct !== null && !nearlyEqual(reaction.percent, expectedPct, PCT_TOLERANCE)) {
+    errors.push(`${label}.reaction.percent must match fromClose/toClose.`);
+  }
+}
+
+function validateReleaseResolution(errors, itemRaw, taskMap, index) {
+  const item = isObject(itemRaw) ? itemRaw : {};
+  const label = item.symbol || `companyReleaseResolutions[${index}]`;
+  const task = taskMap.get(item.taskId);
+  if (!task) errors.push(`${label}.taskId must map to companyReleaseTasks.`);
+  if (task && item.symbol !== task.symbol) errors.push(`${label}.symbol must match company-release task.`);
+  if (task && item.reportDate !== task.reportDate) errors.push(`${label}.reportDate must match company-release task.`);
+  if (!RELEASE_RESOLUTION_STATUSES.has(item.status)) errors.push(`${label}.status is invalid.`);
+  if (!RELEASE_RESOLUTION_CONFIDENCES.has(item.confidence)) errors.push(`${label}.confidence is invalid.`);
+  if (!isObject(item.fields)) {
+    errors.push(`${label}.fields must be an object.`);
+    return;
+  }
+  if (!TIMINGS.has(item.fields.reportTiming)) errors.push(`${label}.fields.reportTiming is invalid.`);
+  if (!isObject(item.fields.eps)) errors.push(`${label}.fields.eps must be populated.`);
+  if (!isObject(item.fields.revenue)) errors.push(`${label}.fields.revenue must be populated.`);
+  const eps = isObject(item.fields.eps) ? item.fields.eps : {};
+  const revenue = isObject(item.fields.revenue) ? item.fields.revenue : {};
+  for (const staleField of ['epsActual', 'revenueActual', 'gaapEpsActual', 'epsEstimate', 'epsEstimateSource', 'revenueEstimate', 'revenueEstimateSource']) {
+    if (Object.prototype.hasOwnProperty.call(item.fields, staleField)) {
+      errors.push(`${label}.fields.${staleField} must not appear; use eps/revenue nested fields.`);
+    }
+  }
+  if (!nullableNumber(eps.actual)) errors.push(`${label}.fields.eps.actual must be numeric or null.`);
+  if (!nullableNumber(revenue.actual)) errors.push(`${label}.fields.revenue.actual must be numeric or null.`);
+  if (!nullableNumber(eps.gaapActual)) errors.push(`${label}.fields.eps.gaapActual must be numeric or null.`);
+  if (!nullableNumber(eps.estimate)) errors.push(`${label}.fields.eps.estimate must be numeric or null.`);
+  if (!nullableNumber(revenue.estimate)) errors.push(`${label}.fields.revenue.estimate must be numeric or null.`);
+  if (eps.estimate !== null && eps.estimateSource !== 'earningsapi_company') {
+    errors.push(`${label}.fields.eps.estimateSource must be earningsapi_company when eps.estimate is populated.`);
+  }
+  if (eps.estimate === null && eps.estimateSource) {
+    errors.push(`${label}.fields.eps.estimateSource must be blank when eps.estimate is null.`);
+  }
+  if (revenue.estimate !== null && revenue.estimateSource !== 'earningsapi_company') {
+    errors.push(`${label}.fields.revenue.estimateSource must be earningsapi_company when revenue.estimate is populated.`);
+  }
+  if (item.status === 'resolved') {
+    if (item.sourceType !== 'sec_8k_exhibit_99_1') errors.push(`${label}.sourceType must be sec_8k_exhibit_99_1.`);
+    if (!/^https:\/\/www\.sec\.gov\//.test(item.sourceUrl)) errors.push(`${label}.sourceUrl must be an SEC URL.`);
+    if (!/^https:\/\/www\.sec\.gov\//.test(item.secFilingUrl)) errors.push(`${label}.secFilingUrl must be an SEC URL.`);
+    if (!isFiniteNumber(eps.actual)) errors.push(`${label}.fields.eps.actual is required when resolved.`);
+    if (!isFiniteNumber(revenue.actual)) errors.push(`${label}.fields.revenue.actual is required when resolved.`);
+  }
+  if (eps.comparisonSource === 'unreconciled_earningsapi_company' && eps.estimate !== null) {
+    errors.push(`${label}.fields.eps.estimate must not be used while EarningsAPI EPS actual is unreconciled.`);
+  }
+  if (!Array.isArray(item.notes)) errors.push(`${label}.notes must be an array.`);
+  validateReleaseReaction(errors, item, label);
+}
+
+function validateReleaseSummary(errors, data) {
+  const companyReleaseResolutions = Array.isArray(data.companyReleaseResolutions) ? data.companyReleaseResolutions : [];
+  const expected = {
+    total: companyReleaseResolutions.length,
+    resolved: companyReleaseResolutions.filter((item) => item.status === 'resolved').length,
+    needsReview: companyReleaseResolutions.filter((item) => item.status === 'needs_review').length,
+    unresolved: companyReleaseResolutions.filter((item) => item.status === 'unresolved').length
+  };
+  if (!isObject(data.summary)) {
+    errors.push('summary must be an object.');
+    return;
+  }
+  for (const [field, value] of Object.entries(expected)) {
+    if (data.summary[field] !== value) errors.push(`summary.${field} must be ${value}.`);
+  }
+}
+
 function validateEarningsWeekPayload(data, options = {}) {
   const errors = [];
 
@@ -918,8 +1094,51 @@ function validateEarningsWeekPayload(data, options = {}) {
   return errors;
 }
 
+function validateEarningsWeekReleasePayload(data, week, options = {}) {
+  const errors = [];
+  const taskMap = new Map((Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []).map((task) => [task.id, task]));
+
+  if (data.schemaVersion !== 1) errors.push('schemaVersion must be 1.');
+  if (!isIsoDateTime(data.generatedAt)) errors.push('generatedAt must be an ISO timestamp.');
+  validateReleaseSidecarMetadata(errors, data, week, options);
+  if (!Array.isArray(data.companyReleaseResolutions)) {
+    errors.push('companyReleaseResolutions must be an array.');
+  } else {
+    const seen = new Set();
+    data.companyReleaseResolutions.forEach((item, index) => {
+      if (seen.has(item?.taskId)) errors.push(`${item.taskId} appears more than once.`);
+      seen.add(item?.taskId);
+      validateReleaseResolution(errors, item, taskMap, index);
+    });
+    for (const task of Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []) {
+      if (!seen.has(task.id)) errors.push(`${task.id} is missing from companyReleaseResolutions.`);
+    }
+  }
+  validateReleaseSummary(errors, data);
+
+  return errors;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.mode === 'release') {
+    const data = readJson(args.input);
+    const week = readJson(args.week);
+    const errors = validateEarningsWeekReleasePayload(data, week, { weekPath: args.week });
+
+    if (errors.length) {
+      console.error(`Earnings company-release resolution validation failed for ${args.input}:`);
+      for (const error of errors) console.error(`- ${error}`);
+      process.exit(1);
+    }
+
+    console.log(`Earnings company-release validation passed for ${args.input}`);
+    console.log(`Resolved: ${data.summary.resolved}`);
+    console.log(`Needs review: ${data.summary.needsReview}`);
+    console.log(`Unresolved: ${data.summary.unresolved}`);
+    return;
+  }
+
   const data = readJson(args.input);
   const errors = validateEarningsWeekPayload(data, { requireNarrative: args.requireNarrative });
 
@@ -940,5 +1159,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  validateEarningsWeekPayload
+  validateEarningsWeekPayload,
+  validateEarningsWeekReleasePayload
 };
