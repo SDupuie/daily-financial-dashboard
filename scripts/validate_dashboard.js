@@ -521,7 +521,7 @@ if (!dashboardMatch) {
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'SMH', 'VGT', 'VAW', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
@@ -550,9 +550,10 @@ if (!dashboardMatch) {
       VFH: 'VFH',
       VHT: 'VHT',
       VIS: 'VIS',
+      VAW: 'VAW',
+      VNQ: 'VNQ',
       SMH: 'SMH',
       VGT: 'VGT',
-      VAW: 'VAW',
       VPU: 'VPU',
       DBC: 'DBC',
       PDBC: 'PDBC',
