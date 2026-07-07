@@ -73,7 +73,6 @@ Crypto section data has this contract:
 
 ```json
 {
-  "tapeHeader": "Crypto tape: bitcoin holds $61K while sentiment improves from extreme fear",
   "stats": [
     { "sym": "F&G", "name": "Fear & Greed Index", "sub": "Extreme Fear", "price": "21", "delta": "+2", "chg": "+2", "dir": "up" },
     { "sym": "ALTSEASON", "name": "Altcoin Season Index", "sub": "Neutral", "price": "48", "delta": "Unchanged", "chg": "/100", "dir": "flat" },

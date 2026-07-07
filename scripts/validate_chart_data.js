@@ -205,6 +205,16 @@ function main() {
     String(row?.ticker || '').toUpperCase(),
     String(row?.section || 'tape')
   ]).filter(([ticker]) => ticker));
+  const seenChartableTickers = new Set();
+  for (const [index, rowRaw] of chartableRows.entries()) {
+    const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+    const ticker = String(row.ticker || '').toUpperCase();
+    if (!ticker) continue;
+    if (seenChartableTickers.has(ticker)) {
+      errors.push(`dashboard chartable row ${index} duplicates ticker ${ticker}; each chartable row must be unique.`);
+    }
+    seenChartableTickers.add(ticker);
+  }
 
   if (chartData.schemaVersion !== 1) {
     errors.push('schemaVersion must be 1.');

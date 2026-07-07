@@ -367,6 +367,16 @@ if (!dashboardMatch) {
     // README Data Contracts split chartable crypto tickers from crypto-only section stats.
     const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
     const cryptoStatRows = data.crypto?.stats ?? [];
+    const seenTapeTickers = new Set();
+    for (const [index, rowRaw] of tapeRows.entries()) {
+      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+      const ticker = String(row.ticker ?? '').trim().toUpperCase();
+      if (!ticker) continue;
+      if (seenTapeTickers.has(ticker)) {
+        errors.push(`tape.rows[${index}].ticker duplicates ${ticker}; each dashboard row must have a unique ticker.`);
+      }
+      seenTapeTickers.add(ticker);
+    }
     const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
     const staticTickerNotePattern = /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains|quote recap|price recap|latest quote|latest close)/i;
     const requireString = (value, label) => {
@@ -975,15 +985,10 @@ if (!dashboardMatch) {
       }
     }
 
-    const cryptoHeader = String(data.crypto?.tapeHeader ?? '');
     const cryptoNotes = data.crypto?.notes ?? [];
     const fng = cryptoStatRows.find(row => row.sym === 'F&G');
     const altcoinSeason = cryptoStatRows.find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
     const staleFngPattern = /(numeric read|pull still failed|F&G ~|unavailable|not retrievable|not extractable)/i;
-
-    if (staleFngPattern.test(cryptoHeader)) {
-      errors.push('Crypto tape header contains stale F&G failure/unavailable language.');
-    }
 
     for (const rowRaw of cryptoTickerRows) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
@@ -1163,6 +1168,7 @@ if (!dashboardMatch) {
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
       requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
+      validateStoryFreshness(note, `Crypto note "${note.title ?? '(untitled)'}"`);
       validateNewPillState(note, `Crypto note "${note.title ?? '(untitled)'}"`);
     }
 
