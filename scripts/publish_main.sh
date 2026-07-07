@@ -195,9 +195,9 @@ const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\
 if (!m) process.exit(1);
 const data = JSON.parse(m[1]);
 const date = (data.masthead && data.masthead.date) || "";
-const volume = (data.masthead && data.masthead.volume) || "";
-if (!date || !volume) process.exit(1);
-process.stdout.write(`${date}\t${volume}`);
+const edition = (data.masthead && data.masthead.edition) || "";
+if (!date || !edition) process.exit(1);
+process.stdout.write(`${date}\t${edition}`);
 '
 }
 
@@ -298,27 +298,27 @@ wait_for_pages_run_and_deploy() {
 verify_pages_content() {
   local pages_url="$1"
   local expected_date="$2"
-  local expected_volume="$3"
+  local expected_edition="$3"
   local html
 
   html="$(curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" "$pages_url")" || return 1
-  if EXPECTED_DATE="$expected_date" EXPECTED_VOLUME="$expected_volume" node -e '
+  if EXPECTED_DATE="$expected_date" EXPECTED_EDITION="$expected_edition" node -e '
 const fs = require("fs");
 const html = fs.readFileSync(0, "utf8");
 const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 if (!m) process.exit(1);
 const data = JSON.parse(m[1]);
 const date = data?.masthead?.date || "";
-const volume = data?.masthead?.volume || "";
-if (date === process.env.EXPECTED_DATE && volume === process.env.EXPECTED_VOLUME) {
+const edition = data?.masthead?.edition || "";
+if (date === process.env.EXPECTED_DATE && edition === process.env.EXPECTED_EDITION) {
   process.exit(0);
 }
 process.exit(2);
 ' <<<"$html"; then
-    echo "Pages content verified at ${pages_url} (${expected_volume}; ${expected_date})."
+    echo "Pages content verified at ${pages_url} (${expected_edition}; ${expected_date})."
     return 0
   fi
-  echo "Pages content is stale at ${pages_url}; expected ${expected_volume} / ${expected_date}." >&2
+  echo "Pages content is stale at ${pages_url}; expected ${expected_edition} / ${expected_date}." >&2
   return 1
 }
 
@@ -365,9 +365,9 @@ if ! marker_row="$(extract_dashboard_markers)"; then
 fi
 
 expected_date=""
-expected_volume=""
-IFS=$'\t' read -r expected_date expected_volume <<<"$marker_row"
-if [[ -z "$expected_date" || -z "$expected_volume" ]]; then
+expected_edition=""
+IFS=$'\t' read -r expected_date expected_edition <<<"$marker_row"
+if [[ -z "$expected_date" || -z "$expected_edition" ]]; then
   echo "Skipping Pages verification: dashboard markers were empty." >&2
   exit 0
 fi
@@ -378,7 +378,7 @@ retrigger_count=0
 
 while true; do
   if wait_for_pages_run_and_deploy "$deploy_sha"; then
-    if verify_pages_content "$pages_url" "$expected_date" "$expected_volume"; then
+    if verify_pages_content "$pages_url" "$expected_date" "$expected_edition"; then
       break
     fi
     echo "Pages deploy succeeded but live content still stale." >&2

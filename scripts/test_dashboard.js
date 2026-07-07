@@ -347,7 +347,7 @@ function testPatchDashboardDataBlockKeepsShellAndStampsEdition() {
   const html = [
     '<script type="application/json" id="dashboard-data">{"editionId":"old","price":"$1.00"}</script>',
     '<script type="application/json" id="chart-data">{"schemaVersion":1,"series":[]}</script>',
-    '<div class="page" id="app"><div id="mast-vol">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
+    '<div class="page" id="app"><div id="mast-edition">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
     '<script>(function () {})();</script>'
   ].join('');
   const next = patchDashboardDataBlock(html, { editionId: 'old', price: '$4.54B', replacementLike: '$&' });
@@ -481,7 +481,7 @@ function testApplyDashboardDataJsonCliMode() {
     '<script type="application/json" id="dashboard-data">{"editionId":"old","masthead":{"date":"Monday, July 6, 2026"},"footer":{"compiled":"Compiled Monday, July 6, 2026 at 4:00 PM CDT"}}<\/script>',
     '<!-- ============ DATA END ============ -->',
     '<script type="application/json" id="chart-data">{"schemaVersion":1,"series":[]}</script>',
-    '<div class="page" id="app"><div id="mast-vol">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
+    '<div class="page" id="app"><div id="mast-edition">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
     '<script>(function () {})();</script>'
   ].join('\n');
   fs.writeFileSync(dashboardFile, dashboardHtml);
@@ -520,7 +520,7 @@ function testApplyDashboardDataJsonCliMode() {
     '<script type="application/json" id="dashboard-data">{"editionId":"old","masthead":{"date":"Monday, July 6, 2026"},"footer":{"compiled":"Compiled Monday, July 6, 2026 at 4:00 PM CDT"},"tape":{"rows":[{"ticker":"SPX","group":"Equities","last":"stale","delta":"stale","pct":"stale","dir":"flat","asOf":"old"}]}}<\/script>',
     '<!-- ============ DATA END ============ -->',
     `<script type="application/json" id="chart-data">${JSON.stringify(chartData)}<\/script>`,
-    '<div class="page" id="app"><div id="mast-vol">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
+    '<div class="page" id="app"><div id="mast-edition">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
     '<script>(function () {})();</script>'
   ].join('\n'));
   const result = spawnSync(process.execPath, [
@@ -548,7 +548,7 @@ function testDashboardHtmlShellContract() {
   const runtimeScriptIndex = html.indexOf('(function () {');
   const markers = [
     '<div class="page" id="app">',
-    '<div id="mast-vol">',
+    '<div id="mast-edition">',
     '<div class="right" id="mast-date">',
     '<h1 id="hero-headline">',
     '<div id="hero-copy"></div>',

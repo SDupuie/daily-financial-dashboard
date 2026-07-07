@@ -333,7 +333,7 @@ if (chartDataIndex >= 0 && runtimeScriptIndex >= 0 && chartDataIndex >= runtimeS
 
 requireOrderedMarkerSequence([
   '<div class="page" id="app">',
-  '<div id="mast-vol">',
+  '<div id="mast-edition">',
   '<div class="right" id="mast-date">',
   '<h1 id="hero-headline">',
   '<div id="hero-copy"></div>',
@@ -461,10 +461,14 @@ if (!dashboardMatch) {
     const expectedDate = part('day');
     const expectedYear = part('year');
     const allowedStoryDates = allowedNewsDates(now);
+    const mastheadEdition = String(data.masthead?.edition ?? '').trim();
     const mastheadDate = String(data.masthead?.date ?? '');
     const footerCompiled = String(data.footer?.compiled ?? '');
     if (!isIsoDateTime(data.editionId)) {
       errors.push('dashboard-data.editionId must be a populated ISO timestamp.');
+    }
+    if (!mastheadEdition) {
+      errors.push('masthead.edition must be a non-empty string.');
     }
     const dateMsg = `Masthead/footer may be stale: expected ${expectedDay}, ${expectedMonth} ${expectedDate}, ${expectedYear}.`;
 

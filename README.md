@@ -30,7 +30,7 @@ This section is the canonical human-readable contract for dashboard data. Keep `
 ### Embedded `dashboard-data`
 
 - `editionId`: ISO timestamp identifying the exact embedded dashboard edition. Bump it every time helper scripts rewrite `dashboard-data`; localhost refresh cache keys must use this field rather than inferring identity from the visible date/ticker shape.
-- `masthead`: issue metadata for the visible header. `masthead.date` must be the dashboard date.
+- `masthead`: visible header metadata. `masthead.date` must be the dashboard date, and `masthead.edition` should be the user-facing session label such as `Morning Edition` or `Afternoon Edition`. Use `editionId` for exact build/revision identity rather than a visible serial number.
 - `opening`: market-open summary with `headline`, `deck`, and exactly four `catalysts[]` items.
 - `futuresModule`: the four-card futures module and its one to three promoted stories. Use `sectionLabel`/`sectionTitle` to distinguish morning `Before The Open` / `Pre-Market Futures` from afternoon `After The Bell` / `Session Futures`.
 - `tape`: the cross-asset Tape table. All ticker quote rows, including crypto tickers, live in `tape.rows[]`.
@@ -363,7 +363,7 @@ For non-deterministic editorial/news work, do not hand-edit the embedded HTML ou
    - Do not use machine-readable endpoints such as `query1.finance.yahoo.com`, `api.nasdaq.com`, JSON APIs, CSV downloads, or other raw data feeds as `READ MORE` links.
 
 5. Rewrite the JSON sections in this order.
-   - `masthead`: bump volume by 1 and set `masthead.date`.
+   - `masthead`: set `masthead.edition` to `Morning Edition` or `Afternoon Edition` for the active run and set `masthead.date`.
    - `opening`: update `headline`, `deck`, and four concise catalyst items.
    - `futuresModule`: embed four futures rows and the top one to three priority futures-module stories for the active morning or afternoon update window.
    - `tape`: refresh all required cross-asset rows and commentary.
