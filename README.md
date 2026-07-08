@@ -336,6 +336,8 @@ For non-deterministic editorial/news work, do not hand-edit the embedded HTML ou
    - If you use a same-day manual quote fallback for a chartable ticker, do not patch only `tape.rows` or `chart-data.quoteRows`. Reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value, or validation should fail.
 
 4. Search news after prices.
+   - This is a required step on every scheduled run, before any story set is finalized.
+   - Start every scheduled run with a fresh news search pass and keep previous links only if they remain among the best available reporting after direct comparison.
    - Use today and yesterday as explicit dates in every query; during the scheduled Monday morning dashboard window, add Saturday when needed because the freshness rule may still admit relevant Saturday-dated coverage.
    - Start with:
      - `stock market news [today] OR [yesterday]`
