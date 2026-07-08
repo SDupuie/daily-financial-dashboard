@@ -7,6 +7,8 @@ const { deriveQuoteRowsFromSeries } = require('./fetch_chart_data');
 
 const DEFAULT_DASHBOARD = path.resolve(process.cwd(), 'daily_financial_news.html');
 const GENERATED_DIR = path.resolve(process.cwd(), 'generated');
+const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
+const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WINDOW_LABELS = {
   morning: {
     sectionLabel: 'Before The Open',
@@ -155,6 +157,7 @@ function parseArgs(argv) {
     windowMode: '',
     applyDashboardDataJson: '',
     refreshNewsBaseline: false,
+    skipEarnings: false,
     skipFutures: false,
     skipChartData: false,
     skipCryptoStats: false,
@@ -190,6 +193,10 @@ function parseArgs(argv) {
     }
     if (arg === '--scheduled') {
       args.scheduled = true;
+      continue;
+    }
+    if (arg === '--skip-earnings') {
+      args.skipEarnings = true;
       continue;
     }
     if (arg === '--skip-futures') {
@@ -252,6 +259,7 @@ Options:
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
   --scheduled                         Advance the News "New" baseline after a successful scheduled run
+  --skip-earnings                     Skip earnings week refresh + embed
   --skip-futures                      Skip node scripts/fetch_futures_module.js and futuresModule patching
   --skip-chart-data                   Skip node scripts/fetch_chart_data.js and chart/quote-row patching
   --skip-crypto-stats                 Skip node scripts/fetch_crypto_stats.js and crypto.stats[] patching
@@ -263,8 +271,9 @@ Options:
 
 This orchestrator standardizes the deterministic local daily update flow:
   1. refresh staging fetchers for the selected update window
-  2. patch embedded dashboard-data and chart-data blocks
-  3. validate the dashboard
+  2. refresh and embed the canonical earnings week payload
+  3. patch embedded dashboard-data and chart-data blocks
+  4. validate the dashboard
 
 Publish remains a separate explicit step via ./scripts/publish_main.sh.
 `);
@@ -282,6 +291,91 @@ function runCommand(command, args) {
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function writeJson(filePath, value) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function earningsRowKey(row) {
+  return `${String(row?.symbol || '').trim().toUpperCase()}::${String(row?.reportDate || '').trim()}`;
+}
+
+function sentenceCaseCompany(row) {
+  return String(row?.company || row?.symbol || 'This company').trim();
+}
+
+function fallbackOutcomeInterpretation(row, existingInterpretation = '') {
+  const company = sentenceCaseCompany(row);
+  const epsResult = String(row?.eps?.result || '').trim();
+  const revenueResult = String(row?.revenue?.result || '').trim();
+  const overall = String(row?.outcome?.overall || '').trim();
+  if (!overall || overall === 'pending') return existingInterpretation;
+  if (overall === 'beat') return `${company} beat on both EPS and revenue.`;
+  if (overall === 'miss') return `${company} missed on both EPS and revenue.`;
+  if (overall === 'mixed') {
+    if (epsResult === 'beat' && revenueResult === 'miss') return `${company} beat on EPS but missed on revenue.`;
+    if (epsResult === 'miss' && revenueResult === 'beat') return `${company} missed on EPS but beat on revenue.`;
+    return `${company} delivered a mixed earnings read versus consensus.`;
+  }
+  if (overall === 'met') return `${company} came in roughly in line with consensus expectations.`;
+  if (overall === 'eps_only_beat') return `${company} beat on EPS while revenue was not comparable against consensus.`;
+  if (overall === 'eps_only_miss') return `${company} missed on EPS while revenue was not comparable against consensus.`;
+  if (overall === 'unverified') return `${company} reported results, but the source set remains incomplete.`;
+  return existingInterpretation;
+}
+
+function fallbackReactionNote(row, existingNote = '') {
+  if (String(row?.reaction?.status || '').trim() !== 'computed') return '';
+  const percent = Number(row?.reaction?.percent);
+  if (!Number.isFinite(percent)) return existingNote;
+  const company = sentenceCaseCompany(row);
+  const direction = percent > 0 ? 'rose' : percent < 0 ? 'fell' : 'finished flat';
+  const magnitude = percent === 0 ? '' : ` ${Math.abs(percent).toFixed(1)}%`;
+  return `${company} shares ${direction}${magnitude} on the first eligible close after the report.`.replace(/\s+/g, ' ').trim();
+}
+
+function syncEarningsNarrativeSidecar() {
+  const week = readJson(EARNINGS_WEEK_PATH);
+  const existing = fs.existsSync(EARNINGS_NARRATIVE_PATH)
+    ? readJson(EARNINGS_NARRATIVE_PATH)
+    : { rows: [] };
+  const existingByKey = new Map(
+    (Array.isArray(existing.rows) ? existing.rows : []).map((row) => [earningsRowKey(row), row])
+  );
+  const rows = (Array.isArray(week.rows) ? week.rows : [])
+    .filter((row) => existingByKey.has(earningsRowKey(row)))
+    .map((row) => {
+      const prior = existingByKey.get(earningsRowKey(row)) || {};
+      return {
+        symbol: row.symbol,
+        reportDate: row.reportDate,
+        eps: {
+          note: String(prior.eps?.note || '')
+        },
+        revenue: {
+          note: String(prior.revenue?.note || '')
+        },
+        outcome: {
+          guide: String(prior.outcome?.guide || ''),
+          interpretation: fallbackOutcomeInterpretation(row, String(prior.outcome?.interpretation || ''))
+        },
+        reaction: {
+          note: fallbackReactionNote(row, String(prior.reaction?.note || ''))
+        }
+      };
+    });
+  if (!rows.length) {
+    throw new Error('Cannot sync earnings narrative sidecar because it has no row overlap with the current earnings week.');
+  }
+  writeJson(EARNINGS_NARRATIVE_PATH, {
+    schemaVersion: 1,
+    sourceArtifact: 'generated/earnings_week.json',
+    sourceGeneratedAt: week.generatedAt,
+    sourceRange: week.range,
+    rows,
+    outputPath: EARNINGS_NARRATIVE_PATH
+  });
 }
 
 function readJsonBlock(html, id) {
@@ -517,6 +611,13 @@ function main() {
     if (args.skipAssetAllocationPortfolio) assetAllocationArgs.push('--skip-portfolio');
     if (args.skipAssetAllocationSummary) assetAllocationArgs.push('--skip-summary');
     runCommand('node', assetAllocationArgs);
+  }
+
+  if (!args.skipEarnings) {
+    runCommand('node', ['scripts/earnings_week.js', 'refresh']);
+    syncEarningsNarrativeSidecar();
+    runCommand('node', ['scripts/earnings_week.js', 'apply-narrative']);
+    runCommand('node', ['scripts/earnings_week.js', 'embed', '--dashboard', args.dashboard]);
   }
 
   patchDashboard(args);

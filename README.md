@@ -286,8 +286,9 @@ Codex Scheduler runs should finish with `node scripts/run_daily_update.js --refr
 
 This orchestrates the repo-owned deterministic daily refresh steps for the selected window:
 - runs the futures fetcher in morning pre-open mode or afternoon session mode
-- refreshes staging JSON under `generated/` for futures, chart-data, crypto stat cards, asset-allocation rows, and the sanitized portfolio summary
-- patches embedded `futuresModule.futures`, `futuresModule.sectionLabel`, `futuresModule.sectionTitle`, `tape.rows` quote fields, `crypto.stats[]`, `assetAllocationPortfolio.rows`, `assetAllocationPortfolio` summary fields, and the full embedded `chart-data` block
+- refreshes staging JSON under `generated/` for futures, chart-data, crypto stat cards, asset-allocation rows, the sanitized portfolio summary, and the canonical earnings week artifact
+- runs `node scripts/earnings_week.js refresh`, reapplies the canonical `generated/earnings_narrative.json` sidecar against the refreshed week artifact, and then runs `node scripts/earnings_week.js embed` so rows whose report window has arrived pick up refreshed actuals before the dashboard patch step
+- patches embedded `futuresModule.futures`, `futuresModule.sectionLabel`, `futuresModule.sectionTitle`, `tape.rows` quote fields, `crypto.stats[]`, `assetAllocationPortfolio.rows`, `assetAllocationPortfolio` summary fields, the embedded `earnings.week`, and the full embedded `chart-data` block
 - marks `stories[]` and `crypto.notes[]` cards with `isNewSinceScheduledUpdate` from the embedded scheduled baseline, advancing that baseline only when `--scheduled` is present
 - runs dashboard validation
 
