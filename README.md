@@ -11,7 +11,10 @@ This repository maintains `daily_financial_news.html`, the canonical static Dail
 
 ## Update Cadence
 
-Update `daily_financial_news.html` each market morning around 7:00 AM Central, before the U.S. open. When doing an afternoon refresh around 4:00 PM Central, switch the futures module from the morning setup view to the completed-session view. The main dashboard payload lives inside:
+- Morning update: Update `daily_financial_news.html` each market morning in the 6:45 AM to 8:00 AM America/Chicago window, before the U.S. open. Switch the futures module from the completed-session view to the morning setup view.
+- Afternoon update: Update `daily_financial_news.html` each market afternoon in the 3:45 PM to 5:00 PM America/Chicago window, after the U.S. close. Switch the futures module from the morning setup view to the completed-session view.
+
+The main dashboard payload lives inside:
 
 ```html
 <!-- ============ DATA START — edit this block to update the dashboard ============ -->
@@ -257,7 +260,7 @@ The `chart-data` block is generated chart history plus quote-row staging data:
 Use the same embedded `futuresModule` data block for both update windows; set the visible labels to match the update:
 
 - Morning update: `futuresModule.sectionLabel` = `Before The Open`; `futuresModule.sectionTitle` = `Pre-Market Futures`. Futures charts should cover the current overnight Globex session from the prior futures reopen, normally 5:00 PM Central / 6:00 PM Eastern, through the latest available morning tick.
-- Afternoon update: `futuresModule.sectionLabel` = `After The Bell`; `futuresModule.sectionTitle` = `Session Futures`. Run the update around 4:00 PM Central, but keep the futures charts scoped to regular market hours, normally 8:30 AM to 3:00 PM Central / 9:30 AM to 4:00 PM Eastern. Visible change values should compare the latest regular-session futures value with the prior trading day's official 4:00 PM Eastern futures close, matching the daily-change basis used by cash indexes. Store the official market-time contract in Eastern time, e.g. raw `referenceLabel` = `prior 4 PM ET close` and `marketTimeZone` = `America/New_York`. Use `node scripts/fetch_futures_module.js --session` for this completed-session futures payload.
+- Afternoon update: `futuresModule.sectionLabel` = `After The Bell`; `futuresModule.sectionTitle` = `Session Futures`. Run the update in the 3:45 PM through 5:00 PM Central window, but keep the futures charts scoped to regular market hours, normally 8:30 AM to 3:00 PM Central / 9:30 AM to 4:00 PM Eastern. Visible change values should compare the latest regular-session futures value with the prior trading day's official 4:00 PM Eastern futures close, matching the daily-change basis used by cash indexes. Store the official market-time contract in Eastern time, e.g. raw `referenceLabel` = `prior 4 PM ET close` and `marketTimeZone` = `America/New_York`. Use `node scripts/fetch_futures_module.js --session` for this completed-session futures payload.
 - Holiday or unusual-session updates should use the closest accurate window label and make the shortened or closed cash-market context clear in `footer.compiled`.
 
 ## Optional Local Market Refresh
