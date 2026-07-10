@@ -832,6 +832,41 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
   return { rows: verifiedRows, review };
 }
 
+function verifyEarningsApiRecoveryRows(rows, range, confirmations = []) {
+  const activeDates = new Set(displayDatesForRange(range.from, range.to));
+  const confirmationsBySymbol = new Map(confirmations.map((row) => [row.symbol, row]));
+  const verifiedRows = [];
+  const review = [];
+  for (const row of rows) {
+    if (!isDisplayEligibleEarningsRow(row)) {
+      verifiedRows.push(row);
+      continue;
+    }
+    const confirmation = confirmationsBySymbol.get(row.symbol) || null;
+    if (confirmation && activeDates.has(confirmation.reportDate)) {
+      verifiedRows.push({
+        ...row,
+        reportDate: confirmation.reportDate,
+        sourceAudit: {
+          ...row.sourceAudit,
+          scheduleVerification: scheduleAudit('official_confirmed', row, [], confirmation)
+        }
+      });
+      continue;
+    }
+    if (confirmation) continue;
+    review.push({
+      symbol: row.symbol,
+      company: row.company,
+      primaryDate: row.reportDate,
+      secondaryDates: [],
+      reason: 'uncorroborated_earningsapi_recovery_date',
+      required: 'official_company_ir_date_confirmation'
+    });
+  }
+  return { rows: verifiedRows, review };
+}
+
 function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, profiles) {
   const finnhubKeys = new Set(finnhubRows.map((row) => `${row.reportDate}:${row.symbol}`));
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
@@ -1953,22 +1988,28 @@ async function main() {
     finnhubMetrics,
     earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays
   });
+  const scheduleConfirmations = readScheduleConfirmations(args.scheduleConfirmations);
   const scheduleVerification = verifyFinnhubScheduleRows(
     finnhubRows,
     earningsApiCalendarDays,
     { from: args.from, to: args.to },
-    readScheduleConfirmations(args.scheduleConfirmations)
+    scheduleConfirmations
+  );
+  const earningsApiRows = buildEarningsApiRows(secondaryRecoveryCandidates, earningsApiCompanyFetches);
+  const earningsApiScheduleVerification = verifyEarningsApiRecoveryRows(
+    earningsApiRows,
+    { from: args.from, to: args.to },
+    scheduleConfirmations
   );
   fs.mkdirSync(path.dirname(args.scheduleReview), { recursive: true });
   fs.writeFileSync(args.scheduleReview, `${JSON.stringify({
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     range: { from: args.from, to: args.to },
-    rows: scheduleVerification.review,
+    rows: [...scheduleVerification.review, ...earningsApiScheduleVerification.review],
     outputPath: args.scheduleReview
   }, null, 2)}\n`);
-  const earningsApiRows = buildEarningsApiRows(secondaryRecoveryCandidates, earningsApiCompanyFetches);
-  const mergedRows = [...scheduleVerification.rows, ...earningsApiRows].sort((left, right) => {
+  const mergedRows = [...scheduleVerification.rows, ...earningsApiScheduleVerification.rows].sort((left, right) => {
     const dateCompare = left.reportDate.localeCompare(right.reportDate);
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
@@ -2037,6 +2078,7 @@ module.exports = {
   fetchYahooBarsForRows,
   profileFromCache,
   resolveProviderDateConflicts,
+  verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
   storeProfileInCache,
   valueOutcome

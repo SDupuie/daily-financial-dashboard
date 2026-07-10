@@ -21,7 +21,7 @@ function buildEarningsWeekPolicy() {
     sourceHierarchy: [
       'Finnhub primary for calendar slate, company profile, timing, EPS/revenue estimates, and EPS/revenue actuals when the row is present.',
       'Finnhub metric endpoint may recover market capitalization when Finnhub profile is empty for a Finnhub-present row.',
-      'EarningsAPI secondary corroborates display-eligible Finnhub dates and supplies display-scale events missing from Finnhub; an official company IR confirmation may set the report date within the active week.',
+      'EarningsAPI secondary corroborates display-eligible Finnhub dates and supplies display-scale events missing from Finnhub; every displayed EarningsAPI-only recovery row requires official company IR date confirmation.',
       'SEC/company release resolution for actual revenue, EPS context, fiscal period, report timing, and source verification.',
       'Yahoo Finance Chart API for close-to-close market reaction.'
     ],
@@ -46,7 +46,7 @@ function buildEarningsWeekPolicy() {
       unknown: 'unavailable'
     },
     secondaryRecoveryFieldPolicy: {
-      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row; every date conflict or missing secondary row requires official company IR confirmation. An official date outside the active week excludes the row from that week.',
+      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row; every date conflict or missing secondary row requires official company IR confirmation. Every displayed EarningsAPI-only recovery row also requires official company IR confirmation. An official date outside the active week excludes the row from that week.',
       profileRecovery: 'For Finnhub-present rows with empty Finnhub profile, EarningsAPI calendar may supply company name and Finnhub metric may supply market capitalization; EPS/revenue/timing remain Finnhub.',
       eps: 'EarningsAPI company endpoint may supply EPS estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
       revenue: 'EarningsAPI company endpoint may supply revenue estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',

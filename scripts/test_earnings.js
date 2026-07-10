@@ -24,6 +24,7 @@ const {
   ensureFinnhubPrimaryUsable,
   profileFromCache,
   resolveProviderDateConflicts,
+  verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows
 } = require('./earnings_week_build');
 const {
@@ -537,6 +538,27 @@ function testPrimaryScheduleVerification() {
   assert.equal(official.review.length, 0);
 
   assert.equal(calendarVerificationDates({ from: range.from, to: range.to }).includes('2026-02-06'), true);
+
+  const recoveryRow = {
+    symbol: 'RECOVERY',
+    company: 'Recovery Corp',
+    country: 'US',
+    exchange: 'NASDAQ NMS - GLOBAL MARKET',
+    marketCap: 2000000000,
+    reportDate: '2026-01-06',
+    sourceAudit: { selectedSources: { slate: 'earningsApiCalendar' } }
+  };
+  const recovery = verifyEarningsApiRecoveryRows([recoveryRow], range);
+  assert.equal(recovery.rows.length, 0);
+  assert.deepEqual(recovery.review.map((row) => row.reason), ['uncorroborated_earningsapi_recovery_date']);
+  const officialRecovery = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
+    symbol: 'RECOVERY',
+    reportDate: '2026-01-08',
+    sourceName: 'Official investor relations calendar',
+    sourceUrl: 'https://investors.example.test/earnings'
+  }]);
+  assert.equal(officialRecovery.rows[0].reportDate, '2026-01-08');
+  assert.equal(officialRecovery.rows[0].sourceAudit.scheduleVerification.status, 'official_confirmed');
 }
 
 function testWeekValidatorAllowsOfficialScheduleRedate() {

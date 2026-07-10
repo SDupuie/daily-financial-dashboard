@@ -571,6 +571,20 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
 }
 
 function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) {
+  const scheduleVerification = isObject(audit.scheduleVerification) ? audit.scheduleVerification : null;
+  if (scheduleVerification) {
+    const official = scheduleVerification.official;
+    if (scheduleVerification.status !== 'official_confirmed'
+      || !isIsoDate(scheduleVerification.primaryDate)
+      || !Array.isArray(scheduleVerification.secondaryDates)
+      || !isObject(official)
+      || !isIsoDate(official.reportDate)
+      || official.reportDate !== row.reportDate
+      || !/^https:\/\//.test(official.sourceUrl || '')
+      || !String(official.sourceName || '').trim()) {
+      errors.push(`${label}.sourceAudit.scheduleVerification must be a complete official schedule confirmation.`);
+    }
+  }
   if (audit.finnhubCalendar?.present !== false) {
     errors.push(`${label}.sourceAudit.finnhubCalendar.present must be false for EarningsAPI-recovered rows.`);
   }
@@ -585,7 +599,10 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   }
   const companyRow = audit.earningsApiCompany.selectedRow;
   const companyReleaseResolution = audit.companyReleaseResolution;
-  if (companyRow.reportDate !== row.reportDate) errors.push(`${label}.earningsApiCompany.reportDate must match row.reportDate.`);
+  if (companyRow.reportDate !== row.reportDate
+    && !(scheduleVerification?.status === 'official_confirmed' && companyRow.reportDate === scheduleVerification.primaryDate)) {
+    errors.push(`${label}.earningsApiCompany.reportDate must match row.reportDate.`);
+  }
   validateAuditMetricSnapshot(errors, companyRow, `${label}.sourceAudit.earningsApiCompany.selectedRow`);
   let expectedSources;
   if (isObject(companyReleaseResolution)) {
