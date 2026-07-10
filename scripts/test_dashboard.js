@@ -905,6 +905,14 @@ function testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt() {
   assert.match(result.stderr, /publishedAt must be an offset-bearing ISO timestamp/);
 }
 
+function testDashboardValidatorRejectsDuplicateFuturesStoryUrl() {
+  const data = validationDashboardData();
+  data.futuresModule.stories[1].url = data.futuresModule.stories[0].url;
+  const result = validateDashboardFixture(data, 'dfd-futures-duplicate-url-');
+  assert.notEqual(result.status, 0, 'Duplicate Futures story links must fail validation.');
+  assert.match(result.stderr, /futuresModule\.stories\[1\]\.url duplicates futuresModule\.stories\[0\]\.url/);
+}
+
 function testDashboardValidatorRejectsImpossibleFuturesDates() {
   const badReferenceDate = validationDashboardData();
   badReferenceDate.masthead.edition = 'Morning Edition';
@@ -938,7 +946,7 @@ function testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow() {
   data.futuresModule.stories[0].publishedAt = '2026-07-09T19:59:59Z';
   const result = validateDashboardFixture(data, 'dfd-futures-window-');
   assert.notEqual(result.status, 0, 'A futures story published after the regular-session close must fail validation.');
-  assert.match(result.stderr, /publishedAt must fall between the fetched prior U\.S\. regular-session close/);
+  assert.match(result.stderr, /publishedAt must fall between the current U\.S\. regular-session open/);
 }
 
 function testDashboardValidatorAcceptsInWindowFuturesStories() {
@@ -949,6 +957,8 @@ function testDashboardValidatorAcceptsInWindowFuturesStories() {
 function testDashboardValidatorRequiresMatchingFuturesEdition() {
   const morningMismatch = validationDashboardData();
   morningMismatch.masthead.edition = 'Afternoon Edition';
+  morningMismatch.futuresModule.sectionLabel = 'Before The Open';
+  morningMismatch.futuresModule.sectionTitle = 'Pre-Market Futures';
   const morningResult = validateDashboardFixture(morningMismatch, 'dfd-futures-edition-morning-');
   assert.notEqual(morningResult.status, 0, 'Afternoon masthead must not validate against Pre-Market Futures.');
   assert.match(morningResult.stderr, /masthead\.edition must be Morning Edition when futuresModule is Before The Open\/Pre-Market Futures/);
@@ -1632,6 +1642,7 @@ function main() {
   testDashboardValidatorAcceptsFridayBridgeCalendars();
   testDashboardValidatorRejectsOversizedFuturesStoryTag();
   testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
+  testDashboardValidatorRejectsDuplicateFuturesStoryUrl();
   testDashboardValidatorRejectsImpossibleFuturesDates();
   testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow();
   testDashboardValidatorAcceptsInWindowFuturesStories();

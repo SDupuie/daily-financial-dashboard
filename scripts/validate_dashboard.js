@@ -980,6 +980,7 @@ if (!dashboardMatch) {
     if (futuresModuleStories.length !== 3) {
       errors.push('futuresModule.stories must contain exactly three priority stories.');
     }
+    const futuresStoryUrls = new Map();
     for (const [index, storyRaw] of futuresModuleStories.entries()) {
       const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
       requireString(story.tag, `futuresModule.stories[${index}].tag`);
@@ -989,6 +990,15 @@ if (!dashboardMatch) {
       requireString(story.title, `futuresModule.stories[${index}].title`);
       requireString(story.body, `futuresModule.stories[${index}].body`);
       requireHttpsUrl(story.url, `futuresModule.stories[${index}]`);
+      const canonicalUrl = canonicalStoryUrl(story.url);
+      if (canonicalUrl) {
+        const earlierIndex = futuresStoryUrls.get(canonicalUrl);
+        if (earlierIndex !== undefined) {
+          errors.push(`futuresModule.stories[${index}].url duplicates futuresModule.stories[${earlierIndex}].url.`);
+        } else {
+          futuresStoryUrls.set(canonicalUrl, index);
+        }
+      }
       validateStoryFreshness(story, `futuresModule.stories[${index}]`);
       if (futuresStoryWindow) {
         const publishedAt = String(story.publishedAt ?? '').trim();
