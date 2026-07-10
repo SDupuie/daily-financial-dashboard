@@ -431,6 +431,7 @@ function officialEvent(release, rule, variant, values) {
 }
 
 function lensForEvents(events) {
+  if (!events.length) return null;
   const weight = { high: 3, medium: 2, low: 1 };
   const selected = [...events].sort((left, right) => (weight[right.impact] - weight[left.impact]))[0];
   const variantKey = String(selected?.id || '').split(':').slice(3).join(':');
@@ -477,14 +478,17 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
     const events = matchedEvents
       .map(({ date: _date, sortMinutes: _sortMinutes, lens: _lens, ...event }) => event);
     const closureName = MARKET_CLOSURES[Number(date.slice(0, 4))]?.[date] || '';
-    return {
+    const day = {
       date,
       label: dayLabel(date),
       closure: closureName ? { label: 'U.S. Markets Closed', reason: closureName } : null,
-      events,
-      marketLens: lensForEvents(matchedEvents),
-      marketLensSource: 'generated'
+      events
     };
+    if (matchedEvents.length) {
+      day.marketLens = lensForEvents(matchedEvents);
+      day.marketLensSource = 'generated';
+    }
+    return day;
   });
 
   const result = {
@@ -553,15 +557,23 @@ function validateWeekAheadPayload(payload) {
     if (day?.closure !== null && day?.closure !== undefined && (!isPlainObject(day.closure) || !day.closure.label || !day.closure.reason)) {
       errors.push(`weekAhead.days[${dayIndex}].closure must be null or a labeled closure.`);
     }
-    if (!isPlainObject(day?.marketLens) || !day.marketLens.title || !day.marketLens.body || !Array.isArray(day.marketLens.watchlist)) {
-      errors.push(`weekAhead.days[${dayIndex}].marketLens is incomplete.`);
-    }
-    if (!['generated', 'editorial'].includes(day?.marketLensSource)) {
-      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be generated or editorial.`);
-    }
     if (!Array.isArray(day?.events)) {
       errors.push(`weekAhead.days[${dayIndex}].events must be an array.`);
       return;
+    }
+    const hasEvents = day.events.length > 0;
+    const hasMarketLens = day.marketLens !== undefined && day.marketLens !== null;
+    if (hasEvents && (!isPlainObject(day.marketLens) || !day.marketLens.title || !day.marketLens.body || !Array.isArray(day.marketLens.watchlist))) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLens is incomplete.`);
+    }
+    if (!hasEvents && hasMarketLens) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLens must be omitted when there are no events.`);
+    }
+    if (hasEvents && !['generated', 'editorial'].includes(day?.marketLensSource)) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be generated or editorial.`);
+    }
+    if (!hasEvents && day?.marketLensSource !== undefined) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be omitted when there are no events.`);
     }
     let previousTime = '';
     day.events.forEach((event, eventIndex) => {

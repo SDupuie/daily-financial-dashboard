@@ -636,11 +636,15 @@ function applyWeekAhead(data, weekAheadPayload) {
   );
   data.weekAhead = {
     ...weekAheadPayload,
-    days: weekAheadPayload.days.map((day) => ({
-      ...day,
-      marketLens: existingLenses.get(day.date) || day.marketLens,
-      marketLensSource: existingLenses.has(day.date) ? 'editorial' : 'generated'
-    }))
+    days: weekAheadPayload.days.map((day) => {
+      const next = { ...day };
+      const editorialLens = existingLenses.get(day.date);
+      if (editorialLens && Array.isArray(day.events) && day.events.length > 0) {
+        next.marketLens = editorialLens;
+        next.marketLensSource = 'editorial';
+      }
+      return next;
+    })
   };
 }
 

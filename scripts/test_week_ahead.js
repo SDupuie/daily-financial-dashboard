@@ -108,6 +108,10 @@ function run() {
   assert.equal(payload.source.provider, 'FXMacroData');
   assert.equal(payload.source.timeInterpretation, TIME_INTERPRETATION);
   assert.equal(payload.sourceSummary.includedEvents, 11);
+  const monday = payload.days.find((day) => day.date === '2026-07-13');
+  assert.deepEqual(monday.events, []);
+  assert.equal(monday.marketLens, undefined);
+  assert.equal(monday.marketLensSource, undefined);
   const tuesday = payload.days.find((day) => day.date === '2026-07-14');
   assert.equal(tuesday.events.length, 4);
   assert.deepEqual(tuesday.events.map((event) => event.period), ['MoM', 'YoY', 'MoM', 'YoY']);
