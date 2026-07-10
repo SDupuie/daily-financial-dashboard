@@ -399,6 +399,27 @@ function testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion() {
   assert.equal(error.exitCode, EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE);
   assert.match(error.message, /NEW \(2026-07-09\)/);
 
+  const staleNarrative = {
+    rows: [{
+      ...staged.payload.rows[0],
+      postReportRefreshRequired: false,
+      outcome: { interpretation: 'Pre-report demand assumptions framed the setup.', guide: 'FY26 outlook reaffirmed.' },
+      reaction: { note: 'Pre-report copy should never return after actuals arrive.' }
+    }]
+  };
+  const invalidatedWeek = {
+    ...week,
+    rows: [{
+      ...week.rows[0],
+      outcome: { overall: 'mixed', guide: '', interpretation: '' },
+      reaction: { status: 'computed', note: '' }
+    }]
+  };
+  const invalidated = buildEarningsNarrativeSidecar(invalidatedWeek, staleNarrative);
+  assert.deepEqual(invalidated.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }]);
+  assert.equal(invalidated.payload.rows[0].outcome.interpretation, '');
+  assert.equal(invalidated.payload.rows[0].postReportRefreshRequired, true);
+
   const completed = buildEarningsNarrativeSidecar(week, {
     rows: [{
       ...staged.payload.rows[0],
@@ -407,6 +428,17 @@ function testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion() {
     }]
   });
   assert.deepEqual(completed.missingRows, []);
+
+  const refreshed = buildEarningsNarrativeSidecar(invalidatedWeek, {
+    rows: [{
+      ...invalidated.payload.rows[0],
+      outcome: { interpretation: 'Margins and the forward outlook became the post-report focus.', guide: 'FY26 outlook reaffirmed.' },
+      reaction: { note: 'Updated margin and outlook detail drove the post-report read.' }
+    }]
+  });
+  assert.deepEqual(refreshed.missingRows, []);
+  assert.equal(refreshed.payload.rows[0].postReportRefreshRequired, undefined);
+  assert.equal(refreshed.payload.rows[0].outcome.interpretation, 'Margins and the forward outlook became the post-report focus.');
 }
 
 function testChartSeriesOwnsDerivedQuoteViews() {

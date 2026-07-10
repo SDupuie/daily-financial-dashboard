@@ -432,6 +432,16 @@ function narrativeNeedsEditorialCopy(row, narrative) {
   return row?.reaction?.status === 'computed' && !String(narrative?.reaction?.note || '').trim();
 }
 
+function canonicalNarrativeIsEmpty(row) {
+  return [
+    row?.eps?.note,
+    row?.revenue?.note,
+    row?.outcome?.guide,
+    row?.outcome?.interpretation,
+    row?.reaction?.note
+  ].every((value) => !String(value || '').trim());
+}
+
 function buildEarningsNarrativeSidecar(week, existing = { rows: [] }) {
   const existingByKey = new Map(
     (Array.isArray(existing.rows) ? existing.rows : []).map((row) => [earningsRowKey(row), row])
@@ -440,27 +450,41 @@ function buildEarningsNarrativeSidecar(week, existing = { rows: [] }) {
     // Keep prior editorial rows and stage any newly display-eligible row for human enrichment.
     .filter((row) => existingByKey.has(earningsRowKey(row)) || isDisplayEligibleEarningsRow(row))
     .map((row) => {
-      const prior = existingByKey.get(earningsRowKey(row)) || {};
+      const existingPrior = existingByKey.get(earningsRowKey(row));
+      const prior = existingPrior || {};
+      // earnings_week_refresh clears all narrative fields whenever deterministic
+      // report facts change. Do not let this sidecar restore that pre-report copy.
+      // The marker survives the first failed run so the editor's replacement copy
+      // can be accepted on the rerun without being cleared a second time.
+      const sidecarRefreshPending = prior.postReportRefreshRequired === true;
+      const stalePriorCopy = Boolean(existingPrior)
+        && canonicalNarrativeIsEmpty(row)
+        && !sidecarRefreshPending;
+      const nextNarrative = stalePriorCopy ? {} : prior;
+      const missingEditorialCopy = narrativeNeedsEditorialCopy(row, nextNarrative);
+      const postReportRefreshRequired = missingEditorialCopy
+        && (sidecarRefreshPending || stalePriorCopy || !existingPrior);
       return {
         symbol: row.symbol,
         reportDate: row.reportDate,
         eps: {
-          note: String(prior.eps?.note || '')
+          note: String(nextNarrative.eps?.note || '')
         },
         revenue: {
-          note: String(prior.revenue?.note || '')
+          note: String(nextNarrative.revenue?.note || '')
         },
         outcome: {
-          guide: String(prior.outcome?.guide || ''),
+          guide: String(nextNarrative.outcome?.guide || ''),
           // Numeric beat/miss fields are displayed separately. Keep only the
           // editorial thesis and release-backed forward guidance here.
-          interpretation: String(prior.outcome?.interpretation || '')
+          interpretation: String(nextNarrative.outcome?.interpretation || '')
         },
         reaction: {
           // The calculated percentage already appears in the monitor. Keep only
           // editorial commentary that explains the reaction's likely driver.
-          note: String(prior.reaction?.note || '')
-        }
+          note: String(nextNarrative.reaction?.note || '')
+        },
+        ...(postReportRefreshRequired ? { postReportRefreshRequired: true } : {})
       };
     });
   const rowsByKey = new Map(rows.map((row) => [earningsRowKey(row), row]));
