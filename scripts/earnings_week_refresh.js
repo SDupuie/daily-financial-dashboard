@@ -470,6 +470,20 @@ function applyFinnhubRefresh(row, providerRow) {
           actual: providerRow.revenue.actual
         }
       },
+      // A provider-date conflict can move the dashboard row to a date verified
+      // by Nasdaq while Finnhub keeps publishing the matching quarter under its
+      // original calendar date. Preserve that returned row in the conflict audit
+      // so the result refresh remains traceable instead of silently stranding it.
+      providerDateConflict: row.sourceAudit?.providerDateConflict ? {
+        ...row.sourceAudit.providerDateConflict,
+        candidates: {
+          ...row.sourceAudit.providerDateConflict.candidates,
+          finnhub: mergeFinnhubConflictCandidates(
+            row.sourceAudit.providerDateConflict.candidates?.finnhub,
+            providerRow
+          )
+        }
+      } : row.sourceAudit?.providerDateConflict,
       selectedSources: {
         ...row.sourceAudit?.selectedSources,
         timing: providerRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
@@ -484,6 +498,30 @@ function applyFinnhubRefresh(row, providerRow) {
       }
     }
   });
+}
+
+function finnhubConflictCandidate(row) {
+  return {
+    reportDate: row.reportDate,
+    reportTiming: row.reportTiming,
+    fiscalQuarter: row.fiscalQuarter,
+    fiscalYear: row.fiscalYear,
+    eps: {
+      estimate: row.eps?.estimate ?? null,
+      actual: row.eps?.actual ?? null
+    },
+    revenue: {
+      estimate: row.revenue?.estimate ?? null,
+      actual: row.revenue?.actual ?? null
+    }
+  };
+}
+
+function mergeFinnhubConflictCandidates(candidates, providerRow) {
+  const candidate = finnhubConflictCandidate(providerRow);
+  const existing = Array.isArray(candidates) ? candidates : [];
+  const withoutSameDate = existing.filter((item) => item?.reportDate !== candidate.reportDate);
+  return [...withoutSameDate, candidate];
 }
 
 function applyEarningsApiCompanyRefresh(row, providerRow) {
@@ -565,6 +603,28 @@ function selectCompanyRow(rows, target) {
     })[0] || null;
 }
 
+function selectFinnhubRefreshRow(rows, target) {
+  const exact = rows.find((row) => rowKey(row) === rowKey(target));
+  if (exact) return exact;
+
+  const conflict = target.sourceAudit?.providerDateConflict;
+  if (!conflict || conflict.selectedProvider === 'finnhub') return null;
+
+  // Once a non-Finnhub date wins a verified calendar conflict, Finnhub can
+  // still publish the quarter's actuals under its original (or revised) date.
+  // Match only the same reported fiscal period and require an actual so a
+  // neighboring estimate-only entry cannot overwrite the dashboard row.
+  return rows
+    .filter((row) => row.symbol === target.symbol)
+    .filter((row) => row.fiscalQuarter === target.fiscalQuarter && row.fiscalYear === target.fiscalYear)
+    .filter((row) => Number.isFinite(row.eps?.actual) || Number.isFinite(row.revenue?.actual))
+    .sort((left, right) => {
+      const leftActuals = Number.isFinite(left.eps?.actual) + Number.isFinite(left.revenue?.actual);
+      const rightActuals = Number.isFinite(right.eps?.actual) + Number.isFinite(right.revenue?.actual);
+      return rightActuals - leftActuals || right.reportDate.localeCompare(left.reportDate);
+    })[0] || null;
+}
+
 function unresolvedCompanyReleaseTaskKeys(source) {
   const appliedIds = new Set((source.companyReleaseApply?.applied || [])
     .map((item) => item?.taskId)
@@ -594,7 +654,7 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     let next = row;
     const selectedSlate = row.sourceAudit?.selectedSources?.slate;
     if (selectedSlate === 'finnhub') {
-      next = applyFinnhubRefresh(row, finnhubByKey.get(rowKey(row)));
+      next = applyFinnhubRefresh(row, selectFinnhubRefreshRow(refreshData.finnhubRows || [], row));
     } else if (selectedSlate === 'earningsApiCalendar') {
       next = applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyBySymbol.get(row.symbol) || [], row));
     }
@@ -615,7 +675,9 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     delete output.narrativeApply;
   }
 
-  output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows);
+  output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
+    shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
+  });
   if (output.companyReleaseTasks.length === 0) delete output.companyReleaseApply;
   updateSummary(output);
   output.generatedAt = new Date().toISOString();
@@ -710,8 +772,10 @@ if (require.main === module) {
 module.exports = {
   applyEarningsApiCompanyRefresh,
   applyFinnhubRefresh,
+  mergeFinnhubConflictCandidates,
   refreshEarningsResults,
   refreshTargetRows,
   removeStaleCompanyReleaseResolutionSidecar,
-  reportWindowArrived
+  reportWindowArrived,
+  selectFinnhubRefreshRow
 };

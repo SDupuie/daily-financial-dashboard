@@ -904,13 +904,61 @@ function companyReleaseTaskFromRecovery(task, row, reason) {
   };
 }
 
-function buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows) {
+const DATE_CONFLICT_RELEASE_MIN_MARKET_CAP = 250000000;
+
+function companyReleaseTaskFromDateConflict(row, reason) {
+  return {
+    id: `${row.reportDate}:${row.symbol}:company-release`,
+    recoveryId: '',
+    symbol: row.symbol,
+    company: row.company,
+    reportDate: row.reportDate,
+    trigger: 'provider_date_conflict_requires_company_release',
+    reason,
+    priority: Number(row.marketCap) >= 10000000000 ? 'high' : 'normal',
+    marketCap: row.marketCap,
+    marketCapDisplay: row.marketCapDisplay,
+    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
+    neededFields: [
+      'reportTiming',
+      'fiscalPeriod',
+      'eps.actual',
+      'revenue.actual',
+      'companyReleaseUrl',
+      'secFilingUrl'
+    ],
+    preferredSources: [
+      'SEC 8-K Exhibit 99.1',
+      'Company investor relations earnings release'
+    ],
+    doNotUseForOverrides: ['finnhub_calendar_row'],
+    permittedUses: [
+      'official_actuals_resolution',
+      'timing_resolution',
+      'fiscal_period_resolution',
+      'eps_basis_resolution'
+    ],
+    instructions: 'Use SEC/company release only to resolve actuals and timing after a verified provider-date conflict. Keep Finnhub estimates for comparison.',
+    sourceAudit: row.sourceAudit
+  };
+}
+
+function buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows, options = {}) {
   const rowsByKey = new Map(rows.map((row) => [`${row.reportDate}:${row.symbol}`, row]));
-  return secondaryRecoveryCandidates.flatMap((task) => {
+  const recoveryTasks = secondaryRecoveryCandidates.flatMap((task) => {
     const row = rowsByKey.get(`${task.reportDate}:${task.symbol}`);
     const reason = companyReleaseReason(row);
     return reason ? [companyReleaseTaskFromRecovery(task, row, reason)] : [];
   });
+  const conflictTasks = rows.flatMap((row) => {
+    const conflict = row.sourceAudit?.providerDateConflict;
+    if (!conflict || conflict.status !== 'resolved' || conflict.selectedProvider === 'finnhub') return [];
+    if (!Number.isFinite(row.marketCap) || row.marketCap < DATE_CONFLICT_RELEASE_MIN_MARKET_CAP) return [];
+    if (!options.shouldEscalateDateConflict?.(row)) return [];
+    const reason = companyReleaseReason(row);
+    return reason ? [companyReleaseTaskFromDateConflict(row, reason)] : [];
+  });
+  return [...recoveryTasks, ...conflictTasks];
 }
 
 function normalizeProfile(symbol, result) {

@@ -288,13 +288,14 @@ function extractReportTiming(filing) {
 
 function extractEps(text) {
   const patterns = [
-    { basis: 'adjusted_non_gaap', regex: /(?:Adjusted diluted EPS|Adjusted EPS|Non-GAAP diluted earnings per share|Non-GAAP diluted EPS)[^$]{0,220}\$\s*([\d.]+)/i },
-    { basis: 'gaap_diluted', regex: /Diluted earnings per (?:common )?share[^$]{0,220}\$\s*([\d.]+)/i },
-    { basis: 'gaap_diluted', regex: /Diluted EPS[^$]{0,160}\$\s*([\d.]+)/i }
+    { basis: 'gaap_diluted', regex: /Net loss[\s\S]{0,260}?\(\s*\$\s*([\d.]+)\s*\)\s+per share/i, sign: -1 },
+    { basis: 'adjusted_non_gaap', regex: /(?:Adjusted diluted EPS|Adjusted EPS|Non-GAAP diluted earnings per share|Non-GAAP diluted EPS)[^$]{0,220}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i },
+    { basis: 'gaap_diluted', regex: /Diluted earnings per (?:common )?share[^$]{0,220}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i },
+    { basis: 'gaap_diluted', regex: /Diluted EPS[^$]{0,160}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i }
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern.regex);
-    if (match) return { value: Number(match[1]), basis: pattern.basis };
+    if (match) return { value: (pattern.sign || (/\(\s*\$/.test(match[0]) ? -1 : 1)) * Number(match[1]), basis: pattern.basis };
   }
   return { value: null, basis: '' };
 }
@@ -323,15 +324,21 @@ function moneyText(value) {
 
 function earningsApiBackup(task) {
   const coverage = task.sourceAudit?.earningsApiCompany?.selectedRow || {};
+  const finnhub = task.sourceAudit?.finnhubCalendar || {};
+  const useFinnhub = task.trigger === 'provider_date_conflict_requires_company_release';
+  const source = useFinnhub ? 'finnhub' : 'earningsapi_company';
+  const backup = useFinnhub ? finnhub : coverage;
   return {
     eps: {
-      estimate: numberOrNull(coverage.eps?.estimate),
-      actual: numberOrNull(coverage.eps?.actual)
+      estimate: numberOrNull(backup.eps?.estimate),
+      actual: numberOrNull(backup.eps?.actual),
+      estimateSource: Number.isFinite(numberOrNull(backup.eps?.estimate)) ? source : ''
     },
     revenue: {
-      estimate: numberOrNull(coverage.revenue?.estimate)
+      estimate: numberOrNull(backup.revenue?.estimate),
+      estimateSource: Number.isFinite(numberOrNull(backup.revenue?.estimate)) ? source : ''
     },
-    fiscalQuarterEnding: String(coverage.fiscalQuarterEnding || '').trim()
+    fiscalQuarterEnding: String(backup.fiscalQuarterEnding || '').trim()
   };
 }
 
@@ -345,7 +352,7 @@ function resolveComparableEps(secEps, task, text) {
     gaapBasis: secEps.basis === 'gaap_diluted' ? secEps.basis : '',
     adjustment,
     estimate: backup.eps.estimate,
-    estimateSource: Number.isFinite(backup.eps.estimate) ? 'earningsapi_company' : '',
+    estimateSource: backup.eps.estimateSource,
     estimateCount: '',
     actualSource: 'sec_company_release',
     comparisonSource: ''
@@ -503,11 +510,12 @@ async function resolveTask(task, tickerMap, args) {
   const backup = earningsApiBackup(task);
   const revenueActual = extractRevenue(text);
   const reportTiming = extractReportTiming(filing);
-  const reaction = await resolveReaction(task, reportTiming, args);
+  const officialReport = { ...task, reportDate: filing.filingDate };
+  const reaction = await resolveReaction(officialReport, reportTiming, args);
   const status = Number.isFinite(comparableEps.actual) && Number.isFinite(revenueActual) ? 'resolved' : 'needs_review';
   const notes = [
     Number.isFinite(comparableEps.estimate)
-      ? 'EarningsAPI company endpoint supplied secondary-recovery EPS consensus; revenue consensus is used only when present in the deterministic backup row.'
+      ? `${task.trigger === 'provider_date_conflict_requires_company_release' ? 'Finnhub' : 'EarningsAPI company endpoint'} supplied the retained consensus estimates for comparison.`
       : 'Company release supplied reported actuals; consensus estimates remain unavailable unless supplied by another deterministic source.'
   ];
   if (comparableEps.adjustment?.note) notes.push(comparableEps.adjustment.note);
@@ -519,7 +527,7 @@ async function resolveTask(task, tickerMap, args) {
     taskId: task.id,
     symbol: task.symbol,
     company: task.company,
-    reportDate: task.reportDate,
+    reportDate: filing.filingDate,
     status,
     sourceType: 'sec_8k_exhibit_99_1',
     sourceUrl,
@@ -527,7 +535,7 @@ async function resolveTask(task, tickerMap, args) {
     confidence: status === 'resolved' ? 'high' : 'medium',
     fields: {
       company: task.company,
-      fiscalPeriod: extractFiscalPeriod(text, task.reportDate),
+      fiscalPeriod: extractFiscalPeriod(text, filing.filingDate),
       reportTiming,
       eps: {
         actual: comparableEps.actual,
@@ -544,7 +552,7 @@ async function resolveTask(task, tickerMap, args) {
       revenue: {
         actual: revenueActual,
         estimate: backup.revenue.estimate,
-        estimateSource: Number.isFinite(backup.revenue.estimate) ? 'earningsapi_company' : ''
+        estimateSource: backup.revenue.estimateSource
       }
     },
     reaction,

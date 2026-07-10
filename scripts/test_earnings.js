@@ -1030,6 +1030,76 @@ async function testResultRefreshDoesNotRebuildSlate() {
   assert.equal(result.payload.secondaryRecoveryCandidates.length, 0, 'Result refresh must not create a new secondary slate.');
 }
 
+async function testResultRefreshUsesFinnhubActualsAfterResolvedDateConflict() {
+  const [baseRow] = buildRows([finnhubRow('CONFLICT', {
+    reportDate: '2026-01-06',
+    eps: { estimate: 1, actual: null },
+    revenue: { estimate: 1000000000, actual: null }
+  })], [profile('CONFLICT')]);
+  const row = {
+    ...baseRow,
+    reportDate: '2026-01-07',
+    reportTiming: 'unknown',
+    reaction: {
+      basis: 'unavailable', percent: null, fromDate: '', fromClose: null,
+      toDate: '', toClose: null, status: 'pending', note: '', source: ''
+    },
+    sourceAudit: {
+      ...baseRow.sourceAudit,
+      providerDateConflict: {
+        symbol: 'CONFLICT',
+        status: 'resolved',
+        selectedDate: '2026-01-07',
+        selectedProvider: 'earningsApiCalendar',
+        selectedDateSource: 'nasdaq',
+        reason: 'nasdaq_matched_earningsapi_date',
+        candidates: {
+          finnhub: [{
+            reportDate: '2026-01-06', reportTiming: 'amc', fiscalQuarter: 4, fiscalYear: 2025,
+            eps: { estimate: 1, actual: null }, revenue: { estimate: 1000000000, actual: null }
+          }],
+          earningsApiCalendar: [],
+          nasdaq: []
+        }
+      },
+      selectedSources: { ...baseRow.sourceAudit.selectedSources, timing: 'none' },
+      yahoo: {}
+    }
+  };
+  const result = await refreshEarningsResults({
+    rows: [row], secondaryRecoveryCandidates: [], companyReleaseTasks: [], summary: { counts: {} }
+  }, {
+    finnhubRows: [finnhubRow('CONFLICT', {
+      reportDate: '2026-01-06',
+      eps: { estimate: 1, actual: 1.5 },
+      revenue: { estimate: 1000000000, actual: 1250000000 }
+    })],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [{
+      symbol: 'CONFLICT', ok: true, status: 200, responseMs: 1, error: '',
+      bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 110 }]
+    }]
+  }, { asOf: '2026-01-08T12:00:00.000Z' });
+
+  const refreshed = result.payload.rows[0];
+  assert.equal(refreshed.eps.actual, 1.5, 'A resolved date conflict must not block Finnhub actuals.');
+  assert.equal(refreshed.revenue.actual, 1250000000);
+  assert.equal(refreshed.sourceAudit.finnhubCalendar.reportDate, '2026-01-06');
+  assert.equal(refreshed.sourceAudit.providerDateConflict.candidates.finnhub[0].eps.actual, 1.5);
+
+  const unresolved = await refreshEarningsResults({
+    rows: [row], secondaryRecoveryCandidates: [], companyReleaseTasks: [], summary: { counts: {} }
+  }, {
+    finnhubRows: [finnhubRow('CONFLICT', {
+      reportDate: '2026-01-06', eps: { estimate: 1, actual: null }, revenue: { estimate: 1000000000, actual: null }
+    })],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: []
+  }, { asOf: '2026-01-08T12:00:00.000Z' });
+  assert.equal(unresolved.payload.companyReleaseTasks.length, 1, 'An arrived date conflict without actuals must escalate to the company-release resolver.');
+  assert.equal(unresolved.payload.companyReleaseTasks[0].trigger, 'provider_date_conflict_requires_company_release');
+}
+
 function testWeekValidatorRejectsUnappliedCompanyReleaseTasks() {
   const source = embeddedWeekFixture();
   source.companyReleaseTasks = [companyReleaseTaskFixture(source)];
@@ -1472,6 +1542,7 @@ async function main() {
   testValidateReleaseSkipsWeekWithoutCompanyReleaseTasks();
   testValidateReleaseRejectsMalformedCompanyReleaseTasks();
   await testResultRefreshDoesNotRebuildSlate();
+  await testResultRefreshUsesFinnhubActualsAfterResolvedDateConflict();
   console.log('Earnings contract fixture tests passed.');
 }
 

@@ -214,6 +214,7 @@ function metricPayload(fields, options = {}) {
 function sourceFromResolution(value, fallback = 'none') {
   if (!value) return fallback;
   if (value === 'earningsapi_company') return 'earningsApiCompany';
+  if (value === 'finnhub') return 'finnhub';
   return value;
 }
 
@@ -306,6 +307,7 @@ function applyResolution(row, task, resolution) {
 
   const updated = {
     ...row,
+    reportDate: resolution.reportDate,
     company: row.company || resolution.company || task.company,
     reportTiming: resolution.fields.reportTiming,
     eps,
@@ -318,7 +320,9 @@ function applyResolution(row, task, resolution) {
     reaction,
     sourceSummary: {
       primary: 'sec_company_release',
-      fallbacks: ['earningsApiCompany', 'finnhubProfile'].filter((item) => item !== 'finnhubProfile' || row.sourceAudit?.finnhubProfile),
+      fallbacks: row.sourceAudit?.selectedSources?.slate === 'finnhub'
+        ? ['finnhub', ...(row.sourceAudit?.providerDateConflict ? ['providerDateConflict'] : []), ...(row.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric' ? ['finnhubMetric'] : [])]
+        : ['earningsApiCompany', 'finnhubProfile'].filter((item) => item !== 'finnhubProfile' || row.sourceAudit?.finnhubProfile),
       reaction: reactionSource(reaction)
     },
     sourceAudit: {
@@ -357,10 +361,12 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
     const task = taskMap.get(resolution.taskId);
     if (!task) throw new Error(`${resolution.taskId} does not map to companyReleaseTasks.`);
     if (task.symbol !== resolution.symbol) throw new Error(`${resolution.taskId} symbol does not match resolution.`);
-    if (task.reportDate !== resolution.reportDate) throw new Error(`${resolution.taskId} reportDate does not match resolution.`);
+    if (task.reportDate !== resolution.reportDate && task.trigger !== 'provider_date_conflict_requires_company_release') {
+      throw new Error(`${resolution.taskId} reportDate does not match resolution.`);
+    }
 
     const key = rowKey(resolution);
-    const existing = rowsByKey.get(key);
+    const existing = rowsByKey.get(key) || rowsByKey.get(rowKey(task));
     const baseRow = existing?.row || rowFromTask(task, resolution);
     const updated = applyResolution(baseRow, task, resolution);
     if (existing) {
