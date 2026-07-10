@@ -1054,6 +1054,36 @@ async function testResultRefreshDoesNotRebuildSlate() {
   assert.equal(result.payload.secondaryRecoveryCandidates.length, 0, 'Result refresh must not create a new secondary slate.');
 }
 
+async function testUnchangedResultRefreshPreservesNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  const result = await refreshEarningsResults(source, {
+    finnhubRows: [finnhubRow('VERIFY')],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [{
+      symbol: 'VERIFY',
+      ok: true,
+      status: 200,
+      responseMs: 1,
+      error: '',
+      bars: [{
+        date: '2026-01-06',
+        close: 100
+      }, {
+        date: '2026-01-07',
+        close: 105
+      }]
+    }]
+  }, {
+    asOf: '2026-01-07T22:00:00.000Z',
+    outputPath: 'generated/earnings_week.json'
+  });
+
+  assert.equal(result.changedRows, 0, 'Unchanged deterministic facts must not invalidate narrative.');
+  assert.equal(result.payload.rows[0].outcome.interpretation, source.rows[0].outcome.interpretation);
+  assert.equal(result.payload.rows[0].reaction.note, source.rows[0].reaction.note);
+  assert.deepEqual(result.payload.narrativeApply, source.narrativeApply);
+}
+
 async function testResultRefreshUsesFinnhubActualsAfterResolvedDateConflict() {
   const [baseRow] = buildRows([finnhubRow('CONFLICT', {
     reportDate: '2026-01-06',
@@ -1567,6 +1597,7 @@ async function main() {
   testValidateReleaseSkipsWeekWithoutCompanyReleaseTasks();
   testValidateReleaseRejectsMalformedCompanyReleaseTasks();
   await testResultRefreshDoesNotRebuildSlate();
+  await testUnchangedResultRefreshPreservesNarrative();
   await testResultRefreshUsesFinnhubActualsAfterResolvedDateConflict();
   console.log('Earnings contract fixture tests passed.');
 }

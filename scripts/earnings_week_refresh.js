@@ -365,10 +365,30 @@ function deterministicSnapshot(row) {
     reportTiming: row.reportTiming,
     fiscalQuarter: row.fiscalQuarter,
     fiscalYear: row.fiscalYear,
-    eps: row.eps,
-    revenue: row.revenue,
+    eps: {
+      estimate: row.eps?.estimate,
+      actual: row.eps?.actual,
+      surprisePercent: row.eps?.surprisePercent,
+      result: row.eps?.result,
+      basis: row.eps?.basis
+    },
+    revenue: {
+      estimate: row.revenue?.estimate,
+      actual: row.revenue?.actual,
+      surprisePercent: row.revenue?.surprisePercent,
+      result: row.revenue?.result
+    },
     outcomeOverall: row.outcome?.overall,
-    reaction: row.reaction
+    reaction: {
+      basis: row.reaction?.basis,
+      percent: row.reaction?.percent,
+      fromDate: row.reaction?.fromDate,
+      fromClose: row.reaction?.fromClose,
+      toDate: row.reaction?.toDate,
+      toClose: row.reaction?.toClose,
+      status: row.reaction?.status,
+      source: row.reaction?.source
+    }
   });
 }
 
@@ -391,6 +411,29 @@ function clearNarrative(row) {
     reaction: {
       ...row.reaction,
       note: ''
+    }
+  };
+}
+
+function preserveNarrative(row, prior) {
+  return {
+    ...row,
+    eps: {
+      ...row.eps,
+      note: prior.eps?.note || ''
+    },
+    revenue: {
+      ...row.revenue,
+      note: prior.revenue?.note || ''
+    },
+    outcome: {
+      ...row.outcome,
+      guide: prior.outcome?.guide || '',
+      interpretation: prior.outcome?.interpretation || ''
+    },
+    reaction: {
+      ...row.reaction,
+      note: prior.reaction?.note || ''
     }
   };
 }
@@ -644,10 +687,23 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
 
   const reactionRows = output.rows.filter((row) => targetKeys.has(rowKey(row)));
   if (reactionRows.length && refreshData.yahooFetches) {
-    const refreshed = attachReactions(reactionRows, refreshData.yahooFetches).map(finalizeRow);
+    const reactionSnapshots = new Map(reactionRows.map((row) => [rowKey(row), deterministicSnapshot(row)]));
+    const reactionRowsByKey = new Map(reactionRows.map((row) => [rowKey(row), row]));
+    const refreshed = attachReactions(reactionRows, refreshData.yahooFetches)
+      .map(finalizeRow)
+      .map((row) => {
+        const key = rowKey(row);
+        return deterministicSnapshot(row) === reactionSnapshots.get(key)
+          ? preserveNarrative(row, reactionRowsByKey.get(key))
+          : row;
+      });
     const refreshedByKey = new Map(refreshed.map((row) => [rowKey(row), row]));
     output.rows = output.rows.map((row) => refreshedByKey.get(rowKey(row)) || row);
-    for (const row of refreshed) changedKeys.add(rowKey(row));
+    for (const row of refreshed) {
+      if (deterministicSnapshot(row) !== reactionSnapshots.get(rowKey(row))) {
+        changedKeys.add(rowKey(row));
+      }
+    }
   }
 
   if (changedKeys.size) {
