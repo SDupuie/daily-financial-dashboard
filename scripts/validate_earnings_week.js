@@ -452,6 +452,26 @@ function validateAuditMetricSnapshot(errors, snapshot, label) {
 
 function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
   const companyReleaseResolution = isObject(audit.companyReleaseResolution) ? audit.companyReleaseResolution : null;
+  const scheduleVerification = isObject(audit.scheduleVerification) ? audit.scheduleVerification : null;
+  if (scheduleVerification) {
+    if (!['corroborated', 'official_confirmed'].includes(scheduleVerification.status)) {
+      errors.push(`${label}.sourceAudit.scheduleVerification.status is invalid.`);
+    }
+    if (!isIsoDate(scheduleVerification.primaryDate)) errors.push(`${label}.sourceAudit.scheduleVerification.primaryDate must be an ISO date.`);
+    if (!Array.isArray(scheduleVerification.secondaryDates) || scheduleVerification.secondaryDates.some((date) => !isIsoDate(date))) {
+      errors.push(`${label}.sourceAudit.scheduleVerification.secondaryDates must contain ISO dates.`);
+    }
+    if (scheduleVerification.status === 'official_confirmed') {
+      const official = scheduleVerification.official;
+      if (!isObject(official) || !isIsoDate(official.reportDate) || !/^https:\/\//.test(official.sourceUrl || '') || !String(official.sourceName || '').trim()) {
+        errors.push(`${label}.sourceAudit.scheduleVerification.official must provide an official ISO date, HTTPS URL, and source name.`);
+      } else if (official.reportDate !== row.reportDate) {
+        errors.push(`${label}.reportDate must match the official schedule confirmation.`);
+      }
+    } else if (scheduleVerification.official !== null) {
+      errors.push(`${label}.sourceAudit.scheduleVerification.official must be null when corroborated.`);
+    }
+  }
   if (!isObject(audit.finnhubCalendar)) {
     errors.push(`${label}.sourceAudit.finnhubCalendar must be populated.`);
   } else {
@@ -462,8 +482,10 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
       ? conflict.candidates.finnhub.map((item) => item.reportDate)
       : [];
     if (conflict) {
-      if (!companyReleaseResolution && conflictSelectedDate !== row.reportDate) errors.push(`${label}.providerDateConflict.selectedDate must match row.reportDate.`);
+      if (!companyReleaseResolution && !scheduleVerification && conflictSelectedDate !== row.reportDate) errors.push(`${label}.providerDateConflict.selectedDate must match row.reportDate.`);
       if (!conflictFinnhubDates.includes(calendar.reportDate)) errors.push(`${label}.finnhubCalendar.reportDate must match a providerDateConflict Finnhub candidate.`);
+    } else if (scheduleVerification?.status === 'official_confirmed') {
+      if (calendar.reportDate !== scheduleVerification.primaryDate) errors.push(`${label}.finnhubCalendar.reportDate must match scheduleVerification.primaryDate.`);
     } else if (calendar.reportDate !== row.reportDate) {
       errors.push(`${label}.finnhubCalendar.reportDate must match row.reportDate.`);
     }

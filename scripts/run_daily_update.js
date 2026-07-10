@@ -12,6 +12,7 @@ const DEFAULT_DASHBOARD = path.resolve(process.cwd(), 'daily_financial_news.html
 const GENERATED_DIR = path.resolve(process.cwd(), 'generated');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
+const EARNINGS_SCHEDULE_REVIEW_PATH = path.join(GENERATED_DIR, 'earnings_schedule_review.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE = 2;
 const SCHEDULED_WINDOWS = {
@@ -527,6 +528,23 @@ function earningsEditorialRequiredError(rows) {
   return error;
 }
 
+function pendingEarningsScheduleReviews() {
+  if (!fs.existsSync(EARNINGS_SCHEDULE_REVIEW_PATH)) return [];
+  const review = readJson(EARNINGS_SCHEDULE_REVIEW_PATH);
+  const week = readJson(EARNINGS_WEEK_PATH);
+  if (review?.range?.from !== week?.range?.from || review?.range?.to !== week?.range?.to) return [];
+  return Array.isArray(review.rows) ? review.rows : [];
+}
+
+function earningsScheduleConfirmationRequiredError(rows) {
+  const labels = rows.map((row) => `${row.symbol} (${row.primaryDate})`).join(', ');
+  const error = new Error(
+    `Official company IR date confirmation is required before this dashboard can be updated: ${labels}`
+  );
+  error.exitCode = EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE;
+  return error;
+}
+
 function readJsonBlock(html, id) {
   const match = html.match(new RegExp(`<script type="application/json" id="${escapeRegExp(id)}">([\\s\\S]*?)<\\/script>`));
   if (!match) {
@@ -836,6 +854,8 @@ function main() {
         '--to', args.calendarRolloverRange.to
       ]);
     }
+    const scheduleReviews = pendingEarningsScheduleReviews();
+    if (scheduleReviews.length) throw earningsScheduleConfirmationRequiredError(scheduleReviews);
     runCommand('node', ['scripts/earnings_week.js', 'refresh']);
     const missingNarrativeRows = syncEarningsNarrativeSidecar();
     if (missingNarrativeRows.length) {
@@ -870,6 +890,7 @@ module.exports = {
   buildEarningsNarrativeSidecar,
   calendarRolloverRange,
   earningsCalendarNeedsBuild,
+  earningsScheduleConfirmationRequiredError,
   earningsEditorialRequiredError,
   EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   applyDashboardDataJson,

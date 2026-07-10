@@ -7,6 +7,7 @@ const {
   buildEarningsWeekPolicy,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  isDisplayEligibleEarningsRow,
   normalizeEarningsTiming,
   numberOrNull
 } = require('./earnings_week_contract');
@@ -31,6 +32,10 @@ const DEFAULT_FINNHUB_METRIC_CACHE = path.resolve(process.cwd(), 'generated', 'f
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(process.cwd(), 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_MONTHLY_LIMIT = 1000;
 const DEFAULT_EARNINGSAPI_RESERVE = 150;
+const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
+const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
+const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
+const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 28;
 const REACTION_LOOKBACK_DAYS = 5;
 const REACTION_LOOKAHEAD_DAYS = 5;
 const SECONDARY_RECOVERY_MIN_MARKET_CAP = 1000000000;
@@ -51,6 +56,8 @@ function parseArgs(argv) {
     earningsApiUsage: DEFAULT_EARNINGSAPI_USAGE,
     earningsApiMonthlyLimit: DEFAULT_EARNINGSAPI_MONTHLY_LIMIT,
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
+    scheduleConfirmations: DEFAULT_SCHEDULE_CONFIRMATIONS,
+    scheduleReview: DEFAULT_SCHEDULE_REVIEW,
     skipEarningsApi: false,
     compact: false
   };
@@ -127,6 +134,16 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--schedule-confirmations') {
+      args.scheduleConfirmations = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_SCHEDULE_CONFIRMATIONS);
+      i += 1;
+      continue;
+    }
+    if (arg === '--schedule-review') {
+      args.scheduleReview = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_SCHEDULE_REVIEW);
+      i += 1;
+      continue;
+    }
     if (arg === '--skip-earningsapi') {
       args.skipEarningsApi = true;
       continue;
@@ -177,6 +194,9 @@ Options:
   --earningsapi-usage PATH     EarningsAPI monthly usage ledger
   --earningsapi-monthly-limit  Monthly EarningsAPI call cap (default: 1000)
   --earningsapi-reserve 150    Calls reserved for other dashboard runs
+  --schedule-confirmations PATH
+                               Official IR date confirmations for uncorroborated/in-week-conflict rows
+  --schedule-review PATH       Generated review queue for rows requiring an official date confirmation
   --skip-earningsapi           Disable secondary-source recovery
   --compact                    Print compact coverage report
   --help                       Show this help
@@ -494,9 +514,17 @@ async function fetchEarningsApiCalendarDay(date, args, token, usage) {
   };
 }
 
-async function fetchEarningsApiCalendar(args, token, usage) {
+function calendarVerificationDates(args) {
+  const dates = [];
+  const first = addDays(args.from, -CALENDAR_VERIFICATION_LOOKBACK_DAYS);
+  const last = addDays(args.to, CALENDAR_VERIFICATION_LOOKAHEAD_DAYS);
+  for (let date = first; compareIsoDate(date, last) <= 0; date = addDays(date, 1)) dates.push(date);
+  return dates;
+}
+
+async function fetchEarningsApiCalendar(args, token, usage, dates = args.displayDates) {
   const days = [];
-  for (const date of args.displayDates) {
+  for (const date of dates) {
     days.push(await fetchEarningsApiCalendarDay(date, args, token, usage));
   }
   return days;
@@ -628,7 +656,7 @@ function providerDateConflictAudit(symbol, finnhubRows, earningsApiRows, nasdaqR
   };
 }
 
-function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasdaqCalendarDays = []) {
+function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasdaqCalendarDays = [], options = {}) {
   // Nasdaq is a strict tie-breaker only: it may confirm one of the provider dates,
   // but it must not introduce a third date or upgrade timing by itself.
   const originalFinnhubRowsBySymbol = new Map();
@@ -667,7 +695,7 @@ function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasd
     let selectedDateSource = 'finnhub_fallback';
     let reason = 'nasdaq_unavailable_or_unmatched_finnhub_symbol_present';
 
-    if (finnhubDates.length === 1 && earningsApiDates.length === 1 && nasdaqDates.length === 1) {
+    if (options.allowNasdaqResolution !== false && finnhubDates.length === 1 && earningsApiDates.length === 1 && nasdaqDates.length === 1) {
       if (nasdaqDates[0] === finnhubDates[0]) {
         selectedDate = finnhubDates[0];
         selectedProvider = 'finnhub';
@@ -711,6 +739,93 @@ function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasd
     earningsApiCalendarDays: resolvedEarningsApiCalendarDays,
     providerDateConflicts: [...conflictsBySymbol.values()]
   };
+}
+
+function readScheduleConfirmations(file) {
+  if (!fs.existsSync(file)) return [];
+  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.rows)) {
+    throw new Error('earnings_schedule_confirmations.json must contain schemaVersion 1 and rows[].');
+  }
+  const seen = new Set();
+  return payload.rows.map((row, index) => {
+    const symbol = String(row?.symbol || '').trim().toUpperCase();
+    const reportDate = String(row?.reportDate || '').trim();
+    const sourceUrl = String(row?.sourceUrl || '').trim();
+    const sourceName = String(row?.sourceName || '').trim();
+    if (!/^[A-Z0-9.-]+$/.test(symbol) || !isIsoDate(reportDate) || !/^https:\/\//.test(sourceUrl) || !sourceName) {
+      throw new Error(`earnings_schedule_confirmations.rows[${index}] must provide symbol, ISO reportDate, sourceName, and HTTPS sourceUrl.`);
+    }
+    if (seen.has(symbol)) throw new Error(`earnings_schedule_confirmations contains duplicate ${symbol}.`);
+    seen.add(symbol);
+    return { symbol, reportDate, sourceUrl, sourceName };
+  });
+}
+
+function scheduleAudit(status, row, secondaryDates, official = null) {
+  return {
+    status,
+    primaryDate: row.reportDate,
+    secondaryDates,
+    official
+  };
+}
+
+function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirmations = []) {
+  const activeDates = new Set(displayDatesForRange(range.from, range.to));
+  const secondaryDatesBySymbol = new Map();
+  for (const candidate of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
+    if (!secondaryDatesBySymbol.has(candidate.symbol)) secondaryDatesBySymbol.set(candidate.symbol, new Set());
+    secondaryDatesBySymbol.get(candidate.symbol).add(candidate.reportDate);
+  }
+  const confirmationsBySymbol = new Map(confirmations.map((row) => [row.symbol, row]));
+  const review = [];
+  const verifiedRows = [];
+
+  for (const row of rows) {
+    if (!isDisplayEligibleEarningsRow(row)) {
+      verifiedRows.push(row);
+      continue;
+    }
+    const secondaryDates = [...(secondaryDatesBySymbol.get(row.symbol) || new Set())].sort();
+    const confirmation = confirmationsBySymbol.get(row.symbol) || null;
+    const datesAgree = secondaryDates.length === 1 && secondaryDates[0] === row.reportDate;
+    const hasCrossWeekConflict = secondaryDates.some((date) => !activeDates.has(date));
+    const hasInWeekConflict = secondaryDates.length > 0 && !datesAgree && !hasCrossWeekConflict;
+
+    if (datesAgree) {
+      verifiedRows.push({
+        ...row,
+        sourceAudit: {
+          ...row.sourceAudit,
+          scheduleVerification: scheduleAudit('corroborated', row, secondaryDates)
+        }
+      });
+      continue;
+    }
+    if (hasCrossWeekConflict) continue;
+    if (confirmation && activeDates.has(confirmation.reportDate)) {
+      verifiedRows.push({
+        ...row,
+        reportDate: confirmation.reportDate,
+        sourceAudit: {
+          ...row.sourceAudit,
+          scheduleVerification: scheduleAudit('official_confirmed', row, secondaryDates, confirmation)
+        }
+      });
+      continue;
+    }
+    if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
+    review.push({
+      symbol: row.symbol,
+      company: row.company,
+      primaryDate: row.reportDate,
+      secondaryDates,
+      reason: hasInWeekConflict ? 'in_week_calendar_date_conflict' : 'uncorroborated_primary_calendar_date',
+      required: 'official_company_ir_date_confirmation'
+    });
+  }
+  return { rows: verifiedRows, review };
 }
 
 function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, profiles) {
@@ -1805,11 +1920,22 @@ async function main() {
   const finnhubCalendar = await fetchFinnhubCalendar(args, token);
   ensureFinnhubPrimaryUsable(finnhubCalendar, args);
 
-  // This script performs the weekly slate build. EarningsAPI calendar calls
-  // are a one-time coverage pass here, not part of ordinary result refreshes.
-  const earningsApiCalendarDays = await fetchEarningsApiCalendar(args, earningsApiToken, earningsApiUsage);
-  const nasdaqCalendarDays = await fetchNasdaqCalendarForConflicts(finnhubCalendar.rows, earningsApiCalendarDays, args);
-  const calendarResolution = resolveProviderDateConflicts(finnhubCalendar.rows, earningsApiCalendarDays, nasdaqCalendarDays);
+  // The secondary scan intentionally reaches beyond the visible week. This
+  // catches a primary-date error that otherwise looks like a missing backup row.
+  const earningsApiCalendarDays = await fetchEarningsApiCalendar(
+    args,
+    earningsApiToken,
+    earningsApiUsage,
+    calendarVerificationDates(args)
+  );
+  const activeEarningsApiCalendarDays = earningsApiCalendarDays.filter((day) => args.displayDates.includes(day.date));
+  const nasdaqCalendarDays = await fetchNasdaqCalendarForConflicts(finnhubCalendar.rows, activeEarningsApiCalendarDays, args);
+  const calendarResolution = resolveProviderDateConflicts(
+    finnhubCalendar.rows,
+    activeEarningsApiCalendarDays,
+    nasdaqCalendarDays,
+    { allowNasdaqResolution: false }
+  );
   const earningsApiCandidateRows = calendarResolution.earningsApiCalendarDays
     .flatMap((day) => day.rows)
     .filter((row) => !calendarResolution.finnhubRows.some((finnhubRow) => finnhubRow.symbol === row.symbol && finnhubRow.reportDate === row.reportDate));
@@ -1823,8 +1949,22 @@ async function main() {
     finnhubMetrics,
     earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays
   });
+  const scheduleVerification = verifyFinnhubScheduleRows(
+    finnhubRows,
+    earningsApiCalendarDays,
+    { from: args.from, to: args.to },
+    readScheduleConfirmations(args.scheduleConfirmations)
+  );
+  fs.mkdirSync(path.dirname(args.scheduleReview), { recursive: true });
+  fs.writeFileSync(args.scheduleReview, `${JSON.stringify({
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    range: { from: args.from, to: args.to },
+    rows: scheduleVerification.review,
+    outputPath: args.scheduleReview
+  }, null, 2)}\n`);
   const earningsApiRows = buildEarningsApiRows(secondaryRecoveryCandidates, earningsApiCompanyFetches);
-  const mergedRows = [...finnhubRows, ...earningsApiRows].sort((left, right) => {
+  const mergedRows = [...scheduleVerification.rows, ...earningsApiRows].sort((left, right) => {
     const dateCompare = left.reportDate.localeCompare(right.reportDate);
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
@@ -1885,6 +2025,7 @@ module.exports = {
   buildSecondaryRecoveryCandidates,
   buildRows,
   buildCompanyReleaseTasks,
+  calendarVerificationDates,
   combinedOutcome,
   ensureFinnhubPrimaryUsable,
   fetchNasdaqCalendarForConflicts,
@@ -1892,6 +2033,7 @@ module.exports = {
   fetchYahooBarsForRows,
   profileFromCache,
   resolveProviderDateConflicts,
+  verifyFinnhubScheduleRows,
   storeProfileInCache,
   valueOutcome
 };

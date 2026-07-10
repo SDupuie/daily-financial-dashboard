@@ -20,9 +20,11 @@ const {
   buildCompanyReleaseTasks,
   buildSecondaryRecoveryCandidates,
   buildRows,
+  calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
   profileFromCache,
-  resolveProviderDateConflicts
+  resolveProviderDateConflicts,
+  verifyFinnhubScheduleRows
 } = require('./earnings_week_build');
 const {
   applyCompanyReleaseResolutions,
@@ -489,6 +491,63 @@ function testUnresolvedProviderDateConflictFallsBackToFinnhub() {
   assert.equal(resolution.finnhubRows[0].providerDateConflict.status, 'fallback');
   assert.equal(resolution.finnhubRows[0].providerDateConflict.selectedDateSource, 'finnhub_fallback');
   assert.equal(secondaryRecoveryCandidates.length, 0, 'Unresolved same-symbol conflicts must not surface duplicate recovery rows.');
+}
+
+function testPrimaryScheduleVerification() {
+  const range = { from: '2026-01-05', to: '2026-01-09' };
+  const baseRows = (symbol) => buildRows([finnhubRow(symbol, { reportDate: '2026-01-06' })], [profile(symbol)]);
+  const matching = verifyFinnhubScheduleRows(baseRows('MATCH'), [{
+    date: '2026-01-06', rows: [earningsApiRow('MATCH', { reportDate: '2026-01-06' })]
+  }], range);
+  assert.equal(matching.rows.length, 1);
+  assert.equal(matching.review.length, 0);
+  assert.equal(matching.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
+
+  const crossWeek = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [{
+    date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })]
+  }], range);
+  assert.equal(crossWeek.rows.length, 0, 'A conflicting date outside the active week must not appear in the current slate.');
+  assert.equal(crossWeek.review.length, 0);
+
+  const uncorroborated = verifyFinnhubScheduleRows(baseRows('SINGLE'), [], range);
+  assert.equal(uncorroborated.rows.length, 0);
+  assert.deepEqual(uncorroborated.review.map((row) => row.reason), ['uncorroborated_primary_calendar_date']);
+
+  const official = verifyFinnhubScheduleRows(baseRows('OFFICIAL'), [{
+    date: '2026-01-07', rows: [earningsApiRow('OFFICIAL', { reportDate: '2026-01-07' })]
+  }], range, [{
+    symbol: 'OFFICIAL',
+    reportDate: '2026-01-08',
+    sourceName: 'Official investor relations calendar',
+    sourceUrl: 'https://investors.example.test/earnings'
+  }]);
+  assert.equal(official.rows[0].reportDate, '2026-01-08');
+  assert.equal(official.rows[0].sourceAudit.scheduleVerification.status, 'official_confirmed');
+  assert.equal(official.review.length, 0);
+
+  assert.equal(calendarVerificationDates({ from: range.from, to: range.to }).includes('2026-02-06'), true);
+}
+
+function testWeekValidatorAllowsOfficialScheduleRedate() {
+  const source = embeddedWeekFixture();
+  const row = source.rows.find((item) => item.symbol === 'H');
+  assert.ok(row, 'Embedded fixture must include Hyatt for official-date validation coverage.');
+  row.reportDate = '2026-07-09';
+  source.narrativeApply.applied = source.narrativeApply.applied.map((item) => item.symbol === 'H'
+    ? { ...item, reportDate: row.reportDate }
+    : item);
+  row.sourceAudit.scheduleVerification = {
+    status: 'official_confirmed',
+    primaryDate: '2026-07-10',
+    secondaryDates: ['2026-07-09'],
+    official: {
+      symbol: 'H',
+      reportDate: '2026-07-09',
+      sourceName: 'Official investor relations calendar',
+      sourceUrl: 'https://investors.example.test/earnings'
+    }
+  };
+  validateWeekPayload(source);
 }
 
 function testFinnhubRowsCanRecoverProfileOnly() {
@@ -1569,6 +1628,8 @@ async function main() {
   testConflictDateRecoveryCanPreserveDisplayEligibility();
   testNasdaqConfirmedFinnhubDateSuppressesConflictRecovery();
   testUnresolvedProviderDateConflictFallsBackToFinnhub();
+  testPrimaryScheduleVerification();
+  testWeekValidatorAllowsOfficialScheduleRedate();
   testFinnhubRowsCanRecoverProfileOnly();
   testWeekValidatorAcceptsProfileRecoveryContract();
   testWeekValidatorAllowsEmptyEarningsWeek();

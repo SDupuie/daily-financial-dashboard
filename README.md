@@ -361,7 +361,7 @@ Allowed `reportTiming` values are `bmo`, `amc`, `dmh`, and `unknown`. Allowed me
 ### EarningsAPI budget policy
 
 - Treat the monthly quota as a scarce secondary-recovery budget, not a primary data source.
-- Query EarningsAPI calendar at most once per weekday in the target week during a normal weekly discovery pass.
+- During a weekly build, query EarningsAPI calendar across the active week plus a bounded seven-day lookback and 28-day lookahead for date corroboration. This scan never runs during ordinary result refreshes.
 - Query EarningsAPI company rows only for Finnhub-missing display candidates.
 - Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
 - Keep a monthly call counter and stop optional calls before the limit. Preserve reserve capacity for urgent secondary-recovery checks.
@@ -376,12 +376,27 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 2. Fetch Finnhub earnings calendar for the selected five trading days.
 3. Fetch Finnhub profiles for Finnhub rows and filter display eligibility by market cap, country/exchange/profile quality, and watchlist rules.
 4. If Finnhub fails, returns zero usable rows, or returns fewer than the configured minimum usable rows, fail closed instead of promoting a secondary source into the whole slate. The default minimum is `max(1, weekdays * 2)`, so the normal Monday-Friday strip requires at least 10 Finnhub rows before any EarningsAPI secondary-recovery calls. Use `--min-finnhub-rows 1` only for intentional holiday-week or diagnostic runs.
-5. Fetch EarningsAPI calendar for the same five trading days as a one-time coverage check for the slate build. Do not repeat this call during ordinary result refreshes for the same calendar slate.
-6. If Finnhub and EarningsAPI have the same symbol on different dates, fetch Nasdaq calendar for the same week as a strict conflict-only resolver. Nasdaq may confirm the report date only when it returns exactly one in-week row for that symbol and that date matches either Finnhub or EarningsAPI. If Nasdaq fails, returns no row, returns multiple rows, or returns a third date, ignore Nasdaq and keep Finnhub because Finnhub has the symbol in the weekly slate. Nasdaq date confirmation does not confirm timing; use Nasdaq timing only when supplied and matching the selected provider, otherwise keep timing unknown.
-7. For Finnhub rows, fetch `profile2` with 429 retry/backoff and use `generated/finnhub_profile_cache.json` only after live profile fetches fail or rate-limit. For rows with empty Finnhub profile data after that, read cached Finnhub `stock/metric` market cap first, then fetch the metric endpoint with conservative retry/backoff if uncached; use the matching EarningsAPI calendar row for company name only. This may make a Finnhub-covered row display-eligible, but it must not change Finnhub EPS, revenue, timing, or outcome.
-8. Compare EarningsAPI-discovered symbols against the conflict-resolved Finnhub slate. Queue only symbols absent from Finnhub as `secondaryRecoveryCandidates`; same-symbol date conflicts must collapse to one audited canonical row, not duplicate recovery rows.
-9. For each queued candidate, fetch the EarningsAPI company endpoint and select the row matching the report date. Use that row for EPS/revenue estimates and actuals only after the date is consistent.
-10. Persist the canonical `earnings_week.json` with the built slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes.
+5. Fetch EarningsAPI calendar across the active week plus a bounded seven-day lookback and 28-day lookahead. Use only active-week rows for secondary recovery; use the wider scan solely to corroborate report dates.
+6. Every display-eligible Finnhub row needs either one matching EarningsAPI date or an official company IR confirmation in `generated/earnings_schedule_confirmations.json`. If a secondary date falls outside the active five-trading-day range, exclude the Finnhub row from that week. If dates disagree within the active week, or Finnhub has no secondary match, queue the row in `generated/earnings_schedule_review.json` and stop the dashboard update until an official IR confirmation is supplied. Nasdaq is audit-only in this flow; it does not choose a date over the official company source.
+7. An official confirmation row must contain `symbol`, `reportDate`, `sourceName`, and an HTTPS `sourceUrl`. If its date is in the active week, the canonical row moves to that date; if it is outside the active week, the row is excluded. After adding or changing a confirmation, rebuild the active week with `node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD`, then rerun the deterministic orchestrator.
+8. For Finnhub rows, fetch `profile2` with 429 retry/backoff and use `generated/finnhub_profile_cache.json` only after live profile fetches fail or rate-limit. For rows with empty Finnhub profile data after that, read cached Finnhub `stock/metric` market cap first, then fetch the metric endpoint with conservative retry/backoff if uncached; use the matching EarningsAPI calendar row for company name only. This may make a Finnhub-covered row display-eligible, but it must not change Finnhub EPS, revenue, timing, or outcome.
+9. Compare active-week EarningsAPI-discovered symbols against the corroborated Finnhub slate. Queue only symbols absent from Finnhub as `secondaryRecoveryCandidates`; same-symbol date conflicts must collapse to one audited canonical row, not duplicate recovery rows.
+10. For each queued candidate, fetch the EarningsAPI company endpoint and select the row matching the report date. Use that row for EPS/revenue estimates and actuals only after the date is consistent.
+11. Persist the canonical `earnings_week.json` with the verified slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes.
+
+`earnings_schedule_confirmations.json` uses this local generated-artifact shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "rows": [{
+    "symbol": "H",
+    "reportDate": "2026-07-30",
+    "sourceName": "Hyatt investor relations",
+    "sourceUrl": "https://investors.hyatt.com/"
+  }]
+}
+```
 
 #### Post-report result refresh
 

@@ -16,17 +16,17 @@ function earningsRowKey(row) {
 function buildEarningsWeekPolicy() {
   return {
     baseSlate: 'Finnhub earnings calendar by date range',
-    enrichment: 'Finnhub company profile endpoint by symbol for name, exchange, country, and market capitalization; Finnhub metric plus EarningsAPI calendar for identity-only recovery when Finnhub profile is empty; Nasdaq calendar as a conflict-only date resolver when Finnhub and EarningsAPI disagree on the same symbol; EarningsAPI company endpoint for display-scale rows missing from Finnhub',
+    enrichment: 'Finnhub company profile endpoint by symbol for name, exchange, country, and market capitalization; a bounded EarningsAPI calendar scan corroborates display-eligible report dates; official company IR confirmation resolves uncorroborated or in-week-conflict dates; Finnhub metric plus EarningsAPI calendar support identity-only recovery when Finnhub profile is empty; EarningsAPI company endpoint covers display-scale rows missing from Finnhub',
     reaction: 'Yahoo Finance Chart API close-to-close policy',
     sourceHierarchy: [
       'Finnhub primary for calendar slate, company profile, timing, EPS/revenue estimates, and EPS/revenue actuals when the row is present.',
       'Finnhub metric endpoint may recover market capitalization when Finnhub profile is empty for a Finnhub-present row.',
-      'EarningsAPI secondary for display-scale events missing from Finnhub, and company-name recovery only when Finnhub profile is empty for a Finnhub-present row; never overrides a Finnhub row.',
+      'EarningsAPI secondary corroborates display-eligible Finnhub dates and supplies display-scale events missing from Finnhub; an official company IR confirmation may set the report date within the active week.',
       'SEC/company release resolution for actual revenue, EPS context, fiscal period, report timing, and source verification.',
       'Yahoo Finance Chart API for close-to-close market reaction.'
     ],
     fieldPrimaries: {
-      slate: 'Finnhub earnings calendar',
+      slate: 'Finnhub earnings calendar after date corroboration or official company IR confirmation',
       company: 'Finnhub company profile name, falling back to EarningsAPI calendar company name for profile-empty Finnhub rows, then ticker symbol',
       marketCap: 'Finnhub company profile marketCapitalization converted from millions to dollars, falling back to Finnhub stock metric marketCapitalization for profile-empty Finnhub rows',
       timing: 'Finnhub earnings calendar hour',
@@ -46,7 +46,7 @@ function buildEarningsWeekPolicy() {
       unknown: 'unavailable'
     },
     secondaryRecoveryFieldPolicy: {
-      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. If Finnhub has the same symbol on a different date, a strict Nasdaq match may confirm either provider date; otherwise Finnhub remains canonical and the EarningsAPI row is not recovered.',
+      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row; a different-week secondary date excludes it from the current slate, while an in-week conflict or missing secondary row requires official company IR confirmation.',
       profileRecovery: 'For Finnhub-present rows with empty Finnhub profile, EarningsAPI calendar may supply company name and Finnhub metric may supply market capitalization; EPS/revenue/timing remain Finnhub.',
       eps: 'EarningsAPI company endpoint may supply EPS estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
       revenue: 'EarningsAPI company endpoint may supply revenue estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
@@ -54,8 +54,8 @@ function buildEarningsWeekPolicy() {
       reaction: 'Yahoo Finance Chart API.'
     },
     conflictResolution: {
-      nasdaqCalendar: 'Use only for same-symbol, different-date Finnhub/EarningsAPI conflicts. Nasdaq resolves the report date only when it returns exactly one in-week row matching either provider date; otherwise ignore Nasdaq and fall back to Finnhub when Finnhub has the symbol.',
-      timing: 'Nasdaq date confirmation does not imply timing confirmation. Use Nasdaq timing only when it is supplied and agrees with the selected provider; otherwise keep timing unknown.'
+      officialCompanyIr: 'Official company investor-relations schedule resolves in-week conflicts and uncorroborated display rows. A confirmation outside the active five-trading-day range excludes the row from that week.',
+      nasdaqCalendar: 'Nasdaq remains an audit source and does not select a report date over the official company source.'
     }
   };
 }
