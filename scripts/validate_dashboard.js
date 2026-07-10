@@ -117,6 +117,11 @@ function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
 
+function hasAtMostFourDecimalPlaces(value) {
+  if (!isFiniteNumber(value)) return false;
+  return Number(value) === Number(Number(value).toFixed(4));
+}
+
 function isOffsetBearingIsoDateTime(value) {
   return isIsoDateTime(value);
 }
@@ -657,6 +662,9 @@ if (!dashboardMatch) {
         if (chartData.schemaVersion !== 1) {
           errors.push('chart-data.schemaVersion must be 1.');
         }
+        if (chartData.barEncoding !== 'tuple-v1') {
+          errors.push('chart-data.barEncoding must be tuple-v1.');
+        }
         if (!Array.isArray(chartData.series)) {
           errors.push('chart-data.series must be an array.');
         }
@@ -677,29 +685,42 @@ if (!dashboardMatch) {
         }
         const chartSeriesByTicker = new Map();
         for (const [index, itemRaw] of chartSeries.entries()) {
-          const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
-          const ticker = String(item.ticker || '').toUpperCase();
+          const sourceItem = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
+          const ticker = String(sourceItem.ticker || '').toUpperCase();
           const label = ticker || `chart-data.series[${index}]`;
           if (!ticker) errors.push(`chart-data.series[${index}].ticker must be populated.`);
           if (chartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded chart series for ${ticker}.`);
-          chartSeriesByTicker.set(ticker, item);
 
           const expectedSource = expectedChartSourceSymbols.get(ticker);
           if (!expectedSource) {
             errors.push(`${label} is not a required chart ticker.`);
-          } else if (item.sourceSymbol !== expectedSource) {
+          } else if (sourceItem.sourceSymbol !== expectedSource) {
             errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
           }
-          if (!recognizedChartSources.has(item.source)) {
+          if (!recognizedChartSources.has(sourceItem.source)) {
             errors.push(`${label}.source is not recognized.`);
           }
-          if (!Array.isArray(item.bars) || item.bars.length < 2) {
+          const decodedBars = [];
+          if (!Array.isArray(sourceItem.bars) || sourceItem.bars.length < 2) {
             errors.push(`${label}.bars must contain at least two daily bars for the inline chart.`);
           } else {
             let previousTime = '';
-            for (const [barIndex, barRaw] of item.bars.entries()) {
-              const bar = barRaw && typeof barRaw === 'object' ? barRaw : {};
+            for (const [barIndex, barRaw] of sourceItem.bars.entries()) {
               const barLabel = `${label}.bars[${barIndex}]`;
+              if (!Array.isArray(barRaw) || barRaw.length !== 6) {
+                errors.push(`${barLabel} must be a [time, open, high, low, close, volume] tuple.`);
+                continue;
+              }
+              const [time, open, high, low, close, volume] = barRaw;
+              const bar = {
+                time,
+                open,
+                high,
+                low,
+                close,
+                ...(volume === null ? {} : { volume })
+              };
+              decodedBars.push(bar);
               if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
                 errors.push(`${barLabel}.time must be an ISO date.`);
               }
@@ -710,6 +731,8 @@ if (!dashboardMatch) {
               for (const field of ['open', 'high', 'low', 'close']) {
                 if (!isFiniteNumber(bar[field])) {
                   errors.push(`${barLabel}.${field} must be numeric.`);
+                } else if (!hasAtMostFourDecimalPlaces(bar[field])) {
+                  errors.push(`${barLabel}.${field} must use at most four decimal places.`);
                 }
               }
               if (!isCoherentOhlc(bar)) {
@@ -719,23 +742,25 @@ if (!dashboardMatch) {
                 errors.push(`${barLabel}.volume must be a non-negative number when present.`);
               }
               // Close-only sources intentionally duplicate close into OHLC so Lightweight Charts can render consistently.
-              if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
+              if (sourceItem.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
                 errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
               }
-              if (item.noVolume && bar.volume !== undefined) {
+              if (sourceItem.noVolume && bar.volume !== undefined) {
                 errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
               }
               // Guard the embedded artifact against quote-only latest bars masquerading as OHLC candles.
-              if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
+              if (!sourceItem.priceOnly && sourceItem.dataKind === 'ohlc' && barIndex === sourceItem.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
                 errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
               }
             }
           }
-          if (item.sourceSymbol === 'TREASURY:CURVE') {
-            const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
+          const item = { ...sourceItem, bars: decodedBars };
+          chartSeriesByTicker.set(ticker, item);
+          if (sourceItem.sourceSymbol === 'TREASURY:CURVE') {
+            const curvePoints = Array.isArray(sourceItem.curvePoints) ? sourceItem.curvePoints : [];
             validateYieldCurvePointSet(label, 'curvePoints', curvePoints);
-            validateYieldCurveComparisons(label, item, curvePoints);
-            const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
+            validateYieldCurveComparisons(label, sourceItem, curvePoints);
+            const curveSpread = sourceItem.curveSpread && typeof sourceItem.curveSpread === 'object' ? sourceItem.curveSpread : {};
             if (curveSpread.label !== '2s10s') {
               errors.push(`${label}.curveSpread.label must be 2s10s so the row does not duplicate the 10Y Treasury quote.`);
             }

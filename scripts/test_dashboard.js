@@ -14,6 +14,7 @@ const {
   refreshWindow
 } = require('./local_market_server');
 const {
+  compactChartPayload,
   finnhubQuoteBarFromPayload,
   mergeFinnhubQuoteBar,
   quoteRowFromSeries,
@@ -848,6 +849,25 @@ function validateDashboardFixture(data, fixturePrefix) {
   }
 }
 
+function validateChartDataFixture(chartData, fixturePrefix) {
+  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  try {
+    fs.writeFileSync(dashboardFile, replaceJsonBlock(html, 'chart-data', JSON.stringify(chartData)));
+    return spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'validate_dashboard.js'),
+      dashboardFile
+    ], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-10T13:30:00Z' }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function validationDashboardData() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   return readJsonBlock(html, 'dashboard-data');
@@ -895,6 +915,39 @@ function testDashboardValidatorAcceptsFridayBridgeCalendars() {
 
   const result = validateDashboardFixture(data, 'dfd-friday-bridge-');
   assert.equal(result.status, 0, result.stderr);
+}
+
+function testCompactChartPayloadUsesFourDecimalTuples() {
+  const compact = compactChartPayload({
+    schemaVersion: 1,
+    series: [{
+      ticker: 'TEST',
+      bars: [{
+        time: '2026-07-10',
+        open: 1.23456,
+        high: 1.98765,
+        low: 1.11114,
+        close: 1.22225,
+        volume: 123.6
+      }]
+    }]
+  });
+  assert.equal(compact.barEncoding, 'tuple-v1');
+  assert.deepEqual(compact.series[0].bars[0], ['2026-07-10', 1.2346, 1.9877, 1.1111, 1.2223, 124]);
+}
+
+function testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const chartData = readJsonBlock(html, 'chart-data');
+  chartData.series[0].bars[0] = ['2021-07-12', 1.23456, 2, 1, 2, null];
+  const precisionResult = validateChartDataFixture(chartData, 'dfd-chart-precision-');
+  assert.notEqual(precisionResult.status, 0, 'Embedded OHLC values must be capped at four decimals.');
+  assert.match(precisionResult.stderr, /must use at most four decimal places/);
+
+  chartData.series[0].bars[0] = { time: '2021-07-12', open: 1, high: 2, low: 1, close: 2 };
+  const shapeResult = validateChartDataFixture(chartData, 'dfd-chart-tuple-');
+  assert.notEqual(shapeResult.status, 0, 'Embedded chart bars must use the compact tuple encoding.');
+  assert.match(shapeResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
 }
 
 function testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt() {
@@ -1640,6 +1693,8 @@ function main() {
   testApplyDashboardDataJsonCliMode();
   testDashboardHtmlShellContract();
   testDashboardValidatorAcceptsFridayBridgeCalendars();
+  testCompactChartPayloadUsesFourDecimalTuples();
+  testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars();
   testDashboardValidatorRejectsOversizedFuturesStoryTag();
   testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
   testDashboardValidatorRejectsDuplicateFuturesStoryUrl();

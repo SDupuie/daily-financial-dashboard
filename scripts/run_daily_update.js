@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { deriveQuoteRowsFromSeries } = require('./fetch_chart_data');
+const { compactChartPayload, deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
 const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
 const { validateWeekAheadPayload } = require('./week_ahead_contract');
 const { addDays } = require('./calendar_contract');
@@ -261,6 +261,7 @@ function parseArgs(argv) {
     windowMode: '',
     applyDashboardDataJson: '',
     refreshNewsBaseline: false,
+    syncChartQuotes: false,
     scheduledPreflight: false,
     skipEarnings: false,
     skipFutures: false,
@@ -287,6 +288,10 @@ function parseArgs(argv) {
     }
     if (arg === '--refresh-news-baseline') {
       args.refreshNewsBaseline = true;
+      continue;
+    }
+    if (arg === '--sync-chart-quotes') {
+      args.syncChartQuotes = true;
       continue;
     }
     if (arg === '--scheduled-preflight') {
@@ -348,7 +353,7 @@ function parseArgs(argv) {
     }
   }
 
-  const contentModeCount = [args.applyDashboardDataJson, args.refreshNewsBaseline].filter(Boolean).length;
+  const contentModeCount = [args.applyDashboardDataJson, args.refreshNewsBaseline, args.syncChartQuotes].filter(Boolean).length;
   if (args.scheduledPreflight) {
     if (!args.windowMode || contentModeCount) {
       throw new Error('Use --scheduled-preflight with exactly one of --morning or --afternoon.');
@@ -356,10 +361,10 @@ function parseArgs(argv) {
     return args;
   }
   if (!args.windowMode && contentModeCount === 0) {
-    throw new Error('You must pass --morning, --afternoon, --apply-dashboard-data-json, or --refresh-news-baseline.');
+    throw new Error('You must pass --morning, --afternoon, --apply-dashboard-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
   }
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !(args.scheduled && args.refreshNewsBaseline))) {
-    throw new Error('Use only one update mode: --morning, --afternoon, --apply-dashboard-data-json, or --refresh-news-baseline.');
+    throw new Error('Use only one update mode: --morning, --afternoon, --apply-dashboard-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
   }
   if (args.scheduled && (!args.refreshNewsBaseline || !args.windowMode)) {
     throw new Error('--scheduled is only valid with --refresh-news-baseline plus --morning or --afternoon.');
@@ -373,12 +378,14 @@ function printHelp() {
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [options]
   node scripts/run_daily_update.js --refresh-news-baseline [--scheduled --morning|--afternoon] [options]
+  node scripts/run_daily_update.js --sync-chart-quotes [options]
   node scripts/run_daily_update.js --scheduled-preflight (--morning | --afternoon) [options]
 
 Options:
   --dashboard PATH                     Dashboard HTML to patch (default: daily_financial_news.html)
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
   --refresh-news-baseline             Recompute only story New-pill flags and newsBaseline
+  --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
   --scheduled-preflight               Verify the Chicago-time window and duplicate marker without writing files
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
@@ -717,10 +724,10 @@ function patchDashboard(args) {
   let nextHtml = html;
 
   if (!args.skipChartData) {
-    const chartData = readJson(path.join(GENERATED_DIR, 'chart_data.json'));
+    const chartData = roundChartPayload(readJson(path.join(GENERATED_DIR, 'chart_data.json')));
     // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
     syncDashboardPricesFromChartData(dashboardData, chartData);
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', `\n${JSON.stringify(chartData, null, 2)}\n`);
+    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
   }
 
   if (!args.skipFutures) {
@@ -758,9 +765,9 @@ function applyDashboardDataJson(args) {
   const dashboardData = readJson(args.applyDashboardDataJson);
   let nextHtml = html;
   try {
-    const chartData = readJsonBlock(html, 'chart-data');
+    const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
     syncDashboardPricesFromChartData(dashboardData, chartData);
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', `\n${JSON.stringify(chartData, null, 2)}\n`);
+    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
   } catch (_error) {
     // dashboard-data-only maintenance still works on staging fixtures that omit chart-data.
   }
@@ -774,13 +781,23 @@ function refreshNewsBaseline(args) {
   const dashboardData = readJsonBlock(html, 'dashboard-data');
   let nextHtml = html;
   try {
-    const chartData = readJsonBlock(html, 'chart-data');
+    const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
     syncDashboardPricesFromChartData(dashboardData, chartData);
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', `\n${JSON.stringify(chartData, null, 2)}\n`);
+    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
   } catch (_error) {
     // Baseline-only fixtures may omit chart-data.
   }
   applyScheduledNewsBaseline(dashboardData, dashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode });
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
+  fs.writeFileSync(args.dashboard, nextHtml);
+}
+
+function syncChartQuotes(args) {
+  const html = fs.readFileSync(args.dashboard, 'utf8');
+  const dashboardData = readJsonBlock(html, 'dashboard-data');
+  const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
+  syncDashboardPricesFromChartData(dashboardData, chartData);
+  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
   fs.writeFileSync(args.dashboard, nextHtml);
 }
@@ -803,6 +820,14 @@ function main() {
 
   if (args.refreshNewsBaseline) {
     refreshNewsBaseline(args);
+    if (!args.skipValidate) {
+      runCommand('node', ['scripts/validate_dashboard.js', args.dashboard]);
+    }
+    return;
+  }
+
+  if (args.syncChartQuotes) {
+    syncChartQuotes(args);
     if (!args.skipValidate) {
       runCommand('node', ['scripts/validate_dashboard.js', args.dashboard]);
     }

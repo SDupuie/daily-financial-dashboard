@@ -41,6 +41,8 @@ function parseArgs(argv) {
     days: DEFAULT_DAYS,
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: 250,
+    embedCompact: false,
+    embedSource: '',
     compact: false
   };
 
@@ -75,6 +77,15 @@ function parseArgs(argv) {
       args.compact = true;
       continue;
     }
+    if (arg === '--embed-compact') {
+      args.embedCompact = true;
+      continue;
+    }
+    if (arg === '--embed-source') {
+      args.embedSource = path.resolve(process.cwd(), argv[i + 1] || '');
+      i += 1;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -93,6 +104,8 @@ Options:
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
   --delay-ms 250      Delay between source requests
+  --embed-compact     Compact the existing embedded chart-data block without fetching
+  --embed-source PATH Use this generated chart-data JSON when compacting the embedded block
   --compact           Print one-line series summary
   --help              Show this help
 `);
@@ -265,6 +278,84 @@ function asFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function fourDecimalNumber(value) {
+  const numeric = asFiniteNumber(value);
+  if (numeric === null) return null;
+  const scale = 10 ** 4;
+  const epsilon = Math.sign(numeric || 1) * Number.EPSILON * Math.max(1, Math.abs(numeric));
+  return Math.round((numeric + epsilon) * scale) / scale;
+}
+
+function objectBar(bar) {
+  if (Array.isArray(bar)) {
+    const [time, open, high, low, close, volume] = bar;
+    return {
+      time,
+      open,
+      high,
+      low,
+      close,
+      ...(volume === null || volume === undefined ? {} : { volume })
+    };
+  }
+  return bar && typeof bar === 'object' ? bar : {};
+}
+
+function compactChartBar(rawBar) {
+  const bar = objectBar(rawBar);
+  return [
+    String(bar.time || ''),
+    fourDecimalNumber(bar.open),
+    fourDecimalNumber(bar.high),
+    fourDecimalNumber(bar.low),
+    fourDecimalNumber(bar.close),
+    Number.isFinite(Number(bar.volume)) ? Math.round(Number(bar.volume)) : null
+  ];
+}
+
+function roundChartPayload(payload) {
+  return {
+    ...payload,
+    series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => ({
+      ...series,
+      bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
+        const bar = objectBar(rawBar);
+        return {
+          time: String(bar.time || ''),
+          open: fourDecimalNumber(bar.open),
+          high: fourDecimalNumber(bar.high),
+          low: fourDecimalNumber(bar.low),
+          close: fourDecimalNumber(bar.close),
+          ...(Number.isFinite(Number(bar.volume)) ? { volume: Math.round(Number(bar.volume)) } : {})
+        };
+      })
+    }))
+  };
+}
+
+function compactChartPayload(payload) {
+  const rounded = roundChartPayload(payload);
+  return {
+    ...rounded,
+    barEncoding: 'tuple-v1',
+    series: rounded.series.map((series) => ({
+      ...series,
+      bars: series.bars.map(compactChartBar)
+    }))
+  };
+}
+
+function compactEmbeddedChartData(input, sourcePayload = null) {
+  const html = fs.readFileSync(input, 'utf8');
+  const match = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
+  if (!match) throw new Error(`Could not find embedded chart-data JSON in ${input}`);
+  const rounded = roundChartPayload(sourcePayload || JSON.parse(match[1]));
+  rounded.quoteRows = deriveQuoteRowsFromSeries(rounded.series);
+  const payload = compactChartPayload(rounded);
+  fs.writeFileSync(input, html.replace(match[0], `<script type="application/json" id="chart-data">${JSON.stringify(payload)}</script>`));
+  return payload;
 }
 
 function sortBars(bars) {
@@ -764,6 +855,12 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.embedCompact) {
+    const sourcePayload = args.embedSource ? JSON.parse(fs.readFileSync(args.embedSource, 'utf8')) : null;
+    const payload = compactEmbeddedChartData(args.input, sourcePayload);
+    process.stdout.write(`Compacted embedded chart-data with ${payload.series.length} series\n`);
+    return;
+  }
   const inputRows = readChartableRows(args.input);
   const endDate = new Date();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
@@ -809,11 +906,14 @@ module.exports = {
   REQUEST_TIMEOUT_MS,
   deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,
+  compactChartPayload,
+  compactEmbeddedChartData,
   fetchSeries,
   finnhubQuoteBarFromPayload,
   isoDateFromDate,
   mergeFinnhubQuoteBar,
   quoteRowFromSeries,
+  roundChartPayload,
   readChartableRows,
   readCryptoRows,
   readTapeRows,
