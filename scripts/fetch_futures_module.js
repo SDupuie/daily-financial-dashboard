@@ -69,8 +69,8 @@ Options:
 `);
 }
 
-function yahooChartUrl(symbol, args) {
-  const range = args.mode === 'session' ? '5d' : '1d';
+function yahooChartUrl(symbol, args, rangeOverride = '') {
+  const range = rangeOverride || (args.mode === 'session' ? '5d' : '1d');
   return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=5m`;
 }
 
@@ -247,7 +247,29 @@ function regularSessionComparison(points, symbol) {
   };
 }
 
-function parseFuture(spec, payload, args) {
+function latestRegularSessionClose(points, symbol) {
+  const sessions = new Map();
+  for (const point of points) {
+    const [timestamp] = point;
+    if (!isRegularSessionPoint(timestamp)) continue;
+    const date = chicagoIsoDate(timestamp);
+    if (!date) continue;
+    if (!sessions.has(date)) sessions.set(date, []);
+    sessions.get(date).push(point);
+  }
+
+  const referenceDate = [...sessions.keys()].sort().at(-1);
+  const referencePoint = referenceDate ? sessions.get(referenceDate)?.at(-1) : null;
+  if (!referencePoint) {
+    throw new Error(`${symbol} response did not include a usable prior regular-session close`);
+  }
+  return {
+    referenceDate,
+    referenceTime: referencePoint[0]
+  };
+}
+
+function parseFuture(spec, payload, args, referencePayload = null) {
   const meta = payload?.chart?.result?.[0]?.meta;
   const previousClose = Number(meta?.chartPreviousClose);
   const quotePrice = Number(meta?.regularMarketPrice);
@@ -259,6 +281,9 @@ function parseFuture(spec, payload, args) {
   const pricePoints = parsePricePoints(payload);
   const sessionComparison = args.mode === 'session'
     ? regularSessionComparison(pricePoints, spec.symbol)
+    : null;
+  const premarketReference = args.mode === 'premarket'
+    ? latestRegularSessionClose(parsePricePoints(referencePayload), spec.symbol)
     : null;
   const comparisonPoints = sessionComparison
     ? sessionComparison.sessionPoints
@@ -284,16 +309,16 @@ function parseFuture(spec, payload, args) {
     raw: {
       instrumentType: meta?.instrumentType || null,
       exchangeName: meta?.exchangeName || null,
-      ...(sessionComparison ? {
+      ...(sessionComparison || premarketReference ? {
         marketTimeZone: 'America/New_York'
       } : {}),
       price,
       regularMarketTime: Number(regularMarketTime) || null,
       referencePrice,
       referenceLabel,
-      ...(sessionComparison ? {
-        referenceDate: sessionComparison.referenceDate,
-        referenceTime: sessionComparison.referenceTime,
+      ...(sessionComparison || premarketReference ? {
+        referenceDate: sessionComparison?.referenceDate || premarketReference.referenceDate,
+        referenceTime: sessionComparison?.referenceTime || premarketReference.referenceTime,
         referenceCloseEastern: '4:00 PM ET'
       } : {}),
       quotePrice,
@@ -313,8 +338,12 @@ function parseFuture(spec, payload, args) {
 }
 
 async function fetchFuture(spec, args) {
-  const payload = await fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
-  return parseFuture(spec, payload, args);
+  const payloadPromise = fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
+  const referencePayloadPromise = args.mode === 'premarket'
+    ? fetchJson(yahooChartUrl(spec.symbol, args, '5d'), args.timeoutMs)
+    : Promise.resolve(null);
+  const [payload, referencePayload] = await Promise.all([payloadPromise, referencePayloadPromise]);
+  return parseFuture(spec, payload, args, referencePayload);
 }
 
 async function main() {

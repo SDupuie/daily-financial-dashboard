@@ -21,6 +21,9 @@ const {
 const {
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
+  buildEarningsNarrativeSidecar,
+  earningsEditorialRequiredError,
+  EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   patchDashboardDataBlock,
   applyCryptoQuoteRows,
   applyCryptoStats,
@@ -31,7 +34,8 @@ const {
   replaceJsonBlock,
   syncDashboardPricesFromChartData,
   storyIdentity,
-  stampDashboardEdition
+  stampDashboardEdition,
+  validateScheduledPreflight
 } = require('./run_daily_update');
 
 const root = path.resolve(__dirname, '..');
@@ -101,8 +105,23 @@ function extractDashboardRuntimeFunction(html, name) {
   const start = html.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `Missing dashboard runtime function ${name}`);
 
+  const parameterStart = html.indexOf('(', start);
+  let parameterDepth = 0;
+  let bodyStart = -1;
+  for (let index = parameterStart; index < html.length; index += 1) {
+    if (html[index] === '(') parameterDepth += 1;
+    if (html[index] === ')') {
+      parameterDepth -= 1;
+      if (parameterDepth === 0) {
+        bodyStart = html.indexOf('{', index);
+        break;
+      }
+    }
+  }
+  assert.notEqual(bodyStart, -1, `Missing body for dashboard runtime function ${name}`);
+
   let depth = 0;
-  for (let index = start; index < html.length; index += 1) {
+  for (let index = bodyStart; index < html.length; index += 1) {
     if (html[index] === '{') {
       depth += 1;
     } else if (html[index] === '}') {
@@ -112,6 +131,10 @@ function extractDashboardRuntimeFunction(html, name) {
   }
 
   assert.fail(`Could not extract dashboard runtime function ${name}`);
+}
+
+function extractScriptFunction(file, name) {
+  return extractDashboardRuntimeFunction(fs.readFileSync(path.join(root, file), 'utf8'), name);
 }
 
 function testUpdaterQuoteAndCryptoPatches() {
@@ -190,6 +213,40 @@ function testUpdaterModulePatches() {
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnAsOf, '2026-07-06');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnValue, '+1.23%');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnStale, false);
+}
+
+function testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion() {
+  const week = {
+    generatedAt: '2026-07-09T22:00:00.000Z',
+    range: { from: '2026-07-06', to: '2026-07-10' },
+    rows: [{
+      symbol: 'NEW',
+      reportDate: '2026-07-09',
+      country: 'US',
+      exchange: 'NASDAQ',
+      marketCap: 2000000000,
+      sourceAudit: { finnhubProfile: { industry: 'Technology' } },
+      outcome: { overall: 'beat' },
+      reaction: { status: 'computed' }
+    }]
+  };
+  const staged = buildEarningsNarrativeSidecar(week, { rows: [] });
+
+  assert.deepEqual(staged.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }]);
+  assert.equal(staged.payload.rows.length, 1);
+  assert.equal(staged.payload.rows[0].outcome.interpretation, '');
+  const error = earningsEditorialRequiredError(staged.missingRows);
+  assert.equal(error.exitCode, EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE);
+  assert.match(error.message, /NEW \(2026-07-09\)/);
+
+  const completed = buildEarningsNarrativeSidecar(week, {
+    rows: [{
+      ...staged.payload.rows[0],
+      outcome: { interpretation: 'Demand and margin expansion supported the result.', guide: 'FY26 outlook reaffirmed.' },
+      reaction: { note: 'Demand and margin expansion supported the reaction.' }
+    }]
+  });
+  assert.deepEqual(completed.missingRows, []);
 }
 
 function testChartSeriesOwnsDerivedQuoteViews() {
@@ -383,7 +440,11 @@ function testScheduledNewsBaselineMarkers() {
   assert.deepEqual(manualData.newsBaseline.currentScheduledStoryIds, previousData.newsBaseline.currentScheduledStoryIds);
 
   const scheduledData = { stories: [existingStory, newStory], crypto: { notes: [existingCryptoNote, newCryptoNote] } };
-  applyScheduledNewsBaseline(scheduledData, previousData, { scheduled: true });
+  applyScheduledNewsBaseline(scheduledData, previousData, {
+    scheduled: true,
+    scheduledWindow: 'morning',
+    now: new Date('2026-07-06T12:00:00.000Z')
+  });
 
   assert.equal(scheduledData.stories[0].isNewSinceScheduledUpdate, undefined);
   assert.equal(scheduledData.stories[1].isNewSinceScheduledUpdate, true);
@@ -397,6 +458,7 @@ function testScheduledNewsBaselineMarkers() {
     storyIdentity(newStory)
   ].sort());
   assert.ok(!Number.isNaN(Date.parse(scheduledData.newsBaseline.lastScheduledUpdateAt)));
+  assert.equal(scheduledData.newsBaseline.lastScheduledWindow, '2026-07-06:morning');
 }
 
 function testRefreshNewsBaselineCliMode() {
@@ -451,6 +513,7 @@ function testRefreshNewsBaselineCliMode() {
     '--dashboard', dashboardFile,
     '--refresh-news-baseline',
     '--scheduled',
+    '--morning',
     '--skip-validate'
   ], {
     cwd: root,
@@ -470,6 +533,7 @@ function testRefreshNewsBaselineCliMode() {
     storyIdentity(newCryptoNote),
     storyIdentity(newStory)
   ].sort());
+  assert.match(parsed.newsBaseline.lastScheduledWindow, /^\d{4}-\d{2}-\d{2}:morning$/);
 }
 
 function testApplyDashboardDataJsonCliMode() {
@@ -570,6 +634,227 @@ function testDashboardHtmlShellContract() {
     assert.ok(index > previousIndex, `Shell marker out of order: ${marker}`);
     assert.ok(index < runtimeScriptIndex, `Shell marker moved into runtime script region: ${marker}`);
     previousIndex = index;
+  }
+}
+
+function validateDashboardFixture(data, fixturePrefix) {
+  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  try {
+    fs.writeFileSync(dashboardFile, replaceJsonBlock(html, 'dashboard-data', JSON.stringify(data)));
+    return spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'validate_dashboard.js'),
+      dashboardFile
+    ], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-09T22:45:00Z' }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function validationDashboardData() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  return readJsonBlock(html, 'dashboard-data');
+}
+
+function testDashboardValidatorRejectsOversizedFuturesStoryTag() {
+  const data = validationDashboardData();
+  data.futuresModule.stories[0].tag = 'An Editorial Tag That Is Too Long';
+  const result = validateDashboardFixture(data, 'dfd-futures-tag-');
+  assert.notEqual(result.status, 0, 'An oversized futures tag must fail validation.');
+  assert.match(result.stderr, /tag must be 24 characters or fewer to preserve the shared story-label column/);
+}
+
+function testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt() {
+  const data = validationDashboardData();
+  delete data.futuresModule.stories[0].publishedAt;
+  const result = validateDashboardFixture(data, 'dfd-futures-published-at-');
+  assert.notEqual(result.status, 0, 'A futures story without publishedAt must fail validation.');
+  assert.match(result.stderr, /publishedAt must be an offset-bearing ISO timestamp/);
+}
+
+function testDashboardValidatorRejectsImpossibleFuturesDates() {
+  const badReferenceDate = validationDashboardData();
+  badReferenceDate.masthead.edition = 'Morning Edition';
+  badReferenceDate.editionId = '2026-07-09T12:30:00Z';
+  badReferenceDate.futuresModule.sectionLabel = 'Before The Open';
+  badReferenceDate.futuresModule.sectionTitle = 'Pre-Market Futures';
+  for (const future of badReferenceDate.futuresModule.futures) {
+    future.raw.referenceDate = '2026-06-31';
+    future.raw.referenceCloseEastern = '4:00 PM ET';
+  }
+  for (const story of badReferenceDate.futuresModule.stories) story.publishedAt = '2026-07-09T11:45:00Z';
+  const referenceResult = validateDashboardFixture(badReferenceDate, 'dfd-futures-invalid-reference-date-');
+  assert.notEqual(referenceResult.status, 0, 'Impossible prior-close dates must fail validation.');
+  assert.match(referenceResult.stderr, /referenceDate must be an ISO date/);
+
+  const badPublishedAt = validationDashboardData();
+  badPublishedAt.futuresModule.stories[0].publishedAt = '2026-07-32T12:00:00Z';
+  const publishedAtResult = validateDashboardFixture(badPublishedAt, 'dfd-futures-invalid-published-at-');
+  assert.notEqual(publishedAtResult.status, 0, 'Impossible publication dates must fail validation.');
+  assert.match(publishedAtResult.stderr, /publishedAt must be an offset-bearing ISO timestamp/);
+
+  const badPublishedOn = validationDashboardData();
+  badPublishedOn.stories[0].publishedOn = '2026-07-32';
+  const publishedOnResult = validateDashboardFixture(badPublishedOn, 'dfd-invalid-published-on-');
+  assert.notEqual(publishedOnResult.status, 0, 'Impossible story dates must fail validation.');
+  assert.match(publishedOnResult.stderr, /publishedOn must be an ISO date/);
+}
+
+function testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow() {
+  const data = validationDashboardData();
+  data.futuresModule.stories[0].publishedAt = '2026-07-09T20:00:01Z';
+  const result = validateDashboardFixture(data, 'dfd-futures-window-');
+  assert.notEqual(result.status, 0, 'A futures story published after the regular-session close must fail validation.');
+  assert.match(result.stderr, /publishedAt must fall between the current U\.S\. regular-session open/);
+}
+
+function testDashboardValidatorAcceptsInWindowFuturesStories() {
+  const result = validateDashboardFixture(validationDashboardData(), 'dfd-futures-in-window-');
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function testDashboardValidatorRequiresMatchingFuturesEdition() {
+  const morningMismatch = validationDashboardData();
+  morningMismatch.masthead.edition = 'Morning Edition';
+  const morningResult = validateDashboardFixture(morningMismatch, 'dfd-futures-edition-morning-');
+  assert.notEqual(morningResult.status, 0, 'Morning masthead must not validate against Session Futures.');
+  assert.match(morningResult.stderr, /masthead\.edition must be Afternoon Edition when futuresModule is After The Bell\/Session Futures/);
+
+  const afternoonMismatch = validationDashboardData();
+  afternoonMismatch.masthead.edition = 'Afternoon Edition';
+  afternoonMismatch.futuresModule.sectionLabel = 'Before The Open';
+  afternoonMismatch.futuresModule.sectionTitle = 'Pre-Market Futures';
+  for (const future of afternoonMismatch.futuresModule.futures) {
+    future.raw.referenceDate = '2026-07-08';
+    future.raw.referenceCloseEastern = '4:00 PM ET';
+  }
+  for (const story of afternoonMismatch.futuresModule.stories) {
+    story.publishedAt = '2026-07-09T11:45:00Z';
+  }
+  const afternoonResult = validateDashboardFixture(afternoonMismatch, 'dfd-futures-edition-afternoon-');
+  assert.notEqual(afternoonResult.status, 0, 'Afternoon masthead must not validate against Pre-Market Futures.');
+  assert.match(afternoonResult.stderr, /masthead\.edition must be Morning Edition when futuresModule is Before The Open\/Pre-Market Futures/);
+}
+
+function testDashboardValidatorAcceptsMorningFuturesStoryWindow() {
+  const data = validationDashboardData();
+  data.masthead.edition = 'Morning Edition';
+  data.editionId = '2026-07-09T12:30:00Z';
+  data.futuresModule.sectionLabel = 'Before The Open';
+  data.futuresModule.sectionTitle = 'Pre-Market Futures';
+  for (const future of data.futuresModule.futures) {
+    future.raw.referenceDate = '2026-07-08';
+    future.raw.referenceCloseEastern = '4:00 PM ET';
+  }
+  for (const story of data.futuresModule.stories) {
+    story.publishedAt = '2026-07-09T11:45:00Z';
+  }
+  const result = validateDashboardFixture(data, 'dfd-futures-morning-');
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function testDashboardValidatorRequiresSharedMorningFuturesReferenceDate() {
+  const data = validationDashboardData();
+  data.masthead.edition = 'Morning Edition';
+  data.editionId = '2026-07-09T12:30:00Z';
+  data.futuresModule.sectionLabel = 'Before The Open';
+  data.futuresModule.sectionTitle = 'Pre-Market Futures';
+  for (const future of data.futuresModule.futures) {
+    delete future.raw.referenceDate;
+    delete future.raw.referenceCloseEastern;
+  }
+  const result = validateDashboardFixture(data, 'dfd-futures-morning-reference-');
+  assert.notEqual(result.status, 0, 'Morning stories must use the fetched prior-close date rather than a guessed weekday.');
+  assert.match(result.stderr, /Pre-Market Futures rows must share one valid raw\.referenceDate/);
+}
+
+function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
+  const sources = [
+    'isIsoDate',
+    'isIsoDateTime',
+    'zonedDateParts',
+    'zonedDateTime',
+    'sharedFuturesReferenceDate',
+    'futuresStoryPublicationWindow'
+  ].map((name) => extractScriptFunction('scripts/validate_dashboard.js', name)).join('\n');
+  const { futuresStoryPublicationWindow } = Function(`${sources}\nreturn { futuresStoryPublicationWindow };`)();
+  const futures = Array.from({ length: 4 }, () => ({ raw: { referenceDate: '2026-07-02' } }));
+  const window = futuresStoryPublicationWindow(
+    'Pre-Market Futures',
+    '2026-07-06T12:30:00Z',
+    new Date('2026-07-06T12:30:00Z'),
+    futures
+  );
+
+  assert.equal(window.start.toISOString(), '2026-07-02T20:00:00.000Z');
+  assert.equal(window.end.toISOString(), '2026-07-06T12:30:00.000Z');
+}
+
+function testDashboardValidatorRejectsReferencePagesInAllNewsSections() {
+  const data = validationDashboardData();
+  data.futuresModule.stories[0] = {
+    tag: 'Calendar',
+    tone: 'neutral',
+    title: 'NYSE market hours and holidays',
+    body: 'Use this maintained exchange calendar when a holiday or shortened session affects the market schedule.',
+    url: 'https://www.nyse.com/markets/hours-calendars',
+    referencePage: true
+  };
+  data.stories[0].referencePage = true;
+  data.crypto.notes[0].referencePage = true;
+  const result = validateDashboardFixture(data, 'dfd-reference-page-');
+  assert.notEqual(result.status, 0, 'News sections must not accept evergreen-page exceptions.');
+  assert.match(result.stderr, /futuresModule\.stories\[0\]\.referencePage is not supported/);
+  assert.match(result.stderr, /Story .*\.referencePage is not supported/);
+  assert.match(result.stderr, /Crypto note .*\.referencePage is not supported/);
+}
+
+function testDashboardValidatorRequiresCryptoNoteDisplayFields() {
+  for (const field of ['kicker', 'title', 'body']) {
+    const data = validationDashboardData();
+    delete data.crypto.notes[0][field];
+    const result = validateDashboardFixture(data, `dfd-crypto-note-${field}-`);
+    assert.notEqual(result.status, 0, `Crypto notes must require ${field}.`);
+    assert.match(result.stderr, new RegExp(`Crypto note ${field} must be populated`));
+  }
+}
+
+function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-scheduled-preflight-'));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const baseline = {
+    lastScheduledUpdateAt: '2026-07-08T21:00:00.000Z',
+    lastScheduledWindow: '2026-07-08:afternoon',
+    previousScheduledStoryIds: [],
+    currentScheduledStoryIds: []
+  };
+  fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
+  try {
+    assert.equal(
+      validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+      '2026-07-09:morning'
+    );
+    assert.throws(
+      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T14:00:00.000Z')),
+      /outside its America\/Chicago update window/
+    );
+    assert.throws(
+      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-11T12:00:00.000Z')),
+      /only permits weekday runs/
+    );
+    baseline.lastScheduledWindow = '2026-07-09:morning';
+    fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
+    assert.throws(
+      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+      /already completed/
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -1078,6 +1363,7 @@ function testLocalMarketServerPartialStatusIncludesRowErrors() {
 function main() {
   testUpdaterQuoteAndCryptoPatches();
   testUpdaterModulePatches();
+  testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion();
   testChartSeriesOwnsDerivedQuoteViews();
   testFinnhubQuoteBarMergesIntoOhlcSeries();
   testFinnhubQuoteFallbackOnlyWhenYahooLatestIsUnusable();
@@ -1087,6 +1373,18 @@ function main() {
   testRefreshNewsBaselineCliMode();
   testApplyDashboardDataJsonCliMode();
   testDashboardHtmlShellContract();
+  testDashboardValidatorRejectsOversizedFuturesStoryTag();
+  testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
+  testDashboardValidatorRejectsImpossibleFuturesDates();
+  testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow();
+  testDashboardValidatorAcceptsInWindowFuturesStories();
+  testDashboardValidatorRequiresMatchingFuturesEdition();
+  testDashboardValidatorAcceptsMorningFuturesStoryWindow();
+  testDashboardValidatorRequiresSharedMorningFuturesReferenceDate();
+  testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday();
+  testDashboardValidatorRejectsReferencePagesInAllNewsSections();
+  testDashboardValidatorRequiresCryptoNoteDisplayFields();
+  testScheduledPreflightEnforcesWindowAndDuplicateMarker();
   testDashboardEarningsMoneySignContract();
   testYieldCurveShortEndTenorsStayVisible();
   testEditionStampChangesIdentity();

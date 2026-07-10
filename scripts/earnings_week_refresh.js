@@ -19,6 +19,7 @@ const {
 
 const root = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
+const DEFAULT_COMPANY_RELEASE_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(root, 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_MONTHLY_LIMIT = 1000;
 const DEFAULT_EARNINGSAPI_RESERVE = 150;
@@ -138,6 +139,13 @@ function readJson(file) {
 function writeJson(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function removeStaleCompanyReleaseResolutionSidecar(week, resolutionPath) {
+  if (Array.isArray(week.companyReleaseTasks) && week.companyReleaseTasks.length > 0) return false;
+  if (!fs.existsSync(resolutionPath)) return false;
+  fs.rmSync(resolutionPath);
+  return true;
 }
 
 function isObject(value) {
@@ -685,6 +693,9 @@ async function main() {
     outputPath: args.output
   });
   writeJson(args.output, result.payload);
+  if (args.output === DEFAULT_INPUT && removeStaleCompanyReleaseResolutionSidecar(result.payload, DEFAULT_COMPANY_RELEASE_RESOLUTIONS)) {
+    process.stdout.write('Removed stale company-release resolution sidecar because the refreshed week has no active tasks.\n');
+  }
   if (!args.skipValidation) validateWeek(args.output);
   printReport(result, args.output, args.compact);
 }
@@ -701,5 +712,6 @@ module.exports = {
   applyFinnhubRefresh,
   refreshEarningsResults,
   refreshTargetRows,
+  removeStaleCompanyReleaseResolutionSidecar,
   reportWindowArrived
 };

@@ -4,7 +4,7 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const {
   buildEarningsWeekPolicy,
   computeEarningsWeekCounts
@@ -27,6 +27,7 @@ const {
 const {
   refreshEarningsResults,
   refreshTargetRows,
+  removeStaleCompanyReleaseResolutionSidecar,
   reportWindowArrived
 } = require('./earnings_week_refresh');
 
@@ -180,8 +181,9 @@ function deterministicVerifiedWeekFixture() {
       }]
     }]
   );
-  rows[0].outcome.interpretation = 'Beat on both lines with a constructive first reaction.';
-  rows[0].reaction.note = 'Shares gained after the report cleared consensus.';
+  rows[0].outcome.interpretation = 'Margin expansion and pricing discipline supported the earnings read.';
+  rows[0].outcome.guide = 'FY26 reaffirmed.';
+  rows[0].reaction.note = 'Margin expansion and updated guidance supported the post-report read.';
 
   return {
     schemaVersion: 1,
@@ -1180,6 +1182,93 @@ function testWeekValidatorAcceptsDeterministicVerifiedRow() {
   validateWeekPayload(source);
 }
 
+function testWeekValidatorRejectsPriceRecapReactionNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].reaction.note = 'Verify Corp shares rose 5.0% on the first eligible close after the report.';
+
+  expectWeekValidationFailure(
+    source,
+    /reaction\.note must explain the earnings driver, not repeat the displayed share-price move/,
+    'Reaction narratives must add a driver instead of restating the displayed move.'
+  );
+}
+
+function testWeekValidatorRejectsVerboseReactionNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].reaction.note = 'Margin expansion and guidance supported the read, but investors still need proof that demand and operating leverage can hold through year-end.';
+
+  expectWeekValidationFailure(
+    source,
+    /reaction\.note must stay within 100 characters for the compact earnings monitor/,
+    'Reaction copy must stay concise enough for the current compact layout.'
+  );
+}
+
+function testWeekValidatorRejectsMetricRecapOutcomeNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].outcome.interpretation = 'Verify Corp beat on both EPS and revenue.';
+
+  expectWeekValidationFailure(
+    source,
+    /outcome\.interpretation must explain the business takeaway, not restate EPS\/revenue beats or misses/,
+    'Outcome narratives must add a business takeaway instead of restating the metrics.'
+  );
+}
+
+function testWeekValidatorRejectsPartialReportedMetricRecapOutcomeNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  const row = source.rows[0];
+  row.reaction = {
+    status: 'unavailable',
+    basis: 'unavailable',
+    percent: null,
+    note: ''
+  };
+  row.sourceStatus = 'partial';
+  row.outcome.interpretation = 'Verify Corp beat on both EPS and revenue.';
+  source.summary.counts = computeEarningsWeekCounts(source.rows);
+
+  expectWeekValidationFailure(
+    source,
+    /outcome\.interpretation must explain the business takeaway, not restate EPS\/revenue beats or misses/,
+    'Partial reported rows must receive the same substantive outcome commentary.'
+  );
+}
+
+function testWeekValidatorRejectsVerboseOutcomeNarrative() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].outcome.interpretation = 'Margin expansion and pricing discipline supported the earnings read while demand, inventory, and operating leverage all improved materially.';
+  source.rows[0].outcome.guide = 'FY26 guidance reaffirmed.';
+
+  expectWeekValidationFailure(
+    source,
+    /outcome\.interpretation must stay within 120 characters for the compact earnings monitor/,
+    'Outcome copy must stay concise enough for the current compact layout.'
+  );
+}
+
+function testWeekValidatorPrioritizesQuarterlyGuidance() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].outcome.guide = 'FY26 revenue +5%; Q4 revenue +3%.';
+
+  expectWeekValidationFailure(
+    source,
+    /outcome\.guide must lead with next-quarter guidance when both quarterly and full-year outlooks are provided/,
+    'Guidance must lead with the nearer quarter when both horizons are available.'
+  );
+}
+
+function testWeekValidatorRejectsNonGuidanceOutcomeGuide() {
+  const source = deterministicVerifiedWeekFixture();
+  source.rows[0].outcome.guide = 'This year had a mixed demand backdrop.';
+
+  expectWeekValidationFailure(
+    source,
+    /outcome\.guide must identify a quarterly\/full-year horizon or explicit no-guidance status/,
+    'A generic reference to a year must not pass as forward guidance.'
+  );
+}
+
 function testWeekValidatorRejectsSourceStatusDrift() {
   const source = embeddedWeekFixture();
   const row = source.rows[0];
@@ -1283,6 +1372,70 @@ function testCompanyReleaseValidatorRejectsCalendarEstimates() {
   );
 }
 
+function testRefreshRemovesStaleCompanyReleaseResolutionSidecarWithoutTasks() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-release-sidecar-'));
+  const sidecar = path.join(dir, 'earnings_company_release_resolutions.json');
+  fs.writeFileSync(sidecar, '{"stale":true}\n');
+  try {
+    assert.equal(removeStaleCompanyReleaseResolutionSidecar({ companyReleaseTasks: [] }, sidecar), true);
+    assert.equal(fs.existsSync(sidecar), false);
+    fs.writeFileSync(sidecar, '{"current":true}\n');
+    assert.equal(removeStaleCompanyReleaseResolutionSidecar({ companyReleaseTasks: [{ id: 'release-1' }] }, sidecar), false);
+    assert.equal(fs.existsSync(sidecar), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testValidateReleaseSkipsWeekWithoutCompanyReleaseTasks() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-release-validate-'));
+  const weekFile = path.join(dir, 'earnings_week.json');
+  const absentSidecar = path.join(dir, 'missing_resolutions.json');
+  const week = embeddedWeekFixture();
+  week.companyReleaseTasks = [];
+  week.summary.counts.companyReleaseTasks = 0;
+  fs.writeFileSync(weekFile, `${JSON.stringify(week)}\n`);
+  try {
+    const output = execFileSync(process.execPath, [
+      path.join(root, 'scripts', 'earnings_week.js'),
+      'validate-release',
+      '--week',
+      weekFile,
+      '--input',
+      absentSidecar
+    ], {
+      cwd: root,
+      encoding: 'utf8'
+    });
+    assert.match(output, /Company-release validation not applicable: .* has no active company-release tasks/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testValidateReleaseRejectsMalformedCompanyReleaseTasks() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-release-malformed-'));
+  const weekFile = path.join(dir, 'earnings_week.json');
+  const week = embeddedWeekFixture();
+  week.companyReleaseTasks = {};
+  fs.writeFileSync(weekFile, `${JSON.stringify(week)}\n`);
+  try {
+    const result = spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'earnings_week.js'),
+      'validate-release',
+      '--week',
+      weekFile
+    ], {
+      cwd: root,
+      encoding: 'utf8'
+    });
+    assert.notEqual(result.status, 0, 'Malformed companyReleaseTasks must fail release validation.');
+    assert.match(result.stderr, /companyReleaseTasks must be an array/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testFailClosed();
   testFinnhubProfileCacheFallbackPreservesIdentity();
@@ -1305,9 +1458,19 @@ async function main() {
   testWeekValidatorRequiresAppliedCompanyReleaseOnRow();
   testWeekValidatorRejectsProvenanceDrift();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
+  testWeekValidatorRejectsPriceRecapReactionNarrative();
+  testWeekValidatorRejectsVerboseReactionNarrative();
+  testWeekValidatorRejectsMetricRecapOutcomeNarrative();
+  testWeekValidatorRejectsPartialReportedMetricRecapOutcomeNarrative();
+  testWeekValidatorRejectsVerboseOutcomeNarrative();
+  testWeekValidatorPrioritizesQuarterlyGuidance();
+  testWeekValidatorRejectsNonGuidanceOutcomeGuide();
   testWeekValidatorRejectsSourceStatusDrift();
   testWeekValidatorRejectsExtraContractFields();
   testCompanyReleaseValidatorRejectsCalendarEstimates();
+  testRefreshRemovesStaleCompanyReleaseResolutionSidecarWithoutTasks();
+  testValidateReleaseSkipsWeekWithoutCompanyReleaseTasks();
+  testValidateReleaseRejectsMalformedCompanyReleaseTasks();
   await testResultRefreshDoesNotRebuildSlate();
   console.log('Earnings contract fixture tests passed.');
 }

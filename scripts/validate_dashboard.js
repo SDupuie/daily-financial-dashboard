@@ -20,6 +20,7 @@ const html = fs.readFileSync(file, 'utf8');
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const minChartHistoryDays = 1826;
+const maxFuturesStoryTagLength = 24;
 const requiredYieldCurveComparisonLabels = ['1M ago', '6M ago'];
 const recognizedChartSources = new Set([
   'Yahoo Finance Chart API',
@@ -115,11 +116,97 @@ function isFiniteNumber(value) {
 }
 
 function isIsoDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
 }
 
 function isIsoDateTime(value) {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function isOffsetBearingIsoDateTime(value) {
+  if (typeof value !== 'string') return false;
+  const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/);
+  if (!match || !isIsoDate(match[1])) return false;
+  const [, , hour, minute, second = '0', , offsetHour = '0', offsetMinute = '0'] = match;
+  return Number(hour) <= 23
+    && Number(minute) <= 59
+    && Number(second) <= 59
+    && Number(offsetHour) <= 23
+    && Number(offsetMinute) <= 59
+    && !Number.isNaN(Date.parse(value));
+}
+
+function zonedDateParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const part = (type) => Number(parts.find((item) => item.type === type)?.value || 0);
+  return {
+    year: part('year'),
+    month: part('month'),
+    day: part('day'),
+    hour: part('hour') % 24,
+    minute: part('minute'),
+    second: part('second')
+  };
+}
+
+function zonedDateTime({ year, month, day, hour, minute }, timeZone) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const offsetParts = zonedDateParts(new Date(utcGuess), timeZone);
+  const observedAsUtc = Date.UTC(
+    offsetParts.year,
+    offsetParts.month - 1,
+    offsetParts.day,
+    offsetParts.hour,
+    offsetParts.minute,
+    offsetParts.second
+  );
+  return new Date(utcGuess - (observedAsUtc - utcGuess));
+}
+
+function sharedFuturesReferenceDate(futures) {
+  const dates = (Array.isArray(futures) ? futures : [])
+    .map((future) => String(future?.raw?.referenceDate || '').trim());
+  if (!dates.length || dates.some((date) => !isIsoDate(date))) return '';
+  return new Set(dates).size === 1 ? dates[0] : '';
+}
+
+function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
+  const runAt = isIsoDateTime(editionId) ? new Date(editionId) : now;
+  const eastern = zonedDateParts(runAt, 'America/New_York');
+  if (sectionTitle === 'Pre-Market Futures') {
+    const referenceDate = sharedFuturesReferenceDate(futures);
+    if (!referenceDate) return null;
+    const [year, month, day] = referenceDate.split('-').map(Number);
+    return {
+      start: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
+      end: runAt,
+      description: 'the fetched prior U.S. regular-session close and the dashboard run time'
+    };
+  }
+  if (sectionTitle === 'Session Futures') {
+    const start = zonedDateTime({ ...eastern, hour: 9, minute: 30 }, 'America/New_York');
+    const marketClose = zonedDateTime({ ...eastern, hour: 16, minute: 0 }, 'America/New_York');
+    return {
+      start,
+      end: new Date(Math.min(runAt.getTime(), marketClose.getTime())),
+      description: 'the current U.S. regular-session open and the earlier of the regular-session close or dashboard run time'
+    };
+  }
+  return null;
 }
 
 function normalizeStoryTitle(value) {
@@ -417,22 +504,19 @@ if (!dashboardMatch) {
       if (!isHttps) errors.push(`${label} must include an HTTPS url.`);
     };
     const requireIsoDate = (value, label) => {
-      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      if (!isIsoDate(value)) {
         errors.push(`${label} must be an ISO date.`);
       }
     };
     const validateStoryFreshness = (itemRaw, label) => {
       const item = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
-      if (item.referencePage !== undefined && typeof item.referencePage !== 'boolean') {
-        errors.push(`${label}.referencePage must be boolean when provided.`);
-      }
-      if (item.referencePage === true) {
-        return;
+      if (item.referencePage !== undefined) {
+        errors.push(`${label}.referencePage is not supported; news items must be dated articles.`);
       }
       requireIsoDate(item.publishedOn, `${label}.publishedOn`);
       const publishedOn = String(item.publishedOn ?? '').trim();
       if (publishedOn && !allowedStoryDates.has(publishedOn)) {
-        errors.push(`${label}.publishedOn must follow the local calendar-date freshness rule in America/Chicago (today/yesterday, plus Saturday during the scheduled Monday morning dashboard window) unless referencePage is true.`);
+        errors.push(`${label}.publishedOn must follow the local calendar-date freshness rule in America/Chicago (today/yesterday, plus Saturday during the scheduled Monday morning dashboard window).`);
       }
     };
     const validateDividendEvents = (events, label, { optional = false } = {}) => {
@@ -807,6 +891,11 @@ if (!dashboardMatch) {
     );
     if (!knownFuturesWindow) {
       errors.push(`futuresModule section labels must be either Before The Open/Pre-Market Futures or After The Bell/Session Futures, got ${futuresSectionLabel}/${futuresSectionTitle}.`);
+    } else {
+      const expectedEdition = futuresSectionTitle === 'Pre-Market Futures' ? 'Morning Edition' : 'Afternoon Edition';
+      if (mastheadEdition !== expectedEdition) {
+        errors.push(`masthead.edition must be ${expectedEdition} when futuresModule is ${futuresSectionLabel}/${futuresSectionTitle}.`);
+      }
     }
 
     // Runtime does not fetch sidecar files; futures-module rows must be embedded and chart-ready.
@@ -903,17 +992,48 @@ if (!dashboardMatch) {
       }
     }
 
+    const isPreMarketFutures = futuresSectionTitle === 'Pre-Market Futures';
+    if (isPreMarketFutures) {
+      for (const [index, futureRaw] of futures.entries()) {
+        const future = futureRaw && typeof futureRaw === 'object' ? futureRaw : {};
+        if (!isIsoDate(future.raw?.referenceDate)) {
+          errors.push(`futuresModule.futures[${index}].raw.referenceDate must be an ISO date for Pre-Market Futures.`);
+        }
+        if (future.raw?.referenceCloseEastern !== '4:00 PM ET') {
+          errors.push(`futuresModule.futures[${index}].raw.referenceCloseEastern must store the prior U.S. regular-session close for Pre-Market Futures.`);
+        }
+      }
+      if (!sharedFuturesReferenceDate(futures)) {
+        errors.push('Pre-Market Futures rows must share one valid raw.referenceDate from the fetched prior regular-session close.');
+      }
+    }
+
     const futuresModuleStories = Array.isArray(futuresModule.stories) ? futuresModule.stories : [];
-    if (futuresModuleStories.length < 1 || futuresModuleStories.length > 3) {
-      errors.push('futuresModule.stories must contain one to three priority stories.');
+    const futuresStoryWindow = futuresStoryPublicationWindow(futuresSectionTitle, data.editionId, now, futures);
+    if (futuresModuleStories.length !== 3) {
+      errors.push('futuresModule.stories must contain exactly three priority stories.');
     }
     for (const [index, storyRaw] of futuresModuleStories.entries()) {
       const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
-      requireString(story.futuresModuleTag, `futuresModule.stories[${index}].futuresModuleTag`);
+      requireString(story.tag, `futuresModule.stories[${index}].tag`);
+      if (String(story.tag || '').trim().length > maxFuturesStoryTagLength) {
+        errors.push(`futuresModule.stories[${index}].tag must be ${maxFuturesStoryTagLength} characters or fewer to preserve the shared story-label column.`);
+      }
       requireString(story.title, `futuresModule.stories[${index}].title`);
       requireString(story.body, `futuresModule.stories[${index}].body`);
       requireHttpsUrl(story.url, `futuresModule.stories[${index}]`);
       validateStoryFreshness(story, `futuresModule.stories[${index}]`);
+      if (futuresStoryWindow) {
+        const publishedAt = String(story.publishedAt ?? '').trim();
+        if (!isOffsetBearingIsoDateTime(publishedAt)) {
+          errors.push(`futuresModule.stories[${index}].publishedAt must be an offset-bearing ISO timestamp.`);
+          continue;
+        }
+        const publishedAtMs = Date.parse(publishedAt);
+        if (publishedAtMs < futuresStoryWindow.start.getTime() || publishedAtMs > futuresStoryWindow.end.getTime()) {
+          errors.push(`futuresModule.stories[${index}].publishedAt must fall between ${futuresStoryWindow.description}.`);
+        }
+      }
     }
 
     // Portfolio validation is instrument-level only; tactical weights/model outputs are intentionally out of scope here.
@@ -1108,6 +1228,11 @@ if (!dashboardMatch) {
       if (newsBaseline.lastScheduledUpdateAt !== null && !isIsoDateTime(newsBaseline.lastScheduledUpdateAt)) {
         errors.push('newsBaseline.lastScheduledUpdateAt must be null or an ISO timestamp.');
       }
+      if (newsBaseline.lastScheduledWindow !== null && !/^\d{4}-\d{2}-\d{2}:(morning|afternoon)$/.test(String(newsBaseline.lastScheduledWindow || ''))) {
+        errors.push('newsBaseline.lastScheduledWindow must be null or a YYYY-MM-DD:morning/afternoon marker.');
+      } else if (newsBaseline.lastScheduledWindow !== null && !isIsoDate(String(newsBaseline.lastScheduledWindow).slice(0, 10))) {
+        errors.push('newsBaseline.lastScheduledWindow must use a real calendar date.');
+      }
       for (const key of ['previousScheduledStoryIds', 'currentScheduledStoryIds']) {
         if (!Array.isArray(newsBaseline[key])) {
           errors.push(`newsBaseline.${key} must be an array.`);
@@ -1168,6 +1293,9 @@ if (!dashboardMatch) {
     }
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
+      requireString(note.kicker, 'Crypto note kicker');
+      requireString(note.title, 'Crypto note title');
+      requireString(note.body, 'Crypto note body');
       requireHttpsUrl(note.url, `Crypto note "${note.title ?? '(untitled)'}"`);
       validateStoryFreshness(note, `Crypto note "${note.title ?? '(untitled)'}"`);
       validateNewPillState(note, `Crypto note "${note.title ?? '(untitled)'}"`);

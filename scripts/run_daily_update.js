@@ -4,11 +4,17 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { deriveQuoteRowsFromSeries } = require('./fetch_chart_data');
+const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
 
 const DEFAULT_DASHBOARD = path.resolve(process.cwd(), 'daily_financial_news.html');
 const GENERATED_DIR = path.resolve(process.cwd(), 'generated');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
+const EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE = 2;
+const SCHEDULED_WINDOWS = {
+  morning: { startMinutes: 6 * 60 + 45, endMinutes: 8 * 60 },
+  afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
+};
 const WINDOW_LABELS = {
   morning: {
     sectionLabel: 'Before The Open',
@@ -86,8 +92,12 @@ function sanitizeNewsBaseline(value) {
   const lastScheduledUpdateAt = typeof baseline.lastScheduledUpdateAt === 'string'
     ? baseline.lastScheduledUpdateAt
     : null;
+  const lastScheduledWindow = typeof baseline.lastScheduledWindow === 'string'
+    ? baseline.lastScheduledWindow
+    : null;
   return {
     lastScheduledUpdateAt,
+    lastScheduledWindow,
     previousScheduledStoryIds: [...arrayStringSet(baseline.previousScheduledStoryIds)].sort(),
     currentScheduledStoryIds: [...arrayStringSet(baseline.currentScheduledStoryIds)].sort()
   };
@@ -122,7 +132,7 @@ function markStoriesNewSinceBaseline(data, comparisonIds) {
   }
 }
 
-function applyScheduledNewsBaseline(data, previousData, { scheduled = false } = {}) {
+function applyScheduledNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
   const previousBaseline = sanitizeNewsBaseline(previousData?.newsBaseline ?? data.newsBaseline);
   // Manual runs can highlight stories that are new since the last scheduled run,
   // but only scheduled runs advance the baseline used by tomorrow's comparison.
@@ -133,8 +143,12 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false } = 
   markStoriesNewSinceBaseline(data, comparisonIds);
 
   if (scheduled) {
+    if (!SCHEDULED_WINDOWS[scheduledWindow]) {
+      throw new Error('Scheduled baseline refresh requires --morning or --afternoon to record the completed window.');
+    }
     data.newsBaseline = {
-      lastScheduledUpdateAt: new Date().toISOString(),
+      lastScheduledUpdateAt: now.toISOString(),
+      lastScheduledWindow: `${chicagoDateParts(now).isoDate}:${scheduledWindow}`,
       previousScheduledStoryIds: [...arrayStringSet(previousBaseline.currentScheduledStoryIds)].sort(),
       currentScheduledStoryIds: sortedDashboardNewsIds(data)
     };
@@ -142,6 +156,67 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false } = 
   }
 
   data.newsBaseline = previousBaseline;
+}
+
+function chicagoDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  return {
+    weekday: part('weekday'),
+    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
+    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
+  };
+}
+
+function scheduledNow() {
+  const override = process.env.SCHEDULED_NOW_ISO;
+  const parsed = override ? new Date(override) : new Date();
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function completedScheduledWindow(baseline) {
+  const marker = String(baseline?.lastScheduledWindow || '');
+  if (/^\d{4}-\d{2}-\d{2}:(morning|afternoon)$/.test(marker)) return marker;
+  const timestamp = typeof baseline?.lastScheduledUpdateAt === 'string'
+    ? new Date(baseline.lastScheduledUpdateAt)
+    : null;
+  if (!timestamp || Number.isNaN(timestamp.getTime())) return '';
+  const parts = chicagoDateParts(timestamp);
+  const window = Object.entries(SCHEDULED_WINDOWS).find(([, range]) => (
+    parts.clockMinutes !== null
+    && parts.clockMinutes >= range.startMinutes
+    && parts.clockMinutes <= range.endMinutes
+  ));
+  return window ? `${parts.isoDate}:${window[0]}` : '';
+}
+
+function validateScheduledPreflight(dashboard, windowMode, now = scheduledNow()) {
+  const range = SCHEDULED_WINDOWS[windowMode];
+  if (!range) throw new Error('Scheduled preflight requires --morning or --afternoon.');
+  const parts = chicagoDateParts(now);
+  if (!['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(parts.weekday)) {
+    throw new Error('Scheduled preflight only permits weekday runs in America/Chicago.');
+  }
+  if (parts.clockMinutes === null || parts.clockMinutes < range.startMinutes || parts.clockMinutes > range.endMinutes) {
+    throw new Error(`Scheduled ${windowMode} preflight is outside its America/Chicago update window.`);
+  }
+  const dashboardData = readJsonBlock(fs.readFileSync(dashboard, 'utf8'), 'dashboard-data');
+  const windowId = `${parts.isoDate}:${windowMode}`;
+  if (completedScheduledWindow(dashboardData.newsBaseline) === windowId) {
+    throw new Error(`Scheduled ${windowMode} preflight refused: ${windowId} already completed.`);
+  }
+  return windowId;
 }
 
 function stampDashboardEdition(data) {
@@ -157,6 +232,7 @@ function parseArgs(argv) {
     windowMode: '',
     applyDashboardDataJson: '',
     refreshNewsBaseline: false,
+    scheduledPreflight: false,
     skipEarnings: false,
     skipFutures: false,
     skipChartData: false,
@@ -181,6 +257,10 @@ function parseArgs(argv) {
     }
     if (arg === '--refresh-news-baseline') {
       args.refreshNewsBaseline = true;
+      continue;
+    }
+    if (arg === '--scheduled-preflight') {
+      args.scheduledPreflight = true;
       continue;
     }
     if (arg === '--morning') {
@@ -234,13 +314,21 @@ function parseArgs(argv) {
     }
   }
 
-  const modeCount = [args.windowMode, args.applyDashboardDataJson, args.refreshNewsBaseline].filter(Boolean).length;
-  if (modeCount === 0) {
+  const contentModeCount = [args.applyDashboardDataJson, args.refreshNewsBaseline].filter(Boolean).length;
+  if (args.scheduledPreflight) {
+    if (!args.windowMode || contentModeCount) {
+      throw new Error('Use --scheduled-preflight with exactly one of --morning or --afternoon.');
+    }
+    return args;
+  }
+  if (!args.windowMode && contentModeCount === 0) {
     throw new Error('You must pass --morning, --afternoon, --apply-dashboard-data-json, or --refresh-news-baseline.');
   }
-
-  if (modeCount > 1) {
+  if (contentModeCount > 1 || (args.windowMode && contentModeCount && !(args.scheduled && args.refreshNewsBaseline))) {
     throw new Error('Use only one update mode: --morning, --afternoon, --apply-dashboard-data-json, or --refresh-news-baseline.');
+  }
+  if (args.scheduled && (!args.refreshNewsBaseline || !args.windowMode)) {
+    throw new Error('--scheduled is only valid with --refresh-news-baseline plus --morning or --afternoon.');
   }
 
   return args;
@@ -250,15 +338,17 @@ function printHelp() {
   process.stdout.write(`Usage:
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [options]
-  node scripts/run_daily_update.js --refresh-news-baseline [--scheduled] [options]
+  node scripts/run_daily_update.js --refresh-news-baseline [--scheduled --morning|--afternoon] [options]
+  node scripts/run_daily_update.js --scheduled-preflight (--morning | --afternoon) [options]
 
 Options:
   --dashboard PATH                     Dashboard HTML to patch (default: daily_financial_news.html)
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
   --refresh-news-baseline             Recompute only story New-pill flags and newsBaseline
+  --scheduled-preflight               Verify the Chicago-time window and duplicate marker without writing files
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
-  --scheduled                         Advance the News "New" baseline after a successful scheduled run
+  --scheduled                         Advance the News "New" baseline for the completed scheduled window
   --skip-earnings                     Skip earnings week refresh + embed
   --skip-futures                      Skip node scripts/fetch_futures_module.js and futuresModule patching
   --skip-chart-data                   Skip node scripts/fetch_chart_data.js and chart/quote-row patching
@@ -301,50 +391,20 @@ function earningsRowKey(row) {
   return `${String(row?.symbol || '').trim().toUpperCase()}::${String(row?.reportDate || '').trim()}`;
 }
 
-function sentenceCaseCompany(row) {
-  return String(row?.company || row?.symbol || 'This company').trim();
+function narrativeNeedsEditorialCopy(row, narrative) {
+  if (!isDisplayEligibleEarningsRow(row)) return false;
+  if (!String(narrative?.outcome?.interpretation || '').trim()) return true;
+  if (row?.outcome?.overall !== 'pending' && !String(narrative?.outcome?.guide || '').trim()) return true;
+  return row?.reaction?.status === 'computed' && !String(narrative?.reaction?.note || '').trim();
 }
 
-function fallbackOutcomeInterpretation(row, existingInterpretation = '') {
-  const company = sentenceCaseCompany(row);
-  const epsResult = String(row?.eps?.result || '').trim();
-  const revenueResult = String(row?.revenue?.result || '').trim();
-  const overall = String(row?.outcome?.overall || '').trim();
-  if (!overall || overall === 'pending') return existingInterpretation;
-  if (overall === 'beat') return `${company} beat on both EPS and revenue.`;
-  if (overall === 'miss') return `${company} missed on both EPS and revenue.`;
-  if (overall === 'mixed') {
-    if (epsResult === 'beat' && revenueResult === 'miss') return `${company} beat on EPS but missed on revenue.`;
-    if (epsResult === 'miss' && revenueResult === 'beat') return `${company} missed on EPS but beat on revenue.`;
-    return `${company} delivered a mixed earnings read versus consensus.`;
-  }
-  if (overall === 'met') return `${company} came in roughly in line with consensus expectations.`;
-  if (overall === 'eps_only_beat') return `${company} beat on EPS while revenue was not comparable against consensus.`;
-  if (overall === 'eps_only_miss') return `${company} missed on EPS while revenue was not comparable against consensus.`;
-  if (overall === 'unverified') return `${company} reported results, but the source set remains incomplete.`;
-  return existingInterpretation;
-}
-
-function fallbackReactionNote(row, existingNote = '') {
-  if (String(row?.reaction?.status || '').trim() !== 'computed') return '';
-  const percent = Number(row?.reaction?.percent);
-  if (!Number.isFinite(percent)) return existingNote;
-  const company = sentenceCaseCompany(row);
-  const direction = percent > 0 ? 'rose' : percent < 0 ? 'fell' : 'finished flat';
-  const magnitude = percent === 0 ? '' : ` ${Math.abs(percent).toFixed(1)}%`;
-  return `${company} shares ${direction}${magnitude} on the first eligible close after the report.`.replace(/\s+/g, ' ').trim();
-}
-
-function syncEarningsNarrativeSidecar() {
-  const week = readJson(EARNINGS_WEEK_PATH);
-  const existing = fs.existsSync(EARNINGS_NARRATIVE_PATH)
-    ? readJson(EARNINGS_NARRATIVE_PATH)
-    : { rows: [] };
+function buildEarningsNarrativeSidecar(week, existing = { rows: [] }) {
   const existingByKey = new Map(
     (Array.isArray(existing.rows) ? existing.rows : []).map((row) => [earningsRowKey(row), row])
   );
   const rows = (Array.isArray(week.rows) ? week.rows : [])
-    .filter((row) => existingByKey.has(earningsRowKey(row)))
+    // Keep prior editorial rows and stage any newly display-eligible row for human enrichment.
+    .filter((row) => existingByKey.has(earningsRowKey(row)) || isDisplayEligibleEarningsRow(row))
     .map((row) => {
       const prior = existingByKey.get(earningsRowKey(row)) || {};
       return {
@@ -358,24 +418,55 @@ function syncEarningsNarrativeSidecar() {
         },
         outcome: {
           guide: String(prior.outcome?.guide || ''),
-          interpretation: fallbackOutcomeInterpretation(row, String(prior.outcome?.interpretation || ''))
+          // Numeric beat/miss fields are displayed separately. Keep only the
+          // editorial thesis and release-backed forward guidance here.
+          interpretation: String(prior.outcome?.interpretation || '')
         },
         reaction: {
-          note: fallbackReactionNote(row, String(prior.reaction?.note || ''))
+          // The calculated percentage already appears in the monitor. Keep only
+          // editorial commentary that explains the reaction's likely driver.
+          note: String(prior.reaction?.note || '')
         }
       };
     });
+  const rowsByKey = new Map(rows.map((row) => [earningsRowKey(row), row]));
+  const missingRows = (Array.isArray(week.rows) ? week.rows : [])
+    .filter((row) => narrativeNeedsEditorialCopy(row, rowsByKey.get(earningsRowKey(row))))
+    .map((row) => ({ symbol: row.symbol, reportDate: row.reportDate }));
+  return {
+    payload: {
+      schemaVersion: 1,
+      sourceArtifact: 'generated/earnings_week.json',
+      sourceGeneratedAt: week.generatedAt,
+      sourceRange: week.range,
+      rows,
+      outputPath: EARNINGS_NARRATIVE_PATH
+    },
+    missingRows
+  };
+}
+
+function syncEarningsNarrativeSidecar() {
+  const week = readJson(EARNINGS_WEEK_PATH);
+  const existing = fs.existsSync(EARNINGS_NARRATIVE_PATH)
+    ? readJson(EARNINGS_NARRATIVE_PATH)
+    : { rows: [] };
+  const { payload, missingRows } = buildEarningsNarrativeSidecar(week, existing);
+  const rows = payload.rows;
   if (!rows.length) {
     throw new Error('Cannot sync earnings narrative sidecar because it has no row overlap with the current earnings week.');
   }
-  writeJson(EARNINGS_NARRATIVE_PATH, {
-    schemaVersion: 1,
-    sourceArtifact: 'generated/earnings_week.json',
-    sourceGeneratedAt: week.generatedAt,
-    sourceRange: week.range,
-    rows,
-    outputPath: EARNINGS_NARRATIVE_PATH
-  });
+  writeJson(EARNINGS_NARRATIVE_PATH, payload);
+  return missingRows;
+}
+
+function earningsEditorialRequiredError(rows) {
+  const labels = rows.map((row) => `${row.symbol} (${row.reportDate})`).join(', ');
+  const error = new Error(
+    `Earnings editorial enrichment is required before this dashboard can be updated: ${labels}`
+  );
+  error.exitCode = EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE;
+  return error;
 }
 
 function readJsonBlock(html, id) {
@@ -529,7 +620,7 @@ function patchDashboard(args) {
     applyAssetAllocationSummary(dashboardData, summaryPayload);
   }
 
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled });
+  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
   fs.writeFileSync(args.dashboard, nextHtml);
 }
@@ -546,7 +637,7 @@ function applyDashboardDataJson(args) {
   } catch (_error) {
     // dashboard-data-only maintenance still works on staging fixtures that omit chart-data.
   }
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled });
+  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
   fs.writeFileSync(args.dashboard, nextHtml);
 }
@@ -562,7 +653,7 @@ function refreshNewsBaseline(args) {
   } catch (_error) {
     // Baseline-only fixtures may omit chart-data.
   }
-  applyScheduledNewsBaseline(dashboardData, dashboardData, { scheduled: args.scheduled });
+  applyScheduledNewsBaseline(dashboardData, dashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
   fs.writeFileSync(args.dashboard, nextHtml);
 }
@@ -574,6 +665,12 @@ function main() {
   }
   if (args.applyDashboardDataJson && !fs.existsSync(args.applyDashboardDataJson)) {
     throw new Error(`dashboard-data JSON file not found: ${args.applyDashboardDataJson}`);
+  }
+
+  if (args.scheduledPreflight) {
+    const windowId = validateScheduledPreflight(args.dashboard, args.windowMode);
+    process.stdout.write(`Scheduled preflight OK: ${windowId}\n`);
+    return;
   }
 
   if (args.refreshNewsBaseline) {
@@ -615,7 +712,13 @@ function main() {
 
   if (!args.skipEarnings) {
     runCommand('node', ['scripts/earnings_week.js', 'refresh']);
-    syncEarningsNarrativeSidecar();
+    const missingNarrativeRows = syncEarningsNarrativeSidecar();
+    if (missingNarrativeRows.length) {
+      // A standalone refresh must never leave an older embedded earnings monitor
+      // looking publishable. Codex completes this editorial work on scheduled and
+      // manual dashboard runs, then reruns the deterministic path.
+      throw earningsEditorialRequiredError(missingNarrativeRows);
+    }
     runCommand('node', ['scripts/earnings_week.js', 'apply-narrative']);
     runCommand('node', ['scripts/earnings_week.js', 'embed', '--dashboard', args.dashboard]);
   }
@@ -632,18 +735,23 @@ if (require.main === module) {
     main();
   } catch (error) {
     process.stderr.write(`run_daily_update failed: ${error.message}\n`);
-    process.exit(1);
+    process.exit(error.exitCode || 1);
   }
 }
 
 module.exports = {
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
+  buildEarningsNarrativeSidecar,
+  earningsEditorialRequiredError,
+  EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   applyDashboardDataJson,
   applyCryptoQuoteRows,
   applyCryptoStats,
   applyFuturesModule,
   applyScheduledNewsBaseline,
+  chicagoDateParts,
+  completedScheduledWindow,
   applyTapeQuoteRows,
   syncDashboardPricesFromChartData,
   patchDashboardDataBlock,
@@ -651,5 +759,6 @@ module.exports = {
   replaceJsonBlock,
   refreshNewsBaseline,
   storyIdentity,
-  stampDashboardEdition
+  stampDashboardEdition,
+  validateScheduledPreflight
 };

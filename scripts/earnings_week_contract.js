@@ -75,8 +75,21 @@ function computeEarningsSourceStatus(row, options = {}) {
   return 'verified';
 }
 
+function isDisplayEligibleEarningsRow(row) {
+  // Profile-recovered rows have audited company/market-cap sources but no listing fields.
+  // Treat only that explicit source combination as display-eligible without country/exchange.
+  const hasProfileRecovery = row?.sourceAudit?.selectedSources?.company === 'earningsApiCalendar'
+    && row?.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric';
+  if (hasProfileRecovery) return Number.isFinite(row?.marketCap) && row.marketCap >= 1000000000;
+  if (row?.country && row.country !== 'US') return false;
+  if (/OTC/i.test(row?.exchange || '')) return false;
+  if ((row?.sourceAudit?.finnhubProfile?.industry || '').toUpperCase() === 'N/A') return false;
+  return Number.isFinite(row?.marketCap) && row.marketCap >= 1000000000;
+}
+
 module.exports = {
   buildEarningsWeekPolicy,
   computeEarningsSourceStatus,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  isDisplayEligibleEarningsRow
 };

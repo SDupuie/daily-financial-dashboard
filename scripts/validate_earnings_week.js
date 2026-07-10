@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const {
   computeEarningsSourceStatus,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  isDisplayEligibleEarningsRow
 } = require('./earnings_week_contract');
 
 const root = path.resolve(__dirname, '..');
@@ -37,6 +38,18 @@ const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unreso
 const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
 const NUMBER_TOLERANCE = 0.0001;
 const PCT_TOLERANCE = 0.03;
+const REACTION_PRICE_RECAP_PATTERN = /\b(?:shares?|stock)\s+(?:rose|fell|gained|lost|advanced|declined|finished)\b/i;
+const REACTION_DRIVER_PATTERN = /\b(?:guidance|outlook|forecast|margins?|profit|earnings|eps|revenue|sales|demand|volume|pricing|segment|wholesale|consumer|inventory|costs?|operating|gross|capex|valuation|multiple|cash flow|buyback|dividend|leverage|debt|market share|order|backlog)\b/i;
+const REACTION_INTERPRETATION_PATTERN = /\b(?:outweigh(?:ed|s)?|offset|support(?:ed|s)?|pressure(?:d|s)?|concern|focus(?:ed|es)?|suggest(?:ed|s)?|signal(?:ed|s)?|imply|reflect(?:ed|s)?|temper(?:ed|s)?|reinforc(?:ed|es)?|point(?:ed|s)?|left|leave|kept|keep|gave|give|raise(?:d|s)?|lower(?:ed|s)?|indicate(?:d|s)?|driv(?:e|es|ing|en)|drove|lift(?:ed|s|ing)?|help(?:ed|s|ing)?|improv(?:e|ed|es|ing))\b/i;
+const OUTCOME_METRIC_RECAP_PATTERN = /\b(?:eps|earnings|revenue|sales)\s+(?:beat|miss(?:ed)?|met)\b|\b(?:beat|miss(?:ed)?|met)\s+(?:on\s+)?(?:both\s+)?(?:eps|earnings|revenue|sales)\b|\bdelivered a mixed earnings read\b/i;
+const OUTCOME_GUIDANCE_HORIZON_PATTERN = /\b(?:fy\d{2,4}|q[1-4]|(?:first|second|third|fourth)\s+quarter|full[- ]year|fiscal year)\b/i;
+const OUTCOME_NO_GUIDANCE_PATTERN = /\bno\s+(?:(?:formal|updated)\s+)?guidance\b|\bguidance\s+(?:not\s+(?:provided|issued|available)|unverified|none)\b/i;
+const QUARTERLY_GUIDANCE_PATTERN = /\b(?:q[1-4]|(?:first|second|third|fourth)\s+quarter)\b/i;
+const FULL_YEAR_GUIDANCE_PATTERN = /\b(?:fy\d{2,4}|full[- ]year|fiscal year)\b/i;
+// These limits mirror the compact monitor's two-line outcome/guidance and three-line reaction treatment.
+const OUTCOME_INTERPRETATION_MAX_LENGTH = 120;
+const OUTCOME_GUIDE_MAX_LENGTH = 130;
+const REACTION_NOTE_MAX_LENGTH = 100;
 const TOP_LEVEL_FIELDS = new Set([
   'schemaVersion',
   'generatedAt',
@@ -797,21 +810,9 @@ function rowKey(row) {
   return `${row.reportDate}:${row.symbol}`;
 }
 
-function isDisplayEligible(row) {
-  // Profile-recovered rows have audited company/market-cap sources but no listing fields.
-  // Treat only that explicit source combination as display-eligible without country/exchange.
-  const hasProfileRecovery = row.sourceAudit?.selectedSources?.company === 'earningsApiCalendar'
-    && row.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric';
-  if (hasProfileRecovery) return Number.isFinite(row.marketCap) && row.marketCap >= 1000000000;
-  if (row.country && row.country !== 'US') return false;
-  if (/OTC/i.test(row.exchange || '')) return false;
-  if ((row.sourceAudit?.finnhubProfile?.industry || '').toUpperCase() === 'N/A') return false;
-  return Number.isFinite(row.marketCap) && row.marketCap >= 1000000000;
-}
-
 function validateNarrativeApply(errors, data, options = {}) {
   const rows = Array.isArray(data.rows) ? data.rows : [];
-  const requiredRows = rows.filter(isDisplayEligible);
+  const requiredRows = rows.filter(isDisplayEligibleEarningsRow);
   if (!isObject(data.narrativeApply)) {
     if (options.required && requiredRows.length) errors.push('narrativeApply must be populated after narrative enrichment.');
     return;
@@ -852,9 +853,39 @@ function validateNarrativeApply(errors, data, options = {}) {
       errors.push(`${row.symbol} is display-eligible but missing from narrativeApply.applied.`);
       continue;
     }
-    if (!row.outcome?.interpretation?.trim()) errors.push(`${row.symbol}.outcome.interpretation must be populated after narrative enrichment.`);
-    if (row.reaction?.status === 'computed' && !row.reaction.note.trim()) {
-      errors.push(`${row.symbol}.reaction.note must be populated after narrative enrichment.`);
+    const reportedRow = row.outcome?.overall !== 'pending';
+    if (!row.outcome?.interpretation?.trim()) {
+      errors.push(`${row.symbol}.outcome.interpretation must be populated after narrative enrichment.`);
+    } else if (row.outcome.interpretation.trim().length > OUTCOME_INTERPRETATION_MAX_LENGTH) {
+      errors.push(`${row.symbol}.outcome.interpretation must stay within ${OUTCOME_INTERPRETATION_MAX_LENGTH} characters for the compact earnings monitor.`);
+    } else if (reportedRow && OUTCOME_METRIC_RECAP_PATTERN.test(row.outcome.interpretation)) {
+      errors.push(`${row.symbol}.outcome.interpretation must explain the business takeaway, not restate EPS/revenue beats or misses.`);
+    } else if (reportedRow && (!REACTION_DRIVER_PATTERN.test(row.outcome.interpretation) || !REACTION_INTERPRETATION_PATTERN.test(row.outcome.interpretation))) {
+      errors.push(`${row.symbol}.outcome.interpretation must identify a concrete business driver and explain its relevance.`);
+    }
+    if (reportedRow) {
+      const guide = String(row.outcome?.guide || '').trim();
+      if (!guide) {
+        errors.push(`${row.symbol}.outcome.guide must summarize next-quarter or full-year guidance after a reported result.`);
+      } else if (guide.length > OUTCOME_GUIDE_MAX_LENGTH) {
+        errors.push(`${row.symbol}.outcome.guide must stay within ${OUTCOME_GUIDE_MAX_LENGTH} characters for the compact earnings monitor.`);
+      } else if (!OUTCOME_GUIDANCE_HORIZON_PATTERN.test(guide) && !OUTCOME_NO_GUIDANCE_PATTERN.test(guide)) {
+        errors.push(`${row.symbol}.outcome.guide must identify a quarterly/full-year horizon or explicit no-guidance status.`);
+      } else if (QUARTERLY_GUIDANCE_PATTERN.test(guide) && FULL_YEAR_GUIDANCE_PATTERN.test(guide) && guide.search(QUARTERLY_GUIDANCE_PATTERN) > guide.search(FULL_YEAR_GUIDANCE_PATTERN)) {
+        errors.push(`${row.symbol}.outcome.guide must lead with next-quarter guidance when both quarterly and full-year outlooks are provided.`);
+      }
+    }
+    if (row.reaction?.status === 'computed') {
+      const note = String(row.reaction?.note || '').trim();
+      if (!note) {
+        errors.push(`${row.symbol}.reaction.note must be populated after narrative enrichment.`);
+      } else if (note.length > REACTION_NOTE_MAX_LENGTH) {
+        errors.push(`${row.symbol}.reaction.note must stay within ${REACTION_NOTE_MAX_LENGTH} characters for the compact earnings monitor.`);
+      } else if (REACTION_PRICE_RECAP_PATTERN.test(note)) {
+        errors.push(`${row.symbol}.reaction.note must explain the earnings driver, not repeat the displayed share-price move.`);
+      } else if (!REACTION_DRIVER_PATTERN.test(note) || !REACTION_INTERPRETATION_PATTERN.test(note)) {
+        errors.push(`${row.symbol}.reaction.note must identify a concrete earnings driver and explain its relevance to the reaction.`);
+      }
     }
   }
 }
@@ -1122,8 +1153,17 @@ function validateEarningsWeekReleasePayload(data, week, options = {}) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.mode === 'release') {
-    const data = readJson(args.input);
     const week = readJson(args.week);
+    if (!Array.isArray(week.companyReleaseTasks)) {
+      console.error(`Earnings week validation failed for ${args.week}:`);
+      console.error('- companyReleaseTasks must be an array.');
+      process.exit(1);
+    }
+    if (week.companyReleaseTasks.length === 0) {
+      console.log(`Company-release validation not applicable: ${args.week} has no active company-release tasks.`);
+      return;
+    }
+    const data = readJson(args.input);
     const errors = validateEarningsWeekReleasePayload(data, week, { weekPath: args.week });
 
     if (errors.length) {
