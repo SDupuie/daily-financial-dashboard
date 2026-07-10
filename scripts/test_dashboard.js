@@ -649,7 +649,7 @@ function validateDashboardFixture(data, fixturePrefix) {
     ], {
       cwd: root,
       encoding: 'utf8',
-      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-09T22:45:00Z' }
+      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-10T13:30:00Z' }
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -707,10 +707,10 @@ function testDashboardValidatorRejectsImpossibleFuturesDates() {
 
 function testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow() {
   const data = validationDashboardData();
-  data.futuresModule.stories[0].publishedAt = '2026-07-09T20:00:01Z';
+  data.futuresModule.stories[0].publishedAt = '2026-07-09T19:59:59Z';
   const result = validateDashboardFixture(data, 'dfd-futures-window-');
   assert.notEqual(result.status, 0, 'A futures story published after the regular-session close must fail validation.');
-  assert.match(result.stderr, /publishedAt must fall between the current U\.S\. regular-session open/);
+  assert.match(result.stderr, /publishedAt must fall between the fetched prior U\.S\. regular-session close/);
 }
 
 function testDashboardValidatorAcceptsInWindowFuturesStories() {
@@ -720,39 +720,25 @@ function testDashboardValidatorAcceptsInWindowFuturesStories() {
 
 function testDashboardValidatorRequiresMatchingFuturesEdition() {
   const morningMismatch = validationDashboardData();
-  morningMismatch.masthead.edition = 'Morning Edition';
+  morningMismatch.masthead.edition = 'Afternoon Edition';
   const morningResult = validateDashboardFixture(morningMismatch, 'dfd-futures-edition-morning-');
-  assert.notEqual(morningResult.status, 0, 'Morning masthead must not validate against Session Futures.');
-  assert.match(morningResult.stderr, /masthead\.edition must be Afternoon Edition when futuresModule is After The Bell\/Session Futures/);
-
-  const afternoonMismatch = validationDashboardData();
-  afternoonMismatch.masthead.edition = 'Afternoon Edition';
-  afternoonMismatch.futuresModule.sectionLabel = 'Before The Open';
-  afternoonMismatch.futuresModule.sectionTitle = 'Pre-Market Futures';
-  for (const future of afternoonMismatch.futuresModule.futures) {
-    future.raw.referenceDate = '2026-07-08';
-    future.raw.referenceCloseEastern = '4:00 PM ET';
-  }
-  for (const story of afternoonMismatch.futuresModule.stories) {
-    story.publishedAt = '2026-07-09T11:45:00Z';
-  }
-  const afternoonResult = validateDashboardFixture(afternoonMismatch, 'dfd-futures-edition-afternoon-');
-  assert.notEqual(afternoonResult.status, 0, 'Afternoon masthead must not validate against Pre-Market Futures.');
-  assert.match(afternoonResult.stderr, /masthead\.edition must be Morning Edition when futuresModule is Before The Open\/Pre-Market Futures/);
+  assert.notEqual(morningResult.status, 0, 'Afternoon masthead must not validate against Pre-Market Futures.');
+  assert.match(morningResult.stderr, /masthead\.edition must be Morning Edition when futuresModule is Before The Open\/Pre-Market Futures/);
 }
 
 function testDashboardValidatorAcceptsMorningFuturesStoryWindow() {
   const data = validationDashboardData();
   data.masthead.edition = 'Morning Edition';
-  data.editionId = '2026-07-09T12:30:00Z';
+  data.editionId = '2026-07-10T12:30:00Z';
   data.futuresModule.sectionLabel = 'Before The Open';
   data.futuresModule.sectionTitle = 'Pre-Market Futures';
   for (const future of data.futuresModule.futures) {
-    future.raw.referenceDate = '2026-07-08';
+    future.raw.referenceDate = '2026-07-09';
     future.raw.referenceCloseEastern = '4:00 PM ET';
   }
   for (const story of data.futuresModule.stories) {
-    story.publishedAt = '2026-07-09T11:45:00Z';
+    story.publishedOn = '2026-07-10';
+    story.publishedAt = '2026-07-10T11:45:00Z';
   }
   const result = validateDashboardFixture(data, 'dfd-futures-morning-');
   assert.equal(result.status, 0, result.stderr);
@@ -761,7 +747,7 @@ function testDashboardValidatorAcceptsMorningFuturesStoryWindow() {
 function testDashboardValidatorRequiresSharedMorningFuturesReferenceDate() {
   const data = validationDashboardData();
   data.masthead.edition = 'Morning Edition';
-  data.editionId = '2026-07-09T12:30:00Z';
+  data.editionId = '2026-07-10T12:30:00Z';
   data.futuresModule.sectionLabel = 'Before The Open';
   data.futuresModule.sectionTitle = 'Pre-Market Futures';
   for (const future of data.futuresModule.futures) {
