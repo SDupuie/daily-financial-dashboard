@@ -46,7 +46,7 @@ function buildEarningsWeekPolicy() {
       unknown: 'unavailable'
     },
     secondaryRecoveryFieldPolicy: {
-      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row; a different-week secondary date excludes it from the current slate, while an in-week conflict or missing secondary row requires official company IR confirmation.',
+      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row; every date conflict or missing secondary row requires official company IR confirmation. An official date outside the active week excludes the row from that week.',
       profileRecovery: 'For Finnhub-present rows with empty Finnhub profile, EarningsAPI calendar may supply company name and Finnhub metric may supply market capitalization; EPS/revenue/timing remain Finnhub.',
       eps: 'EarningsAPI company endpoint may supply EPS estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
       revenue: 'EarningsAPI company endpoint may supply revenue estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',

@@ -506,8 +506,19 @@ function testPrimaryScheduleVerification() {
   const crossWeek = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [{
     date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })]
   }], range);
-  assert.equal(crossWeek.rows.length, 0, 'A conflicting date outside the active week must not appear in the current slate.');
-  assert.equal(crossWeek.review.length, 0);
+  assert.equal(crossWeek.rows.length, 0, 'A cross-week conflict must await an official confirmation.');
+  assert.deepEqual(crossWeek.review.map((row) => row.reason), ['cross_week_calendar_date_conflict']);
+
+  const crossWeekOfficial = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [{
+    date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })]
+  }], range, [{
+    symbol: 'OUTSIDE',
+    reportDate: '2026-01-30',
+    sourceName: 'Official investor relations calendar',
+    sourceUrl: 'https://investors.example.test/earnings'
+  }]);
+  assert.equal(crossWeekOfficial.rows.length, 0, 'An official out-of-week date must exclude the row from the active slate.');
+  assert.equal(crossWeekOfficial.review.length, 0);
 
   const uncorroborated = verifyFinnhubScheduleRows(baseRows('SINGLE'), [], range);
   assert.equal(uncorroborated.rows.length, 0);

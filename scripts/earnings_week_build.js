@@ -803,7 +803,6 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       });
       continue;
     }
-    if (hasCrossWeekConflict) continue;
     if (confirmation && activeDates.has(confirmation.reportDate)) {
       verifiedRows.push({
         ...row,
@@ -816,12 +815,17 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       continue;
     }
     if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
+    const reason = hasCrossWeekConflict
+      ? 'cross_week_calendar_date_conflict'
+      : hasInWeekConflict
+        ? 'in_week_calendar_date_conflict'
+        : 'uncorroborated_primary_calendar_date';
     review.push({
       symbol: row.symbol,
       company: row.company,
       primaryDate: row.reportDate,
       secondaryDates,
-      reason: hasInWeekConflict ? 'in_week_calendar_date_conflict' : 'uncorroborated_primary_calendar_date',
+      reason,
       required: 'official_company_ir_date_confirmation'
     });
   }
