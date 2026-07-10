@@ -571,7 +571,7 @@ if (!dashboardMatch) {
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
@@ -616,6 +616,7 @@ if (!dashboardMatch) {
       UST3M: 'TREASURY:3M',
       UST10Y: 'TREASURY:10Y',
       UST30Y: 'TREASURY:30Y',
+      UUP: 'UUP',
       IEF: 'IEF',
       AGG: 'AGG',
       LQD: 'LQD',
