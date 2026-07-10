@@ -73,9 +73,9 @@ const LENSES = {
     watchlist: ['CL', 'XLE', '10Y']
   },
   quiet: {
-    title: 'No data catalyst dominates',
-    body: 'Rates, oil, and headlines are more likely than the calendar to set factor leadership.',
-    watchlist: ['DXY', '2Y', '10Y']
+    title: 'Quiet calendar',
+    body: 'No major release today. Rates, oil, and headlines set the tone.',
+    watchlist: []
   }
 };
 
