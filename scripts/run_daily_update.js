@@ -5,11 +5,14 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { deriveQuoteRowsFromSeries } = require('./fetch_chart_data');
 const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
+const { validateWeekAheadPayload } = require('./week_ahead_contract');
+const { addDays } = require('./calendar_contract');
 
 const DEFAULT_DASHBOARD = path.resolve(process.cwd(), 'daily_financial_news.html');
 const GENERATED_DIR = path.resolve(process.cwd(), 'generated');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
+const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE = 2;
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 6 * 60 + 45, endMinutes: 8 * 60 },
@@ -185,6 +188,31 @@ function scheduledNow() {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
+function calendarRolloverRange(windowMode, now = scheduledNow()) {
+  // Calendar membership changes only at these two handoff windows; all other
+  // runs retain the existing five trading dates while refreshing live results.
+  const parts = chicagoDateParts(now);
+  if (windowMode === 'afternoon' && parts.weekday === 'Fri') {
+    return { from: parts.isoDate, to: addDays(parts.isoDate, 6) };
+  }
+  if (windowMode === 'morning' && parts.weekday === 'Mon') {
+    return { from: parts.isoDate, to: addDays(parts.isoDate, 4) };
+  }
+  return null;
+}
+
+function earningsCalendarNeedsBuild(range, earningsWeekPath = EARNINGS_WEEK_PATH) {
+  if (!range || !fs.existsSync(earningsWeekPath)) return Boolean(range);
+  try {
+    // A narrative-completion rerun must reuse the staged slate instead of
+    // rebuilding it and invalidating the editorial work it is about to apply.
+    const existingRange = readJson(earningsWeekPath).range;
+    return existingRange?.from !== range.from || existingRange?.to !== range.to;
+  } catch (_error) {
+    return true;
+  }
+}
+
 function completedScheduledWindow(baseline) {
   const marker = String(baseline?.lastScheduledWindow || '');
   if (/^\d{4}-\d{2}-\d{2}:(morning|afternoon)$/.test(marker)) return marker;
@@ -239,6 +267,7 @@ function parseArgs(argv) {
     skipCryptoStats: false,
     skipAssetAllocationPortfolio: false,
     skipAssetAllocationSummary: false,
+    skipWeekAhead: false,
     scheduled: false,
     skipValidate: false
   };
@@ -304,6 +333,10 @@ function parseArgs(argv) {
       args.skipAssetAllocationSummary = true;
       continue;
     }
+    if (arg === '--skip-week-ahead') {
+      args.skipWeekAhead = true;
+      continue;
+    }
     if (arg === '--skip-validate') {
       args.skipValidate = true;
       continue;
@@ -356,6 +389,7 @@ Options:
   --skip-asset-allocation-portfolio   Skip Asset Allocation ETF row fetch and patching
   --skip-asset-allocation-summary     Skip Asset Allocation summary refresh/import and patching
   --skip-asset-allocation             Skip both asset-allocation fetchers and patch steps
+  --skip-week-ahead                   Skip Week Ahead calendar refresh and patching
   --skip-validate                     Skip node scripts/validate_dashboard.js
   --help                              Show this help
 
@@ -578,6 +612,49 @@ function applyAssetAllocationSummary(data, summaryPayload) {
   };
 }
 
+function hasEditorialMarketLens(day) {
+  const value = day?.marketLens;
+  return day?.marketLensSource === 'editorial'
+    && Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof value.title === 'string'
+    && typeof value.body === 'string'
+    && Array.isArray(value.watchlist)
+    && value.watchlist.every((item) => typeof item === 'string');
+}
+
+function applyWeekAhead(data, weekAheadPayload) {
+  const errors = validateWeekAheadPayload(weekAheadPayload);
+  if (errors.length) throw new Error(`Generated Week Ahead payload is invalid: ${errors.join(' ')}`);
+  // Editorial lenses are the only Week Ahead field that survives a deterministic
+  // refresh, and only when its calendar date remains in the refreshed range.
+  const existingLenses = new Map(
+    (Array.isArray(data.weekAhead?.days) ? data.weekAhead.days : [])
+      .filter((day) => typeof day?.date === 'string' && hasEditorialMarketLens(day))
+      .map((day) => [day.date, day.marketLens])
+  );
+  data.weekAhead = {
+    ...weekAheadPayload,
+    days: weekAheadPayload.days.map((day) => ({
+      ...day,
+      marketLens: existingLenses.get(day.date) || day.marketLens,
+      marketLensSource: existingLenses.has(day.date) ? 'editorial' : 'generated'
+    }))
+  };
+}
+
+function patchWeekAheadRollover(args, weekAheadPath = WEEK_AHEAD_PATH) {
+  if (args.skipWeekAhead || !args.calendarRolloverRange) return false;
+  // This deliberate partial commit keeps the calendar on schedule when Earnings
+  // pauses later for required, section-specific editorial narratives.
+  const html = fs.readFileSync(args.dashboard, 'utf8');
+  const dashboardData = readJsonBlock(html, 'dashboard-data');
+  applyWeekAhead(dashboardData, readJson(weekAheadPath));
+  fs.writeFileSync(args.dashboard, patchDashboardDataBlock(html, dashboardData));
+  return true;
+}
+
 function syncDashboardPricesFromChartData(data, chartData) {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
@@ -620,6 +697,10 @@ function patchDashboard(args) {
     applyAssetAllocationSummary(dashboardData, summaryPayload);
   }
 
+  if (!args.skipWeekAhead && args.calendarRolloverRange) {
+    applyWeekAhead(dashboardData, readJson(WEEK_AHEAD_PATH));
+  }
+
   applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
   fs.writeFileSync(args.dashboard, nextHtml);
@@ -660,6 +741,7 @@ function refreshNewsBaseline(args) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  args.calendarRolloverRange = calendarRolloverRange(args.windowMode);
   if (!fs.existsSync(args.dashboard)) {
     throw new Error(`Dashboard file not found: ${args.dashboard}`);
   }
@@ -710,7 +792,22 @@ function main() {
     runCommand('node', assetAllocationArgs);
   }
 
+  if (!args.skipWeekAhead && args.calendarRolloverRange) {
+    runCommand('node', ['scripts/fetch_week_ahead.js', '--date', args.calendarRolloverRange.from]);
+    // Week Ahead has a valid generated-lens fallback, so its calendar rollover
+    // is committed before Earnings can stop for required editorial narratives.
+    patchWeekAheadRollover(args);
+  }
+
   if (!args.skipEarnings) {
+    if (earningsCalendarNeedsBuild(args.calendarRolloverRange)) {
+      runCommand('node', [
+        'scripts/earnings_week.js',
+        'build',
+        '--from', args.calendarRolloverRange.from,
+        '--to', args.calendarRolloverRange.to
+      ]);
+    }
     runCommand('node', ['scripts/earnings_week.js', 'refresh']);
     const missingNarrativeRows = syncEarningsNarrativeSidecar();
     if (missingNarrativeRows.length) {
@@ -743,12 +840,16 @@ module.exports = {
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
   buildEarningsNarrativeSidecar,
+  calendarRolloverRange,
+  earningsCalendarNeedsBuild,
   earningsEditorialRequiredError,
   EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   applyDashboardDataJson,
   applyCryptoQuoteRows,
   applyCryptoStats,
   applyFuturesModule,
+  applyWeekAhead,
+  patchWeekAheadRollover,
   applyScheduledNewsBaseline,
   chicagoDateParts,
   completedScheduledWindow,

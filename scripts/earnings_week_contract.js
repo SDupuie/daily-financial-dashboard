@@ -1,5 +1,18 @@
-// Keep the generated artifact, validator, and deterministic fixture tests on
-// one contract surface so wording/count-rule changes do not drift by file.
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeEarningsTiming(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  return ['bmo', 'amc', 'dmh'].includes(raw) ? raw : 'unknown';
+}
+
+function earningsRowKey(row) {
+  return `${row?.reportDate || ''}:${row?.symbol || ''}`;
+}
+
 function buildEarningsWeekPolicy() {
   return {
     baseSlate: 'Finnhub earnings calendar by date range',
@@ -91,5 +104,8 @@ module.exports = {
   buildEarningsWeekPolicy,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
-  isDisplayEligibleEarningsRow
+  earningsRowKey,
+  isDisplayEligibleEarningsRow,
+  normalizeEarningsTiming,
+  numberOrNull
 };

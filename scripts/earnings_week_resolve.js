@@ -3,6 +3,13 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { numberOrNull } = require('./earnings_week_contract');
+const {
+  addDays,
+  compareIsoDate,
+  dateFromIso,
+  isoFromDate
+} = require('./calendar_contract');
 
 const root = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
@@ -130,30 +137,6 @@ async function fetchJson(url, args, headers = {}) {
   } catch (error) {
     return { ...result, ok: false, data: null, parseError: error.message };
   }
-}
-
-function dateFromIso(isoDate) {
-  return new Date(`${isoDate}T00:00:00Z`);
-}
-
-function isoFromDate(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(isoDate, days) {
-  const date = dateFromIso(isoDate);
-  date.setUTCDate(date.getUTCDate() + days);
-  return isoFromDate(date);
-}
-
-function compareIsoDate(left, right) {
-  return String(left).localeCompare(String(right));
-}
-
-function numberOrNull(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function roundedCents(value) {

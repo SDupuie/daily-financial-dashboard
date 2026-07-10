@@ -5,7 +5,9 @@ const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const {
   computeEarningsSourceStatus,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  earningsRowKey: rowKey,
+  numberOrNull
 } = require('./earnings_week_contract');
 const {
   combinedOutcome,
@@ -185,11 +187,6 @@ Options:
   return args;
 }
 
-function numberOrNull(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
 function pctChange(estimate, actual) {
   const left = numberOrNull(estimate);
   const right = numberOrNull(actual);
@@ -220,10 +217,6 @@ function sourceFromResolution(value, fallback = 'none') {
 
 function reactionSource(reaction) {
   return reaction?.status === 'computed' ? 'yahoo' : 'none';
-}
-
-function rowKey(item) {
-  return `${item.reportDate}:${item.symbol}`;
 }
 
 function rowFromTask(task, resolution) {

@@ -7,8 +7,12 @@ const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const {
   buildEarningsWeekPolicy,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  earningsRowKey,
+  normalizeEarningsTiming,
+  numberOrNull
 } = require('./earnings_week_contract');
+const { displayDatesForRange, isIsoDate } = require('./calendar_contract');
 const {
   attachReactions,
   attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates,
@@ -261,6 +265,23 @@ function testFailClosed() {
     }),
     'Two Finnhub rows should satisfy the scaled one-weekday default.'
   );
+}
+
+function testCalendarRolloverDisplayDates() {
+  assert.equal(isIsoDate('2026-02-28'), true);
+  assert.equal(isIsoDate('2026-02-30'), false, 'Impossible calendar dates must not roll into a different week.');
+  assert.equal(normalizeEarningsTiming(' AMC '), 'amc');
+  assert.equal(normalizeEarningsTiming('unknown-provider-code'), 'unknown');
+  assert.equal(numberOrNull('12.5'), 12.5);
+  assert.equal(numberOrNull(''), null);
+  assert.equal(earningsRowKey({ reportDate: '2026-07-10', symbol: 'ACME' }), '2026-07-10:ACME');
+  assert.deepEqual(displayDatesForRange('2026-07-13', '2026-07-17'), [
+    '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17'
+  ]);
+  assert.deepEqual(displayDatesForRange('2026-07-10', '2026-07-16'), [
+    '2026-07-10', '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16'
+  ]);
+  assert.deepEqual(displayDatesForRange('2026-07-11', '2026-07-17'), []);
 }
 
 function testFinnhubProfileCacheFallbackPreservesIdentity() {
@@ -609,6 +630,9 @@ function testWeekValidatorAllowsEmptyEarningsWeek() {
     companyReleaseTasks: 0
   };
 
+  validateWeekPayload(source);
+
+  source.range = { from: '2026-07-10', to: '2026-07-16' };
   validateWeekPayload(source);
 }
 
@@ -1507,6 +1531,7 @@ function testValidateReleaseRejectsMalformedCompanyReleaseTasks() {
 }
 
 async function main() {
+  testCalendarRolloverDisplayDates();
   testFailClosed();
   testFinnhubProfileCacheFallbackPreservesIdentity();
   testFinnhubCoveredRowsDoNotSpendSecondaryRecovery();

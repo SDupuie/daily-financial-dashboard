@@ -2,6 +2,7 @@
 
 const assert = require('assert/strict');
 const { spawnSync } = require('child_process');
+const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -18,13 +19,18 @@ const {
   quoteRowFromSeries,
   shouldUseFinnhubQuoteFallback,
 } = require('./fetch_chart_data');
+const { normalizedSummary } = require('./fetch_asset_allocation');
 const {
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
+  applyWeekAhead,
   buildEarningsNarrativeSidecar,
+  calendarRolloverRange,
+  earningsCalendarNeedsBuild,
   earningsEditorialRequiredError,
   EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   patchDashboardDataBlock,
+  patchWeekAheadRollover,
   applyCryptoQuoteRows,
   applyCryptoStats,
   applyFuturesModule,
@@ -37,6 +43,7 @@ const {
   stampDashboardEdition,
   validateScheduledPreflight
 } = require('./run_daily_update');
+const { normalizeWeekAhead } = require('./week_ahead_contract');
 
 const root = path.resolve(__dirname, '..');
 
@@ -213,6 +220,159 @@ function testUpdaterModulePatches() {
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnAsOf, '2026-07-06');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnValue, '+1.23%');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnStale, false);
+}
+
+function testUpdaterWeekAheadPreservesEditorialLens() {
+  const data = dashboardFixture();
+  const payload = normalizeWeekAhead({
+    announcements: {
+      retail_sales: { data: [{ announcement_id: 'usd_retail_sales_2026-05-31', announcement_datetime: 1781699400, val: 0.1 }] }
+    },
+    predictions: {
+      retail_sales: { data: [{
+        announcement_id: 'usd_retail_sales_2026-06-30',
+        announcement_datetime: 1784205000,
+        announcement_datetime_local: '2026-07-13T08:30:00-04:00',
+        predictions: [{ prediction_type: 'market_consensus', predicted_value: 0.2 }]
+      }] }
+    }
+  }, {
+    range: { from: '2026-07-13', to: '2026-07-17' },
+    officialSchedule: {
+      events: [{
+        date: '2026-07-13', time: '08:30', keys: ['retail-sales'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  data.weekAhead = {
+    days: [{
+      date: '2026-07-13',
+      marketLens: { title: 'Custom lens', body: 'Editorial copy stays separate from calendar facts.', watchlist: ['SPX'] },
+      marketLensSource: 'editorial'
+    }]
+  };
+  applyWeekAhead(data, payload);
+  assert.equal(data.weekAhead.days[0].marketLens.title, 'Custom lens');
+  assert.equal(data.weekAhead.days[0].marketLensSource, 'editorial');
+  assert.equal(data.weekAhead.days[0].events[0].time, '08:30');
+  assert.equal(data.weekAhead.days[0].events[0].forecast, '0.2%');
+
+  const generatedData = dashboardFixture();
+  generatedData.weekAhead = {
+    days: [{
+      date: '2026-07-13',
+      marketLens: { title: 'Stale generated lens', body: 'This should not survive a calendar refresh.', watchlist: ['SPX'] }
+    }]
+  };
+  applyWeekAhead(generatedData, payload);
+  assert.equal(generatedData.weekAhead.days[0].marketLens.title, 'Demand gets the next vote');
+  assert.equal(generatedData.weekAhead.days[0].marketLensSource, 'generated');
+}
+
+function testCalendarRolloverRange() {
+  assert.deepEqual(calendarRolloverRange('afternoon', new Date('2026-07-10T21:00:00Z')), {
+    from: '2026-07-10', to: '2026-07-16'
+  });
+  assert.deepEqual(calendarRolloverRange('morning', new Date('2026-07-13T12:00:00Z')), {
+    from: '2026-07-13', to: '2026-07-17'
+  });
+  assert.equal(calendarRolloverRange('morning', new Date('2026-07-10T12:00:00Z')), null);
+  assert.equal(calendarRolloverRange('afternoon', new Date('2026-07-13T21:00:00Z')), null);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-calendar-rollover-'));
+  const earningsPath = path.join(dir, 'earnings_week.json');
+  const fridayBridge = { from: '2026-07-10', to: '2026-07-16' };
+  assert.equal(earningsCalendarNeedsBuild(fridayBridge, earningsPath), true);
+  fs.writeFileSync(earningsPath, JSON.stringify({ range: fridayBridge }));
+  assert.equal(earningsCalendarNeedsBuild(fridayBridge, earningsPath), false);
+  assert.equal(earningsCalendarNeedsBuild({ from: '2026-07-13', to: '2026-07-17' }, earningsPath), true);
+}
+
+function testWeekAheadRolloverCommitsBeforeEarnings() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-week-ahead-rollover-'));
+  const dashboardPath = path.join(dir, 'dashboard.html');
+  const weekAheadPath = path.join(dir, 'week_ahead.json');
+  const payload = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: { from: '2026-07-10', to: '2026-07-16' },
+    officialSchedule: {
+      events: [{
+        date: '2026-07-13', time: '08:30', keys: ['retail-sales'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T21:00:00Z')
+  });
+  fs.writeFileSync(weekAheadPath, JSON.stringify(payload));
+  fs.writeFileSync(dashboardPath, `<script type="application/json" id="dashboard-data">${JSON.stringify({ weekAhead: { days: [] } })}</script>`);
+
+  assert.equal(patchWeekAheadRollover({
+    dashboard: dashboardPath,
+    calendarRolloverRange: { from: '2026-07-10', to: '2026-07-16' },
+    skipWeekAhead: false
+  }, weekAheadPath), true);
+  const patched = readJsonBlock(fs.readFileSync(dashboardPath, 'utf8'), 'dashboard-data');
+  assert.deepEqual(patched.weekAhead.days.map((day) => day.date), [
+    '2026-07-10', '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16'
+  ]);
+}
+
+function testWeekAheadRendererConvertsMarketTime() {
+  const instant = extractScriptFunction('daily_financial_news.html', 'weekAheadInstant');
+  const label = extractScriptFunction('daily_financial_news.html', 'weekAheadTimeLabel');
+  const weekAheadTimeLabel = new Function(`${instant}\n${label}\nreturn weekAheadTimeLabel;`)();
+  const rendered = weekAheadTimeLabel(
+    { date: '2026-07-14' },
+    { time: '08:30' },
+    { range: { marketTimeZone: 'America/New_York', timeZone: 'America/Chicago' } }
+  );
+  assert.equal(rendered, '7:30 AM');
+}
+
+function testWeekAheadRendererGroupsReleaseFamilies() {
+  const releaseFamily = extractScriptFunction('daily_financial_news.html', 'weekAheadReleaseFamily');
+  const familyVariant = extractScriptFunction('daily_financial_news.html', 'weekAheadFamilyVariant');
+  const familyEvents = extractScriptFunction('daily_financial_news.html', 'weekAheadFamilyEvents');
+  const eventGroups = extractScriptFunction('daily_financial_news.html', 'weekAheadEventGroups');
+  const runtime = new Function(`${releaseFamily}\n${familyVariant}\n${familyEvents}\n${eventGroups}\nreturn { weekAheadFamilyEvents, weekAheadEventGroups };`)();
+  const event = (name, period, agency = 'BLS', time = '08:30') => ({ name, period, agency, time, impact: 'high' });
+  const events = [
+    event('Consumer Price Index', 'YoY'),
+    event('Core Consumer Price Index', 'YoY'),
+    event('Consumer Price Index', 'MoM'),
+    event('Core Consumer Price Index', 'MoM'),
+    event('Producer Price Index', 'MoM'),
+    event('Core Producer Price Index', 'MoM'),
+    event('Retail Sales', 'MoM', 'Census'),
+    event('Retail Sales Control Group', 'MoM', 'Census'),
+    event('Core Retail Sales', 'MoM', 'Census'),
+    event('Core PCE Price Index', 'YoY', 'BEA')
+  ];
+  const groups = runtime.weekAheadEventGroups(events);
+
+  assert.deepEqual(groups.map((group) => group.family?.title || group.events[0].name), [
+    'Consumer Price Index',
+    'Producer Price Index',
+    'Retail Sales',
+    'Core PCE Price Index'
+  ]);
+  assert.deepEqual(
+    runtime.weekAheadFamilyEvents(groups[0].events, groups[0].family).map((item) => `${item.name}:${item.period}`),
+    [
+      'Core Consumer Price Index:MoM',
+      'Core Consumer Price Index:YoY',
+      'Consumer Price Index:MoM',
+      'Consumer Price Index:YoY'
+    ]
+  );
+  assert.deepEqual(
+    runtime.weekAheadFamilyEvents(groups[2].events, groups[2].family).map((item) => item.name),
+    ['Core Retail Sales', 'Retail Sales', 'Retail Sales Control Group']
+  );
+  assert.equal(groups[3].family, null, 'A standalone core release must not be collapsed into a family.');
 }
 
 function testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion() {
@@ -669,6 +829,42 @@ function testDashboardValidatorRejectsOversizedFuturesStoryTag() {
   assert.match(result.stderr, /tag must be 24 characters or fewer to preserve the shared story-label column/);
 }
 
+function testDashboardValidatorAcceptsFridayBridgeCalendars() {
+  const data = validationDashboardData();
+  data.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: { from: '2026-07-10', to: '2026-07-16' },
+    officialSchedule: {
+      events: [{
+        date: '2026-07-13', time: '08:30', keys: ['retail-sales'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  const earningsWeek = data.earnings.week;
+  earningsWeek.range = { from: '2026-07-10', to: '2026-07-16' };
+  earningsWeek.rows = [];
+  earningsWeek.secondaryRecoveryCandidates = [];
+  earningsWeek.companyReleaseTasks = [];
+  delete earningsWeek.companyReleaseApply;
+  delete earningsWeek.narrativeApply;
+  earningsWeek.summary.counts = {
+    total: 0,
+    verified: 0,
+    partial: 0,
+    reactionComputed: 0,
+    missingTiming: 0,
+    missingRevenue: 0,
+    missingMarketCap: 0,
+    secondaryRecoveryCandidates: 0,
+    companyReleaseTasks: 0
+  };
+
+  const result = validateDashboardFixture(data, 'dfd-friday-bridge-');
+  assert.equal(result.status, 0, result.stderr);
+}
+
 function testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt() {
   const data = validationDashboardData();
   delete data.futuresModule.stories[0].publishedAt;
@@ -761,14 +957,16 @@ function testDashboardValidatorRequiresSharedMorningFuturesReferenceDate() {
 
 function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
   const sources = [
-    'isIsoDate',
-    'isIsoDateTime',
     'zonedDateParts',
     'zonedDateTime',
     'sharedFuturesReferenceDate',
     'futuresStoryPublicationWindow'
   ].map((name) => extractScriptFunction('scripts/validate_dashboard.js', name)).join('\n');
-  const { futuresStoryPublicationWindow } = Function(`${sources}\nreturn { futuresStoryPublicationWindow };`)();
+  const { futuresStoryPublicationWindow } = Function(
+    'isIsoDate',
+    'isIsoDateTime',
+    `${sources}\nreturn { futuresStoryPublicationWindow };`
+  )(isIsoDate, isIsoDateTime);
   const futures = Array.from({ length: 4 }, () => ({ raw: { referenceDate: '2026-07-02' } }));
   const window = futuresStoryPublicationWindow(
     'Pre-Market Futures',
@@ -1024,6 +1222,41 @@ function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
   });
   assert.notEqual(result.status, 0, 'stale quoteRows vs series mismatch should fail validate_chart_data');
   assert.match(result.stderr, /must match the latest generated series bar-derived value/);
+}
+
+function testStrictCalendarDatesReachChartAndAssetValidation() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-strict-calendar-date-'));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const chartFile = path.join(dir, 'chart_data.json');
+  const dashboardHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const chartData = readJsonBlock(dashboardHtml, 'chart-data');
+  chartData.series[0].bars[0].time = '2026-02-30';
+  fs.writeFileSync(dashboardFile, dashboardHtml);
+  fs.writeFileSync(chartFile, JSON.stringify(chartData));
+
+  try {
+    const result = spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'validate_chart_data.js'),
+      '--dashboard', dashboardFile,
+      '--chart-data', chartFile
+    ], {
+      cwd: root,
+      encoding: 'utf8'
+    });
+    assert.notEqual(result.status, 0, 'Chart validation must reject impossible ISO-looking bar dates.');
+    assert.match(result.stderr, /bars\[0\]\.time must be an ISO date/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  assert.throws(
+    () => normalizedSummary({
+      asOf: '2026-02-30',
+      status: 'available',
+      portfolioMtdReturnValue: 1.25
+    }, false, ''),
+    /summary asOf must be YYYY-MM-DD/
+  );
 }
 
 function testValidateChartDataRejectsLatestOhlcPlaceholder() {
@@ -1349,6 +1582,11 @@ function testLocalMarketServerPartialStatusIncludesRowErrors() {
 function main() {
   testUpdaterQuoteAndCryptoPatches();
   testUpdaterModulePatches();
+  testUpdaterWeekAheadPreservesEditorialLens();
+  testCalendarRolloverRange();
+  testWeekAheadRolloverCommitsBeforeEarnings();
+  testWeekAheadRendererConvertsMarketTime();
+  testWeekAheadRendererGroupsReleaseFamilies();
   testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion();
   testChartSeriesOwnsDerivedQuoteViews();
   testFinnhubQuoteBarMergesIntoOhlcSeries();
@@ -1359,6 +1597,7 @@ function main() {
   testRefreshNewsBaselineCliMode();
   testApplyDashboardDataJsonCliMode();
   testDashboardHtmlShellContract();
+  testDashboardValidatorAcceptsFridayBridgeCalendars();
   testDashboardValidatorRejectsOversizedFuturesStoryTag();
   testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
   testDashboardValidatorRejectsImpossibleFuturesDates();
@@ -1376,6 +1615,7 @@ function main() {
   testEditionStampChangesIdentity();
   testLocalRefreshBrowserContract();
   testLocalRefreshKeepsNewerEmbeddedSeriesProvenance();
+  testStrictCalendarDatesReachChartAndAssetValidation();
   testValidateChartDataRejectsQuoteRowsAheadOfSeries();
   testValidateChartDataRejectsLatestOhlcPlaceholder();
   testValidateChartDataRejectsStaleSourceFamilies();

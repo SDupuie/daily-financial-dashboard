@@ -6,8 +6,12 @@ const https = require('https');
 const { execFileSync } = require('child_process');
 const {
   computeEarningsSourceStatus,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  earningsRowKey: rowKey,
+  normalizeEarningsTiming: normalizeTiming,
+  numberOrNull
 } = require('./earnings_week_contract');
+const { compareIsoDate, displayDatesForRange, isIsoDate } = require('./calendar_contract');
 
 const {
   attachReactions,
@@ -152,20 +156,6 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isIsoDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-function compareIsoDate(left, right) {
-  return String(left).localeCompare(String(right));
-}
-
-function numberOrNull(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
 function pctChange(estimate, actual) {
   if (!Number.isFinite(estimate) || !Number.isFinite(actual) || estimate === 0) return null;
   return (actual / estimate - 1) * 100;
@@ -192,16 +182,6 @@ function metricPayload(current, incoming, options = {}) {
 
 function sourceFor(value, source) {
   return Number.isFinite(value) ? source : 'none';
-}
-
-function rowKey(row) {
-  return `${row.reportDate}:${row.symbol}`;
-}
-
-function normalizeTiming(value) {
-  const raw = String(value || '').trim().toLowerCase();
-  if (['bmo', 'amc', 'dmh'].includes(raw)) return raw;
-  return 'unknown';
 }
 
 function fetchJson(url, args, headers = {}) {
@@ -279,7 +259,7 @@ async function fetchFinnhubCalendarRows(args, token, range) {
   return (Array.isArray(result.data?.earningsCalendar) ? result.data.earningsCalendar : [])
     .map(normalizeFinnhubCalendarRow)
     .filter((row) => row.symbol && isIsoDate(row.reportDate))
-    .filter((row) => compareIsoDate(row.reportDate, range.from) >= 0 && compareIsoDate(row.reportDate, range.to) <= 0);
+    .filter((row) => displayDatesForRange(range.from, range.to).includes(row.reportDate));
 }
 
 function earningsApiUsageMonth(date = new Date()) {

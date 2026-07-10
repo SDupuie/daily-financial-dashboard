@@ -5,8 +5,16 @@ const path = require('path');
 const {
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  earningsRowKey: rowKey,
   isDisplayEligibleEarningsRow
 } = require('./earnings_week_contract');
+const {
+  compareIsoDate,
+  displayDatesForRange,
+  isIsoDate,
+  isIsoDateTime,
+  isSupportedFiveTradingDayRange
+} = require('./calendar_contract');
 
 const root = path.resolve(__dirname, '..');
 const defaultInput = path.resolve(root, 'generated', 'earnings_week.json');
@@ -171,28 +179,6 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isIsoDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-function isIsoDateTime(value) {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
-}
-
-function dateFromIso(isoDate) {
-  return new Date(`${isoDate}T00:00:00Z`);
-}
-
-function isoFromDate(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(isoDate, days) {
-  const date = dateFromIso(isoDate);
-  date.setUTCDate(date.getUTCDate() + days);
-  return isoFromDate(date);
-}
-
 function isFiniteNumber(value) {
   return Number.isFinite(value);
 }
@@ -213,19 +199,6 @@ function nearlyEqualNullable(left, right, tolerance = NUMBER_TOLERANCE) {
 function pctChange(from, to) {
   if (!isFiniteNumber(from) || !isFiniteNumber(to) || from === 0) return null;
   return (to / from - 1) * 100;
-}
-
-function compareIsoDate(left, right) {
-  return String(left).localeCompare(String(right));
-}
-
-function isMondayFridayRange(from, to) {
-  if (!isIsoDate(from) || !isIsoDate(to)) return false;
-  const start = dateFromIso(from);
-  const end = dateFromIso(to);
-  return start.getUTCDay() === 1
-    && end.getUTCDay() === 5
-    && addDays(from, 4) === to;
 }
 
 function valueOutcome(actual, estimate) {
@@ -264,8 +237,8 @@ function validateRange(errors, range) {
   if (isIsoDate(range.from) && isIsoDate(range.to) && compareIsoDate(range.from, range.to) > 0) {
     errors.push('range.from must be on or before range.to.');
   }
-  if (isIsoDate(range.from) && isIsoDate(range.to) && !isMondayFridayRange(range.from, range.to)) {
-    errors.push('range must be exactly Monday through Friday.');
+  if (isIsoDate(range.from) && isIsoDate(range.to) && !isSupportedFiveTradingDayRange(range.from, range.to)) {
+    errors.push('range must be Monday-Friday or Friday plus next Monday-Thursday.');
   }
 }
 
@@ -738,7 +711,7 @@ function validateRow(errors, rowRaw, index, range) {
   if (!isIsoDate(row.reportDate)) {
     errors.push(`${label}.reportDate must be an ISO date.`);
   } else if (isObject(range) && isIsoDate(range.from) && isIsoDate(range.to)) {
-    if (compareIsoDate(row.reportDate, range.from) < 0 || compareIsoDate(row.reportDate, range.to) > 0) {
+    if (!displayDatesForRange(range.from, range.to).includes(row.reportDate)) {
       errors.push(`${label}.reportDate must be inside range.`);
     }
   }
@@ -838,10 +811,6 @@ function validateCompanyReleaseApply(errors, data) {
       errors.push(`${task.id} must be reflected in row.sourceAudit.companyReleaseResolution.`);
     }
   }
-}
-
-function rowKey(row) {
-  return `${row.reportDate}:${row.symbol}`;
 }
 
 function validateNarrativeApply(errors, data, options = {}) {

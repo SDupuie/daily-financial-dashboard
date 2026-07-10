@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { validateEarningsWeekPayload } = require('./validate_earnings_week');
+const { validateWeekAheadPayload } = require('./week_ahead_contract');
+const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
   cryptoQuoteRowFromSeries,
   quoteRowFromSeries
@@ -115,30 +117,8 @@ function isFiniteNumber(value) {
   return Number.isFinite(Number(value));
 }
 
-function isIsoDate(value) {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const [year, month, day] = value.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCFullYear() === year
-    && date.getUTCMonth() === month - 1
-    && date.getUTCDate() === day;
-}
-
-function isIsoDateTime(value) {
-  return typeof value === 'string' && !Number.isNaN(Date.parse(value));
-}
-
 function isOffsetBearingIsoDateTime(value) {
-  if (typeof value !== 'string') return false;
-  const match = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/);
-  if (!match || !isIsoDate(match[1])) return false;
-  const [, , hour, minute, second = '0', , offsetHour = '0', offsetMinute = '0'] = match;
-  return Number(hour) <= 23
-    && Number(minute) <= 59
-    && Number(second) <= 59
-    && Number(offsetHour) <= 23
-    && Number(offsetMinute) <= 59
-    && !Number.isNaN(Date.parse(value));
+  return isIsoDateTime(value);
 }
 
 function zonedDateParts(date, timeZone) {
@@ -252,23 +232,6 @@ function dashboardNewsItems(data) {
     ...(Array.isArray(data?.stories) ? data.stories : []),
     ...(Array.isArray(data?.crypto?.notes) ? data.crypto.notes : [])
   ];
-}
-
-function dateFromIso(value) {
-  return new Date(`${value}T00:00:00Z`);
-}
-
-function addDays(value, days) {
-  const date = dateFromIso(value);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-function isMondayFridayRange(range) {
-  if (!range || !isIsoDate(range.from) || !isIsoDate(range.to)) return false;
-  return dateFromIso(range.from).getUTCDay() === 1
-    && dateFromIso(range.to).getUTCDay() === 5
-    && addDays(range.from, 4) === range.to;
 }
 
 function validateYieldCurvePointSet(label, fieldName, points, referencePoints = null) {
@@ -450,6 +413,9 @@ if (!dashboardMatch) {
 
   if (data) {
     const now = getNow();
+    for (const message of validateWeekAheadPayload(data.weekAhead)) {
+      errors.push(`weekAhead: ${message}`);
+    }
     const tapeRows = data.tape?.rows ?? [];
     // README Data Contracts split chartable crypto tickers from crypto-only section stats.
     const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
@@ -1306,23 +1272,10 @@ if (!dashboardMatch) {
       for (const error of validateEarningsWeekPayload(earningsWeek, { requireNarrative: true })) {
         errors.push(`earnings.week: ${error}`);
       }
-      if (!isMondayFridayRange(earningsWeek.range)) {
-        errors.push('earnings.week.range must cover exactly Monday through Friday.');
-      }
     } else {
       errors.push('earnings.week is required.');
     }
 
-    const weekRows = Array.isArray(data.weekAhead?.rows) ? data.weekAhead.rows : [];
-    if (!weekRows.length) {
-      errors.push('weekAhead.rows must contain at least one calendar row.');
-    }
-    for (const [index, rowRaw] of weekRows.entries()) {
-      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-      requireString(row.day, `weekAhead.rows[${index}].day`);
-      requireString(row.event, `weekAhead.rows[${index}].event`);
-      requireString(row.tickers, `weekAhead.rows[${index}].tickers`);
-    }
   }
 }
 

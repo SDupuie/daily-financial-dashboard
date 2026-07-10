@@ -356,15 +356,6 @@ function dashboardDataRegion(html) {
   return { region: region[0], dataJson: data[1] };
 }
 
-function patchFooterCompiled(compiled, altcoinSeason) {
-  if (typeof compiled !== 'string' || !compiled.trim()) return compiled;
-  const replacement = `Altcoin Season uses the latest verified ${altcoinSeason.asOfDisplay} reading with the CoinMarketCap chart API prior-day comparison `;
-  if (/Altcoin Season uses[^·]+/.test(compiled)) {
-    return compiled.replace(/Altcoin Season uses[^·]+/, replacement);
-  }
-  return compiled;
-}
-
 function patchDashboard(html, normalized) {
   // Manual patch mode is limited to the dashboard-owned JSON region so helper use cannot drift surrounding markup.
   const { region, dataJson } = dashboardDataRegion(html);
@@ -380,10 +371,6 @@ function patchDashboard(html, normalized) {
     if (mapping.has(sym)) {
       Object.assign(row, mapping.get(sym));
     }
-  }
-
-  if (dashboardData?.footer?.compiled) {
-    dashboardData.footer.compiled = patchFooterCompiled(dashboardData.footer.compiled, normalized.altcoinSeason);
   }
 
   dashboardData = stampDashboardEdition(dashboardData);

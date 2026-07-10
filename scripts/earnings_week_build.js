@@ -6,8 +6,19 @@ const https = require('https');
 const {
   buildEarningsWeekPolicy,
   computeEarningsSourceStatus,
-  computeEarningsWeekCounts
+  computeEarningsWeekCounts,
+  normalizeEarningsTiming,
+  numberOrNull
 } = require('./earnings_week_contract');
+const {
+  addDays,
+  compareIsoDate,
+  dateFromIso,
+  displayDatesForRange,
+  isIsoDate,
+  isSupportedFiveTradingDayRange,
+  isoFromDate
+} = require('./calendar_contract');
 
 const REQUEST_TIMEOUT_MS = 20000;
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'earnings_week.json');
@@ -136,9 +147,10 @@ function parseArgs(argv) {
   if (compareIsoDate(args.from, args.to) > 0) {
     throw new Error('--from must be on or before --to.');
   }
-  if (!isMondayFridayRange(args.from, args.to)) {
-    throw new Error('Earnings week range must be exactly Monday through Friday.');
+  if (!isSupportedFiveTradingDayRange(args.from, args.to)) {
+    throw new Error('Earnings range must be Monday-Friday or Friday plus next Monday-Thursday.');
   }
+  args.displayDates = displayDatesForRange(args.from, args.to);
   if (args.minFinnhubRows === null) {
     args.minFinnhubRows = defaultMinFinnhubRows(args.from, args.to);
   }
@@ -150,8 +162,8 @@ function printHelp() {
   process.stdout.write(`Usage: node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD [options]
 
 Options:
-  --from YYYY-MM-DD            Monday of the earnings week
-  --to YYYY-MM-DD              Friday of the same earnings week
+  --from YYYY-MM-DD            Monday for a Monday-Friday slate, or Friday for the bridge slate
+  --to YYYY-MM-DD              Friday for a Monday-Friday slate, or following Thursday for the bridge slate
   --output PATH                Output JSON path (default: generated/earnings_week.json)
   --timeout-ms 20000           HTTP timeout in ms per request
   --finnhub-delay-ms 700       Delay between Finnhub profile requests
@@ -189,49 +201,8 @@ function loadEnv(file = path.resolve(process.cwd(), '.env')) {
   }
 }
 
-function isIsoDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
-function dateFromIso(isoDate) {
-  return new Date(`${isoDate}T00:00:00Z`);
-}
-
-function isoFromDate(date) {
-  return date.toISOString().slice(0, 10);
-}
-
-function addDays(isoDate, days) {
-  const date = dateFromIso(isoDate);
-  date.setUTCDate(date.getUTCDate() + days);
-  return isoFromDate(date);
-}
-
-function isMondayFridayRange(from, to) {
-  if (!isIsoDate(from) || !isIsoDate(to)) return false;
-  const start = dateFromIso(from);
-  const end = dateFromIso(to);
-  return start.getUTCDay() === 1
-    && end.getUTCDay() === 5
-    && addDays(from, 4) === to;
-}
-
-function weekdayCount(from, to) {
-  if (!isIsoDate(from) || !isIsoDate(to) || compareIsoDate(from, to) > 0) return 0;
-  let count = 0;
-  for (let date = from; compareIsoDate(date, to) <= 0; date = addDays(date, 1)) {
-    const day = dateFromIso(date).getUTCDay();
-    if (day >= 1 && day <= 5) count += 1;
-  }
-  return count;
-}
-
 function defaultMinFinnhubRows(from, to) {
-  return Math.max(1, weekdayCount(from, to) * 2);
-}
-
-function compareIsoDate(left, right) {
-  return left.localeCompare(right);
+  return Math.max(1, displayDatesForRange(from, to).length * 2);
 }
 
 function sleep(ms) {
@@ -302,12 +273,6 @@ function ensureFinnhubPrimaryUsable(finnhubCalendar, options = {}) {
   }
 }
 
-function numberOrNull(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-}
-
 function marketCapNumber(value) {
   const text = String(value || '').trim();
   if (!text || /^n\/a$/i.test(text)) return null;
@@ -322,17 +287,11 @@ function pctChange(from, to) {
   return (right / left - 1) * 100;
 }
 
-function normalizeTiming(value) {
-  const raw = String(value || '').trim().toLowerCase();
-  if (['bmo', 'amc', 'dmh'].includes(raw)) return raw;
-  return 'unknown';
-}
-
 function normalizeFinnhubCalendarRow(row) {
   return {
     symbol: String(row?.symbol || '').trim().toUpperCase(),
     reportDate: String(row?.date || '').trim(),
-    reportTiming: normalizeTiming(row?.hour),
+    reportTiming: normalizeEarningsTiming(row?.hour),
     fiscalQuarter: numberOrNull(row?.quarter),
     fiscalYear: numberOrNull(row?.year),
     eps: {
@@ -385,7 +344,7 @@ async function fetchFinnhubCalendar(args, token) {
   const rows = dedupeCalendarRows(rawRows
     .map(normalizeFinnhubCalendarRow)
     .filter((row) => row.symbol && isIsoDate(row.reportDate))
-    .filter((row) => compareIsoDate(row.reportDate, args.from) >= 0 && compareIsoDate(row.reportDate, args.to) <= 0));
+    .filter((row) => args.displayDates.includes(row.reportDate)));
   return {
     ok: result.ok,
     status: result.status,
@@ -537,7 +496,7 @@ async function fetchEarningsApiCalendarDay(date, args, token, usage) {
 
 async function fetchEarningsApiCalendar(args, token, usage) {
   const days = [];
-  for (let date = args.from; compareIsoDate(date, args.to) <= 0; date = addDays(date, 1)) {
+  for (const date of args.displayDates) {
     days.push(await fetchEarningsApiCalendarDay(date, args, token, usage));
   }
   return days;
@@ -579,7 +538,7 @@ function symbolsWithProviderDateConflicts(finnhubRows, earningsApiCalendarDays) 
 async function fetchNasdaqCalendarForConflicts(finnhubRows, earningsApiCalendarDays, args) {
   if (symbolsWithProviderDateConflicts(finnhubRows, earningsApiCalendarDays).size === 0) return [];
   const days = [];
-  for (let date = args.from; compareIsoDate(date, args.to) <= 0; date = addDays(date, 1)) {
+  for (const date of args.displayDates) {
     days.push(await fetchNasdaqCalendarDay(date, args));
   }
   return days;

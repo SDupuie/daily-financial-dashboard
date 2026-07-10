@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { isIsoDate } = require('./calendar_contract');
 
 const REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_PORTFOLIO_OUTPUT = path.resolve(process.cwd(), 'generated', 'asset_allocation_portfolio.json');
@@ -387,10 +388,6 @@ async function fetchPortfolioRows(args) {
   };
 }
 
-function isIsoDate(value) {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
-
 function normalizedSummary(raw, stale, refreshError) {
   const status = raw?.status === 'available' ? 'available' : 'unavailable';
   const value = Number(raw?.portfolioMtdReturnValue);
@@ -478,3 +475,7 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+module.exports = {
+  normalizedSummary
+};
