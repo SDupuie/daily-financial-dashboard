@@ -292,7 +292,7 @@ for (const url of runtimeUrls) {
 }
 const expectedRuntimeUrls = [...allowedLocalRefreshUrls];
 if (runtimeUrls.length !== expectedRuntimeUrls.length || runtimeUrls.some((url, index) => url !== expectedRuntimeUrls[index])) {
-  errors.push('The dashboard runtime must expose only the canonical HTTPS loopback market-refresh URL.');
+  errors.push('The dashboard runtime must expose only the canonical HTTPS LAN market-refresh URL.');
 }
 
 const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);

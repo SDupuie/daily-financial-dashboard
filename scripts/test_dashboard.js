@@ -2183,6 +2183,7 @@ function testLocalMarketServerOriginPolicyAndTlsOptions() {
 }
 
 async function testLocalMarketServerHttpsBoundary() {
+  // Exercise the real HTTPS handler and response boundary; certificate-chain trust is verified separately by the installed helper checks.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-tls-'));
   const cert = path.join(dir, 'cert.pem');
   const key = path.join(dir, 'key.pem');

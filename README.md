@@ -175,7 +175,7 @@ Static dashboard validation does not prove that the already-running local helper
 
 ### Required daily checks
 
-- Run `node scripts/validate_dashboard.js daily_financial_news.html`. It enforces dates, News-card freshness, embedded-data text hygiene, Tape note quality, and the runtime's localhost-only refresh endpoint contract. Treat a Futures News-card contract failure as a hard stop; do not finish a scheduled update with `--skip-validate`.
+- Run `node scripts/validate_dashboard.js daily_financial_news.html`. It enforces dates, News-card freshness, embedded-data text hygiene, Tape note quality, and the runtime's LAN-only refresh endpoint contract. Treat a Futures News-card contract failure as a hard stop; do not finish a scheduled update with `--skip-validate`.
 - Run `git diff --check`.
 - Confirm that only intended files changed. `./scripts/publish_main.sh` runs dashboard validation again before it pushes.
 
@@ -200,7 +200,7 @@ This section is the canonical human-readable contract for dashboard data. Keep `
 
 ### Embedded `dashboard-data`
 
-- `editionId`: ISO timestamp identifying the exact embedded dashboard edition. Bump it every time helper scripts rewrite `dashboard-data`; localhost refresh cache keys must use this field rather than inferring identity from the visible date/ticker shape.
+- `editionId`: ISO timestamp identifying the exact embedded dashboard edition. Bump it every time helper scripts rewrite `dashboard-data`; local-refresh cache keys must use this field rather than inferring identity from the visible date/ticker shape.
 - `masthead`: visible header metadata. `masthead.date` must be the dashboard date. `masthead.edition` must match the Futures session: `Morning Edition` for `Before The Open` / `Pre-Market Futures`, or `Afternoon Edition` for `After The Bell` / `Session Futures`. Use `editionId` for exact build/revision identity rather than a visible serial number.
 - `opening`: market-open summary with `headline`, `deck`, and exactly four `catalysts[]` items.
 - `futuresModule`: the four-card futures module and promoted Futures news. Use `sectionLabel`/`sectionTitle` to distinguish morning `Before The Open` / `Pre-Market Futures` from afternoon `After The Bell` / `Session Futures`; see the News-card contract for story rules.

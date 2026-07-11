@@ -16322,7 +16322,7 @@
           const ticker = String(item?.ticker || '').toUpperCase();
           if (!ticker || !Array.isArray(item.bars) || item.bars.length < 2) continue;
           const existing = seriesMap.get(ticker);
-          // Local refreshes may update the embedded roster but cannot introduce a new chartable instrument.
+          // Local refreshes may update an embedded series but cannot introduce a new chartable instrument.
           if (!existing) continue;
           const existingLatest = latestSeriesBarDate(existing);
           const refreshedLatest = latestSeriesBarDate(item);
@@ -16578,7 +16578,7 @@
         if (indicator) indicator.outerHTML = localRefreshIndicatorHtml();
       }
 
-      // Only the optional localhost/cache payload is shape-normalized; embedded dashboard data is validated as canonical.
+      // Only the optional local-refresh/cache payload is shape-normalized; embedded dashboard data is validated as canonical.
       function localRefreshSections(payload) {
         return {
           series: Array.isArray(payload?.series) ? payload.series : [],
@@ -16632,7 +16632,7 @@
             payload
           }));
         } catch (_error) {
-          // Cache storage is best-effort; the live localhost refresh still works without it.
+          // Cache storage is best-effort; the live local-network refresh still works without it.
         }
       }
 
@@ -16665,10 +16665,10 @@
               render(data);
               return;
             }
-            // A 200 response can still be stale or empty; try the next loopback URL unless something actually changed.
+            // A 200 response can still be stale or empty; try the next configured helper URL unless something actually changed.
             helperError = 'Local helper reached; no newer prices';
           } catch (_error) {
-            // Browsers intentionally obscure many loopback failures, so the indicator groups unavailable, CORS/PNA-blocked, and network errors.
+            // Browsers obscure local-network failures, so the indicator groups unavailable, TLS/CORS/LNA-blocked, and network errors.
             lastFailure = _error?.name === 'AbortError' ? 'Local refresh timed out' : 'Local refresh unavailable or blocked';
           } finally {
             window.clearTimeout(timeout);

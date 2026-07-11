@@ -8,6 +8,7 @@ const path = require('path');
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
 
+// Bind the reserved primary-LAN address explicitly; network policy, not this process, keeps guest and WAN clients out.
 const DEFAULT_HOST = '192.168.2.2';
 const DEFAULT_PORT = 2210;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -143,6 +144,7 @@ function sendJson(res, statusCode, payload) {
 }
 
 function isAllowedBrowserOrigin(origin) {
+  // Origin-less clients remain available for command-line health checks; browser callers must match the narrow allowlist.
   if (!origin) return true;
   if (origin === PUBLISHED_DASHBOARD_ORIGIN) return true;
   try {
@@ -259,7 +261,7 @@ function isPartialRefresh(errors, sections) {
 }
 
 function shouldRefreshChartRow(row) {
-  // Full-curve comparison context belongs to scheduled chart-data, not the short-tail localhost refresh.
+  // Full-curve comparison context belongs to scheduled chart-data, not the short-tail local refresh.
   return String(row?.sourceSymbol || '') !== 'TREASURY:CURVE';
 }
 
@@ -282,7 +284,7 @@ async function fetchChartPayload(args, startDate, endDate) {
   const series = results.filter(Boolean);
   let quoteRows = { tape: [], crypto: [] };
   try {
-    // The localhost refresh payload mirrors production: prices are derived from refreshed series
+    // The local-refresh payload mirrors production: prices are derived from refreshed series
     // so preview data cannot invent a second market-data truth alongside chart history.
     quoteRows = chartData.deriveQuoteRowsFromSeries(series);
   } catch (error) {
