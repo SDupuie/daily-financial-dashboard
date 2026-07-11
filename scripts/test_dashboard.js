@@ -62,9 +62,25 @@ const {
 } = require('./dashboard_validation_fixture');
 
 const root = path.resolve(__dirname, '..');
+// Some fixture paths outlive the helper that creates them, so main() owns one failure-safe cleanup pass for the whole suite.
+const temporaryDirectories = new Set();
+
+function makeTemporaryDirectory(parent, prefix) {
+  fs.mkdirSync(parent, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(parent, prefix));
+  temporaryDirectories.add(dir);
+  return dir;
+}
+
+function cleanupTemporaryDirectories() {
+  for (const dir of [...temporaryDirectories].reverse()) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  temporaryDirectories.clear();
+}
 
 function writeChartDataFixture(latestDate, { tuple = true } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-market-server-');
   const file = path.join(dir, 'dashboard.html');
   const payload = {
     schemaVersion: 1,
@@ -154,44 +170,30 @@ function dashboardFixture() {
   };
 }
 
-function extractDashboardRuntimeFunction(html, name) {
-  const functionStart = html.indexOf(`function ${name}(`);
-  assert.notEqual(functionStart, -1, `Missing dashboard runtime function ${name}`);
-  // Preserve async so lifecycle helpers run with the same promise semantics as the browser runtime.
-  const start = html.slice(Math.max(0, functionStart - 6), functionStart) === 'async '
-    ? functionStart - 6
-    : functionStart;
+function extractRuntimeTestBlock(source, name) {
+  // Explicit source markers keep tests on the published implementation without pretending this fixture harness is a JavaScript parser.
+  const startMarker = `/* TEST BLOCK START: ${name} */`;
+  const endMarker = `/* TEST BLOCK END: ${name} */`;
+  const startCount = source.split(startMarker).length - 1;
+  const endCount = source.split(endMarker).length - 1;
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker);
 
-  const parameterStart = html.indexOf('(', functionStart);
-  let parameterDepth = 0;
-  let bodyStart = -1;
-  for (let index = parameterStart; index < html.length; index += 1) {
-    if (html[index] === '(') parameterDepth += 1;
-    if (html[index] === ')') {
-      parameterDepth -= 1;
-      if (parameterDepth === 0) {
-        bodyStart = html.indexOf('{', index);
-        break;
-      }
-    }
-  }
-  assert.notEqual(bodyStart, -1, `Missing body for dashboard runtime function ${name}`);
+  assert.equal(startCount, 1, `Expected one test block start ${name}; found ${startCount}`);
+  assert.equal(endCount, 1, `Expected one test block end ${name}; found ${endCount}`);
+  assert.ok(start < end, `Test block markers are out of order for ${name}`);
 
-  let depth = 0;
-  for (let index = bodyStart; index < html.length; index += 1) {
-    if (html[index] === '{') {
-      depth += 1;
-    } else if (html[index] === '}') {
-      depth -= 1;
-      if (depth === 0) return html.slice(start, index + 1);
-    }
-  }
-
-  assert.fail(`Could not extract dashboard runtime function ${name}`);
+  return source.slice(start + startMarker.length, end);
 }
 
-function extractScriptFunction(file, name) {
-  return extractDashboardRuntimeFunction(fs.readFileSync(path.join(root, file), 'utf8'), name);
+function dashboardRuntimeSource(html) {
+  const matches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
+  assert.equal(matches.length, 1, `Expected one dashboard-runtime script; found ${matches.length}`);
+  return matches[0][1];
+}
+
+function extractDashboardRuntimeTestBlock(html, name) {
+  return extractRuntimeTestBlock(dashboardRuntimeSource(html), name);
 }
 
 function testUpdaterQuoteAndCryptoPatches() {
@@ -332,7 +334,7 @@ function testCalendarRolloverRange() {
   assert.equal(calendarRolloverRange('morning', new Date('2026-07-10T12:00:00Z')), null);
   assert.equal(calendarRolloverRange('afternoon', new Date('2026-07-13T21:00:00Z')), null);
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-calendar-rollover-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-calendar-rollover-');
   const earningsPath = path.join(dir, 'earnings_week.json');
   const fridayBridge = { from: '2026-07-10', to: '2026-07-16' };
   assert.equal(earningsCalendarNeedsBuild(fridayBridge, earningsPath), true);
@@ -342,7 +344,7 @@ function testCalendarRolloverRange() {
 }
 
 function testWeekAheadRolloverCommitsBeforeEarnings() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-week-ahead-rollover-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-week-ahead-rollover-');
   const dashboardPath = path.join(dir, 'dashboard.html');
   const weekAheadPath = path.join(dir, 'week_ahead.json');
   const payload = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
@@ -371,9 +373,9 @@ function testWeekAheadRolloverCommitsBeforeEarnings() {
 }
 
 function testWeekAheadRendererConvertsMarketTime() {
-  const instant = extractScriptFunction('daily_financial_news.html', 'weekAheadInstant');
-  const label = extractScriptFunction('daily_financial_news.html', 'weekAheadTimeLabel');
-  const weekAheadTimeLabel = new Function(`${instant}\n${label}\nreturn weekAheadTimeLabel;`)();
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-time');
+  const weekAheadTimeLabel = new Function(`${source}\nreturn weekAheadTimeLabel;`)();
   const rendered = weekAheadTimeLabel(
     { date: '2026-07-14' },
     { time: '08:30' },
@@ -383,11 +385,9 @@ function testWeekAheadRendererConvertsMarketTime() {
 }
 
 function testWeekAheadRendererGroupsReleaseFamilies() {
-  const releaseFamily = extractScriptFunction('daily_financial_news.html', 'weekAheadReleaseFamily');
-  const familyVariant = extractScriptFunction('daily_financial_news.html', 'weekAheadFamilyVariant');
-  const familyEvents = extractScriptFunction('daily_financial_news.html', 'weekAheadFamilyEvents');
-  const eventGroups = extractScriptFunction('daily_financial_news.html', 'weekAheadEventGroups');
-  const runtime = new Function(`${releaseFamily}\n${familyVariant}\n${familyEvents}\n${eventGroups}\nreturn { weekAheadFamilyEvents, weekAheadEventGroups };`)();
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-family');
+  const runtime = new Function(`${source}\nreturn { weekAheadFamilyEvents, weekAheadEventGroups };`)();
   const event = (name, period, agency = 'BLS', time = '08:30') => ({ name, period, agency, time, impact: 'high' });
   const events = [
     event('Consumer Price Index', 'YoY'),
@@ -704,7 +704,7 @@ function testScheduledNewsBaselineMarkers() {
 }
 
 function testRefreshNewsBaselineCliMode() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-news-baseline-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-news-baseline-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const existingStory = {
     tag: 'Markets',
@@ -779,7 +779,7 @@ function testRefreshNewsBaselineCliMode() {
 }
 
 function testApplyDashboardDataJsonCliMode() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-dashboard-apply-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-dashboard-apply-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const payloadFile = path.join(dir, 'dashboard-data.json');
   const dashboardHtml = [
@@ -848,7 +848,7 @@ function testApplyDashboardDataJsonCliMode() {
 }
 
 function testApplyChartDataJsonCliMode() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-apply-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-apply-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const payloadFile = path.join(dir, 'chart-data.json');
   const shell = [
@@ -892,7 +892,7 @@ function testApplyChartDataJsonCliMode() {
 function testChartFetcherTickerFilterAndMergeChartDataCliMode() {
   assert.deepEqual(parseFetchChartDataArgs(['--ticker', 'HG', '--ticker', 'NG']).tickers, ['HG', 'NG']);
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-merge-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-merge-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const payloadFile = path.join(dir, 'commodity-chart-data.json');
   const shell = [
@@ -949,6 +949,7 @@ function testDashboardHtmlShellContract() {
   assert.equal(countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g), 1);
   assert.equal(countMatches(/<script type="application\/json" id="chart-data">[\s\S]*?<\/script>/g), 1);
   assert.equal(countMatches(/<script id="dashboard-runtime">[\s\S]*?<\/script>/g), 1);
+  assert.doesNotThrow(() => new Function(dashboardRuntimeSource(html)), 'The complete dashboard runtime must parse as JavaScript.');
   assert.match(html, /An embedded dashboard payload could not be loaded\./);
   assert.doesNotMatch(html, /The embedded dashboard-data JSON block could not be parsed\./);
   assert.notEqual(html.indexOf('<!-- ============ DATA START'), -1);
@@ -966,8 +967,32 @@ function testDashboardHtmlShellContract() {
   }
 }
 
+function testDashboardRuntimeExtractionBoundary() {
+  const markedBlock = (body) => `/* TEST BLOCK START: fixture */${body}/* TEST BLOCK END: fixture */`;
+  const html = [
+    markedBlock('const selected = "outside";'),
+    `<script id="dashboard-runtime">${markedBlock('const selected = "runtime";')}</script>`
+  ].join('\n');
+  const source = extractDashboardRuntimeTestBlock(html, 'fixture');
+  assert.match(source, /selected = "runtime"/);
+  assert.doesNotMatch(source, /selected = "outside"/);
+
+  assert.throws(
+    () => dashboardRuntimeSource('<script id="dashboard-runtime"></script><script id="dashboard-runtime"></script>'),
+    /Expected one dashboard-runtime script; found 2/
+  );
+  assert.throws(
+    () => new Function(dashboardRuntimeSource('<script id="dashboard-runtime">const broken = ;</script>')),
+    SyntaxError
+  );
+  assert.throws(
+    () => extractRuntimeTestBlock('/* TEST BLOCK END: fixture *//* TEST BLOCK START: fixture */', 'fixture'),
+    /markers are out of order/
+  );
+}
+
 function testDashboardValidatorRejectsRemoteRuntimeEndpoint() {
-  const dir = fs.mkdtempSync(path.join(root, 'generated', 'dfd-runtime-url-'));
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-runtime-url-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const { dashboard, chartData } = createDashboardValidationFixture();
   try {
@@ -991,7 +1016,7 @@ function testDashboardValidatorRejectsRemoteRuntimeEndpoint() {
 }
 
 function validateDashboardFixture(data, fixturePrefix) {
-  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), fixturePrefix);
   const dashboardFile = path.join(dir, 'dashboard.html');
   const { chartData } = createDashboardValidationFixture();
   try {
@@ -1010,7 +1035,7 @@ function validateDashboardFixture(data, fixturePrefix) {
 }
 
 function validateChartDataFixture(chartData, fixturePrefix) {
-  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), fixturePrefix);
   const dashboardFile = path.join(dir, 'dashboard.html');
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   try {
@@ -1029,7 +1054,7 @@ function validateChartDataFixture(chartData, fixturePrefix) {
 }
 
 function validateDashboardAndChartFixture(data, chartData, fixturePrefix) {
-  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), fixturePrefix);
   const dashboardFile = path.join(dir, 'dashboard.html');
   try {
     fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(data, chartData));
@@ -1268,17 +1293,12 @@ function testDashboardValidatorRequiresSharedMorningFuturesReferenceDate() {
 }
 
 function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
-  const sources = [
-    'zonedDateParts',
-    'zonedDateTime',
-    'sharedFuturesReferenceDate',
-    'sharedFuturesSessionDate',
-    'futuresStoryPublicationWindow'
-  ].map((name) => extractScriptFunction('scripts/validate_dashboard.js', name)).join('\n');
+  const validator = fs.readFileSync(path.join(root, 'scripts', 'validate_dashboard.js'), 'utf8');
+  const source = extractRuntimeTestBlock(validator, 'futures-story-window');
   const { futuresStoryPublicationWindow } = Function(
     'isIsoDate',
     'isIsoDateTime',
-    `${sources}\nreturn { futuresStoryPublicationWindow };`
+    `${source}\nreturn { futuresStoryPublicationWindow };`
   )(isIsoDate, isIsoDateTime);
   const futures = Array.from({ length: 4 }, () => ({ raw: { referenceDate: '2026-07-02' } }));
   const window = futuresStoryPublicationWindow(
@@ -1331,7 +1351,7 @@ function testDashboardValidatorRequiresCryptoNoteDisplayFields() {
 }
 
 function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-scheduled-preflight-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-scheduled-preflight-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const baseline = {
     lastScheduledUpdateAt: '2026-07-08T21:00:00.000Z',
@@ -1366,12 +1386,8 @@ function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
 
 function testDashboardEarningsMoneySignContract() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const sources = [
-    'formatEarningsCurrency',
-    'formatEarningsEps',
-    'formatEarningsRevenue'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
-  const { formatEarningsEps, formatEarningsRevenue } = Function(`${sources}\nreturn { formatEarningsEps, formatEarningsRevenue };`)();
+  const source = extractDashboardRuntimeTestBlock(html, 'earnings-currency');
+  const { formatEarningsEps, formatEarningsRevenue } = Function(`${source}\nreturn { formatEarningsEps, formatEarningsRevenue };`)();
 
   assert.equal(formatEarningsEps(-0.73), '-$0.73');
   assert.equal(formatEarningsEps(0.73), '$0.73');
@@ -1398,10 +1414,7 @@ function testEditionStampChangesIdentity() {
 function testLocalRefreshIndicatorBehavior() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   assert.match(html, /\.local-refresh-indicator\[data-local-refresh-state="partial"\] \.local-refresh-indicator-dot/);
-  const sources = [
-    'localRefreshIndicatorHtml',
-    'setLocalRefreshIndicator'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const source = extractDashboardRuntimeTestBlock(html, 'local-refresh-indicator');
   const runtime = Function(`
     let localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
     let indicatorAvailable = true;
@@ -1432,7 +1445,7 @@ function testLocalRefreshIndicatorBehavior() {
         return indicatorAvailable ? indicator : null;
       }
     };
-    ${sources}
+    ${source}
     return {
       setLocalRefreshIndicator,
       markup: () => localRefreshIndicatorHtml(),
@@ -1486,19 +1499,17 @@ function testLocalRefreshIndicatorBehavior() {
 
 function testEmbeddedPayloadLoadErrorsAreDistinct() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const sources = [
-    'decodeEmbeddedChartBar',
-    'decodeEmbeddedChartSeries',
-    'loadChartData',
-    'loadData'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const source = [
+    extractDashboardRuntimeTestBlock(html, 'chart-payload-load'),
+    extractDashboardRuntimeTestBlock(html, 'dashboard-payload-load')
+  ].join('\n');
   const runtime = Function(`
     let chartSeriesByTicker = new Map();
     let chartDataReferenceDate = '';
     const nodes = new Map();
     const document = { getElementById: (id) => nodes.get(id) || null };
     const chartPayloadReferenceDate = () => '2026-07-10';
-    ${sources}
+    ${source}
     return {
       loadChartData,
       loadData,
@@ -1519,12 +1530,10 @@ function testEmbeddedPayloadLoadErrorsAreDistinct() {
 
 async function testLocalRefreshIndicatorLifecycle() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const sources = [
-    'localRefreshStatusText',
-    'localRefreshTickerCount',
-    'localRefreshResultMessage',
-    'tryLocalMarketRefresh'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const source = [
+    extractDashboardRuntimeTestBlock(html, 'local-refresh-status'),
+    extractDashboardRuntimeTestBlock(html, 'local-refresh-request')
+  ].join('\n');
   const runtime = Function(`
     let fetch;
     class AbortController { constructor() { this.signal = {}; } abort() {} }
@@ -1549,7 +1558,7 @@ async function testLocalRefreshIndicatorLifecycle() {
     const applyLocalMarketRefresh = () => applyResult;
     const writeCachedLocalMarketRefresh = (_data, payload) => writes.push(payload);
     const render = (data) => renders.push(data);
-    ${sources}
+    ${source}
     return {
       async run({ fetchImpl, changed, focused = false }) {
         fetch = fetchImpl;
@@ -1643,14 +1652,9 @@ async function testLocalRefreshIndicatorLifecycle() {
 
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const sources = [
-    'mergeBars',
-    'sameJsonValue',
-    'latestSeriesBarDate',
-    'mergeSeriesMap'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const source = extractDashboardRuntimeTestBlock(html, 'local-refresh-series-merge');
   const { mergeSeriesMap } = Function(`
-    ${sources}
+    ${source}
     return { mergeSeriesMap };
   `)();
   const seriesMap = new Map([[
@@ -1713,12 +1717,12 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
 
 function testLocalRefreshIgnoresIdenticalCryptoStats() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const sources = [
-    'sameJsonValue',
-    'applyCryptoStats'
-  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const source = [
+    extractDashboardRuntimeTestBlock(html, 'local-refresh-series-merge'),
+    extractDashboardRuntimeTestBlock(html, 'local-refresh-crypto-stats')
+  ].join('\n');
   const { applyCryptoStats } = Function(`
-    ${sources}
+    ${source}
     return { applyCryptoStats };
   `)();
   const data = {
@@ -1732,7 +1736,7 @@ function testLocalRefreshIgnoresIdenticalCryptoStats() {
 }
 
 function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-validate-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-validate-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const chartFile = path.join(dir, 'chart_data.json');
   const dashboardHtml = `<script type="application/json" id="dashboard-data">${JSON.stringify({
@@ -1806,7 +1810,7 @@ function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
 }
 
 function testStrictCalendarDatesReachChartAndAssetValidation() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-strict-calendar-date-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-strict-calendar-date-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const chartFile = path.join(dir, 'chart_data.json');
   const dashboardHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
@@ -1841,7 +1845,7 @@ function testStrictCalendarDatesReachChartAndAssetValidation() {
 }
 
 function testValidateChartDataRejectsLatestOhlcPlaceholder() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-placeholder-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-placeholder-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const chartFile = path.join(dir, 'chart_data.json');
   const dashboardHtml = `<script type="application/json" id="dashboard-data">${JSON.stringify({
@@ -1929,7 +1933,7 @@ function testValidateChartDataRejectsLatestOhlcPlaceholder() {
 }
 
 function testValidateChartDataRejectsStaleSourceFamilies() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-sources-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-sources-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const chartFile = path.join(dir, 'chart_data.json');
   const dashboardHtml = `<script type="application/json" id="dashboard-data">${JSON.stringify({
@@ -2004,7 +2008,7 @@ function testValidateChartDataRejectsStaleSourceFamilies() {
 }
 
 function testValidateChartDataRejectsDuplicateYieldCurveComparisons() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-yield-curve-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-yield-curve-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const chartFile = path.join(dir, 'chart_data.json');
   const dashboardRow = {
@@ -2224,7 +2228,7 @@ function testLocalMarketServerAutoRefreshWindow() {
 }
 
 function testLocalMarketServerSkipsYieldCurveRefresh() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-yield-curve-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-market-server-yield-curve-');
   const input = path.join(dir, 'dashboard.html');
   const dashboardData = {
     tape: {
@@ -2265,7 +2269,7 @@ function testLocalMarketServerExplicitAndFallbackWindows() {
   assert.equal(explicit.mode, 'explicit');
   assert.equal(explicit.days, 15);
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-empty-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-market-server-empty-');
   const input = path.join(dir, 'dashboard.html');
   fs.writeFileSync(input, '<html></html>');
   const fallback = refreshWindow(
@@ -2327,7 +2331,7 @@ function testLocalMarketServerOriginPolicyAndTlsOptions() {
 
 async function testLocalMarketServerHttpsBoundary() {
   // Exercise the real HTTPS handler and response boundary; certificate-chain trust is verified separately by the installed helper checks.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-tls-'));
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-market-server-tls-');
   const cert = path.join(dir, 'cert.pem');
   const key = path.join(dir, 'key.pem');
   const certificateResult = spawnSync('openssl', [
@@ -2405,70 +2409,90 @@ async function testLocalMarketServerHttpsBoundary() {
   }
 }
 
+async function runDashboardTest(test) {
+  try {
+    await test();
+  } catch (error) {
+    console.error(`Dashboard test failed: ${test.name}`);
+    throw error;
+  }
+}
+
 async function main() {
-  testUpdaterQuoteAndCryptoPatches();
-  testUpdaterModulePatches();
-  testUpdaterWeekAheadPreservesEditorialLens();
-  testCalendarRolloverRange();
-  testWeekAheadRolloverCommitsBeforeEarnings();
-  testWeekAheadRendererConvertsMarketTime();
-  testWeekAheadRendererGroupsReleaseFamilies();
-  testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion();
-  testChartSeriesOwnsDerivedQuoteViews();
-  testFinnhubQuoteBarMergesIntoOhlcSeries();
-  testFinnhubQuoteFallbackOnlyWhenYahooLatestIsUnusable();
-  testJsonBlockPatchKeepsDollarLiterals();
-  testPatchDashboardDataBlockKeepsShellAndStampsEdition();
-  testScheduledNewsBaselineMarkers();
-  testRefreshNewsBaselineCliMode();
-  testApplyDashboardDataJsonCliMode();
-  testApplyChartDataJsonCliMode();
-  testChartFetcherTickerFilterAndMergeChartDataCliMode();
-  testDashboardHtmlShellContract();
-  testDashboardValidatorRejectsRemoteRuntimeEndpoint();
-  testDashboardValidatorAcceptsFridayBridgeCalendars();
-  testCompactChartPayloadUsesFourDecimalTuples();
-  testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars();
-  testDashboardValidatorUsesTheTapeAsItsChartRoster();
-  testDashboardValidatorAcceptsCurrentEmbeddedDashboard();
-  testDashboardValidatorRejectsOversizedFuturesStoryTag();
-  testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
-  testDashboardValidatorRejectsDuplicateFuturesStoryUrl();
-  testDashboardValidatorRejectsImpossibleFuturesDates();
-  testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow();
-  testDashboardValidatorAcceptsInWindowFuturesStories();
-  testDashboardValidatorRequiresMatchingFuturesEdition();
-  testDashboardValidatorAcceptsMorningFuturesStoryWindow();
-  testDashboardValidatorRequiresSharedMorningFuturesReferenceDate();
-  testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday();
-  testDashboardValidatorRejectsReferencePagesInAllNewsSections();
-  testDashboardValidatorRequiresCryptoNoteDisplayFields();
-  testScheduledPreflightEnforcesWindowAndDuplicateMarker();
-  testDashboardEarningsMoneySignContract();
-  testYieldCurveShortEndTenorsStayVisible();
-  testEditionStampChangesIdentity();
-  testLocalRefreshIndicatorBehavior();
-  testEmbeddedPayloadLoadErrorsAreDistinct();
-  await testLocalRefreshIndicatorLifecycle();
-  testLocalRefreshKeepsNewerEmbeddedSeriesProvenance();
-  testLocalRefreshIgnoresIdenticalCryptoStats();
-  testStrictCalendarDatesReachChartAndAssetValidation();
-  testValidateChartDataRejectsQuoteRowsAheadOfSeries();
-  testValidateChartDataRejectsLatestOhlcPlaceholder();
-  testValidateChartDataRejectsStaleSourceFamilies();
-  testValidateChartDataRejectsDuplicateYieldCurveComparisons();
-  testDashboardValidatorRejectsInvalidYieldCurveComparisons();
-  testChartPayloadMetadataContract();
-  testSharedChartPayloadContractAcrossEncodings();
-  testDashboardValidatorRejectsInvalidChartPayloadMetadata();
-  testLocalMarketServerAutoRefreshWindow();
-  testLocalMarketServerSkipsYieldCurveRefresh();
-  testLocalMarketServerExplicitAndFallbackWindows();
-  testLocalMarketServerPartialStatusIncludesRowErrors();
-  testLocalTlsOperationalContract();
-  testLocalMarketServerOriginPolicyAndTlsOptions();
-  await testLocalMarketServerHttpsBoundary();
-  console.log('Dashboard fixture tests passed.');
+  const tests = [
+    testUpdaterQuoteAndCryptoPatches,
+    testUpdaterModulePatches,
+    testUpdaterWeekAheadPreservesEditorialLens,
+    testCalendarRolloverRange,
+    testWeekAheadRolloverCommitsBeforeEarnings,
+    testWeekAheadRendererConvertsMarketTime,
+    testWeekAheadRendererGroupsReleaseFamilies,
+    testNewEarningsNarrativeRowsStageAndRequireEditorialCompletion,
+    testChartSeriesOwnsDerivedQuoteViews,
+    testFinnhubQuoteBarMergesIntoOhlcSeries,
+    testFinnhubQuoteFallbackOnlyWhenYahooLatestIsUnusable,
+    testJsonBlockPatchKeepsDollarLiterals,
+    testPatchDashboardDataBlockKeepsShellAndStampsEdition,
+    testScheduledNewsBaselineMarkers,
+    testRefreshNewsBaselineCliMode,
+    testApplyDashboardDataJsonCliMode,
+    testApplyChartDataJsonCliMode,
+    testChartFetcherTickerFilterAndMergeChartDataCliMode,
+    testDashboardHtmlShellContract,
+    testDashboardRuntimeExtractionBoundary,
+    testDashboardValidatorRejectsRemoteRuntimeEndpoint,
+    testDashboardValidatorAcceptsFridayBridgeCalendars,
+    testCompactChartPayloadUsesFourDecimalTuples,
+    testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars,
+    testDashboardValidatorUsesTheTapeAsItsChartRoster,
+    testDashboardValidatorAcceptsCurrentEmbeddedDashboard,
+    testDashboardValidatorRejectsOversizedFuturesStoryTag,
+    testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt,
+    testDashboardValidatorRejectsDuplicateFuturesStoryUrl,
+    testDashboardValidatorRejectsImpossibleFuturesDates,
+    testDashboardValidatorRejectsFuturesStoryOutsideActiveWindow,
+    testDashboardValidatorAcceptsInWindowFuturesStories,
+    testDashboardValidatorRequiresMatchingFuturesEdition,
+    testDashboardValidatorAcceptsMorningFuturesStoryWindow,
+    testDashboardValidatorRequiresSharedMorningFuturesReferenceDate,
+    testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday,
+    testDashboardValidatorRejectsReferencePagesInAllNewsSections,
+    testDashboardValidatorRequiresCryptoNoteDisplayFields,
+    testScheduledPreflightEnforcesWindowAndDuplicateMarker,
+    testDashboardEarningsMoneySignContract,
+    testYieldCurveShortEndTenorsStayVisible,
+    testEditionStampChangesIdentity,
+    testLocalRefreshIndicatorBehavior,
+    testEmbeddedPayloadLoadErrorsAreDistinct,
+    testLocalRefreshIndicatorLifecycle,
+    testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,
+    testLocalRefreshIgnoresIdenticalCryptoStats,
+    testStrictCalendarDatesReachChartAndAssetValidation,
+    testValidateChartDataRejectsQuoteRowsAheadOfSeries,
+    testValidateChartDataRejectsLatestOhlcPlaceholder,
+    testValidateChartDataRejectsStaleSourceFamilies,
+    testValidateChartDataRejectsDuplicateYieldCurveComparisons,
+    testDashboardValidatorRejectsInvalidYieldCurveComparisons,
+    testChartPayloadMetadataContract,
+    testSharedChartPayloadContractAcrossEncodings,
+    testDashboardValidatorRejectsInvalidChartPayloadMetadata,
+    testLocalMarketServerAutoRefreshWindow,
+    testLocalMarketServerSkipsYieldCurveRefresh,
+    testLocalMarketServerExplicitAndFallbackWindows,
+    testLocalMarketServerPartialStatusIncludesRowErrors,
+    testLocalTlsOperationalContract,
+    testLocalMarketServerOriginPolicyAndTlsOptions,
+    testLocalMarketServerHttpsBoundary
+  ];
+
+  try {
+    for (const test of tests) {
+      await runDashboardTest(test);
+    }
+    console.log('Dashboard fixture tests passed.');
+  } finally {
+    cleanupTemporaryDirectories();
+  }
 }
 
 main().catch((error) => {

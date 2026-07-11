@@ -12,6 +12,16 @@ Use the top-level files and directories according to their intended ownership:
 - `scripts/`: Operational automation, data-fetch utilities, validation checks, publishing helpers, and tests for dashboard behavior.
 - `README.md`: Project documentation and operational notes.
 
+## Sources of Authority
+
+Use each repository artifact only for the scope it owns:
+
+- `AGENTS.md` is the canonical project-policy source for agent behavior. Its safety, scope, validation, audit, and file-ownership instructions govern automated work in this repository.
+- `README.md` is the canonical human-readable operational and data-contract source. Keep it aligned with production behavior and project policy; treat a disagreement between these documents as documentation drift to resolve, not as an alternate workflow.
+- `daily_financial_news.html` is the canonical published runtime artifact and contains the current embedded production payload. Its generated runtime or data must still conform to the contracts documented in `README.md`.
+- Files under `generated/` are staging or cache artifacts. A workflow may treat one as its current build input, but it does not supersede the published artifact or documented contract.
+- Validators are executable enforcement of selected documented contracts. Tests are regression evidence for implementation paths. Neither validators, tests, nor fixtures independently define product or data policy, and fixtures are never production data.
+
 Default file-change policy:
 
 - Do not create, edit, or delete project files outside `mockups/` for visual design exploration unless the user specifically asks to modify dashboard source, data, scripts, tests, documentation, repository configuration, or publishing assets.

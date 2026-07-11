@@ -16272,6 +16272,7 @@
         return value;
       }
 
+      /* TEST BLOCK START: chart-payload-load */
       function decodeEmbeddedChartBar([time, open, high, low, close, volume]) {
         return {
           time,
@@ -16299,12 +16300,14 @@
         chartSeriesByTicker = new Map(series.map((item) => [String(item.ticker).toUpperCase(), item]));
         chartDataReferenceDate = chartPayloadReferenceDate(payload);
       }
+      /* TEST BLOCK END: chart-payload-load */
 
       function chartSeriesForTicker(ticker) {
         const key = String(ticker || '').toUpperCase();
         return chartSeriesByTicker.get(key);
       }
 
+      /* TEST BLOCK START: local-refresh-series-merge */
       function mergeBars(existingBars, refreshedBars) {
         const byTime = new Map();
         for (const bar of existingBars) {
@@ -16356,6 +16359,7 @@
         }
         return changed;
       }
+      /* TEST BLOCK END: local-refresh-series-merge */
 
       function marketNumber(value, maximumFractionDigits = 2) {
         return new Intl.NumberFormat('en-US', {
@@ -16551,6 +16555,7 @@
         return changed;
       }
 
+      /* TEST BLOCK START: local-refresh-crypto-stats */
       function applyCryptoStats(data, stats) {
         data.crypto = { ...data.crypto };
         const rows = data.crypto.stats;
@@ -16570,7 +16575,9 @@
         });
         return changed;
       }
+      /* TEST BLOCK END: local-refresh-crypto-stats */
 
+      /* TEST BLOCK START: local-refresh-status */
       function localRefreshStatusText(payload) {
         const date = new Date(payload?.generatedAt || Date.now());
         const label = new Intl.DateTimeFormat('en-US', {
@@ -16599,7 +16606,9 @@
         }
         return lines.join('\n');
       }
+      /* TEST BLOCK END: local-refresh-status */
 
+      /* TEST BLOCK START: local-refresh-indicator */
       function localRefreshIndicatorHtml() {
         const { state, message } = localRefreshIndicator;
         return `<span class="local-refresh-indicator" data-local-refresh-indicator data-local-refresh-state="${esc(state)}" role="img" aria-label="${esc(message)}" tabindex="0"><span class="local-refresh-indicator-dot" aria-hidden="true"></span><span class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">${esc(message)}</span><span class="visually-hidden" data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span></span>`;
@@ -16617,6 +16626,7 @@
         const announcement = indicator.querySelector('[data-local-refresh-announcement]');
         if (announcement) announcement.textContent = message;
       }
+      /* TEST BLOCK END: local-refresh-indicator */
 
       // Only the optional local-refresh/cache payload is shape-normalized; embedded dashboard data is validated as canonical.
       function localRefreshSections(payload) {
@@ -16676,6 +16686,7 @@
         }
       }
 
+      /* TEST BLOCK START: local-refresh-request */
       async function tryLocalMarketRefresh(data) {
         if (typeof fetch !== 'function' || typeof AbortController !== 'function') {
           setLocalRefreshIndicator('error', 'Local refresh unavailable in this browser');
@@ -16733,6 +16744,7 @@
         }
         setLocalRefreshIndicator('error', helperError || lastFailure);
       }
+      /* TEST BLOCK END: local-refresh-request */
 
       function tapeChartIcon() {
         return `
@@ -18415,6 +18427,7 @@
         return { label: 'Pending', tone: 'pending' };
       }
 
+      /* TEST BLOCK START: earnings-currency */
       function formatEarningsCurrency(value, divisor, digits, suffix = '') {
         if (!Number.isFinite(value)) return '';
         const sign = value < 0 ? '-' : '';
@@ -18433,6 +18446,7 @@
         if (Math.abs(value) >= 1000000) return formatEarningsCurrency(value, 1000000, 1, 'M');
         return formatEarningsCurrency(value, 1, 0);
       }
+      /* TEST BLOCK END: earnings-currency */
 
       function earningsMetricDisplayValue(row, metric, field) {
         const value = row[metric]?.[field];
@@ -18593,6 +18607,7 @@
         return section('Single Stocks', 'Earnings', '', body, 'section-earnings', actionHtml);
       }
 
+      /* TEST BLOCK START: week-ahead-time */
       function weekAheadInstant(date, time, sourceTimeZone) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !/^\d{2}:\d{2}$/.test(time || '')) return null;
         // Calendar facts are stored as wall time in the source market zone; derive
@@ -18624,6 +18639,7 @@
           hour12: true
         }).format(instant).replace(/\s/g, ' ');
       }
+      /* TEST BLOCK END: week-ahead-time */
 
       function weekAheadRangeLabel(week) {
         const from = new Date(`${week.range?.from || ''}T12:00:00Z`);
@@ -18690,6 +18706,7 @@
         </div>`;
       }
 
+      /* TEST BLOCK START: week-ahead-family */
       function weekAheadReleaseFamily(event, dayEvents) {
         const peerNames = new Set(dayEvents
           .filter((candidate) => candidate.time === event.time && candidate.agency === event.agency)
@@ -18739,6 +18756,7 @@
           return groups;
         }, []);
       }
+      /* TEST BLOCK END: week-ahead-family */
 
       function weekAheadFamilyGroupHtml(day, group, week) {
         const events = weekAheadFamilyEvents(group.events, group.family);
@@ -18969,12 +18987,14 @@
         repositionEarningsDetail(earningsWeekDays.find((day) => day.key === activeEarningsDayKey) || null);
       }
 
+      /* TEST BLOCK START: dashboard-payload-load */
       function loadData() {
         // Production is intentionally self-contained; dashboard copy and chart history live in embedded JSON blocks.
         const node = document.getElementById('dashboard-data');
         if (!node) throw new Error('The dashboard-data JSON block was not found.');
         return JSON.parse(node.textContent || '{}');
       }
+      /* TEST BLOCK END: dashboard-payload-load */
 
       document.addEventListener('click', routeDashboardClick);
       document.addEventListener('change', routeAppearanceChange);

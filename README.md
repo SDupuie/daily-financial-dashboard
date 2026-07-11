@@ -12,6 +12,16 @@ This repository maintains `daily_financial_news.html`, the canonical static Dail
 - `launchd/`: optional local-machine LaunchAgent templates for running dashboard helper scripts.
 - `mockups/`: temporary design exploration only. Production must not depend on files in this directory.
 
+### Sources of authority
+
+- `AGENTS.md` is the canonical project-policy source for agent behavior, including safety, scope, validation, audit, and file-ownership rules.
+- This `README.md` is the canonical human-readable operational and data-contract source.
+- `daily_financial_news.html` is the canonical published runtime artifact and contains the current embedded production payload.
+- `generated/` contains staging and cache artifacts. A staged artifact may be the current input to a build or editorial step, but it is not the published source of truth.
+- Validators enforce selected documented contracts. Tests provide regression evidence for implementation paths. Neither tests nor fixtures define product or data policy, and fixtures are never production data.
+
+If these surfaces disagree, treat that as drift to correct. Agent work follows `AGENTS.md`; operational and payload decisions follow this README; the published artifact must conform to both. Do not make a failing test pass by changing the documented contract unless the intended product behavior has also changed.
+
 The main dashboard payload lives inside:
 
 ```html
@@ -186,7 +196,8 @@ Run the applicable checks after content, structural, layout, script, or contract
 - Superlative-claim gate: `rg -n "record|all-time|fresh high|new high|record close|record low" daily_financial_news.html`
 - Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. Browser-check the Week Ahead section after changing an editorial `marketLens` for readability and overflow.
 - After changing the Tape local-refresh indicator, browser-check its hover and keyboard-focus tooltip with the helper live and unavailable at narrow mobile, tablet, and desktop widths. The tooltip must remain inside the viewport and each state must remain legible.
-- Run `node scripts/test_calendar_contract.js`, `node scripts/test_earnings.js`, `node scripts/test_week_ahead.js`, and `node scripts/test_dashboard.js` after script or data-contract changes.
+- Run `./scripts/test_all.sh` after script or data-contract changes. It checks tracked JavaScript and shell syntax, the LaunchAgent plist, all four test routines, the canonical embedded dashboard contracts, HTML structure, and whitespace errors. It is self-contained and does not require ignored `generated/` artifacts or network access.
+- The complete command does not replace the browser checks above: test and validation routines cannot prove responsive geometry, focus behavior in a real browser, or visual readability.
 
 ### Commit and publish
 
@@ -390,7 +401,7 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 
 #### Weekly slate construction
 
-1. The orchestrator builds a calendar slate only when a Friday-afternoon or Monday-morning target range differs from the canonical generated `earnings_week.json` range. Friday uses current Friday plus next Monday-Thursday; Monday uses the current Monday-Friday. A rerun after earnings editorial copy is supplied retains that just-built slate. Run `node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD` only to intentionally rebuild one of those supported five-trading-day ranges.
+1. The orchestrator builds a calendar slate only when a Friday-afternoon or Monday-morning target range differs from the current staged `generated/earnings_week.json` range. Friday uses current Friday plus next Monday-Thursday; Monday uses the current Monday-Friday. A rerun after earnings editorial copy is supplied retains that just-built slate. Run `node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD` only to intentionally rebuild one of those supported five-trading-day ranges.
 2. Fetch Finnhub earnings calendar for the selected five trading days.
 3. Fetch Finnhub profiles for Finnhub rows and filter display eligibility by market cap, country/exchange/profile quality, and watchlist rules.
 4. If Finnhub fails, returns zero usable rows, or returns fewer than the configured minimum usable rows, fail closed instead of promoting a secondary source into the whole slate. The default minimum is `max(1, weekdays * 2)`, so the normal Monday-Friday strip requires at least 10 Finnhub rows before any EarningsAPI secondary-recovery calls. Use `--min-finnhub-rows 1` only for intentional holiday-week or diagnostic runs.
@@ -400,7 +411,7 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 8. For Finnhub rows, fetch `profile2` with 429 retry/backoff and use `generated/finnhub_profile_cache.json` only after live profile fetches fail or rate-limit. For rows with empty Finnhub profile data after that, read cached Finnhub `stock/metric` market cap first, then fetch the metric endpoint with conservative retry/backoff if uncached; use the matching EarningsAPI calendar row for company name only. This may make a Finnhub-covered row display-eligible, but it must not change Finnhub EPS, revenue, timing, or outcome.
 9. Compare active-week EarningsAPI-discovered symbols against the corroborated Finnhub slate. Queue only symbols absent from Finnhub as `secondaryRecoveryCandidates`; same-symbol date conflicts must collapse to one audited canonical row, not duplicate recovery rows.
 10. For each queued candidate, fetch the EarningsAPI company endpoint and select the row matching the report date. Use that row for EPS/revenue estimates and actuals only after the date is consistent.
-11. Persist the canonical `earnings_week.json` with the verified slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes.
+11. Persist the staged `generated/earnings_week.json` with the verified slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes and must be validated before embedding.
 
 `earnings_schedule_confirmations.json` uses this local generated-artifact shape:
 
@@ -418,17 +429,17 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 
 #### Post-report result refresh
 
-1. Run `node scripts/earnings_week.js refresh` against the existing canonical `earnings_week.json`; outside the Friday-afternoon and Monday-morning rollover windows, do not rebuild the slate.
+1. Run `node scripts/earnings_week.js refresh` against the existing staged `generated/earnings_week.json`; outside the Friday-afternoon and Monday-morning rollover windows, do not rebuild the slate.
 2. Select only rows whose report timing has arrived or passed, plus unresolved rows with `companyReleaseTasks`.
 3. Refresh actual EPS/revenue from the row's primary deterministic source: Finnhub for Finnhub-covered rows, EarningsAPI company endpoint for previously recovered EarningsAPI rows, and SEC/company release only for official resolution tasks. Do not call EarningsAPI calendar in this phase.
 4. Create `companyReleaseTasks` only for recovered rows with missing actuals or missing timing, or for an arrived Nasdaq-resolved provider-date conflict whose actuals remain unavailable. Do not use company-release resolution to recover analyst estimates.
 5. Resolve `companyReleaseTasks` against SEC/company release into `earnings_company_release_resolutions.json` with `node scripts/earnings_week.js resolve`. Besides secondary-recovery rows, a row with a Nasdaq-resolved provider-date conflict escalates here once its report window has arrived and provider actuals remain unavailable; retain its Finnhub estimates for comparison.
-6. Apply resolved company-release facts back into the canonical `earnings_week.json` rows with `node scripts/earnings_week.js apply-release`. The dashboard should not merge the sidecar at render time.
+6. Apply resolved company-release facts back into the staged `generated/earnings_week.json` rows with `node scripts/earnings_week.js apply-release`. The dashboard should not merge the sidecar at render time.
 7. Compute EPS and revenue beat/miss mechanically from numeric estimate and actual values. If revenue estimate is unavailable, produce an EPS-only outcome and mark revenue `not_compared`.
 8. Compute market reaction from Yahoo using timing-aware rules once the needed close is available: BMO/DMH = report-date close vs previous trading-day close; AMC = next trading-day close vs report-date close; unknown = unavailable.
 9. Let AI write only narrative fields such as `outcome.interpretation`, `outcome.guide`, `reaction.note`, `eps.note`, and `revenue.note` into `earnings_narrative.json`, using the verified numeric row plus any official-release guidance text. AI must not invent data, dates, estimates, actuals, or reaction values. If the deterministic refresh stages a newly display-eligible row without complete narrative, it writes the row into the sidecar and defers earnings apply/embed; enrich that sidecar before continuing with steps 10 and 11. A deterministic change to a reported row invalidates its old sidecar copy: the next sidecar sync clears it, requires fresh post-report text, and will not accept a carried-forward preview. For every displayed reported row, `outcome.interpretation` must be one terse, decision-relevant business takeaway (120 characters or fewer)—such as guidance, margins, demand, pricing, segment trends, inventory, costs, or valuation tension—not a restatement of EPS/revenue beats or misses. `outcome.guide` must, in 130 characters or fewer, name a verified quarterly or full-year horizon, or clearly state that no updated/formal guidance was provided; a generic reference to a year is not guidance. Do not repeat the column title as an inline prefix. When management provides both, lead with the next-quarter outlook; add the full-year outlook only when it confirms, qualifies, or contradicts that nearer-term message. For a computed reaction, `reaction.note` must be one terse, driver-focused sentence (100 characters or fewer) that explains what investors are weighing—not repeat the displayed share-price move or close-to-close calculation. When a specific driver cannot be verified, summarize the result detail investors are weighing without asserting unsupported causation.
-10. Apply narrative back into the canonical `earnings_week.json` rows with `node scripts/earnings_week.js apply-narrative`. The dashboard should not carry ticker-specific commentary maps.
-11. Embed the validated canonical payload into `daily_financial_news.html` with `node scripts/earnings_week.js embed`. The published dashboard should not fetch `generated/earnings_week.json` at runtime.
+10. Apply narrative back into the staged `generated/earnings_week.json` rows with `node scripts/earnings_week.js apply-narrative`. The dashboard should not carry ticker-specific commentary maps.
+11. Embed the validated staging payload into `daily_financial_news.html` with `node scripts/earnings_week.js embed`. The embedded `dashboard-data.earnings.week` then becomes the published payload; the dashboard must not fetch `generated/earnings_week.json` at runtime.
 
 ### Company-release resolution sidecar
 
@@ -453,9 +464,9 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 }
 ```
 
-The company-release sidecar is not a dashboard runtime input. It must identify the exact canonical earnings week artifact it was derived from with `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`; `node scripts/earnings_week.js validate-release` verifies those fields against the week file before any apply step uses the sidecar. When the current week has no `companyReleaseTasks[]`, refresh removes a stale sidecar and `validate-release` succeeds as not applicable. Every active task must have exactly one matching `companyReleaseResolutions[]` entry. A dashboard-ready `earnings_week.json` with company-release tasks must also include `companyReleaseApply`, every task must be applied with no skipped tasks, and the matching canonical row must contain the applied `sourceAudit.companyReleaseResolution`. SEC/company-release resolution may carry estimates forward only from the EarningsAPI company endpoint for recovered rows, or from Finnhub for a resolved provider-date conflict; never use the EarningsAPI calendar discovery row.
+The company-release sidecar is not a dashboard runtime input. It must identify the exact staged earnings-week artifact it was derived from with `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`; `node scripts/earnings_week.js validate-release` verifies those fields against the week file before any apply step uses the sidecar. When the current week has no `companyReleaseTasks[]`, refresh removes a stale sidecar and `validate-release` succeeds as not applicable. Every active task must have exactly one matching `companyReleaseResolutions[]` entry. A dashboard-ready `earnings_week.json` with company-release tasks must also include `companyReleaseApply`, every task must be applied with no skipped tasks, and the matching row must contain the applied `sourceAudit.companyReleaseResolution`. SEC/company-release resolution may carry estimates forward only from the EarningsAPI company endpoint for recovered rows, or from Finnhub for a resolved provider-date conflict; never use the EarningsAPI calendar discovery row.
 
-The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`. `node scripts/earnings_week.js apply-narrative` rejects narrative generated from a different earnings week artifact before writing any canonical rows.
+The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`. `node scripts/earnings_week.js apply-narrative` rejects narrative generated from a different staged earnings-week artifact before writing any rows.
 
 ## Appendix: Local refresh server
 

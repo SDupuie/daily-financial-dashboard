@@ -110,6 +110,7 @@ function isOffsetBearingIsoDateTime(value) {
   return isIsoDateTime(value);
 }
 
+/* TEST BLOCK START: futures-story-window */
 function zonedDateParts(date, timeZone) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
@@ -188,6 +189,7 @@ function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
   }
   return null;
 }
+/* TEST BLOCK END: futures-story-window */
 
 function normalizeStoryTitle(value) {
   return String(value ?? '')
