@@ -2285,6 +2285,10 @@
       .week-event-variant { grid-template-columns: 1fr; }
       .week-event-variant .week-event-values,
       .week-event-variant .week-scheduled { grid-column: 1; }
+      .week-event-variant .week-scheduled {
+        justify-self: start;
+        width: min(100%, 220px);
+      }
       .week-ledger-foot { align-items: flex-start; flex-direction: column; }
       .week-ledger-status { text-align: left; }
       .tape-chart-shell.tape-inline-chart-card {
