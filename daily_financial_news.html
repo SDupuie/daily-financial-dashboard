@@ -2280,15 +2280,10 @@
       .week-market-lens { grid-column: 1; }
       .week-event-row { column-gap: 7px; row-gap: 8px; }
       .week-forecast-tooltip { left: auto; right: 0; }
-      .week-event-values { grid-column: 3; width: min(100%, 220px); }
+      .week-event-values { width: min(100%, 220px); }
       .week-event-group-body { grid-column: 3; }
-      .week-event-variant { grid-template-columns: 1fr; }
       .week-event-variant .week-event-values,
-      .week-event-variant .week-scheduled { grid-column: 1; }
-      .week-event-variant .week-scheduled {
-        justify-self: start;
-        width: min(100%, 220px);
-      }
+      .week-event-variant .week-scheduled { grid-column: 2; }
       .week-ledger-foot { align-items: flex-start; flex-direction: column; }
       .week-ledger-status { text-align: left; }
       .tape-chart-shell.tape-inline-chart-card {
@@ -2323,6 +2318,13 @@
       }
     }
     @media (max-width: 560px) {
+      .week-event-variant { grid-template-columns: 1fr; }
+      .week-event-variant .week-event-values,
+      .week-event-variant .week-scheduled { grid-column: 1; }
+      .week-event-variant .week-scheduled {
+        justify-self: start;
+        width: min(100%, 220px);
+      }
       .earnings-calendar-strip {
         grid-template-columns: 1fr;
       }
