@@ -1749,6 +1749,7 @@
       border-bottom: 1px solid var(--line);
     }
     .week-day-row:last-of-type { border-bottom: none; }
+    .week-day-header { grid-column: 1; }
     .week-day-count {
       display: block;
       color: var(--muted);
@@ -1853,19 +1854,19 @@
       text-transform: uppercase;
     }
     .week-event-values,
-    .week-event-values-head {
+    .week-day-values-header {
       display: grid;
       gap: 7px;
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-    .week-event-values-header { display: none; }
-    .week-event-values-head > span {
+    .week-day-values-header > span {
       color: var(--muted);
       font-size: 10px;
       font-weight: 900;
       letter-spacing: 0.05em;
       text-transform: uppercase;
     }
+    .week-day-values-header { display: none; }
     .week-value-pair { display: grid; gap: 1px; min-width: 0; }
     .week-value-key {
       color: var(--muted);
@@ -2283,8 +2284,18 @@
         --week-ledger-columns: 1fr;
         --week-calendar-columns: 60px 10px minmax(0, 1fr);
       }
-      .week-day-row { gap: 12px; padding: 16px 14px; }
-      .week-day-label { display: flex; justify-content: space-between; gap: var(--gap-sm); }
+      .week-day-row { gap: 12px; padding: 0 0 16px; }
+      .week-day-header {
+        align-items: center;
+        background: var(--surface-muted);
+        border-bottom: 1px solid var(--line);
+        display: grid;
+        gap: var(--gap-sm);
+        grid-column: 1;
+        grid-template-columns: minmax(0, 1fr) minmax(180px, 0.64fr);
+        padding: 10px 14px;
+      }
+      .week-day-label { display: flex; justify-content: flex-start; gap: var(--gap-sm); }
       .week-day-count { display: inline; margin-top: 0; }
       .week-market-lens { grid-column: 1; }
       .week-event-row { column-gap: 7px; row-gap: 8px; }
@@ -2293,7 +2304,7 @@
       .week-event-group-body { grid-column: 3; }
       .week-event-variant .week-event-values,
       .week-event-variant .week-scheduled { grid-column: 2; }
-      .week-event-values-header { display: grid; }
+      .week-day-values-header { display: grid; justify-self: end; width: min(100%, 220px); }
       .week-event-values .week-value-key {
         clip: rect(0 0 0 0);
         clip-path: inset(50%);
@@ -2337,11 +2348,15 @@
       }
     }
     @media (max-width: 560px) {
+      .week-day-header {
+        grid-template-columns: 60px 10px minmax(0, 1fr);
+        row-gap: 10px;
+      }
+      .week-day-label { grid-column: 1 / -1; }
+      .week-day-values-header { grid-column: 3; justify-self: start; }
       .week-event-variant { grid-template-columns: 1fr; }
       .week-event-variant .week-event-values,
       .week-event-variant .week-scheduled { grid-column: 1; }
-      .week-event-values-header > :first-child { display: none; }
-      .week-event-values-header .week-event-values-head { grid-column: 1; }
       .week-event-variant .week-scheduled {
         justify-self: start;
         width: min(100%, 220px);
@@ -18911,9 +18926,9 @@
         return [event.actual, event.forecast, event.previous].some((value) => value !== null && value !== undefined && value !== '');
       }
 
-      function weekAheadGroupValuesHeaderHtml(events) {
+      function weekAheadDayValuesHeaderHtml(events) {
         if (!events.some(weekAheadHasValues)) return '';
-        return `<span class="week-event-variant week-event-values-header" aria-hidden="true"><span></span><span class="week-event-values-head"><span>Previous</span><span>Forecast</span><span>Actual</span></span></span>`;
+        return '<span class="week-day-values-header" aria-hidden="true"><span>Previous</span><span>Forecast</span><span>Actual</span></span>';
       }
 
       function weekAheadEventTitleHtml(event, agency = null) {
@@ -18942,7 +18957,7 @@
         return `<div class="week-event-row">
           <time class="week-event-time">${esc(weekAheadTimeLabel(day, event, week))}</time>
           <span class="week-impact-dot ${esc(event.impact)}" aria-label="${esc(event.impact)} impact"></span>
-          <span class="week-event-group-body">${weekAheadEventTitleHtml(event)}<span class="week-event-variant-rows">${weekAheadGroupValuesHeaderHtml([event])}<span class="week-event-variant">
+          <span class="week-event-group-body">${weekAheadEventTitleHtml(event)}<span class="week-event-variant-rows"><span class="week-event-variant">
             ${weekAheadEventKindHtml(event)}
             ${weekAheadEventValuesHtml(event)}
           </span></span></span>
@@ -19011,7 +19026,7 @@
         return `<div class="week-event-row">
           <time class="week-event-time">${esc(weekAheadTimeLabel(day, lead, week))}</time>
           <span class="week-impact-dot ${esc(lead.impact)}" aria-label="${esc(lead.impact)} impact"></span>
-          <span class="week-event-group-body">${weekAheadEventTitleHtml({ name: group.family.title }, lead.agency)}<span class="week-event-variant-rows">${weekAheadGroupValuesHeaderHtml(events)}${variants}</span></span>
+          <span class="week-event-group-body">${weekAheadEventTitleHtml({ name: group.family.title }, lead.agency)}<span class="week-event-variant-rows">${variants}</span></span>
         </div>`;
       }
 
@@ -19026,7 +19041,7 @@
         return `<div class="week-event-row">
           <time class="week-event-time">${esc(weekAheadTimeLabel(day, lead, week))}</time>
           <span class="week-impact-dot ${esc(lead.impact)}" aria-label="${esc(lead.impact)} impact"></span>
-          <span class="week-event-group-body">${weekAheadEventTitleHtml(lead)}<span class="week-event-variant-rows">${weekAheadGroupValuesHeaderHtml(group.events)}${variants}</span></span>
+          <span class="week-event-group-body">${weekAheadEventTitleHtml(lead)}<span class="week-event-variant-rows">${variants}</span></span>
         </div>`;
       }
 
@@ -19049,7 +19064,7 @@
             ? `<div class="week-market-lens"><strong>${esc(lens.title)}</strong>${esc(lens.body)}${watchlist.length ? `<span class="week-watchlist">${esc(watchlist.join(' · '))}</span>` : ''}</div>`
             : '';
           return `<article class="week-day-row">
-            <div class="week-day-label">${esc(day.label)}<span class="week-day-count">${esc(count)}</span></div>
+            <div class="week-day-header"><div class="week-day-label">${esc(day.label)}<span class="week-day-count">${esc(count)}</span></div>${weekAheadDayValuesHeaderHtml(events)}</div>
             <div>${calendar}</div>
             ${lensHtml}
           </article>`;
