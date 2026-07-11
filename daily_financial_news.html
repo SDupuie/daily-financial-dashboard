@@ -2117,7 +2117,11 @@
       }
       .week { --week-ledger-columns: 112px minmax(0, 1fr); }
       .week-ledger-head > div:last-child { display: none; }
-      .week-market-lens { grid-column: 2; }
+      .week-market-lens {
+        border-top: 1px solid var(--line);
+        grid-column: 2;
+        padding-top: 14px;
+      }
       .earnings-monitor-header,
       .earnings-monitor-row {
         grid-template-columns: minmax(60px, 0.55fr) 160px 160px minmax(130px, 1fr) minmax(125px, 0.95fr);
@@ -2299,9 +2303,7 @@
       .week-day-label { display: flex; justify-content: flex-start; gap: var(--gap-sm); }
       .week-day-count { display: inline; margin-top: 0; }
       .week-market-lens {
-        border-top: 1px solid var(--line);
         grid-column: 1;
-        padding-top: 14px;
       }
       .week-event-row { column-gap: 7px; row-gap: 8px; }
       .week-forecast-tooltip { left: auto; right: 0; }
