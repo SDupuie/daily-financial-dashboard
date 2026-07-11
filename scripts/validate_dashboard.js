@@ -632,6 +632,9 @@ if (!dashboardMatch) {
           if (!recognizedChartSources.has(sourceItem.source)) {
             errors.push(`${label}.source is not recognized.`);
           }
+          if (typeof sourceItem.noVolume !== 'boolean') {
+            errors.push(`${label}.noVolume must be boolean.`);
+          }
           const decodedBars = [];
           if (!Array.isArray(sourceItem.bars) || sourceItem.bars.length < 2) {
             errors.push(`${label}.bars must contain at least two daily bars for the inline chart.`);
@@ -685,6 +688,10 @@ if (!dashboardMatch) {
                 errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
               }
             }
+          }
+          const hasVolume = decodedBars.some((bar) => bar.volume !== undefined);
+          if (typeof sourceItem.noVolume === 'boolean' && sourceItem.noVolume !== !hasVolume) {
+            errors.push(`${label}.noVolume must be ${!hasVolume} to match its embedded volume bars.`);
           }
           const item = { ...sourceItem, bars: decodedBars };
           chartSeriesByTicker.set(ticker, item);

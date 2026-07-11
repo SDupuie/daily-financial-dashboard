@@ -1937,9 +1937,12 @@
     .week-forecast-qualifier:hover .week-forecast-tooltip,
     .week-forecast-qualifier:focus-within .week-forecast-tooltip { opacity: 1; visibility: visible; }
     .week-scheduled {
+      align-self: center;
       color: var(--muted);
       font-size: 12px;
       font-weight: 750;
+      justify-self: center;
+      text-align: center;
     }
     .week-quiet,
     .week-closure {
@@ -2280,8 +2283,8 @@
       .week-event-values { grid-column: 3; width: min(100%, 220px); }
       .week-event-group-body { grid-column: 3; }
       .week-event-variant { grid-template-columns: 1fr; }
-      .week-event-variant .week-event-values { grid-column: 1; }
-      .week-scheduled { grid-column: 3; }
+      .week-event-variant .week-event-values,
+      .week-event-variant .week-scheduled { grid-column: 1; }
       .week-ledger-foot { align-items: flex-start; flex-direction: column; }
       .week-ledger-status { text-align: left; }
       .tape-chart-shell.tape-inline-chart-card {

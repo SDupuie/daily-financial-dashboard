@@ -275,6 +275,7 @@ The `chart-data` block is generated chart history plus quote-row staging data:
 
 - `schemaVersion` must be `1`.
 - `barEncoding` must be `tuple-v1`: every `series[].bars[]` entry is `[time, open, high, low, close, volume]`, with `volume` set to `null` when unavailable. OHLC values are rounded to at most four decimal places before embedding; the runtime expands tuples back into normal bar objects before rendering.
+- `noVolume` is a required boolean derived from the bars: it is `true` exactly when the series has no usable volume bars. This keeps the chart pane and its `Price only` / `Price + Volume` explanation aligned with the embedded data without prescribing particular tickers.
 - `range.days` must be at least `1826` so the 5Y chart shortcut has enough embedded history.
 - `series[]` is the canonical embedded price-history store. It must include every chartable ticker from `tape.rows[]`, with matching `ticker`, `section`, and `sourceSymbol`.
 - `quoteRows.tape[]` is a derived view over non-crypto `series[]` using `last`, `delta`, and `pct`.

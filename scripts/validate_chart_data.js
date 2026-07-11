@@ -330,6 +330,10 @@ function main() {
         errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
       }
     }
+    const hasVolume = item.bars.some((barRaw) => barRaw && typeof barRaw === 'object' && barRaw.volume !== undefined);
+    if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
+      errors.push(`${label}.noVolume must be ${!hasVolume} to match its generated volume bars.`);
+    }
   }
 
   for (const ticker of expectedByTicker.keys()) {

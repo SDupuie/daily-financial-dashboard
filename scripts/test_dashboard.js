@@ -1053,6 +1053,12 @@ function testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars() {
   const shapeResult = validateChartDataFixture(chartData, 'dfd-chart-tuple-');
   assert.notEqual(shapeResult.status, 0, 'Embedded chart bars must use the compact tuple encoding.');
   assert.match(shapeResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
+
+  const noVolumeChart = readJsonBlock(html, 'chart-data');
+  noVolumeChart.series.find((item) => item.ticker === 'VIX').noVolume = false;
+  const noVolumeResult = validateChartDataFixture(noVolumeChart, 'dfd-chart-no-volume-');
+  assert.notEqual(noVolumeResult.status, 0, 'A chart without volume bars must declare noVolume.');
+  assert.match(noVolumeResult.stderr, /VIX\.noVolume must be true to match its embedded volume bars/);
 }
 
 function testDashboardValidatorUsesTheTapeAsItsChartRoster() {
@@ -1548,6 +1554,19 @@ function testValidateChartDataRejectsLatestOhlcPlaceholder() {
 
   assert.notEqual(result.status, 0, 'latest quote-only placeholder should fail validate_chart_data for OHLC series');
   assert.match(result.stderr, /do not publish a latest quote-only placeholder in an OHLC series/);
+
+  delete chartData.series[0].bars[0].volume;
+  fs.writeFileSync(chartFile, JSON.stringify(chartData));
+  const noVolumeResult = spawnSync(process.execPath, [
+    path.join(root, 'scripts/validate_chart_data.js'),
+    '--dashboard', dashboardFile,
+    '--chart-data', chartFile
+  ], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+  assert.notEqual(noVolumeResult.status, 0, 'A generated chart without volume bars must declare noVolume.');
+  assert.match(noVolumeResult.stderr, /VAW\.noVolume must be true to match its generated volume bars/);
 }
 
 function testValidateChartDataRejectsStaleSourceFamilies() {
