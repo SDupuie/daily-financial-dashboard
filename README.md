@@ -219,6 +219,7 @@ Each Tape row is a chartable quote row with this contract:
 
 - `group` is optional for existing non-crypto rows that are grouped by ticker lists in the renderer; crypto ticker rows must set `group: "Crypto"`.
 - `ticker` is the dashboard display/routing key. `sourceSymbol` is the fetch/chart source key.
+- The Tape roster is editorial and may evolve. Validation does not prescribe symbols; it requires each displayed ticker to be unique and to have matching embedded source, chart-series, and derived quote data.
 - `last`, `delta`, `pct`, `dir`, and `asOf` are derived views. They must match the embedded `chart-data.quoteRows` value for the row, and `chart-data.quoteRows` must itself be reproducible from the latest `chart-data.series` bars.
 - `note` must explain the factor driving that ticker or market today. It must not restate quote values or include source/citation language.
 - Deprecated: do not put ticker quote rows in `crypto.tape[]`.

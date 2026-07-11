@@ -953,6 +953,26 @@ function validateChartDataFixture(chartData, fixturePrefix) {
   }
 }
 
+function validateDashboardAndChartFixture(data, chartData, fixturePrefix) {
+  const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  try {
+    const withDashboardData = replaceJsonBlock(html, 'dashboard-data', JSON.stringify(data));
+    fs.writeFileSync(dashboardFile, replaceJsonBlock(withDashboardData, 'chart-data', JSON.stringify(chartData)));
+    return spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'validate_dashboard.js'),
+      dashboardFile
+    ], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-10T13:30:00Z' }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function validationDashboardData() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   return readJsonBlock(html, 'dashboard-data');
@@ -1033,6 +1053,23 @@ function testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars() {
   const shapeResult = validateChartDataFixture(chartData, 'dfd-chart-tuple-');
   assert.notEqual(shapeResult.status, 0, 'Embedded chart bars must use the compact tuple encoding.');
   assert.match(shapeResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
+}
+
+function testDashboardValidatorUsesTheTapeAsItsChartRoster() {
+  const data = validationDashboardData();
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const chartData = readJsonBlock(html, 'chart-data');
+  const sourceTicker = 'SPX';
+  const dashboardRow = data.tape.rows.find((row) => row.ticker === sourceTicker);
+  const sourceSeries = chartData.series.find((item) => item.ticker === sourceTicker);
+  const sourceQuote = chartData.quoteRows.tape.find((row) => row.ticker === sourceTicker);
+
+  data.tape.rows.push({ ...dashboardRow, ticker: 'TST', name: 'Test Contract', sourceSymbol: 'TEST=F' });
+  chartData.series.push({ ...sourceSeries, ticker: 'TST', name: 'Test Contract', sourceSymbol: 'TEST=F' });
+  chartData.quoteRows.tape.push({ ...sourceQuote, ticker: 'TST', name: 'Test Contract' });
+
+  const result = validateDashboardAndChartFixture(data, chartData, 'dfd-dynamic-tape-roster-');
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt() {
@@ -1782,6 +1819,7 @@ function main() {
   testDashboardValidatorAcceptsFridayBridgeCalendars();
   testCompactChartPayloadUsesFourDecimalTuples();
   testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars();
+  testDashboardValidatorUsesTheTapeAsItsChartRoster();
   testDashboardValidatorRejectsOversizedFuturesStoryTag();
   testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
   testDashboardValidatorRejectsDuplicateFuturesStoryUrl();

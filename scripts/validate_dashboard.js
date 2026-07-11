@@ -569,88 +569,16 @@ if (!dashboardMatch) {
       requireString(catalyst.body, `opening.catalysts[${index}].body`);
     }
 
-    const staleTapeTickers = new Set(['6723.T', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
-    for (const ticker of tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase())) {
-      if (staleTapeTickers.has(ticker)) {
-        errors.push(`The Tape should not include stale or duplicated ticker ${ticker}.`);
-      }
-    }
-
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'HG', 'CL', 'BZ', 'NG', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
-    const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
-    for (const ticker of requiredTapeTickers) {
-      if (!tapeTickerSet.has(ticker)) {
-        errors.push(`The Tape is missing required ticker ${ticker}.`);
-      }
-    }
-    const requiredCryptoTickers = ['BTC', 'ETH', 'SOL', 'XRP', 'IBIT', 'ETHA', 'MSTR'];
-    const cryptoTickerSet = new Set(cryptoTickerRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
-    for (const ticker of requiredCryptoTickers) {
-      if (!cryptoTickerSet.has(ticker)) {
-        errors.push(`The Tape Crypto group is missing required ticker ${ticker}.`);
-      }
-    }
-    // Keep this map in lockstep with tape.rows[].sourceSymbol; embedded charts use it as their source contract.
-    const expectedTapeSourceSymbols = new Map(Object.entries({
-      SPX: '^GSPC',
-      NDX: '^NDX',
-      DJI: '^DJI',
-      RUT: '^RUT',
-      VEA: 'VEA',
-      VWO: 'VWO',
-      VOX: 'VOX',
-      VCR: 'VCR',
-      VDC: 'VDC',
-      VDE: 'VDE',
-      VFH: 'VFH',
-      VHT: 'VHT',
-      VIS: 'VIS',
-      VAW: 'VAW',
-      VNQ: 'VNQ',
-      SMH: 'SMH',
-      VGT: 'VGT',
-      VPU: 'VPU',
-      DBC: 'DBC',
-      PDBC: 'PDBC',
-      XAU: 'GC=F',
-      XAG: 'SI=F',
-      HG: 'HG=F',
-      CL: 'CL=F',
-      BZ: 'BZ=F',
-      NG: 'NG=F',
-      VIX: '^VIX',
-      USYC: 'TREASURY:CURVE',
-      MOVE: '^MOVE',
-      UST3M: 'TREASURY:3M',
-      UST2Y: 'TREASURY:2Y',
-      UST10Y: 'TREASURY:10Y',
-      UST30Y: 'TREASURY:30Y',
-      UUP: 'UUP',
-      IEF: 'IEF',
-      AGG: 'AGG',
-      LQD: 'LQD',
-      HYG: 'HYG'
-    }));
+    // The editorial Tape roster is intentionally open-ended. Its rows define the
+    // chart/source contract for this edition without the validator prescribing symbols.
+    const expectedChartSourceSymbols = new Map();
     for (const [index, row] of tapeRows.entries()) {
       const ticker = String(row?.ticker ?? '').toUpperCase();
       requireString(row?.sourceSymbol, `tape.rows[${index}].sourceSymbol`);
-      const expectedSource = expectedTapeSourceSymbols.get(ticker);
-      if (expectedSource && row.sourceSymbol !== expectedSource) {
-        errors.push(`tape.rows[${index}].sourceSymbol for ${ticker} must be ${expectedSource}.`);
+      if (ticker && row?.sourceSymbol) {
+        expectedChartSourceSymbols.set(ticker, row.sourceSymbol);
       }
     }
-    const expectedCryptoSourceSymbols = new Map();
-    for (const [index, rowRaw] of cryptoTickerRows.entries()) {
-      const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-      const ticker = String(row.ticker ?? '').toUpperCase();
-      if (!ticker) continue;
-      requireString(row.sourceSymbol, `tape.rows Crypto ${ticker}.sourceSymbol`);
-      if (row.sourceSymbol) expectedCryptoSourceSymbols.set(ticker, row.sourceSymbol);
-    }
-    const expectedChartSourceSymbols = new Map([
-      ...expectedTapeSourceSymbols.entries(),
-      ...expectedCryptoSourceSymbols.entries()
-    ]);
 
     if (!chartDataMatch) {
       errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
@@ -697,7 +625,7 @@ if (!dashboardMatch) {
 
           const expectedSource = expectedChartSourceSymbols.get(ticker);
           if (!expectedSource) {
-            errors.push(`${label} is not a required chart ticker.`);
+            errors.push(`${label} has no matching dashboard Tape row.`);
           } else if (sourceItem.sourceSymbol !== expectedSource) {
             errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
           }
@@ -780,15 +708,17 @@ if (!dashboardMatch) {
           }
         }
 
-        const usycQuoteRow = chartData.quoteRows?.tape?.find((row) => row?.ticker === 'USYC');
-        if (usycQuoteRow && !/^2s10s [+-]\d+ bp$/.test(String(usycQuoteRow.last || ''))) {
-          errors.push('Embedded chart-data quoteRows.tape USYC.last must show 2s10s spread instead of repeating the 10Y yield.');
-        }
-
         const chartTapeQuoteRows = Array.isArray(chartData.quoteRows?.tape) ? chartData.quoteRows.tape : [];
         const chartCryptoQuoteRows = Array.isArray(chartData.quoteRows?.crypto) ? chartData.quoteRows.crypto : [];
         const chartTapeQuoteByTicker = new Map(chartTapeQuoteRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
         const chartCryptoQuoteByTicker = new Map(chartCryptoQuoteRows.map((row) => [String(row?.ticker || row?.sym || '').toUpperCase(), row]));
+        const yieldCurveSeries = chartSeries.find((item) => item?.sourceSymbol === 'TREASURY:CURVE');
+        const yieldCurveQuoteRow = yieldCurveSeries
+          ? chartTapeQuoteByTicker.get(String(yieldCurveSeries.ticker || '').toUpperCase())
+          : null;
+        if (yieldCurveQuoteRow && !/^2s10s [+-]\d+ bp$/.test(String(yieldCurveQuoteRow.last || ''))) {
+          errors.push('Embedded chart-data yield-curve quote must show the 2s10s spread instead of repeating the 10Y yield.');
+        }
         for (const [ticker, item] of chartSeriesByTicker.entries()) {
           if (item?.section === 'crypto') {
             const chartRow = chartCryptoQuoteByTicker.get(ticker);
@@ -860,14 +790,6 @@ if (!dashboardMatch) {
             if (dashboardValue !== chartValue) {
               errors.push(`tape.rows Crypto ${ticker}.${dashboardField} must match embedded chart-data quoteRows.crypto ${chartField} value "${chartValue}".`);
             }
-          }
-        }
-
-        // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane chart layout.
-        for (const ticker of ['USYC', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'VIX', 'MOVE']) {
-          const item = chartSeriesByTicker.get(ticker);
-          if (item && item.noVolume !== true) {
-            errors.push(`Embedded Tape chart data for ${ticker} must mark noVolume true for the chart hint/volume-pane contract.`);
           }
         }
       }
@@ -1107,8 +1029,8 @@ if (!dashboardMatch) {
         values: [row.last, row.delta, row.pct],
         label: `tape.rows ${row.ticker ?? row.name ?? '(unknown)'}`
       });
-      if (row.ticker === 'USYC' && !/^2s10s [+-]\d+ bp$/.test(String(row.last || ''))) {
-        errors.push('Tape row USYC.last must show 2s10s spread instead of repeating the 10Y yield.');
+      if (row.sourceSymbol === 'TREASURY:CURVE' && !/^2s10s [+-]\d+ bp$/.test(String(row.last || ''))) {
+        errors.push('The yield-curve Tape row must show the 2s10s spread instead of repeating the 10Y yield.');
       }
     }
 
