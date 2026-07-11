@@ -1,0 +1,21 @@
+[req]
+distinguished_name = dn
+req_extensions = v3_req
+prompt = no
+
+[dn]
+CN = Daily Financial Dashboard Local Helper
+
+[v3_req]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+subjectKeyIdentifier = hash
+
+[alt_names]
+DNS.1 = localhost
+IP.1 = 192.168.2.2
+IP.2 = 127.0.0.1
+IP.3 = ::1
+

@@ -397,7 +397,6 @@ function createServer(args) {
         ok: true,
         host: args.host,
         port: args.port,
-        input: args.input,
         generatedAt: new Date().toISOString()
       });
       return;
@@ -449,10 +448,19 @@ function createServer(args) {
   });
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2));
+function listenServer(args, onListening = () => {}) {
   const server = createServer(args);
   server.listen(args.port, args.host, () => {
+    const address = server.address();
+    if (args.port === 0 && address && typeof address === 'object') args.port = address.port;
+    onListening(server);
+  });
+  return server;
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  listenServer(args, () => {
     process.stdout.write(`Local market server listening at https://${args.host}:${args.port}\n`);
   });
 }
@@ -472,6 +480,7 @@ module.exports = {
   isPartialRefresh,
   isAllowedBrowserOrigin,
   latestEmbeddedChartDate,
+  listenServer,
   localRefreshChartRows,
   parseArgs,
   refreshWindow,

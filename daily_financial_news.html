@@ -453,6 +453,10 @@
       background: var(--blue);
       border-color: var(--blue);
     }
+    .local-refresh-indicator[data-local-refresh-state="partial"] .local-refresh-indicator-dot {
+      background: var(--gold);
+      border-color: var(--gold);
+    }
     .local-refresh-indicator[data-local-refresh-state="idle"] .local-refresh-indicator-dot {
       background: transparent;
       border-color: var(--gold);
@@ -16312,6 +16316,21 @@
         return [...byTime.values()].sort((a, b) => String(a.time).localeCompare(String(b.time)));
       }
 
+      function sameJsonValue(left, right) {
+        if (Object.is(left, right)) return true;
+        if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+        if (Array.isArray(left) || Array.isArray(right)) {
+          return Array.isArray(left)
+            && Array.isArray(right)
+            && left.length === right.length
+            && left.every((value, index) => sameJsonValue(value, right[index]));
+        }
+        const leftKeys = Object.keys(left).sort();
+        const rightKeys = Object.keys(right).sort();
+        return leftKeys.length === rightKeys.length
+          && leftKeys.every((key, index) => key === rightKeys[index] && sameJsonValue(left[key], right[key]));
+      }
+
       function latestSeriesBarDate(series) {
         return String(series?.bars.at(-1)?.time || '');
       }
@@ -16331,6 +16350,7 @@
           const merged = existingLatest && refreshedLatest && refreshedLatest < existingLatest
             ? { ...existing, bars }
             : { ...existing, ...item, bars };
+          if (sameJsonValue(existing, merged)) continue;
           seriesMap.set(ticker, merged);
           changed = true;
         }
@@ -16540,11 +16560,13 @@
         data.crypto.stats = rows.map((row) => {
           const refreshed = bySym.get(String(row?.sym || '').toUpperCase());
           if (!refreshed) return row;
-          changed = true;
-          return {
+          const nextRow = {
             ...row,
             ...refreshed
           };
+          if (sameJsonValue(row, nextRow)) return row;
+          changed = true;
+          return nextRow;
         });
         return changed;
       }
@@ -16566,16 +16588,34 @@
           .filter(Boolean)).size;
       }
 
+      function localRefreshResultMessage(payload) {
+        const lines = [
+          localRefreshStatusText(payload),
+          `${localRefreshTickerCount(payload)} ticker series`
+        ];
+        if (payload?.partial) {
+          const errorCount = Array.isArray(payload?.errors) ? payload.errors.length : 0;
+          lines.push(errorCount ? `${errorCount} refresh ${errorCount === 1 ? 'error' : 'errors'}` : 'Partial refresh');
+        }
+        return lines.join('\n');
+      }
+
       function localRefreshIndicatorHtml() {
         const { state, message } = localRefreshIndicator;
-        return `<span class="local-refresh-indicator" data-local-refresh-indicator data-local-refresh-state="${esc(state)}" role="img" aria-label="${esc(message)}" tabindex="0"><span class="local-refresh-indicator-dot" aria-hidden="true"></span><span class="local-refresh-tooltip" role="tooltip">${esc(message)}</span></span>`;
+        return `<span class="local-refresh-indicator" data-local-refresh-indicator data-local-refresh-state="${esc(state)}" role="img" aria-label="${esc(message)}" tabindex="0"><span class="local-refresh-indicator-dot" aria-hidden="true"></span><span class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">${esc(message)}</span><span class="visually-hidden" data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span></span>`;
       }
 
       function setLocalRefreshIndicator(state, message) {
         localRefreshIndicator = { state, message };
-        // The asynchronous check must not re-render the Tape and interrupt an open chart or active tab.
+        // Update in place so an asynchronous result cannot discard keyboard focus or an open tooltip.
         const indicator = document.querySelector('[data-local-refresh-indicator]');
-        if (indicator) indicator.outerHTML = localRefreshIndicatorHtml();
+        if (!indicator) return;
+        indicator.dataset.localRefreshState = state;
+        indicator.setAttribute('aria-label', message);
+        const tooltip = indicator.querySelector('[data-local-refresh-tooltip]');
+        if (tooltip) tooltip.textContent = message;
+        const announcement = indicator.querySelector('[data-local-refresh-announcement]');
+        if (announcement) announcement.textContent = message;
       }
 
       // Only the optional local-refresh/cache payload is shape-normalized; embedded dashboard data is validated as canonical.
@@ -16659,10 +16699,23 @@
               continue;
             }
             const payload = await response.json();
-            if (applyLocalMarketRefresh(data, payload)) {
+            if (!payload || payload.schemaVersion !== 1) {
+              helperError = 'Local helper returned unsupported data';
+              continue;
+            }
+            const changed = applyLocalMarketRefresh(data, payload);
+            if (changed) {
+              const restoreIndicatorFocus = document.activeElement?.matches?.('[data-local-refresh-indicator]') === true;
               writeCachedLocalMarketRefresh(data, payload);
-              setLocalRefreshIndicator('live', `${localRefreshStatusText(payload)}\n${localRefreshTickerCount(payload)} ticker series`);
               render(data);
+              setLocalRefreshIndicator(payload.partial ? 'partial' : 'live', localRefreshResultMessage(payload));
+              if (restoreIndicatorFocus) {
+                document.querySelector('[data-local-refresh-indicator]')?.focus({ preventScroll: true });
+              }
+              return;
+            }
+            if (payload.partial) {
+              setLocalRefreshIndicator('partial', localRefreshResultMessage(payload));
               return;
             }
             // A 200 response can still be stale or empty; try the next configured helper URL unless something actually changed.
@@ -18939,13 +18992,16 @@
         const cachedLocalRefresh = readCachedLocalMarketRefresh(dashboardData);
         if (cachedLocalRefresh) {
           applyLocalMarketRefresh(dashboardData, cachedLocalRefresh);
-          setLocalRefreshIndicator('cached', `${localRefreshStatusText(cachedLocalRefresh)} · cached local data`);
+          setLocalRefreshIndicator(
+            cachedLocalRefresh.partial ? 'partial' : 'cached',
+            `${localRefreshResultMessage(cachedLocalRefresh)}\nCached local data`
+          );
         }
         render(dashboardData);
         tryLocalMarketRefresh(dashboardData);
       } catch (error) {
         $('hero-headline').textContent = 'Could not load today’s dashboard data.';
-        $('hero-copy').textContent = 'The embedded dashboard-data JSON block could not be parsed.';
+        $('hero-copy').textContent = 'An embedded dashboard payload could not be loaded.';
         $('content').innerHTML = `<div class="error">${esc(error.message)}</div>`;
       }
     })();

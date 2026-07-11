@@ -8,10 +8,10 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 const {
-  createServer: createLocalMarketServer,
   isPartialRefresh,
   isAllowedBrowserOrigin,
   latestEmbeddedChartDate,
+  listenServer: listenLocalMarketServer,
   localRefreshChartRows,
   parseArgs: parseLocalMarketServerArgs,
   refreshWindow
@@ -949,6 +949,8 @@ function testDashboardHtmlShellContract() {
   assert.equal(countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g), 1);
   assert.equal(countMatches(/<script type="application\/json" id="chart-data">[\s\S]*?<\/script>/g), 1);
   assert.equal(countMatches(/<script id="dashboard-runtime">[\s\S]*?<\/script>/g), 1);
+  assert.match(html, /An embedded dashboard payload could not be loaded\./);
+  assert.doesNotMatch(html, /The embedded dashboard-data JSON block could not be parsed\./);
   assert.notEqual(html.indexOf('<!-- ============ DATA START'), -1);
   assert.notEqual(html.indexOf('<!-- ============ DATA END ============ -->'), -1);
   assert.ok(chartDataIndex > html.indexOf('<!-- ============ DATA END ============ -->'));
@@ -1395,15 +1397,28 @@ function testEditionStampChangesIdentity() {
 
 function testLocalRefreshIndicatorBehavior() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  assert.match(html, /\.local-refresh-indicator\[data-local-refresh-state="partial"\] \.local-refresh-indicator-dot/);
   const sources = [
     'localRefreshIndicatorHtml',
     'setLocalRefreshIndicator'
   ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
   const runtime = Function(`
     let localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
-    let rendered = '';
     let indicatorAvailable = true;
     const selectors = [];
+    const tooltip = { textContent: '' };
+    const announcement = { textContent: '' };
+    const indicator = {
+      dataset: {},
+      attributes: {},
+      set outerHTML(_value) { throw new Error('The focused indicator must not be replaced.'); },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      querySelector(selector) {
+        if (selector === '[data-local-refresh-tooltip]') return tooltip;
+        if (selector === '[data-local-refresh-announcement]') return announcement;
+        return null;
+      }
+    };
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
       '&': '&amp;',
       '<': '&lt;',
@@ -1414,15 +1429,19 @@ function testLocalRefreshIndicatorBehavior() {
     const document = {
       querySelector: (selector) => {
         selectors.push(selector);
-        return indicatorAvailable ? {
-          set outerHTML(value) { rendered = value; }
-        } : null;
+        return indicatorAvailable ? indicator : null;
       }
     };
     ${sources}
     return {
       setLocalRefreshIndicator,
-      rendered: () => rendered,
+      markup: () => localRefreshIndicatorHtml(),
+      snapshot: () => ({
+        state: indicator.dataset.localRefreshState,
+        label: indicator.attributes['aria-label'],
+        tooltip: tooltip.textContent,
+        announcement: announcement.textContent
+      }),
       selectors: () => selectors,
       hideIndicator: () => { indicatorAvailable = false; }
     };
@@ -1431,29 +1450,71 @@ function testLocalRefreshIndicatorBehavior() {
     ['checking', 'Checking local refresh'],
     ['live', 'Local refresh 12:34 PM CDT\n44 ticker series'],
     ['cached', 'Cached local data'],
+    ['partial', 'Local refresh 12:34 PM CDT\n43 ticker series\n1 refresh error'],
     ['idle', 'Local helper reached; no newer prices'],
     ['error', 'Local refresh unavailable or blocked']
   ];
 
   for (const [state, message] of states) {
     runtime.setLocalRefreshIndicator(state, message);
-    const markup = runtime.rendered();
+    const markup = runtime.markup();
+    assert.deepEqual(runtime.snapshot(), {
+      state,
+      label: message,
+      tooltip: message,
+      announcement: message
+    });
     assert.match(markup, new RegExp(`data-local-refresh-state="${state}"`));
     assert.match(markup, /role="img"/);
     assert.match(markup, /tabindex="0"/);
     assert.match(markup, /class="local-refresh-indicator-dot" aria-hidden="true"/);
-    assert.match(markup, /class="local-refresh-tooltip" role="tooltip"/);
+    assert.match(markup, /class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip"/);
+    assert.match(markup, /data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"/);
     assert.match(markup, new RegExp(`aria-label="${message.replace('\n', '\\n')}"`));
     assert.doesNotMatch(markup, /\btitle=/);
   }
 
   runtime.setLocalRefreshIndicator('error', '<Local & "safe">');
-  assert.match(runtime.rendered(), /aria-label="&lt;Local &amp; &quot;safe&quot;&gt;"/);
-  assert.match(runtime.rendered(), /<span class="local-refresh-tooltip" role="tooltip">&lt;Local &amp; &quot;safe&quot;&gt;<\/span>/);
+  assert.equal(runtime.snapshot().label, '<Local & "safe">');
+  assert.match(runtime.markup(), /aria-label="&lt;Local &amp; &quot;safe&quot;&gt;"/);
+  assert.match(runtime.markup(), /<span class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">&lt;Local &amp; &quot;safe&quot;&gt;<\/span>/);
   assert.deepEqual(runtime.selectors(), Array.from({ length: states.length + 1 }, () => '[data-local-refresh-indicator]'));
 
   runtime.hideIndicator();
   assert.doesNotThrow(() => runtime.setLocalRefreshIndicator('idle', 'Local helper reached; no newer prices'));
+}
+
+function testEmbeddedPayloadLoadErrorsAreDistinct() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const sources = [
+    'decodeEmbeddedChartBar',
+    'decodeEmbeddedChartSeries',
+    'loadChartData',
+    'loadData'
+  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const runtime = Function(`
+    let chartSeriesByTicker = new Map();
+    let chartDataReferenceDate = '';
+    const nodes = new Map();
+    const document = { getElementById: (id) => nodes.get(id) || null };
+    const chartPayloadReferenceDate = () => '2026-07-10';
+    ${sources}
+    return {
+      loadChartData,
+      loadData,
+      setNode: (id, textContent) => nodes.set(id, { textContent }),
+      clear: () => nodes.clear()
+    };
+  `)();
+
+  assert.throws(() => runtime.loadChartData(), /chart-data JSON block was not found/);
+  runtime.setNode('chart-data', '{bad json');
+  assert.throws(() => runtime.loadChartData(), /JSON/);
+  runtime.clear();
+  assert.throws(() => runtime.loadData(), /dashboard-data JSON block was not found/);
+  runtime.setNode('dashboard-data', '{bad json');
+  assert.throws(() => runtime.loadData(), /JSON/);
+  assert.match(html, /An embedded dashboard payload could not be loaded\./);
 }
 
 async function testLocalRefreshIndicatorLifecycle() {
@@ -1461,6 +1522,7 @@ async function testLocalRefreshIndicatorLifecycle() {
   const sources = [
     'localRefreshStatusText',
     'localRefreshTickerCount',
+    'localRefreshResultMessage',
     'tryLocalMarketRefresh'
   ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
   const runtime = Function(`
@@ -1472,8 +1534,14 @@ async function testLocalRefreshIndicatorLifecycle() {
     const states = [];
     const writes = [];
     const renders = [];
+    const focusRestores = [];
     let localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
     let applyResult = false;
+    let indicatorFocused = false;
+    const document = {
+      activeElement: { matches: (selector) => indicatorFocused && selector === '[data-local-refresh-indicator]' },
+      querySelector: () => ({ focus: (options) => focusRestores.push(options) })
+    };
     const setLocalRefreshIndicator = (state, message) => {
       localRefreshIndicator = { state, message };
       states.push({ state, message });
@@ -1483,15 +1551,17 @@ async function testLocalRefreshIndicatorLifecycle() {
     const render = (data) => renders.push(data);
     ${sources}
     return {
-      async run({ fetchImpl, changed }) {
+      async run({ fetchImpl, changed, focused = false }) {
         fetch = fetchImpl;
         applyResult = changed;
+        indicatorFocused = focused;
         states.length = 0;
         writes.length = 0;
         renders.length = 0;
+        focusRestores.length = 0;
         localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
         await tryLocalMarketRefresh({ editionId: 'fixture' });
-        return { states: [...states], writes: [...writes], renders: [...renders] };
+        return { states: [...states], writes: [...writes], renders: [...renders], focusRestores: [...focusRestores] };
       }
     };
   `)();
@@ -1500,6 +1570,7 @@ async function testLocalRefreshIndicatorLifecycle() {
   assert.deepEqual(unavailable.states, [{ state: 'error', message: 'Local refresh unavailable in this browser' }]);
 
   const payload = {
+    schemaVersion: 1,
     generatedAt: '2026-07-10T18:34:00.000Z',
     series: [{ ticker: 'SPX' }, { ticker: 'VIX' }, { ticker: 'SPX' }]
   };
@@ -1509,15 +1580,39 @@ async function testLocalRefreshIndicatorLifecycle() {
       refreshRequest = { url, options };
       return { ok: true, status: 200, json: async () => payload };
     },
-    changed: true
+    changed: true,
+    focused: true
   });
   assert.deepEqual(refreshed.states.map((entry) => entry.state), ['checking', 'live']);
   assert.match(refreshed.states[1].message, /^Local refresh .+\n2 ticker series$/);
   assert.deepEqual(refreshed.writes, [payload]);
   assert.equal(refreshed.renders.length, 1);
+  assert.deepEqual(refreshed.focusRestores, [{ preventScroll: true }]);
   assert.equal(refreshRequest.url, 'https://192.168.2.2:2210/api/market-refresh');
   assert.equal(refreshRequest.options.cache, 'no-store');
   assert.equal(refreshRequest.options.targetAddressSpace, 'local');
+
+  const partialPayload = {
+    ...payload,
+    partial: true,
+    errors: [{ section: 'tape', ticker: 'MOVE', message: 'failed' }]
+  };
+  const partial = await runtime.run({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => partialPayload }),
+    changed: true
+  });
+  assert.deepEqual(partial.states.map((entry) => entry.state), ['checking', 'partial']);
+  assert.match(partial.states[1].message, /\n2 ticker series\n1 refresh error$/);
+  assert.deepEqual(partial.writes, [partialPayload]);
+  assert.equal(partial.renders.length, 1);
+
+  const unchangedPartial = await runtime.run({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => partialPayload }),
+    changed: false
+  });
+  assert.deepEqual(unchangedPartial.states.map((entry) => entry.state), ['checking', 'partial']);
+  assert.equal(unchangedPartial.writes.length, 0);
+  assert.equal(unchangedPartial.renders.length, 0);
 
   let idleCalls = 0;
   const idle = await runtime.run({
@@ -1537,12 +1632,20 @@ async function testLocalRefreshIndicatorLifecycle() {
   });
   assert.deepEqual(helperError.states.map((entry) => entry.state), ['checking', 'error']);
   assert.equal(helperError.states[1].message, 'Local helper responded with 503');
+
+  const unsupported = await runtime.run({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ partial: true }) }),
+    changed: false
+  });
+  assert.deepEqual(unsupported.states.map((entry) => entry.state), ['checking', 'error']);
+  assert.equal(unsupported.states[1].message, 'Local helper returned unsupported data');
 }
 
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const sources = [
     'mergeBars',
+    'sameJsonValue',
     'latestSeriesBarDate',
     'mergeSeriesMap'
   ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
@@ -1596,6 +1699,7 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   assert.equal(currentMerge.source, 'Local refreshed chart API');
   assert.equal(currentMerge.latestQuoteSource, 'Local refreshed quote API');
   assert.equal(currentMerge.bars.at(-1).time, '2026-07-07');
+  assert.equal(mergeSeriesMap(seriesMap, [structuredClone(currentMerge)]), false);
 
   assert.equal(mergeSeriesMap(seriesMap, [{
     ticker: 'UNKNOWN',
@@ -1605,6 +1709,26 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
     ]
   }]), false);
   assert.equal(seriesMap.has('UNKNOWN'), false);
+}
+
+function testLocalRefreshIgnoresIdenticalCryptoStats() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const sources = [
+    'sameJsonValue',
+    'applyCryptoStats'
+  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const { applyCryptoStats } = Function(`
+    ${sources}
+    return { applyCryptoStats };
+  `)();
+  const data = {
+    crypto: {
+      stats: [{ sym: 'F&G', name: 'Fear & Greed', price: '50', chg: 'Neutral' }]
+    }
+  };
+  assert.equal(applyCryptoStats(data, [structuredClone(data.crypto.stats[0])]), false);
+  assert.equal(applyCryptoStats(data, [{ ...data.crypto.stats[0], price: '51' }]), true);
+  assert.equal(data.crypto.stats[0].price, '51');
 }
 
 function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
@@ -2162,6 +2286,22 @@ function testLocalMarketServerPartialStatusIncludesRowErrors() {
   assert.equal(isPartialRefresh([], { ...cleanSections, cryptoStats: { ok: false, error: 'failed' } }), true);
 }
 
+function testLocalTlsOperationalContract() {
+  const caConfig = fs.readFileSync(path.join(root, 'launchd', 'local-market-ca.cnf'), 'utf8');
+  const serverConfig = fs.readFileSync(path.join(root, 'launchd', 'local-market-server.cnf'), 'utf8');
+  const archiveScript = fs.readFileSync(path.join(root, 'scripts', 'archive_local_ca_key.sh'), 'utf8');
+  const runbook = fs.readFileSync(path.join(root, 'launchd', 'README.md'), 'utf8');
+  assert.match(caConfig, /basicConstraints = critical, CA:TRUE, pathlen:0/);
+  assert.match(serverConfig, /basicConstraints = critical, CA:FALSE/);
+  assert.match(serverConfig, /extendedKeyUsage = serverAuth/);
+  assert.match(serverConfig, /IP\.1 = 192\.168\.2\.2/);
+  assert.match(archiveScript, /-v2 aes-256-cbc -iter 250000/);
+  assert.match(archiveScript, /rm "\$CA_KEY"/);
+  assert.match(runbook, /Certificate Trust Settings/);
+  assert.match(runbook, /access devices on the local network/);
+  assert.match(runbook, /CORS boundary, not authentication/);
+}
+
 function testLocalMarketServerOriginPolicyAndTlsOptions() {
   assert.equal(isAllowedBrowserOrigin(''), true);
   assert.equal(isAllowedBrowserOrigin('https://sdupuie.github.io'), true);
@@ -2180,6 +2320,9 @@ function testLocalMarketServerOriginPolicyAndTlsOptions() {
   assert.equal(args.host, '192.168.2.2');
   assert.equal(args.cert, '/tmp/dashboard-cert.pem');
   assert.equal(args.key, '/tmp/dashboard-key.pem');
+
+  const plist = fs.readFileSync(path.join(root, 'launchd', 'com.scott.daily-financial-dashboard.plist'), 'utf8');
+  assert.match(plist, /<string>--host<\/string>\s*<string>192\.168\.2\.2<\/string>/);
 }
 
 async function testLocalMarketServerHttpsBoundary() {
@@ -2201,21 +2344,27 @@ async function testLocalMarketServerHttpsBoundary() {
     '--cert', cert,
     '--key', key
   ]);
-  const server = createLocalMarketServer(args);
+  args.port = 0;
+  let server;
   await new Promise((resolve, reject) => {
+    server = listenLocalMarketServer(args, resolve);
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
   });
 
   try {
     const address = server.address();
     assert.ok(address && typeof address === 'object');
     const port = address.port;
+    assert.equal(address.address, '127.0.0.1');
+    assert.equal(args.port, port);
 
     const health = await requestLocalHttps(port);
     assert.equal(health.statusCode, 200);
-    assert.equal(JSON.parse(health.body).ok, true);
-    assert.equal(JSON.parse(health.body).host, '127.0.0.1');
+    const healthPayload = JSON.parse(health.body);
+    assert.equal(healthPayload.ok, true);
+    assert.equal(healthPayload.host, '127.0.0.1');
+    assert.equal(healthPayload.port, port);
+    assert.equal(healthPayload.input, undefined);
     assert.equal(health.headers['cache-control'], 'no-store');
     assert.equal(health.headers['x-content-type-options'], 'nosniff');
 
@@ -2299,8 +2448,10 @@ async function main() {
   testYieldCurveShortEndTenorsStayVisible();
   testEditionStampChangesIdentity();
   testLocalRefreshIndicatorBehavior();
+  testEmbeddedPayloadLoadErrorsAreDistinct();
   await testLocalRefreshIndicatorLifecycle();
   testLocalRefreshKeepsNewerEmbeddedSeriesProvenance();
+  testLocalRefreshIgnoresIdenticalCryptoStats();
   testStrictCalendarDatesReachChartAndAssetValidation();
   testValidateChartDataRejectsQuoteRowsAheadOfSeries();
   testValidateChartDataRejectsLatestOhlcPlaceholder();
@@ -2314,6 +2465,7 @@ async function main() {
   testLocalMarketServerSkipsYieldCurveRefresh();
   testLocalMarketServerExplicitAndFallbackWindows();
   testLocalMarketServerPartialStatusIncludesRowErrors();
+  testLocalTlsOperationalContract();
   testLocalMarketServerOriginPolicyAndTlsOptions();
   await testLocalMarketServerHttpsBoundary();
   console.log('Dashboard fixture tests passed.');
