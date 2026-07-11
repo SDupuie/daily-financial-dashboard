@@ -970,7 +970,7 @@ function testDashboardValidatorRejectsRemoteRuntimeEndpoint() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   try {
     fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData).replace(
-      'https://127.0.0.1:2210/api/market-refresh',
+      'https://192.168.2.2:2210/api/market-refresh',
       'https://query1.finance.yahoo.com/api/market-refresh'
     ));
     const result = spawnSync(process.execPath, [
@@ -1466,7 +1466,7 @@ async function testLocalRefreshIndicatorLifecycle() {
   const runtime = Function(`
     let fetch;
     class AbortController { constructor() { this.signal = {}; } abort() {} }
-    const LOCAL_MARKET_REFRESH_URLS = ['https://127.0.0.1:2210/api/market-refresh'];
+    const LOCAL_MARKET_REFRESH_URLS = ['https://192.168.2.2:2210/api/market-refresh'];
     const LOCAL_MARKET_REFRESH_TIMEOUT_MS = 100;
     const window = { setTimeout: () => 1, clearTimeout: () => {} };
     const states = [];
@@ -1515,9 +1515,9 @@ async function testLocalRefreshIndicatorLifecycle() {
   assert.match(refreshed.states[1].message, /^Local refresh .+\n2 ticker series$/);
   assert.deepEqual(refreshed.writes, [payload]);
   assert.equal(refreshed.renders.length, 1);
-  assert.equal(refreshRequest.url, 'https://127.0.0.1:2210/api/market-refresh');
+  assert.equal(refreshRequest.url, 'https://192.168.2.2:2210/api/market-refresh');
   assert.equal(refreshRequest.options.cache, 'no-store');
-  assert.equal(refreshRequest.options.targetAddressSpace, 'loopback');
+  assert.equal(refreshRequest.options.targetAddressSpace, 'local');
 
   let idleCalls = 0;
   const idle = await runtime.run({
@@ -2170,11 +2170,14 @@ function testLocalMarketServerOriginPolicyAndTlsOptions() {
   assert.equal(isAllowedBrowserOrigin('null'), false);
   assert.equal(isAllowedBrowserOrigin('https://example.com'), false);
   assert.equal(isAllowedBrowserOrigin('https://sdupuie.github.io.example.com'), false);
+  assert.equal(parseLocalMarketServerArgs([]).host, '192.168.2.2');
 
   const args = parseLocalMarketServerArgs([
+    '--host', '192.168.2.2',
     '--cert', '/tmp/dashboard-cert.pem',
     '--key', '/tmp/dashboard-key.pem'
   ]);
+  assert.equal(args.host, '192.168.2.2');
   assert.equal(args.cert, '/tmp/dashboard-cert.pem');
   assert.equal(args.key, '/tmp/dashboard-key.pem');
 }
@@ -2193,6 +2196,7 @@ async function testLocalMarketServerHttpsBoundary() {
   assert.equal(certificateResult.status, 0, certificateResult.stderr || 'Could not create the test TLS certificate.');
 
   const args = parseLocalMarketServerArgs([
+    '--host', '127.0.0.1',
     '--cert', cert,
     '--key', key
   ]);
@@ -2210,6 +2214,7 @@ async function testLocalMarketServerHttpsBoundary() {
     const health = await requestLocalHttps(port);
     assert.equal(health.statusCode, 200);
     assert.equal(JSON.parse(health.body).ok, true);
+    assert.equal(JSON.parse(health.body).host, '127.0.0.1');
     assert.equal(health.headers['cache-control'], 'no-store');
     assert.equal(health.headers['x-content-type-options'], 'nosniff');
 

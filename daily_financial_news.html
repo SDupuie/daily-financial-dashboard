@@ -16089,9 +16089,9 @@
       let chartSeriesByTicker = new Map();
       let chartDataReferenceDate = '';
       let dashboardData = null;
-      // Optional localhost refresh: GitHub Pages must render fully from embedded data when this helper is absent.
+      // Optional local-network refresh: GitHub Pages must render fully from embedded data when this helper is absent.
       const LOCAL_MARKET_REFRESH_URLS = [
-        'https://127.0.0.1:2210/api/market-refresh'
+        'https://192.168.2.2:2210/api/market-refresh'
       ];
       const LOCAL_MARKET_REFRESH_TIMEOUT_MS = 30000;
       const LOCAL_MARKET_REFRESH_CACHE_KEY = 'daily-financial-dashboard:local-market-refresh:v2';
@@ -16652,7 +16652,7 @@
             const response = await fetch(url, {
               cache: 'no-store',
               signal: controller.signal,
-              targetAddressSpace: 'loopback'
+              targetAddressSpace: 'local'
             });
             if (!response.ok) {
               helperError = `Local helper responded with ${response.status}`;

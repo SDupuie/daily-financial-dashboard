@@ -10,6 +10,8 @@
     <array>
       <string>/usr/local/bin/node</string>
       <string>/Users/Scott/Projects/Daily Financial Dashboard/scripts/local_market_server.js</string>
+      <string>--host</string>
+      <string>192.168.2.2</string>
       <string>--port</string>
       <string>2210</string>
       <string>--cert</string>

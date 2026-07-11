@@ -8,7 +8,7 @@ const path = require('path');
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
 
-const HOST = '127.0.0.1';
+const DEFAULT_HOST = '192.168.2.2';
 const DEFAULT_PORT = 2210;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AUTO_REFRESH_FALLBACK_DAYS = 30;
@@ -39,6 +39,7 @@ function numericOption(value, fallback, label, { min = -Infinity, max = Infinity
 
 function parseArgs(argv) {
   const args = {
+    host: DEFAULT_HOST,
     port: DEFAULT_PORT,
     input: DEFAULT_INPUT,
     cert: DEFAULT_CERT,
@@ -51,6 +52,11 @@ function parseArgs(argv) {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === '--host') {
+      args.host = argv[i + 1] || DEFAULT_HOST;
+      i += 1;
+      continue;
+    }
     if (arg === '--port' || arg === '-p') {
       args.port = numericOption(argv[i + 1], DEFAULT_PORT, '--port', { min: 1, max: 65535, integer: true });
       i += 1;
@@ -112,10 +118,11 @@ function printHelp() {
   process.stdout.write(`Usage: node scripts/local_market_server.js [options]
 
 Options:
-  --port, -p 2210          Local port to bind on 127.0.0.1
+  --host 192.168.2.2       LAN address to bind
+  --port, -p 2210          Local port to bind
   --input PATH             Dashboard HTML to read for configured rows
-  --cert PATH              TLS certificate for localhost HTTPS
-  --key PATH               TLS private key for localhost HTTPS
+  --cert PATH              TLS certificate for HTTPS
+  --key PATH               TLS private key for HTTPS
   --days N                 Force calendar days to refresh instead of auto tail sizing
   --source-timeout-ms 7000 HTTP timeout in ms per upstream request
   --cache-ms 60000         In-memory cache duration for refresh responses
@@ -147,7 +154,7 @@ function isAllowedBrowserOrigin(origin) {
 }
 
 function writeCorsHeaders(req, res) {
-  // The helper is loopback-only, and browser reads are limited to the published dashboard plus local HTTP(S) development origins.
+  // The helper is LAN-reachable, but browser reads remain limited to the published dashboard plus local development origins.
   for (const [key, value] of Object.entries(CORS_HEADERS)) {
     res.setHeader(key, value);
   }
@@ -377,7 +384,7 @@ function createServer(args) {
       return;
     }
 
-    const url = new URL(req.url, `https://${HOST}:${args.port}`);
+    const url = new URL(req.url, `https://${args.host}:${args.port}`);
     if (req.method !== 'GET') {
       sendJson(res, 405, { ok: false, error: 'Only GET and OPTIONS are supported.' });
       return;
@@ -386,7 +393,7 @@ function createServer(args) {
     if (url.pathname === '/health') {
       sendJson(res, 200, {
         ok: true,
-        host: HOST,
+        host: args.host,
         port: args.port,
         input: args.input,
         generatedAt: new Date().toISOString()
@@ -443,8 +450,8 @@ function createServer(args) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const server = createServer(args);
-  server.listen(args.port, HOST, () => {
-    process.stdout.write(`Local market server listening at https://${HOST}:${args.port}\n`);
+  server.listen(args.port, args.host, () => {
+    process.stdout.write(`Local market server listening at https://${args.host}:${args.port}\n`);
   });
 }
 

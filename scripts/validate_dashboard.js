@@ -283,7 +283,7 @@ if (runtimeScriptMatches.length !== 1) {
 const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
 const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((match) => match[0]);
 const allowedLocalRefreshUrls = new Set([
-  'https://127.0.0.1:2210/api/market-refresh'
+  'https://192.168.2.2:2210/api/market-refresh'
 ]);
 for (const url of runtimeUrls) {
   if (!allowedLocalRefreshUrls.has(url)) {

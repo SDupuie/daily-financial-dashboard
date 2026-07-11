@@ -190,7 +190,7 @@ function renderDashboardValidationFixture(dashboard, chartData) {
 <!-- ============ DATA END ============ -->
 <script type="application/json" id="chart-data">${JSON.stringify(chartData)}</script>
 <div class="page" id="app"><div id="mast-edition"></div><div class="right" id="mast-date"></div><h1 id="hero-headline"></h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>
-<script id="dashboard-runtime">const localRefreshUrls = ['https://127.0.0.1:2210/api/market-refresh'];</script>`;
+<script id="dashboard-runtime">const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>`;
 }
 
 module.exports = {
