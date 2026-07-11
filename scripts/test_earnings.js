@@ -562,20 +562,20 @@ function testPrimaryScheduleVerification() {
 }
 
 function testWeekValidatorAllowsOfficialScheduleRedate() {
-  const source = embeddedWeekFixture();
-  const row = source.rows.find((item) => item.symbol === 'H');
-  assert.ok(row, 'Embedded fixture must include Hyatt for official-date validation coverage.');
-  row.reportDate = '2026-07-09';
-  source.narrativeApply.applied = source.narrativeApply.applied.map((item) => item.symbol === 'H'
+  const source = deterministicVerifiedWeekFixture();
+  const row = source.rows[0];
+  const originalDate = row.reportDate;
+  row.reportDate = '2026-01-07';
+  source.narrativeApply.applied = source.narrativeApply.applied.map((item) => item.symbol === row.symbol
     ? { ...item, reportDate: row.reportDate }
     : item);
   row.sourceAudit.scheduleVerification = {
     status: 'official_confirmed',
-    primaryDate: '2026-07-10',
-    secondaryDates: ['2026-07-09'],
+    primaryDate: originalDate,
+    secondaryDates: [row.reportDate],
     official: {
-      symbol: 'H',
-      reportDate: '2026-07-09',
+      symbol: row.symbol,
+      reportDate: row.reportDate,
       sourceName: 'Official investor relations calendar',
       sourceUrl: 'https://investors.example.test/earnings'
     }

@@ -24,6 +24,12 @@ Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a da
 
 Production is self-contained: the rendered dashboard reads embedded `dashboard-data` and `chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
 
+## Browser support
+
+The supported baseline is Chromium 120+ (Chrome and Edge), Firefox 121+, and Safari 17.4+ on macOS and iOS. Older browsers are out of scope. Dashboard code may rely directly on modern platform APIs available across that baseline, including `fetch`, `AbortController`, `ResizeObserver`, `URL`, `Intl`, `matchMedia`, `localStorage`, and native `<details>`.
+
+There are no WebKit-specific workarounds. The retained availability checks are intentional optional-feature boundaries, not compatibility support: theme preference falls back to the page default when `matchMedia` is unavailable or storage is blocked; `localStorage` reads/writes are best-effort because privacy or storage policy can reject them; and the localhost market refresh runs only when `fetch` and `AbortController` are available. In every one of those cases, the embedded static dashboard remains fully usable. Do not add browser-version branches or polyfills without documenting the concrete supported-browser behavior they protect here.
+
 ## Scheduled preflight
 
 - In `America/Chicago`, the morning update window is 6:45–8:00 AM and the afternoon window is 3:45–5:00 PM. Proceed only on a weekday inside one of those windows; otherwise stop before fetching, editing, committing, or publishing.
@@ -150,6 +156,15 @@ Use this reference only when the deterministic orchestrator fails and a document
 
 For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or footer. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows` or `chart-data.quoteRows`.
 
+### Manual ticker roster changes
+
+Whenever you manually add, remove, rename, or change the `sourceSymbol` of a dashboard ticker, restart the local helper and verify the changed ticker before considering the dashboard complete:
+
+1. Run `launchctl kickstart -k "gui/$(id -u)/com.scott.daily-financial-dashboard"`.
+2. Request `http://127.0.0.1:2210/api/market-refresh` and confirm the changed ticker has a non-empty series and no ticker-specific error.
+
+Static dashboard validation does not prove that the already-running local helper has loaded new ticker support.
+
 ### Asset Allocation fallback
 
 - Refresh the local Asset Allocation Dashboard export through `http://127.0.0.1:2200/api/asset-market-data`, then read `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`.
@@ -160,7 +175,7 @@ For every manually refreshed quote row, follow its full fallback chain before us
 
 ### Required daily checks
 
-- Run `node scripts/validate_dashboard.js daily_financial_news.html`. It enforces dates, News-card freshness, embedded-data text hygiene, and Tape note quality. Treat a Futures News-card contract failure as a hard stop; do not finish a scheduled update with `--skip-validate`.
+- Run `node scripts/validate_dashboard.js daily_financial_news.html`. It enforces dates, News-card freshness, embedded-data text hygiene, Tape note quality, and the runtime's localhost-only refresh endpoint contract. Treat a Futures News-card contract failure as a hard stop; do not finish a scheduled update with `--skip-validate`.
 - Run `git diff --check`.
 - Confirm that only intended files changed. `./scripts/publish_main.sh` runs dashboard validation again before it pushes.
 
@@ -169,8 +184,8 @@ For every manually refreshed quote row, follow its full fallback chain before us
 Run the applicable checks after content, structural, layout, script, or contract changes:
 
 - Superlative-claim gate: `rg -n "record|all-time|fresh high|new high|record close|record low" daily_financial_news.html`
-- URL hygiene gate: `rg -n "query1\\.finance\\.yahoo\\.com|api\\.nasdaq\\.com|/api/|_format=csv|\\.json\\b" daily_financial_news.html`
 - Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. Browser-check the Week Ahead section after changing an editorial `marketLens` for readability and overflow.
+- After changing the Tape local-refresh indicator, browser-check its hover and keyboard-focus tooltip with the helper live and unavailable at narrow mobile, tablet, and desktop widths. The tooltip must remain inside the viewport and each state must remain legible.
 - Run `node scripts/test_calendar_contract.js`, `node scripts/test_earnings.js`, `node scripts/test_week_ahead.js`, and `node scripts/test_dashboard.js` after script or data-contract changes.
 
 ### Commit and publish

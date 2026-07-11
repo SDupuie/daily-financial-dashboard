@@ -6,9 +6,9 @@ const { validateEarningsWeekPayload } = require('./validate_earnings_week');
 const { validateWeekAheadPayload } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
-  cryptoQuoteRowFromSeries,
-  quoteRowFromSeries
-} = require('./fetch_chart_data');
+  decodeTupleSeries,
+  validateChartPayload
+} = require('./chart_payload_contract');
 
 const root = path.resolve(__dirname, '..');
 const inputFile = process.argv[2] || 'daily_financial_news.html';
@@ -21,14 +21,8 @@ if (!file.startsWith(`${root}${path.sep}`) && file !== root) {
 const html = fs.readFileSync(file, 'utf8');
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
-const minChartHistoryDays = 1826;
+const runtimeScriptMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
 const maxFuturesStoryTagLength = 24;
-const requiredYieldCurveComparisonLabels = ['1M ago', '6M ago'];
-const recognizedChartSources = new Set([
-  'Yahoo Finance Chart API',
-  'Yahoo Finance Chart API + Finnhub Quote API',
-  'Treasury.gov Daily Treasury Yield Curve Rate Data'
-]);
 
 const errors = [];
 const warnings = [];
@@ -112,16 +106,6 @@ function allowedNewsDates(now) {
   return allowed;
 }
 
-function isFiniteNumber(value) {
-  if (value === null || value === undefined || value === '') return false;
-  return Number.isFinite(Number(value));
-}
-
-function hasAtMostFourDecimalPlaces(value) {
-  if (!isFiniteNumber(value)) return false;
-  return Number(value) === Number(Number(value).toFixed(4));
-}
-
 function isOffsetBearingIsoDateTime(value) {
   return isIsoDateTime(value);
 }
@@ -169,9 +153,20 @@ function sharedFuturesReferenceDate(futures) {
   return new Set(dates).size === 1 ? dates[0] : '';
 }
 
+function sharedFuturesSessionDate(futures) {
+  const dates = (Array.isArray(futures) ? futures : [])
+    .map((future) => String(future?.raw?.sessionDate || '').trim());
+  if (!dates.length || dates.some((date) => !isIsoDate(date))) return '';
+  return new Set(dates).size === 1 ? dates[0] : '';
+}
+
 function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
   const runAt = isIsoDateTime(editionId) ? new Date(editionId) : now;
-  const eastern = zonedDateParts(runAt, 'America/New_York');
+  const sessionDate = sharedFuturesSessionDate(futures);
+  const [year, month, day] = sessionDate.split('-').map(Number);
+  const eastern = sessionDate
+    ? { year, month, day }
+    : zonedDateParts(runAt, 'America/New_York');
   if (sectionTitle === 'Pre-Market Futures') {
     const referenceDate = sharedFuturesReferenceDate(futures);
     if (!referenceDate) return null;
@@ -239,52 +234,6 @@ function dashboardNewsItems(data) {
   ];
 }
 
-function validateYieldCurvePointSet(label, fieldName, points, referencePoints = null) {
-  if (points.length < 2) {
-    errors.push(`${label}.${fieldName} must contain a Treasury curve for the inline chart.`);
-  }
-  if (referencePoints && points.length !== referencePoints.length) {
-    errors.push(`${label}.${fieldName} must match the current Treasury curve maturity count.`);
-  }
-  for (const [pointIndex, pointRaw] of points.entries()) {
-    const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
-    const referencePoint = referencePoints?.[pointIndex];
-    if (typeof point.label !== 'string' || point.label.trim() === '') {
-      errors.push(`${label}.${fieldName}[${pointIndex}].label must be populated.`);
-    }
-    if (referencePoint && point.label !== referencePoint.label) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].label must match current curve maturity ${referencePoint.label}.`);
-    }
-    if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].years must be positive.`);
-    }
-    if (!isFiniteNumber(point.value)) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].value must be numeric.`);
-    }
-  }
-}
-
-function validateYieldCurveComparisons(label, item, curvePoints) {
-  const comparisonCurves = Array.isArray(item.comparisonCurves) ? item.comparisonCurves : [];
-  if (!Array.isArray(item.comparisonCurves)) {
-    errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
-  }
-  // The renderer assumes these labels exist and that each comparison shares the current curve maturity order.
-  for (const expectedLabel of requiredYieldCurveComparisonLabels) {
-    const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expectedLabel);
-    if (comparisonIndex < 0) {
-      errors.push(`${label}.comparisonCurves must include ${expectedLabel}.`);
-      continue;
-    }
-    const comparison = comparisonCurves[comparisonIndex];
-    if (!isIsoDate(comparison.date)) {
-      errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
-    }
-    const points = Array.isArray(comparison.points) ? comparison.points : [];
-    validateYieldCurvePointSet(label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
-  }
-}
-
 function numericPercent(value) {
   const match = String(value ?? '').trim().match(/^([+-]?\d+(?:\.\d+)?)%$/);
   return match ? Number(match[1]) : null;
@@ -302,14 +251,6 @@ function isCoherentOhlc(bar) {
   if (![open, high, low, close].every(Number.isFinite)) return false;
   if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
-}
-
-function isCloseOnlyPlaceholderBar(bar) {
-  return bar?.volume === undefined
-    && isFiniteNumber(bar?.open)
-    && Number(bar.open) === Number(bar.high)
-    && Number(bar.high) === Number(bar.low)
-    && Number(bar.low) === Number(bar.close);
 }
 
 function countMatches(pattern) {
@@ -335,19 +276,24 @@ function requireOrderedMarkerSequence(markers, bounds = {}) {
   }
 }
 
-// Static guard: the optional live-refresh path must never point the published dashboard at a remote service.
-const localRefreshUrls = [...html.matchAll(/https?:\/\/[^'"`\s]+\/api\/market-refresh/g)].map((match) => match[0]);
+// This main dashboard runtime block is isolated from generated JSON and the vendored chart bundle, which are not runtime endpoint sources.
+if (runtimeScriptMatches.length !== 1) {
+  errors.push(`Expected exactly 1 dashboard-runtime script; found ${runtimeScriptMatches.length}.`);
+}
+const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
+const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((match) => match[0]);
 const allowedLocalRefreshUrls = new Set([
   'http://127.0.0.1:2210/api/market-refresh',
   'http://localhost:2210/api/market-refresh'
 ]);
-if (localRefreshUrls[0] !== 'http://127.0.0.1:2210/api/market-refresh') {
-  errors.push('The first local refresh URL must target http://127.0.0.1:2210/api/market-refresh.');
-}
-for (const url of localRefreshUrls) {
+for (const url of runtimeUrls) {
   if (!allowedLocalRefreshUrls.has(url)) {
-    errors.push(`Unexpected local refresh URL: ${url}`);
+    errors.push(`Unexpected runtime URL: ${url}`);
   }
+}
+const expectedRuntimeUrls = [...allowedLocalRefreshUrls];
+if (runtimeUrls.length !== expectedRuntimeUrls.length || runtimeUrls.some((url, index) => url !== expectedRuntimeUrls[index])) {
+  errors.push('The dashboard runtime must expose only the ordered localhost market-refresh URLs.');
 }
 
 const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);
@@ -362,7 +308,7 @@ if (chartDataScriptCount !== 1) {
 const dataStartIndex = html.indexOf('<!-- ============ DATA START');
 const dataEndIndex = html.indexOf('<!-- ============ DATA END ============ -->');
 const chartDataIndex = html.indexOf('<script type="application/json" id="chart-data">');
-const runtimeScriptIndex = html.indexOf('(function () {');
+const runtimeScriptIndex = html.indexOf('<script id="dashboard-runtime">');
 
 if (dataStartIndex < 0) {
   errors.push('Could not find the DATA START marker.');
@@ -374,7 +320,7 @@ if (chartDataIndex < 0) {
   errors.push('Could not find the chart-data shell position.');
 }
 if (runtimeScriptIndex < 0) {
-  errors.push('Could not find the dashboard runtime bootstrap script.');
+  errors.push('Could not find the dashboard-runtime script.');
 }
 if (dataStartIndex >= 0 && dataEndIndex >= 0 && dataStartIndex >= dataEndIndex) {
   errors.push('DATA START must appear before DATA END.');
@@ -383,7 +329,7 @@ if (dataEndIndex >= 0 && chartDataIndex >= 0 && chartDataIndex <= dataEndIndex) 
   errors.push('chart-data must appear after the DATA END marker.');
 }
 if (chartDataIndex >= 0 && runtimeScriptIndex >= 0 && chartDataIndex >= runtimeScriptIndex) {
-  errors.push('chart-data must appear before the dashboard runtime bootstrap script.');
+  errors.push('chart-data must appear before the dashboard-runtime script.');
 }
 
 requireOrderedMarkerSequence([
@@ -572,11 +518,13 @@ if (!dashboardMatch) {
     // The editorial Tape roster is intentionally open-ended. Its rows define the
     // chart/source contract for this edition without the validator prescribing symbols.
     const expectedChartSourceSymbols = new Map();
+    const expectedChartSections = new Map();
     for (const [index, row] of tapeRows.entries()) {
       const ticker = String(row?.ticker ?? '').toUpperCase();
       requireString(row?.sourceSymbol, `tape.rows[${index}].sourceSymbol`);
       if (ticker && row?.sourceSymbol) {
         expectedChartSourceSymbols.set(ticker, row.sourceSymbol);
+        expectedChartSections.set(ticker, String(row?.group ?? '') === 'Crypto' ? 'crypto' : 'tape');
       }
     }
 
@@ -591,132 +539,24 @@ if (!dashboardMatch) {
       }
 
       if (chartData) {
-        if (chartData.schemaVersion !== 1) {
-          errors.push('chart-data.schemaVersion must be 1.');
-        }
         if (chartData.barEncoding !== 'tuple-v1') {
           errors.push('chart-data.barEncoding must be tuple-v1.');
         }
-        if (!Array.isArray(chartData.series)) {
-          errors.push('chart-data.series must be an array.');
-        }
-        if (!Number.isFinite(Number(chartData.range?.days)) || Number(chartData.range.days) < minChartHistoryDays) {
-          errors.push(`chart-data.range.days must be at least ${minChartHistoryDays} so the 5Y chart shortcut has enough embedded history.`);
-        }
-        const chartSeries = Array.isArray(chartData.series) ? chartData.series : [];
-        const expectedSourceFamilies = new Set(chartSeries.map((item) => item?.source).filter(Boolean));
-        const sourceFamilies = Array.isArray(chartData.sourceFamilies) ? chartData.sourceFamilies : [];
-        if (!Array.isArray(chartData.sourceFamilies)) {
-          errors.push('chart-data.sourceFamilies must list the source strings used by chart-data.series.');
-        }
-        for (const source of expectedSourceFamilies) {
-          if (!sourceFamilies.includes(source)) errors.push(`chart-data.sourceFamilies must include ${source}.`);
-        }
-        for (const source of sourceFamilies) {
-          if (!expectedSourceFamilies.has(source)) errors.push(`chart-data.sourceFamilies contains unused source ${source}.`);
-        }
-        const chartSeriesByTicker = new Map();
-        for (const [index, itemRaw] of chartSeries.entries()) {
-          const sourceItem = itemRaw && typeof itemRaw === 'object' ? itemRaw : {};
-          const ticker = String(sourceItem.ticker || '').toUpperCase();
-          const label = ticker || `chart-data.series[${index}]`;
-          if (!ticker) errors.push(`chart-data.series[${index}].ticker must be populated.`);
-          if (chartSeriesByTicker.has(ticker)) errors.push(`Duplicate embedded chart series for ${ticker}.`);
-
-          const expectedSource = expectedChartSourceSymbols.get(ticker);
-          if (!expectedSource) {
-            errors.push(`${label} has no matching dashboard Tape row.`);
-          } else if (sourceItem.sourceSymbol !== expectedSource) {
-            errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
-          }
-          if (!recognizedChartSources.has(sourceItem.source)) {
-            errors.push(`${label}.source is not recognized.`);
-          }
-          if (typeof sourceItem.noVolume !== 'boolean') {
-            errors.push(`${label}.noVolume must be boolean.`);
-          }
-          const decodedBars = [];
-          if (!Array.isArray(sourceItem.bars) || sourceItem.bars.length < 2) {
-            errors.push(`${label}.bars must contain at least two daily bars for the inline chart.`);
-          } else {
-            let previousTime = '';
-            for (const [barIndex, barRaw] of sourceItem.bars.entries()) {
-              const barLabel = `${label}.bars[${barIndex}]`;
-              if (!Array.isArray(barRaw) || barRaw.length !== 6) {
-                errors.push(`${barLabel} must be a [time, open, high, low, close, volume] tuple.`);
-                continue;
-              }
-              const [time, open, high, low, close, volume] = barRaw;
-              const bar = {
-                time,
-                open,
-                high,
-                low,
-                close,
-                ...(volume === null ? {} : { volume })
-              };
-              decodedBars.push(bar);
-              if (!/^\d{4}-\d{2}-\d{2}$/.test(String(bar.time || ''))) {
-                errors.push(`${barLabel}.time must be an ISO date.`);
-              }
-              if (previousTime && bar.time <= previousTime) {
-                errors.push(`${barLabel}.time must be strictly ascending.`);
-              }
-              previousTime = bar.time;
-              for (const field of ['open', 'high', 'low', 'close']) {
-                if (!isFiniteNumber(bar[field])) {
-                  errors.push(`${barLabel}.${field} must be numeric.`);
-                } else if (!hasAtMostFourDecimalPlaces(bar[field])) {
-                  errors.push(`${barLabel}.${field} must use at most four decimal places.`);
-                }
-              }
-              if (!isCoherentOhlc(bar)) {
-                errors.push(`${barLabel} has incoherent OHLC values.`);
-              }
-              if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
-                errors.push(`${barLabel}.volume must be a non-negative number when present.`);
-              }
-              // Close-only sources intentionally duplicate close into OHLC so Lightweight Charts can render consistently.
-              if (sourceItem.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
-                errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
-              }
-              if (sourceItem.noVolume && bar.volume !== undefined) {
-                errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
-              }
-              // Guard the embedded artifact against quote-only latest bars masquerading as OHLC candles.
-              if (!sourceItem.priceOnly && sourceItem.dataKind === 'ohlc' && barIndex === sourceItem.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
-                errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
-              }
-            }
-          }
-          const hasVolume = decodedBars.some((bar) => bar.volume !== undefined);
-          if (typeof sourceItem.noVolume === 'boolean' && sourceItem.noVolume !== !hasVolume) {
-            errors.push(`${label}.noVolume must be ${!hasVolume} to match its embedded volume bars.`);
-          }
-          const item = { ...sourceItem, bars: decodedBars };
-          chartSeriesByTicker.set(ticker, item);
-          if (sourceItem.sourceSymbol === 'TREASURY:CURVE') {
-            const curvePoints = Array.isArray(sourceItem.curvePoints) ? sourceItem.curvePoints : [];
-            validateYieldCurvePointSet(label, 'curvePoints', curvePoints);
-            validateYieldCurveComparisons(label, sourceItem, curvePoints);
-            const curveSpread = sourceItem.curveSpread && typeof sourceItem.curveSpread === 'object' ? sourceItem.curveSpread : {};
-            if (curveSpread.label !== '2s10s') {
-              errors.push(`${label}.curveSpread.label must be 2s10s so the row does not duplicate the 10Y Treasury quote.`);
-            }
-            if (!isFiniteNumber(curveSpread.valueBp)) {
-              errors.push(`${label}.curveSpread.valueBp must be numeric.`);
-            }
-          }
-        }
-
-        for (const ticker of expectedChartSourceSymbols.keys()) {
-          if (!chartSeriesByTicker.has(ticker)) {
-            errors.push(`Embedded chart data is missing ${ticker}.`);
-          }
-        }
-
-        const chartTapeQuoteRows = Array.isArray(chartData.quoteRows?.tape) ? chartData.quoteRows.tape : [];
-        const chartCryptoQuoteRows = Array.isArray(chartData.quoteRows?.crypto) ? chartData.quoteRows.crypto : [];
+        const {
+          decodedSeries: chartSeries,
+          seriesByTicker: chartSeriesByTicker,
+          tapeRows: chartTapeQuoteRows,
+          cryptoRows: chartCryptoQuoteRows
+        } = validateChartPayload(errors, chartData, {
+          expectedByTicker: expectedChartSourceSymbols,
+          expectedSectionByTicker: expectedChartSections,
+          decodeSeries: decodeTupleSeries,
+          label: 'chart-data',
+          absentMessage: 'has no matching dashboard Tape row.',
+          duplicateMessage: 'Duplicate embedded chart series for',
+          missingMessage: 'Embedded chart data is missing',
+          volumeDescription: 'embedded'
+        });
         const chartTapeQuoteByTicker = new Map(chartTapeQuoteRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
         const chartCryptoQuoteByTicker = new Map(chartCryptoQuoteRows.map((row) => [String(row?.ticker || row?.sym || '').toUpperCase(), row]));
         const yieldCurveSeries = chartSeries.find((item) => item?.sourceSymbol === 'TREASURY:CURVE');
@@ -725,31 +565,6 @@ if (!dashboardMatch) {
           : null;
         if (yieldCurveQuoteRow && !/^2s10s [+-]\d+ bp$/.test(String(yieldCurveQuoteRow.last || ''))) {
           errors.push('Embedded chart-data yield-curve quote must show the 2s10s spread instead of repeating the 10Y yield.');
-        }
-        for (const [ticker, item] of chartSeriesByTicker.entries()) {
-          if (item?.section === 'crypto') {
-            const chartRow = chartCryptoQuoteByTicker.get(ticker);
-            const expected = cryptoQuoteRowFromSeries(item);
-            if (!chartRow || !expected) continue;
-            for (const [chartField, expectedField] of [['price', 'price'], ['delta', 'delta'], ['chg', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']]) {
-              const actual = String(chartRow?.[chartField] ?? '');
-              const derived = String(expected?.[expectedField] ?? '');
-              if (actual !== derived) {
-                errors.push(`Embedded chart-data quoteRows.crypto ${ticker}.${chartField} must match the latest embedded series bar-derived value "${derived}".`);
-              }
-            }
-            continue;
-          }
-          const chartRow = chartTapeQuoteByTicker.get(ticker);
-          const expected = quoteRowFromSeries(item);
-          if (!chartRow || !expected) continue;
-          for (const field of ['last', 'delta', 'pct', 'dir', 'asOf']) {
-            const actual = String(chartRow?.[field] ?? '');
-            const derived = String(expected?.[field] ?? '');
-            if (actual !== derived) {
-              errors.push(`Embedded chart-data quoteRows.tape ${ticker}.${field} must match the latest embedded series bar-derived value "${derived}".`);
-            }
-          }
         }
         const requireMatchingQuoteFields = ({ dashboardRow, chartRow, fields, label }) => {
           if (!chartRow) {

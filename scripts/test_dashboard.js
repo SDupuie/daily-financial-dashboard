@@ -23,6 +23,12 @@ const {
 } = require('./fetch_chart_data');
 const { normalizedSummary } = require('./fetch_asset_allocation');
 const {
+  decodeObjectSeries,
+  decodeTupleSeries,
+  validateChartPayload,
+  validateChartPayloadMetadata
+} = require('./chart_payload_contract');
+const {
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
   applyWeekAhead,
@@ -46,6 +52,11 @@ const {
   validateScheduledPreflight
 } = require('./run_daily_update');
 const { normalizeWeekAhead } = require('./week_ahead_contract');
+const {
+  FIXTURE_NOW,
+  createDashboardValidationFixture,
+  renderDashboardValidationFixture
+} = require('./dashboard_validation_fixture');
 
 const root = path.resolve(__dirname, '..');
 
@@ -111,10 +122,14 @@ function dashboardFixture() {
 }
 
 function extractDashboardRuntimeFunction(html, name) {
-  const start = html.indexOf(`function ${name}(`);
-  assert.notEqual(start, -1, `Missing dashboard runtime function ${name}`);
+  const functionStart = html.indexOf(`function ${name}(`);
+  assert.notEqual(functionStart, -1, `Missing dashboard runtime function ${name}`);
+  // Preserve async so lifecycle helpers run with the same promise semantics as the browser runtime.
+  const start = html.slice(Math.max(0, functionStart - 6), functionStart) === 'async '
+    ? functionStart - 6
+    : functionStart;
 
-  const parameterStart = html.indexOf('(', start);
+  const parameterStart = html.indexOf('(', functionStart);
   let parameterDepth = 0;
   let bodyStart = -1;
   for (let index = parameterStart; index < html.length; index += 1) {
@@ -887,7 +902,7 @@ function testDashboardHtmlShellContract() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const countMatches = (pattern) => [...html.matchAll(pattern)].length;
   const chartDataIndex = html.indexOf('<script type="application/json" id="chart-data">');
-  const runtimeScriptIndex = html.indexOf('(function () {');
+  const runtimeScriptIndex = html.indexOf('<script id="dashboard-runtime">');
   const markers = [
     '<div class="page" id="app">',
     '<div id="mast-edition">',
@@ -900,6 +915,7 @@ function testDashboardHtmlShellContract() {
 
   assert.equal(countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g), 1);
   assert.equal(countMatches(/<script type="application\/json" id="chart-data">[\s\S]*?<\/script>/g), 1);
+  assert.equal(countMatches(/<script id="dashboard-runtime">[\s\S]*?<\/script>/g), 1);
   assert.notEqual(html.indexOf('<!-- ============ DATA START'), -1);
   assert.notEqual(html.indexOf('<!-- ============ DATA END ============ -->'), -1);
   assert.ok(chartDataIndex > html.indexOf('<!-- ============ DATA END ============ -->'));
@@ -915,19 +931,43 @@ function testDashboardHtmlShellContract() {
   }
 }
 
+function testDashboardValidatorRejectsRemoteRuntimeEndpoint() {
+  const dir = fs.mkdtempSync(path.join(root, 'generated', 'dfd-runtime-url-'));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  try {
+    fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData).replace(
+      'http://127.0.0.1:2210/api/market-refresh',
+      'https://query1.finance.yahoo.com/api/market-refresh'
+    ));
+    const result = spawnSync(process.execPath, [
+      path.join(root, 'scripts', 'validate_dashboard.js'),
+      dashboardFile
+    ], {
+      cwd: root,
+      encoding: 'utf8',
+      env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW }
+    });
+    assert.notEqual(result.status, 0, 'A remote dashboard runtime endpoint must fail validation.');
+    assert.match(result.stderr, /Unexpected runtime URL: https:\/\/query1\.finance\.yahoo\.com\/api\/market-refresh/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function validateDashboardFixture(data, fixturePrefix) {
   const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
   const dashboardFile = path.join(dir, 'dashboard.html');
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const { chartData } = createDashboardValidationFixture();
   try {
-    fs.writeFileSync(dashboardFile, replaceJsonBlock(html, 'dashboard-data', JSON.stringify(data)));
+    fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(data, chartData));
     return spawnSync(process.execPath, [
       path.join(root, 'scripts', 'validate_dashboard.js'),
       dashboardFile
     ], {
       cwd: root,
       encoding: 'utf8',
-      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-10T13:30:00Z' }
+      env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW }
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -956,17 +996,15 @@ function validateChartDataFixture(chartData, fixturePrefix) {
 function validateDashboardAndChartFixture(data, chartData, fixturePrefix) {
   const dir = fs.mkdtempSync(path.join(root, 'generated', fixturePrefix));
   const dashboardFile = path.join(dir, 'dashboard.html');
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   try {
-    const withDashboardData = replaceJsonBlock(html, 'dashboard-data', JSON.stringify(data));
-    fs.writeFileSync(dashboardFile, replaceJsonBlock(withDashboardData, 'chart-data', JSON.stringify(chartData)));
+    fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(data, chartData));
     return spawnSync(process.execPath, [
       path.join(root, 'scripts', 'validate_dashboard.js'),
       dashboardFile
     ], {
       cwd: root,
       encoding: 'utf8',
-      env: { ...process.env, VALIDATE_NOW_ISO: '2026-07-10T13:30:00Z' }
+      env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW }
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -974,8 +1012,8 @@ function validateDashboardAndChartFixture(data, chartData, fixturePrefix) {
 }
 
 function validationDashboardData() {
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  return readJsonBlock(html, 'dashboard-data');
+  // Contract mutations start from a fixed, self-contained payload; the live artifact has its own smoke test below.
+  return createDashboardValidationFixture().dashboard;
 }
 
 function testDashboardValidatorRejectsOversizedFuturesStoryTag() {
@@ -988,6 +1026,12 @@ function testDashboardValidatorRejectsOversizedFuturesStoryTag() {
 
 function testDashboardValidatorAcceptsFridayBridgeCalendars() {
   const data = validationDashboardData();
+  data.editionId = '2026-07-10T21:00:00Z';
+  data.masthead = { ...data.masthead, date: 'Friday · July 10, 2026' };
+  data.footer = {
+    ...data.footer,
+    compiled: 'Compiled Friday, July 10, 2026 at 4:00 PM CDT · Market data: Alternative.me Crypto Fear & Greed Index, CoinMarketCap Altcoin Season Index'
+  };
   data.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
     range: { from: '2026-07-10', to: '2026-07-16' },
     officialSchedule: {
@@ -1063,8 +1107,7 @@ function testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars() {
 
 function testDashboardValidatorUsesTheTapeAsItsChartRoster() {
   const data = validationDashboardData();
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const chartData = readJsonBlock(html, 'chart-data');
+  const { chartData } = createDashboardValidationFixture();
   const sourceTicker = 'SPX';
   const dashboardRow = data.tape.rows.find((row) => row.ticker === sourceTicker);
   const sourceSeries = chartData.series.find((item) => item.ticker === sourceTicker);
@@ -1072,9 +1115,20 @@ function testDashboardValidatorUsesTheTapeAsItsChartRoster() {
 
   data.tape.rows.push({ ...dashboardRow, ticker: 'TST', name: 'Test Contract', sourceSymbol: 'TEST=F' });
   chartData.series.push({ ...sourceSeries, ticker: 'TST', name: 'Test Contract', sourceSymbol: 'TEST=F' });
-  chartData.quoteRows.tape.push({ ...sourceQuote, ticker: 'TST', name: 'Test Contract' });
+  chartData.quoteRows.tape.push({ ...sourceQuote, ticker: 'TST', name: 'Test Contract', sourceSymbol: 'TEST=F' });
 
   const result = validateDashboardAndChartFixture(data, chartData, 'dfd-dynamic-tape-roster-');
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function testDashboardValidatorAcceptsCurrentEmbeddedDashboard() {
+  const result = spawnSync(process.execPath, [
+    path.join(root, 'scripts', 'validate_dashboard.js'),
+    path.join(root, 'daily_financial_news.html')
+  ], {
+    cwd: root,
+    encoding: 'utf8'
+  });
   assert.equal(result.status, 0, result.stderr);
 }
 
@@ -1183,6 +1237,7 @@ function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
     'zonedDateParts',
     'zonedDateTime',
     'sharedFuturesReferenceDate',
+    'sharedFuturesSessionDate',
     'futuresStoryPublicationWindow'
   ].map((name) => extractScriptFunction('scripts/validate_dashboard.js', name)).join('\n');
   const { futuresStoryPublicationWindow } = Function(
@@ -1200,6 +1255,15 @@ function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
 
   assert.equal(window.start.toISOString(), '2026-07-02T20:00:00.000Z');
   assert.equal(window.end.toISOString(), '2026-07-06T12:30:00.000Z');
+
+  const sessionWindow = futuresStoryPublicationWindow(
+    'Session Futures',
+    '2026-07-11T12:30:00Z',
+    new Date('2026-07-11T12:30:00Z'),
+    Array.from({ length: 4 }, () => ({ raw: { sessionDate: '2026-07-10' } }))
+  );
+  assert.equal(sessionWindow.start.toISOString(), '2026-07-10T13:30:00.000Z');
+  assert.equal(sessionWindow.end.toISOString(), '2026-07-10T20:00:00.000Z');
 }
 
 function testDashboardValidatorRejectsReferencePagesInAllNewsSections() {
@@ -1296,22 +1360,143 @@ function testEditionStampChangesIdentity() {
   assert.ok(!Number.isNaN(Date.parse(stamped.editionId)));
 }
 
-function testLocalRefreshBrowserContract() {
+function testLocalRefreshIndicatorBehavior() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const sources = [
+    'localRefreshIndicatorHtml',
+    'setLocalRefreshIndicator'
+  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const runtime = Function(`
+    let localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
+    let rendered = '';
+    let indicatorAvailable = true;
+    const selectors = [];
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[character]));
+    const document = {
+      querySelector: (selector) => {
+        selectors.push(selector);
+        return indicatorAvailable ? {
+          set outerHTML(value) { rendered = value; }
+        } : null;
+      }
+    };
+    ${sources}
+    return {
+      setLocalRefreshIndicator,
+      rendered: () => rendered,
+      selectors: () => selectors,
+      hideIndicator: () => { indicatorAvailable = false; }
+    };
+  `)();
+  const states = [
+    ['checking', 'Checking local refresh'],
+    ['live', 'Local refresh 12:34 PM CDT\n44 ticker series'],
+    ['cached', 'Cached local data'],
+    ['idle', 'Local helper reached; no newer prices'],
+    ['error', 'Local refresh unavailable or blocked']
+  ];
 
-  // The localhost refresh helpers live inside the static HTML, so this regression
-  // pins the browser control-flow contract without adding a DOM test harness.
-  assert.match(html, /function applyLocalMarketRefresh\(data, payload\)/);
-  assert.match(html, /changed = syncDashboardPricesFromSeriesMap\(data, chartSeriesByTicker, refreshedTickers\) \|\| changed;/);
-  assert.match(html, /changed = applyCryptoStats\(data, payload\.cryptoStats\?\.stats\) \|\| changed;/);
-  assert.match(html, /changed = mergeSeriesMap\(chartSeriesByTicker, payload\.series\) \|\| changed;/);
-  assert.match(html, /Never let a local refresh backdate a newer embedded scheduled snapshot\./);
-  assert.match(html, /if \(refreshedAsOf && currentAsOf && refreshedAsOf < currentAsOf\) return row;/);
-  assert.match(html, /if \(applyLocalMarketRefresh\(data, payload\)\) \{\s+writeCachedLocalMarketRefresh\(data, payload\);\s+render\(data\);\s+return;\s+\}/);
-  assert.match(html, /A 200 response can still be stale or empty; try the next loopback URL unless something actually changed\./);
-  assert.match(html, /function scrollActiveTapeChartIntoView\(\)/);
-  assert.match(html, /slot\?\.scrollIntoView\?\.\(\{ block: 'nearest', inline: 'nearest', behavior: 'smooth' \}\);/);
-  assert.match(html, /selectTapeChartRow\(tapeChartRow\.dataset\.tapeGroup, tapeChartRow\.dataset\.tapeChartRow, \{ scrollIntoView: true \}\);/);
+  for (const [state, message] of states) {
+    runtime.setLocalRefreshIndicator(state, message);
+    const markup = runtime.rendered();
+    assert.match(markup, new RegExp(`data-local-refresh-state="${state}"`));
+    assert.match(markup, /role="img"/);
+    assert.match(markup, /tabindex="0"/);
+    assert.match(markup, /class="local-refresh-indicator-dot" aria-hidden="true"/);
+    assert.match(markup, /class="local-refresh-tooltip" role="tooltip"/);
+    assert.match(markup, new RegExp(`aria-label="${message.replace('\n', '\\n')}"`));
+    assert.doesNotMatch(markup, /\btitle=/);
+  }
+
+  runtime.setLocalRefreshIndicator('error', '<Local & "safe">');
+  assert.match(runtime.rendered(), /aria-label="&lt;Local &amp; &quot;safe&quot;&gt;"/);
+  assert.match(runtime.rendered(), /<span class="local-refresh-tooltip" role="tooltip">&lt;Local &amp; &quot;safe&quot;&gt;<\/span>/);
+  assert.deepEqual(runtime.selectors(), Array.from({ length: states.length + 1 }, () => '[data-local-refresh-indicator]'));
+
+  runtime.hideIndicator();
+  assert.doesNotThrow(() => runtime.setLocalRefreshIndicator('idle', 'Local helper reached; no newer prices'));
+}
+
+async function testLocalRefreshIndicatorLifecycle() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const sources = [
+    'localRefreshStatusText',
+    'localRefreshTickerCount',
+    'tryLocalMarketRefresh'
+  ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
+  const runtime = Function(`
+    let fetch;
+    class AbortController { constructor() { this.signal = {}; } abort() {} }
+    const LOCAL_MARKET_REFRESH_URLS = ['http://127.0.0.1:2210/api/market-refresh', 'http://localhost:2210/api/market-refresh'];
+    const LOCAL_MARKET_REFRESH_TIMEOUT_MS = 100;
+    const window = { setTimeout: () => 1, clearTimeout: () => {} };
+    const states = [];
+    const writes = [];
+    const renders = [];
+    let localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
+    let applyResult = false;
+    const setLocalRefreshIndicator = (state, message) => {
+      localRefreshIndicator = { state, message };
+      states.push({ state, message });
+    };
+    const applyLocalMarketRefresh = () => applyResult;
+    const writeCachedLocalMarketRefresh = (_data, payload) => writes.push(payload);
+    const render = (data) => renders.push(data);
+    ${sources}
+    return {
+      async run({ fetchImpl, changed }) {
+        fetch = fetchImpl;
+        applyResult = changed;
+        states.length = 0;
+        writes.length = 0;
+        renders.length = 0;
+        localRefreshIndicator = { state: 'checking', message: 'Checking local refresh' };
+        await tryLocalMarketRefresh({ editionId: 'fixture' });
+        return { states: [...states], writes: [...writes], renders: [...renders] };
+      }
+    };
+  `)();
+
+  const unavailable = await runtime.run({ fetchImpl: undefined, changed: false });
+  assert.deepEqual(unavailable.states, [{ state: 'error', message: 'Local refresh unavailable in this browser' }]);
+
+  const payload = {
+    generatedAt: '2026-07-10T18:34:00.000Z',
+    series: [{ ticker: 'SPX' }, { ticker: 'VIX' }, { ticker: 'SPX' }]
+  };
+  const refreshed = await runtime.run({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => payload }),
+    changed: true
+  });
+  assert.deepEqual(refreshed.states.map((entry) => entry.state), ['checking', 'live']);
+  assert.match(refreshed.states[1].message, /^Local refresh .+\n2 ticker series$/);
+  assert.deepEqual(refreshed.writes, [payload]);
+  assert.equal(refreshed.renders.length, 1);
+
+  let idleCalls = 0;
+  const idle = await runtime.run({
+    fetchImpl: async () => {
+      idleCalls += 1;
+      return { ok: true, status: 200, json: async () => payload };
+    },
+    changed: false
+  });
+  assert.equal(idleCalls, 2);
+  assert.deepEqual(idle.states.map((entry) => entry.state), ['checking', 'idle']);
+  assert.equal(idle.states[1].message, 'Local helper reached; no newer prices');
+
+  const helperError = await runtime.run({
+    fetchImpl: async () => ({ ok: false, status: 503 }),
+    changed: false
+  });
+  assert.deepEqual(helperError.states.map((entry) => entry.state), ['checking', 'error']);
+  assert.equal(helperError.states[1].message, 'Local helper responded with 503');
 }
 
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
@@ -1322,7 +1507,6 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
     'mergeSeriesMap'
   ].map((name) => extractDashboardRuntimeFunction(html, name)).join('\n');
   const { mergeSeriesMap } = Function(`
-    const asArr = (value) => Array.isArray(value) ? value : [];
     ${sources}
     return { mergeSeriesMap };
   `)();
@@ -1372,6 +1556,15 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   assert.equal(currentMerge.source, 'Local refreshed chart API');
   assert.equal(currentMerge.latestQuoteSource, 'Local refreshed quote API');
   assert.equal(currentMerge.bars.at(-1).time, '2026-07-07');
+
+  assert.equal(mergeSeriesMap(seriesMap, [{
+    ticker: 'UNKNOWN',
+    bars: [
+      { time: '2026-07-06', open: 1, high: 1, low: 1, close: 1 },
+      { time: '2026-07-07', open: 2, high: 2, low: 2, close: 2 }
+    ]
+  }]), false);
+  assert.equal(seriesMap.has('UNKNOWN'), false);
 }
 
 function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
@@ -1396,6 +1589,7 @@ function testValidateChartDataRejectsQuoteRowsAheadOfSeries() {
   })}</script>`;
   const chartData = {
     schemaVersion: 1,
+    generatedAt: '2026-07-06T20:00:00.000Z',
     range: {
       days: 1826,
       startDate: '2021-07-06',
@@ -1504,6 +1698,7 @@ function testValidateChartDataRejectsLatestOhlcPlaceholder() {
   })}</script>`;
   const chartData = {
     schemaVersion: 1,
+    generatedAt: '2026-07-06T20:00:00.000Z',
     range: {
       days: 1826,
       startDate: '2021-07-06',
@@ -1591,6 +1786,7 @@ function testValidateChartDataRejectsStaleSourceFamilies() {
   })}</script>`;
   const chartData = {
     schemaVersion: 1,
+    generatedAt: '2026-07-06T20:00:00.000Z',
     range: {
       days: 1826,
       startDate: '2021-07-06',
@@ -1676,6 +1872,7 @@ function testValidateChartDataRejectsDuplicateYieldCurveComparisons() {
   })}</script>`;
   const chartData = {
     schemaVersion: 1,
+    generatedAt: '2026-07-06T20:00:00.000Z',
     range: {
       days: 1826,
       startDate: '2021-07-06',
@@ -1737,6 +1934,114 @@ function testValidateChartDataRejectsDuplicateYieldCurveComparisons() {
   assert.notEqual(result.status, 0, 'duplicate Yield Curve comparison curves should fail validate_chart_data');
   assert.match(result.stderr, /comparisonCurves\[1\]\.date must be distinct from 1M ago/);
   assert.match(result.stderr, /comparisonCurves\[1\]\.points must be distinct from 1M ago/);
+}
+
+function testDashboardValidatorRejectsInvalidYieldCurveComparisons() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const chartData = readJsonBlock(html, 'chart-data');
+  const yieldCurve = chartData.series.find((series) => series.sourceSymbol === 'TREASURY:CURVE');
+  assert.ok(yieldCurve, 'The embedded chart data must contain the Treasury yield curve.');
+
+  const duplicateComparison = structuredClone(chartData);
+  const duplicateCurve = duplicateComparison.series.find((series) => series.sourceSymbol === 'TREASURY:CURVE');
+  duplicateCurve.comparisonCurves[1].date = duplicateCurve.comparisonCurves[0].date;
+  duplicateCurve.comparisonCurves[1].points = structuredClone(duplicateCurve.comparisonCurves[0].points);
+  const duplicateResult = validateChartDataFixture(duplicateComparison, 'dfd-embedded-yield-curve-duplicate-');
+  assert.notEqual(duplicateResult.status, 0, 'Duplicate embedded Yield Curve comparison curves must fail dashboard validation.');
+  assert.match(duplicateResult.stderr, /comparisonCurves\[1\]\.date must be distinct from 1M ago/);
+  assert.match(duplicateResult.stderr, /comparisonCurves\[1\]\.points must be distinct from 1M ago/);
+
+  const staleComparison = structuredClone(chartData);
+  const staleCurve = staleComparison.series.find((series) => series.sourceSymbol === 'TREASURY:CURVE');
+  staleCurve.comparisonCurves[0].date = staleCurve.curveDate;
+  const staleResult = validateChartDataFixture(staleComparison, 'dfd-embedded-yield-curve-stale-');
+  assert.notEqual(staleResult.status, 0, 'An out-of-window embedded Yield Curve comparison must fail dashboard validation.');
+  assert.match(staleResult.stderr, /comparisonCurves\[0\]\.date must be 1M ago relative to curveDate/);
+}
+
+function testChartPayloadMetadataContract() {
+  const validPayload = {
+    generatedAt: '2026-07-10T21:30:48.913Z',
+    range: { days: 1826, startDate: '2021-07-10', endDate: '2026-07-10' }
+  };
+  const validErrors = [];
+  validateChartPayloadMetadata(validErrors, validPayload, { label: 'chart-data' });
+  assert.deepEqual(validErrors, []);
+
+  const invalidGeneratedAt = structuredClone(validPayload);
+  invalidGeneratedAt.generatedAt = '2026-07-10T21:30:48';
+  const timestampErrors = [];
+  validateChartPayloadMetadata(timestampErrors, invalidGeneratedAt, { label: 'chart-data' });
+  assert.deepEqual(timestampErrors, ['chart-data.generatedAt must be an offset-bearing ISO timestamp.']);
+
+  const invalidRange = structuredClone(validPayload);
+  invalidRange.range.startDate = '2026-02-30';
+  invalidRange.range.endDate = '';
+  const rangeErrors = [];
+  validateChartPayloadMetadata(rangeErrors, invalidRange, { label: 'chart-data' });
+  assert.deepEqual(rangeErrors, ['chart-data.range.startDate and chart-data.range.endDate must be ISO dates.']);
+}
+
+function testSharedChartPayloadContractAcrossEncodings() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const expectedByTicker = new Map(dashboard.tape.rows.map((row) => [row.ticker, row.sourceSymbol]));
+  const expectedSectionByTicker = new Map(dashboard.tape.rows.map((row) => [row.ticker, 'tape']));
+  const stagedPayload = structuredClone(chartData);
+  stagedPayload.series = stagedPayload.series.map((series) => ({
+    ...series,
+    bars: series.bars.map(([time, open, high, low, close, volume]) => ({
+      time, open, high, low, close, ...(volume === null ? {} : { volume })
+    }))
+  }));
+  const validate = (payload, decodeSeries, volumeDescription) => {
+    const errors = [];
+    validateChartPayload(errors, payload, {
+      expectedByTicker,
+      expectedSectionByTicker,
+      decodeSeries,
+      volumeDescription
+    });
+    return errors;
+  };
+
+  assert.deepEqual(validate(stagedPayload, decodeObjectSeries, 'generated'), []);
+  assert.deepEqual(validate(chartData, decodeTupleSeries, 'embedded'), []);
+
+  const truncatedStagedPayload = structuredClone(stagedPayload);
+  truncatedStagedPayload.series[0].bars = truncatedStagedPayload.series[0].bars.slice(0, 1);
+  const truncatedEmbeddedPayload = structuredClone(chartData);
+  truncatedEmbeddedPayload.series[0].bars = [truncatedEmbeddedPayload.series[0].bars[0], {}];
+  let truncatedStagedErrors;
+  let truncatedEmbeddedErrors;
+  assert.doesNotThrow(() => { truncatedStagedErrors = validate(truncatedStagedPayload, decodeObjectSeries, 'generated'); });
+  assert.doesNotThrow(() => { truncatedEmbeddedErrors = validate(truncatedEmbeddedPayload, decodeTupleSeries, 'embedded'); });
+  assert.match(truncatedStagedErrors.join('\n'), /SPX\.bars must contain at least two daily bars/);
+  assert.match(truncatedEmbeddedErrors.join('\n'), /SPX\.bars\[1\] must be a \[time, open, high, low, close, volume\] tuple/);
+  assert.match(truncatedEmbeddedErrors.join('\n'), /SPX\.bars must contain at least two daily bars/);
+
+  stagedPayload.series[0].noVolume = true;
+  const invalidEmbeddedPayload = structuredClone(chartData);
+  invalidEmbeddedPayload.series[0].noVolume = true;
+  assert.match(validate(stagedPayload, decodeObjectSeries, 'generated').join('\n'), /SPX\.noVolume must be false to match its generated volume bars/);
+  assert.match(validate(invalidEmbeddedPayload, decodeTupleSeries, 'embedded').join('\n'), /SPX\.noVolume must be false to match its embedded volume bars/);
+}
+
+function testDashboardValidatorRejectsInvalidChartPayloadMetadata() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const chartData = readJsonBlock(html, 'chart-data');
+  const mutations = [
+    ['generatedAt', (payload) => { payload.generatedAt = '2026-07-10T21:30:48'; }, /chart-data\.generatedAt must be an offset-bearing ISO timestamp/],
+    ['range.startDate', (payload) => { payload.range.startDate = '2026-02-30'; }, /chart-data\.range\.startDate and chart-data\.range\.endDate must be ISO dates/],
+    ['range.endDate', (payload) => { payload.range.endDate = ''; }, /chart-data\.range\.startDate and chart-data\.range\.endDate must be ISO dates/]
+  ];
+
+  for (const [field, mutate, expectedError] of mutations) {
+    const invalidPayload = structuredClone(chartData);
+    mutate(invalidPayload);
+    const result = validateChartDataFixture(invalidPayload, `dfd-embedded-chart-${field.replace('.', '-')}-`);
+    assert.notEqual(result.status, 0, `Invalid embedded chart-data ${field} must fail dashboard validation.`);
+    assert.match(result.stderr, expectedError);
+  }
 }
 
 function testLocalMarketServerAutoRefreshWindow() {
@@ -1815,7 +2120,7 @@ function testLocalMarketServerPartialStatusIncludesRowErrors() {
   assert.equal(isPartialRefresh([], { ...cleanSections, cryptoStats: { ok: false, error: 'failed' } }), true);
 }
 
-function main() {
+async function main() {
   testUpdaterQuoteAndCryptoPatches();
   testUpdaterModulePatches();
   testUpdaterWeekAheadPreservesEditorialLens();
@@ -1835,10 +2140,12 @@ function main() {
   testApplyChartDataJsonCliMode();
   testChartFetcherTickerFilterAndMergeChartDataCliMode();
   testDashboardHtmlShellContract();
+  testDashboardValidatorRejectsRemoteRuntimeEndpoint();
   testDashboardValidatorAcceptsFridayBridgeCalendars();
   testCompactChartPayloadUsesFourDecimalTuples();
   testDashboardValidatorRejectsNonTupleOrOverPreciseEmbeddedBars();
   testDashboardValidatorUsesTheTapeAsItsChartRoster();
+  testDashboardValidatorAcceptsCurrentEmbeddedDashboard();
   testDashboardValidatorRejectsOversizedFuturesStoryTag();
   testDashboardValidatorRejectsFuturesStoryWithoutPublishedAt();
   testDashboardValidatorRejectsDuplicateFuturesStoryUrl();
@@ -1855,13 +2162,18 @@ function main() {
   testDashboardEarningsMoneySignContract();
   testYieldCurveShortEndTenorsStayVisible();
   testEditionStampChangesIdentity();
-  testLocalRefreshBrowserContract();
+  testLocalRefreshIndicatorBehavior();
+  await testLocalRefreshIndicatorLifecycle();
   testLocalRefreshKeepsNewerEmbeddedSeriesProvenance();
   testStrictCalendarDatesReachChartAndAssetValidation();
   testValidateChartDataRejectsQuoteRowsAheadOfSeries();
   testValidateChartDataRejectsLatestOhlcPlaceholder();
   testValidateChartDataRejectsStaleSourceFamilies();
   testValidateChartDataRejectsDuplicateYieldCurveComparisons();
+  testDashboardValidatorRejectsInvalidYieldCurveComparisons();
+  testChartPayloadMetadataContract();
+  testSharedChartPayloadContractAcrossEncodings();
+  testDashboardValidatorRejectsInvalidChartPayloadMetadata();
   testLocalMarketServerAutoRefreshWindow();
   testLocalMarketServerSkipsYieldCurveRefresh();
   testLocalMarketServerExplicitAndFallbackWindows();
@@ -1869,4 +2181,7 @@ function main() {
   console.log('Dashboard fixture tests passed.');
 }
 
-main();
+main().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
