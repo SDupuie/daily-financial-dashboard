@@ -569,14 +569,14 @@ if (!dashboardMatch) {
       requireString(catalyst.body, `opening.catalysts[${index}].body`);
     }
 
-    const staleTapeTickers = new Set(['6723.T', 'BZ', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
+    const staleTapeTickers = new Set(['6723.T', 'TOTAL', 'MXEA', 'MXEF', 'FNER', 'GSCI']);
     for (const ticker of tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase())) {
       if (staleTapeTickers.has(ticker)) {
         errors.push(`The Tape should not include stale or duplicated ticker ${ticker}.`);
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'HG', 'CL', 'BZ', 'NG', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
@@ -614,7 +614,10 @@ if (!dashboardMatch) {
       PDBC: 'PDBC',
       XAU: 'GC=F',
       XAG: 'SI=F',
+      HG: 'HG=F',
       CL: 'CL=F',
+      BZ: 'BZ=F',
+      NG: 'NG=F',
       VIX: '^VIX',
       USYC: 'TREASURY:CURVE',
       MOVE: '^MOVE',

@@ -17,6 +17,7 @@ const {
   compactChartPayload,
   finnhubQuoteBarFromPayload,
   mergeFinnhubQuoteBar,
+  parseArgs: parseFetchChartDataArgs,
   quoteRowFromSeries,
   shouldUseFinnhubQuoteFallback,
 } = require('./fetch_chart_data');
@@ -838,6 +839,48 @@ function testApplyChartDataJsonCliMode() {
   assert.equal(dashboard.tape.rows[0].asOf, '2026-07-06');
   assert.equal(embeddedChart.barEncoding, 'tuple-v1');
   assert.deepEqual(embeddedChart.series[0].bars.at(-1), ['2026-07-06', 6120, 6125, 6110, 6123.45, null]);
+}
+
+function testChartFetcherTickerFilterAndMergeChartDataCliMode() {
+  assert.deepEqual(parseFetchChartDataArgs(['--ticker', 'HG', '--ticker', 'NG']).tickers, ['HG', 'NG']);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-merge-'));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const payloadFile = path.join(dir, 'commodity-chart-data.json');
+  const shell = [
+    '<!-- ============ DATA START — edit this block to update the dashboard ============ -->',
+    '<script type="application/json" id="dashboard-data">{"editionId":"old","masthead":{"date":"Monday, July 6, 2026"},"footer":{"compiled":"Compiled Monday, July 6, 2026 at 4:00 PM CDT"},"tape":{"rows":[{"ticker":"SPX","group":"Equities","last":"stale","delta":"stale","pct":"stale","dir":"flat","asOf":"old"},{"ticker":"HG","group":"Commodities","last":"stale","delta":"stale","pct":"stale","dir":"flat","asOf":"old"}]}}<\/script>',
+    '<!-- ============ DATA END ============ -->',
+    '<script type="application/json" id="chart-data">{"schemaVersion":1,"barEncoding":"tuple-v1","series":[{"ticker":"SPX","section":"tape","sourceSymbol":"SPX","bars":[["2026-07-03",6000,6000,6000,6000,null],["2026-07-06",6120,6125,6110,6123.45,null]]}]}</script>',
+    '<div class="page" id="app"><div id="mast-edition">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
+    '<script>(function () {})();</script>'
+  ].join('\n');
+  const commodityChartData = {
+    schemaVersion: 1,
+    series: [{
+      ticker: 'HG', section: 'tape', sourceSymbol: 'HG=F',
+      bars: [
+        { time: '2026-07-03', open: 4.5, high: 4.5, low: 4.5, close: 4.5 },
+        { time: '2026-07-06', open: 4.6, high: 4.6, low: 4.6, close: 4.6 }
+      ]
+    }]
+  };
+  fs.writeFileSync(dashboardFile, shell);
+  fs.writeFileSync(payloadFile, JSON.stringify(commodityChartData));
+  const result = spawnSync(process.execPath, [
+    path.join(root, 'scripts/run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--merge-chart-data-json', payloadFile,
+    '--skip-validate'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+
+  const updatedHtml = fs.readFileSync(dashboardFile, 'utf8');
+  const dashboard = readJsonBlock(updatedHtml, 'dashboard-data');
+  const chart = readJsonBlock(updatedHtml, 'chart-data');
+  assert.deepEqual(chart.series.map((series) => series.ticker), ['SPX', 'HG']);
+  assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'SPX').last, '6,123.45');
+  assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'HG').last, '4.60');
 }
 
 function testDashboardHtmlShellContract() {
@@ -1734,6 +1777,7 @@ function main() {
   testRefreshNewsBaselineCliMode();
   testApplyDashboardDataJsonCliMode();
   testApplyChartDataJsonCliMode();
+  testChartFetcherTickerFilterAndMergeChartDataCliMode();
   testDashboardHtmlShellContract();
   testDashboardValidatorAcceptsFridayBridgeCalendars();
   testCompactChartPayloadUsesFourDecimalTuples();

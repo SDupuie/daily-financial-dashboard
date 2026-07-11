@@ -42,6 +42,7 @@ function parseArgs(argv) {
     days: DEFAULT_DAYS,
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: 250,
+    tickers: [],
     embedCompact: false,
     embedSource: '',
     compact: false
@@ -71,6 +72,11 @@ function parseArgs(argv) {
     }
     if (arg === '--delay-ms') {
       args.delayMs = Math.max(0, Number(argv[i + 1] || 0));
+      i += 1;
+      continue;
+    }
+    if (arg === '--ticker') {
+      args.tickers.push(String(argv[i + 1] || '').trim().toUpperCase());
       i += 1;
       continue;
     }
@@ -105,6 +111,7 @@ Options:
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
   --delay-ms 250      Delay between source requests
+  --ticker SYMBOL     Fetch only this dashboard ticker (repeatable)
   --embed-compact     Compact the existing embedded chart-data block without fetching
   --embed-source PATH Use this generated chart-data JSON when compacting the embedded block
   --compact           Print one-line series summary
@@ -862,7 +869,9 @@ async function main() {
     process.stdout.write(`Compacted embedded chart-data with ${payload.series.length} series\n`);
     return;
   }
-  const inputRows = readChartableRows(args.input);
+  const requestedTickers = new Set(args.tickers.filter(Boolean));
+  const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
+  if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
   const endDate = new Date();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
@@ -914,6 +923,7 @@ module.exports = {
   isoDateFromDate,
   mergeFinnhubQuoteBar,
   quoteRowFromSeries,
+  parseArgs,
   roundChartPayload,
   readChartableRows,
   readCryptoRows,
