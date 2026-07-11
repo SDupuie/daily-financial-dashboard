@@ -4,10 +4,13 @@ const assert = require('assert/strict');
 const { spawnSync } = require('child_process');
 const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const fs = require('fs');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const {
+  createServer: createLocalMarketServer,
   isPartialRefresh,
+  isAllowedBrowserOrigin,
   latestEmbeddedChartDate,
   localRefreshChartRows,
   parseArgs: parseLocalMarketServerArgs,
@@ -60,21 +63,51 @@ const {
 
 const root = path.resolve(__dirname, '..');
 
-function writeChartDataFixture(latestDate) {
+function writeChartDataFixture(latestDate, { tuple = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-'));
   const file = path.join(dir, 'dashboard.html');
   const payload = {
     schemaVersion: 1,
+    ...(tuple ? { barEncoding: 'tuple-v1' } : {}),
     series: [{
       ticker: 'SPX',
-      bars: [
-        { time: '2026-06-29', close: 1 },
-        { time: latestDate, close: 2 }
-      ]
+      bars: tuple
+        ? [
+          ['2026-06-29', 1, 1, 1, 1, null],
+          [latestDate, 2, 2, 2, 2, null]
+        ]
+        : [
+          { time: '2026-06-29', close: 1 },
+          { time: latestDate, close: 2 }
+        ]
     }]
   };
   fs.writeFileSync(file, `<script type="application/json" id="chart-data">${JSON.stringify(payload)}</script>`);
   return file;
+}
+
+function requestLocalHttps(port, { path: requestPath = '/health', method = 'GET', headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      host: '127.0.0.1',
+      port,
+      path: requestPath,
+      method,
+      headers,
+      rejectUnauthorized: false
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        resolve({ statusCode: res.statusCode, headers: res.headers, body });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 function dashboardFixture() {
@@ -937,7 +970,7 @@ function testDashboardValidatorRejectsRemoteRuntimeEndpoint() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   try {
     fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData).replace(
-      'http://127.0.0.1:2210/api/market-refresh',
+      'https://127.0.0.1:2210/api/market-refresh',
       'https://query1.finance.yahoo.com/api/market-refresh'
     ));
     const result = spawnSync(process.execPath, [
@@ -1433,7 +1466,7 @@ async function testLocalRefreshIndicatorLifecycle() {
   const runtime = Function(`
     let fetch;
     class AbortController { constructor() { this.signal = {}; } abort() {} }
-    const LOCAL_MARKET_REFRESH_URLS = ['http://127.0.0.1:2210/api/market-refresh', 'http://localhost:2210/api/market-refresh'];
+    const LOCAL_MARKET_REFRESH_URLS = ['https://127.0.0.1:2210/api/market-refresh'];
     const LOCAL_MARKET_REFRESH_TIMEOUT_MS = 100;
     const window = { setTimeout: () => 1, clearTimeout: () => {} };
     const states = [];
@@ -1470,14 +1503,21 @@ async function testLocalRefreshIndicatorLifecycle() {
     generatedAt: '2026-07-10T18:34:00.000Z',
     series: [{ ticker: 'SPX' }, { ticker: 'VIX' }, { ticker: 'SPX' }]
   };
+  let refreshRequest;
   const refreshed = await runtime.run({
-    fetchImpl: async () => ({ ok: true, status: 200, json: async () => payload }),
+    fetchImpl: async (url, options) => {
+      refreshRequest = { url, options };
+      return { ok: true, status: 200, json: async () => payload };
+    },
     changed: true
   });
   assert.deepEqual(refreshed.states.map((entry) => entry.state), ['checking', 'live']);
   assert.match(refreshed.states[1].message, /^Local refresh .+\n2 ticker series$/);
   assert.deepEqual(refreshed.writes, [payload]);
   assert.equal(refreshed.renders.length, 1);
+  assert.equal(refreshRequest.url, 'https://127.0.0.1:2210/api/market-refresh');
+  assert.equal(refreshRequest.options.cache, 'no-store');
+  assert.equal(refreshRequest.options.targetAddressSpace, 'loopback');
 
   let idleCalls = 0;
   const idle = await runtime.run({
@@ -1487,7 +1527,7 @@ async function testLocalRefreshIndicatorLifecycle() {
     },
     changed: false
   });
-  assert.equal(idleCalls, 2);
+  assert.equal(idleCalls, 1);
   assert.deepEqual(idle.states.map((entry) => entry.state), ['checking', 'idle']);
   assert.equal(idle.states[1].message, 'Local helper reached; no newer prices');
 
@@ -2048,8 +2088,10 @@ function testLocalMarketServerAutoRefreshWindow() {
   const input = writeChartDataFixture('2026-07-02');
   const args = parseLocalMarketServerArgs(['--input', input]);
   const window = refreshWindow(args, new Date('2026-07-06T18:00:00Z'));
+  const objectInput = writeChartDataFixture('2026-07-03', { tuple: false });
 
   assert.equal(latestEmbeddedChartDate(input), '2026-07-02');
+  assert.equal(latestEmbeddedChartDate(objectInput), '2026-07-03');
   assert.equal(window.mode, 'auto');
   assert.equal(window.latestEmbeddedDate, '2026-07-02');
   assert.equal(window.days, 12);
@@ -2120,6 +2162,94 @@ function testLocalMarketServerPartialStatusIncludesRowErrors() {
   assert.equal(isPartialRefresh([], { ...cleanSections, cryptoStats: { ok: false, error: 'failed' } }), true);
 }
 
+function testLocalMarketServerOriginPolicyAndTlsOptions() {
+  assert.equal(isAllowedBrowserOrigin(''), true);
+  assert.equal(isAllowedBrowserOrigin('https://sdupuie.github.io'), true);
+  assert.equal(isAllowedBrowserOrigin('http://127.0.0.1:8000'), true);
+  assert.equal(isAllowedBrowserOrigin('https://localhost:8443'), true);
+  assert.equal(isAllowedBrowserOrigin('null'), false);
+  assert.equal(isAllowedBrowserOrigin('https://example.com'), false);
+  assert.equal(isAllowedBrowserOrigin('https://sdupuie.github.io.example.com'), false);
+
+  const args = parseLocalMarketServerArgs([
+    '--cert', '/tmp/dashboard-cert.pem',
+    '--key', '/tmp/dashboard-key.pem'
+  ]);
+  assert.equal(args.cert, '/tmp/dashboard-cert.pem');
+  assert.equal(args.key, '/tmp/dashboard-key.pem');
+}
+
+async function testLocalMarketServerHttpsBoundary() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-market-server-tls-'));
+  const cert = path.join(dir, 'cert.pem');
+  const key = path.join(dir, 'key.pem');
+  const certificateResult = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', key,
+    '-out', cert,
+    '-days', '1',
+    '-subj', '/CN=127.0.0.1'
+  ], { encoding: 'utf8' });
+  assert.equal(certificateResult.status, 0, certificateResult.stderr || 'Could not create the test TLS certificate.');
+
+  const args = parseLocalMarketServerArgs([
+    '--cert', cert,
+    '--key', key
+  ]);
+  const server = createLocalMarketServer(args);
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const port = address.port;
+
+    const health = await requestLocalHttps(port);
+    assert.equal(health.statusCode, 200);
+    assert.equal(JSON.parse(health.body).ok, true);
+    assert.equal(health.headers['cache-control'], 'no-store');
+    assert.equal(health.headers['x-content-type-options'], 'nosniff');
+
+    const allowed = await requestLocalHttps(port, {
+      headers: { Origin: 'https://sdupuie.github.io' }
+    });
+    assert.equal(allowed.statusCode, 200);
+    assert.equal(allowed.headers['access-control-allow-origin'], 'https://sdupuie.github.io');
+    assert.equal(allowed.headers.vary, 'Origin');
+
+    const denied = await requestLocalHttps(port, {
+      headers: { Origin: 'https://example.com' }
+    });
+    assert.equal(denied.statusCode, 403);
+    assert.equal(JSON.parse(denied.body).ok, false);
+    assert.equal(denied.headers['access-control-allow-origin'], undefined);
+
+    const preflight = await requestLocalHttps(port, {
+      path: '/api/market-refresh',
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://sdupuie.github.io',
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Private-Network': 'true'
+      }
+    });
+    assert.equal(preflight.statusCode, 204);
+    assert.equal(preflight.headers['access-control-allow-origin'], 'https://sdupuie.github.io');
+    assert.equal(preflight.headers['access-control-allow-methods'], 'GET, OPTIONS');
+    assert.equal(preflight.headers['access-control-allow-private-network'], 'true');
+
+    const unsupportedMethod = await requestLocalHttps(port, { method: 'POST' });
+    assert.equal(unsupportedMethod.statusCode, 405);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+}
+
 async function main() {
   testUpdaterQuoteAndCryptoPatches();
   testUpdaterModulePatches();
@@ -2178,6 +2308,8 @@ async function main() {
   testLocalMarketServerSkipsYieldCurveRefresh();
   testLocalMarketServerExplicitAndFallbackWindows();
   testLocalMarketServerPartialStatusIncludesRowErrors();
+  testLocalMarketServerOriginPolicyAndTlsOptions();
+  await testLocalMarketServerHttpsBoundary();
   console.log('Dashboard fixture tests passed.');
 }
 

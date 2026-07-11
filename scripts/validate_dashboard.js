@@ -283,8 +283,7 @@ if (runtimeScriptMatches.length !== 1) {
 const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
 const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((match) => match[0]);
 const allowedLocalRefreshUrls = new Set([
-  'http://127.0.0.1:2210/api/market-refresh',
-  'http://localhost:2210/api/market-refresh'
+  'https://127.0.0.1:2210/api/market-refresh'
 ]);
 for (const url of runtimeUrls) {
   if (!allowedLocalRefreshUrls.has(url)) {
@@ -293,7 +292,7 @@ for (const url of runtimeUrls) {
 }
 const expectedRuntimeUrls = [...allowedLocalRefreshUrls];
 if (runtimeUrls.length !== expectedRuntimeUrls.length || runtimeUrls.some((url, index) => url !== expectedRuntimeUrls[index])) {
-  errors.push('The dashboard runtime must expose only the ordered localhost market-refresh URLs.');
+  errors.push('The dashboard runtime must expose only the canonical HTTPS loopback market-refresh URL.');
 }
 
 const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);

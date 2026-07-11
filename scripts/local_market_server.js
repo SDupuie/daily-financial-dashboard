@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-const http = require('http');
+const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const chartData = require('./fetch_chart_data');
@@ -17,11 +18,14 @@ const DEFAULT_SOURCE_TIMEOUT_MS = 7000;
 const DEFAULT_CACHE_MS = 60000;
 const DEFAULT_CONCURRENCY = 5;
 const DEFAULT_INPUT = path.resolve(__dirname, '..', 'daily_financial_news.html');
+const DEFAULT_CERT = path.join(os.homedir(), '.daily-financial-dashboard', 'tls', 'local-market-cert.pem');
+const DEFAULT_KEY = path.join(os.homedir(), '.daily-financial-dashboard', 'tls', 'local-market-key.pem');
+const PUBLISHED_DASHBOARD_ORIGIN = 'https://sdupuie.github.io';
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Private-Network': 'true'
+  'Access-Control-Allow-Private-Network': 'true',
+  'Vary': 'Origin'
 };
 
 function numericOption(value, fallback, label, { min = -Infinity, max = Infinity, integer = false } = {}) {
@@ -37,6 +41,8 @@ function parseArgs(argv) {
   const args = {
     port: DEFAULT_PORT,
     input: DEFAULT_INPUT,
+    cert: DEFAULT_CERT,
+    key: DEFAULT_KEY,
     days: null,
     sourceTimeoutMs: DEFAULT_SOURCE_TIMEOUT_MS,
     cacheMs: DEFAULT_CACHE_MS,
@@ -52,6 +58,16 @@ function parseArgs(argv) {
     }
     if (arg === '--input') {
       args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_INPUT);
+      i += 1;
+      continue;
+    }
+    if (arg === '--cert') {
+      args.cert = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_CERT);
+      i += 1;
+      continue;
+    }
+    if (arg === '--key') {
+      args.key = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_KEY);
       i += 1;
       continue;
     }
@@ -98,6 +114,8 @@ function printHelp() {
 Options:
   --port, -p 2210          Local port to bind on 127.0.0.1
   --input PATH             Dashboard HTML to read for configured rows
+  --cert PATH              TLS certificate for localhost HTTPS
+  --key PATH               TLS private key for localhost HTTPS
   --days N                 Force calendar days to refresh instead of auto tail sizing
   --source-timeout-ms 7000 HTTP timeout in ms per upstream request
   --cache-ms 60000         In-memory cache duration for refresh responses
@@ -117,10 +135,25 @@ function sendJson(res, statusCode, payload) {
   res.end(`${body}\n`);
 }
 
-function writeCorsHeaders(res) {
-  // GitHub Pages may call this loopback helper from a public HTTPS origin; the private-network header satisfies browser preflights.
+function isAllowedBrowserOrigin(origin) {
+  if (!origin) return true;
+  if (origin === PUBLISHED_DASHBOARD_ORIGIN) return true;
+  try {
+    const parsed = new URL(origin);
+    return ['http:', 'https:'].includes(parsed.protocol) && ['127.0.0.1', 'localhost'].includes(parsed.hostname);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function writeCorsHeaders(req, res) {
+  // The helper is loopback-only, and browser reads are limited to the published dashboard plus local HTTP(S) development origins.
   for (const [key, value] of Object.entries(CORS_HEADERS)) {
     res.setHeader(key, value);
+  }
+  const origin = String(req.headers.origin || '');
+  if (origin && isAllowedBrowserOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
 }
 
@@ -165,7 +198,8 @@ function latestEmbeddedChartDate(input) {
   for (const item of Array.isArray(payload?.series) ? payload.series : []) {
     const bars = Array.isArray(item?.bars) ? item.bars : [];
     for (let index = bars.length - 1; index >= 0; index -= 1) {
-      const time = String(bars[index]?.time || '').slice(0, 10);
+      const bar = bars[index];
+      const time = String(Array.isArray(bar) ? bar[0] : bar?.time || '').slice(0, 10);
       const ms = isoDateToUtcMs(time);
       if (ms !== null) {
         latest = latest === null ? ms : Math.max(latest, ms);
@@ -323,9 +357,19 @@ function createServer(args) {
   let cachedPayload = null;
   let cachedAt = 0;
   let inFlight = null;
+  const tlsOptions = {
+    cert: fs.readFileSync(args.cert),
+    key: fs.readFileSync(args.key)
+  };
 
-  return http.createServer(async (req, res) => {
-    writeCorsHeaders(res);
+  return https.createServer(tlsOptions, async (req, res) => {
+    writeCorsHeaders(req, res);
+
+    const origin = String(req.headers.origin || '');
+    if (origin && !isAllowedBrowserOrigin(origin)) {
+      sendJson(res, 403, { ok: false, error: 'Browser origin is not allowed.' });
+      return;
+    }
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -333,7 +377,7 @@ function createServer(args) {
       return;
     }
 
-    const url = new URL(req.url, `http://${HOST}:${args.port}`);
+    const url = new URL(req.url, `https://${HOST}:${args.port}`);
     if (req.method !== 'GET') {
       sendJson(res, 405, { ok: false, error: 'Only GET and OPTIONS are supported.' });
       return;
@@ -400,7 +444,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const server = createServer(args);
   server.listen(args.port, HOST, () => {
-    process.stdout.write(`Local market server listening at http://${HOST}:${args.port}\n`);
+    process.stdout.write(`Local market server listening at https://${HOST}:${args.port}\n`);
   });
 }
 
@@ -417,6 +461,7 @@ module.exports = {
   buildMarketRefresh,
   createServer,
   isPartialRefresh,
+  isAllowedBrowserOrigin,
   latestEmbeddedChartDate,
   localRefreshChartRows,
   parseArgs,

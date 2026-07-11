@@ -12,6 +12,10 @@
       <string>/Users/Scott/Projects/Daily Financial Dashboard/scripts/local_market_server.js</string>
       <string>--port</string>
       <string>2210</string>
+      <string>--cert</string>
+      <string>/Users/Scott/.daily-financial-dashboard/tls/local-market-cert.pem</string>
+      <string>--key</string>
+      <string>/Users/Scott/.daily-financial-dashboard/tls/local-market-key.pem</string>
     </array>
 
     <key>WorkingDirectory</key>

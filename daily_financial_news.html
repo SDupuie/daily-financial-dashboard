@@ -336,6 +336,12 @@
       max-width: 460px;
       text-align: right;
     }
+    .tape-header-actions {
+      align-items: center;
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 4px;
+    }
     .table-card { overflow: hidden; }
     table {
       width: 100%;
@@ -419,7 +425,6 @@
       cursor: help;
       display: inline-flex;
       justify-content: center;
-      margin-left: auto;
       min-height: 32px;
       min-width: 32px;
       position: relative;
@@ -458,7 +463,7 @@
     }
     .local-refresh-indicator[data-local-refresh-state="checking"] .local-refresh-indicator-dot { animation: local-refresh-pulse 1.15s ease-in-out infinite; }
     .local-refresh-tooltip {
-      /* The indicator lives at the toolbar edge, so the detail bubble opens inward instead of beyond the viewport. */
+      /* The indicator sits at the header edge, so the detail bubble opens inward instead of beyond the viewport. */
       position: absolute;
       z-index: 5;
       top: 50%;
@@ -2228,6 +2233,13 @@
     }
     @media (max-width: 760px) {
       .page { padding: 18px 14px 44px; }
+      .tape-header-actions { position: relative; }
+      .tape-header-actions .local-refresh-indicator { position: static; }
+      .tape-header-actions .local-refresh-tooltip {
+        top: calc(100% + 8px);
+        right: 0;
+        transform: none;
+      }
       .topline { position: relative; grid-template-columns: 1fr; text-align: center; }
       .topline .right { display: contents; text-align: center; }
       #mast-date-value { grid-row: 3; justify-self: center; }
@@ -16079,8 +16091,7 @@
       let dashboardData = null;
       // Optional localhost refresh: GitHub Pages must render fully from embedded data when this helper is absent.
       const LOCAL_MARKET_REFRESH_URLS = [
-        'http://127.0.0.1:2210/api/market-refresh',
-        'http://localhost:2210/api/market-refresh'
+        'https://127.0.0.1:2210/api/market-refresh'
       ];
       const LOCAL_MARKET_REFRESH_TIMEOUT_MS = 30000;
       const LOCAL_MARKET_REFRESH_CACHE_KEY = 'daily-financial-dashboard:local-market-refresh:v2';
@@ -16640,7 +16651,8 @@
           try {
             const response = await fetch(url, {
               cache: 'no-store',
-              signal: controller.signal
+              signal: controller.signal,
+              targetAddressSpace: 'loopback'
             });
             if (!response.ok) {
               helperError = `Local helper responded with ${response.status}`;
@@ -17565,6 +17577,10 @@
           : `<button class="tape-chart-cue" type="button" data-tape-chart-cue-current data-tape-chart-cue="${esc(groupKey)}" data-tape-chart-cue-button="${esc(groupKey)}" aria-label="Open first chart in this section">${content}</button>`;
       }
 
+      function tapeHeaderActionsHtml(groupKey) {
+        return `<div class="tape-header-actions">${localRefreshIndicatorHtml()}${tapeChartCueHtml(groupKey)}</div>`;
+      }
+
       function resetTapeChartSlot(slot) {
         if (!slot) return;
         if (chartState.root === slot) {
@@ -17697,11 +17713,10 @@
           <div class="tape-blotter surface surface-shadow surface-clip">
             <div class="tape-toolbar">
               <div class="tape-selector" role="tablist" aria-label="Tape sections">${controls}</div>
-              ${localRefreshIndicatorHtml()}
             </div>
             ${panels}
           </div>
-        `, 'section-tape', tapeChartCueHtml(activeKey));
+        `, 'section-tape', tapeHeaderActionsHtml(activeKey));
       }
 
       function renderFuturesModule(data) {

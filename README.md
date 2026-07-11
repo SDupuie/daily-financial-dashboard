@@ -161,7 +161,7 @@ For every manually refreshed quote row, follow its full fallback chain before us
 Whenever you manually add, remove, rename, or change the `sourceSymbol` of a dashboard ticker, restart the local helper and verify the changed ticker before considering the dashboard complete:
 
 1. Run `launchctl kickstart -k "gui/$(id -u)/com.scott.daily-financial-dashboard"`.
-2. Request `http://127.0.0.1:2210/api/market-refresh` and confirm the changed ticker has a non-empty series and no ticker-specific error.
+2. Request `https://127.0.0.1:2210/api/market-refresh` and confirm the changed ticker has a non-empty series and no ticker-specific error.
 
 Static dashboard validation does not prove that the already-running local helper has loaded new ticker support.
 
@@ -459,11 +459,15 @@ The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sou
 
 ## Appendix: Local refresh server
 
-Run `node scripts/local_market_server.js` to start a read-only local market server at `http://127.0.0.1:2210`. It binds only to localhost, requires no secrets or paid API keys, and exposes:
+Run `node scripts/local_market_server.js` to start a read-only local market server at `https://127.0.0.1:2210`. It binds only to loopback, requires no paid API keys, and exposes:
 
 - `GET /health`
 - `GET /api/market-refresh`
 
-The static dashboard always keeps embedded data as the production fallback. When the local market server is available, the browser silently tries `http://127.0.0.1:2210/api/market-refresh` with `http://localhost:2210/api/market-refresh` as a loopback fallback, merges refreshed quote rows, crypto stat cards, and recent chart data, stores the successful local refresh in browser `localStorage` for up to 12 hours, and appends a small footer status after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the server again. The server treats chart refreshes and crypto-stat refreshes as independent sections, so one upstream crypto outage does not block otherwise healthy quote/chart updates. For chart data, it reads the embedded `chart-data` block, finds the latest embedded bar, and requests only the missing tail plus internal overlap, capped to avoid large backfills; full Treasury Yield Curve comparison history stays scheduled-only so a short local tail cannot replace the embedded 1M/6M curve context. `--days N` remains an explicit diagnostic override. GitHub Pages continues to work normally when the server is not running.
+The helper expects a dedicated TLS certificate at `~/.daily-financial-dashboard/tls/local-market-cert.pem` and its private key at `~/.daily-financial-dashboard/tls/local-market-key.pem`. The certificate must be trusted in the user's login Keychain and contain `127.0.0.1` as an IP subject alternative name; keep the private key outside Git with mode `0600`. The tracked LaunchAgent template passes these paths explicitly. The helper rejects browser origins other than `https://sdupuie.github.io` and local HTTP(S) development origins, while command-line requests without an `Origin` header remain available for diagnostics.
+
+For local browser QA, serve the repository from `http://127.0.0.1` or `http://localhost`; direct `file://` pages have the opaque `null` origin and are intentionally rejected by the helper's origin policy.
+
+The static dashboard always keeps embedded data as the production fallback. When the local market server is available, the browser silently tries `https://127.0.0.1:2210/api/market-refresh`, explicitly identifies the target address space as loopback, merges refreshed quote rows, crypto stat cards, and recent chart data, stores the successful local refresh in browser `localStorage` for up to 12 hours, and updates the status indicator beside The Tape heading after a successful refresh. Reloads on the same embedded dashboard can render the cached local refresh immediately before checking the server again. The server treats chart refreshes and crypto-stat refreshes as independent sections, so one upstream crypto outage does not block otherwise healthy quote/chart updates. For chart data, it reads the embedded `chart-data` block, finds the latest embedded bar, and requests only the missing tail plus internal overlap, capped to avoid large backfills; full Treasury Yield Curve comparison history stays scheduled-only so a short local tail cannot replace the embedded 1M/6M curve context. `--days N` remains an explicit diagnostic override. GitHub Pages continues to work normally when the server is not running.
 
 Use `node scripts/local_market_server.js --port 2211` to choose another local port for direct testing; the published dashboard only auto-checks port `2210`.
