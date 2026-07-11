@@ -1,8 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
   <title>The Daily Tape</title>
-  <rect width="180" height="180" fill="#f7f3ea"/>
-  <rect x="31" y="30" width="118" height="120" rx="7" fill="#161b24"/>
-  <path d="M45 49h90M45 62h57M45 123h90M45 136h62" stroke="#f7f3ea" stroke-linecap="round" stroke-width="6"/>
-  <path d="M47 108 66 93 84 99 102 74 130 80" fill="none" stroke="#e6a737" stroke-linecap="round" stroke-linejoin="round" stroke-width="7"/>
-  <circle cx="130" cy="80" r="4.5" fill="#f7f3ea"/>
+  <rect width="180" height="180" fill="#161b24"/>
+  <path d="M34 44h112M34 62h72M34 126h112M34 144h78" stroke="#f7f3ea" stroke-linecap="round" stroke-width="8"/>
+  <path d="M36 111 62 90 86 98 110 64 146 72" fill="none" stroke="#e6a737" stroke-linecap="round" stroke-linejoin="round" stroke-width="9"/>
+  <circle cx="146" cy="72" r="5.5" fill="#f7f3ea"/>
 </svg>
