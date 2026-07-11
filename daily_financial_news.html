@@ -449,10 +449,9 @@
       border-color: var(--gold);
     }
     .local-refresh-indicator[data-local-refresh-state="error"] .local-refresh-indicator-dot {
-      background: transparent;
+      background: var(--red);
       border-color: var(--red);
     }
-    .local-refresh-indicator[data-local-refresh-state="error"] .local-refresh-indicator-dot::after { content: "!"; }
     .local-refresh-indicator[data-local-refresh-state="checking"] .local-refresh-indicator-dot { animation: local-refresh-pulse 1.15s ease-in-out infinite; }
     .local-refresh-tooltip {
       /* The indicator lives at the toolbar edge, so the detail bubble opens inward instead of beyond the viewport. */
