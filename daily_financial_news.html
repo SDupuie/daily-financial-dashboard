@@ -2298,7 +2298,11 @@
       .week-day-row > :not(.week-day-header) { margin-left: 14px; margin-right: 14px; }
       .week-day-label { display: flex; justify-content: flex-start; gap: var(--gap-sm); }
       .week-day-count { display: inline; margin-top: 0; }
-      .week-market-lens { grid-column: 1; }
+      .week-market-lens {
+        border-top: 1px solid var(--line);
+        grid-column: 1;
+        padding-top: 14px;
+      }
       .week-event-row { column-gap: 7px; row-gap: 8px; }
       .week-forecast-tooltip { left: auto; right: 0; }
       .week-event-values { width: min(100%, 220px); }
