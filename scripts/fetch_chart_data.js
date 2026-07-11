@@ -13,6 +13,7 @@ const FINNHUB_HOST = 'finnhub.io';
 const TREASURY_FIELDS = new Map([
   ['TREASURY:CURVE', 'BC_10YEAR'],
   ['TREASURY:3M', 'BC_3MONTH'],
+  ['TREASURY:2Y', 'BC_2YEAR'],
   ['TREASURY:10Y', 'BC_10YEAR'],
   ['TREASURY:30Y', 'BC_30YEAR']
 ]);

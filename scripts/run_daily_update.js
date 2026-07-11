@@ -260,6 +260,7 @@ function parseArgs(argv) {
     dashboard: DEFAULT_DASHBOARD,
     windowMode: '',
     applyDashboardDataJson: '',
+    applyChartDataJson: '',
     refreshNewsBaseline: false,
     syncChartQuotes: false,
     scheduledPreflight: false,
@@ -283,6 +284,11 @@ function parseArgs(argv) {
     }
     if (arg === '--apply-dashboard-data-json') {
       args.applyDashboardDataJson = path.resolve(process.cwd(), argv[i + 1] || '');
+      i += 1;
+      continue;
+    }
+    if (arg === '--apply-chart-data-json') {
+      args.applyChartDataJson = path.resolve(process.cwd(), argv[i + 1] || '');
       i += 1;
       continue;
     }
@@ -353,7 +359,7 @@ function parseArgs(argv) {
     }
   }
 
-  const contentModeCount = [args.applyDashboardDataJson, args.refreshNewsBaseline, args.syncChartQuotes].filter(Boolean).length;
+  const contentModeCount = [args.applyDashboardDataJson, args.applyChartDataJson, args.refreshNewsBaseline, args.syncChartQuotes].filter(Boolean).length;
   if (args.scheduledPreflight) {
     if (!args.windowMode || contentModeCount) {
       throw new Error('Use --scheduled-preflight with exactly one of --morning or --afternoon.');
@@ -361,10 +367,10 @@ function parseArgs(argv) {
     return args;
   }
   if (!args.windowMode && contentModeCount === 0) {
-    throw new Error('You must pass --morning, --afternoon, --apply-dashboard-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
+    throw new Error('You must pass --morning, --afternoon, --apply-dashboard-data-json, --apply-chart-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
   }
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !(args.scheduled && args.refreshNewsBaseline))) {
-    throw new Error('Use only one update mode: --morning, --afternoon, --apply-dashboard-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
+    throw new Error('Use only one update mode: --morning, --afternoon, --apply-dashboard-data-json, --apply-chart-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
   }
   if (args.scheduled && (!args.refreshNewsBaseline || !args.windowMode)) {
     throw new Error('--scheduled is only valid with --refresh-news-baseline plus --morning or --afternoon.');
@@ -377,6 +383,7 @@ function printHelp() {
   process.stdout.write(`Usage:
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [options]
+  node scripts/run_daily_update.js --apply-chart-data-json PATH [options]
   node scripts/run_daily_update.js --refresh-news-baseline [--scheduled --morning|--afternoon] [options]
   node scripts/run_daily_update.js --sync-chart-quotes [options]
   node scripts/run_daily_update.js --scheduled-preflight (--morning | --afternoon) [options]
@@ -384,6 +391,7 @@ function printHelp() {
 Options:
   --dashboard PATH                     Dashboard HTML to patch (default: daily_financial_news.html)
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
+  --apply-chart-data-json PATH        Safely replace embedded chart history and derive matching Tape prices from JSON
   --refresh-news-baseline             Recompute only story New-pill flags and newsBaseline
   --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
   --scheduled-preflight               Verify the Chicago-time window and duplicate marker without writing files
@@ -776,6 +784,16 @@ function applyDashboardDataJson(args) {
   fs.writeFileSync(args.dashboard, nextHtml);
 }
 
+function applyChartDataJson(args) {
+  const html = fs.readFileSync(args.dashboard, 'utf8');
+  const dashboardData = readJsonBlock(html, 'dashboard-data');
+  const chartData = roundChartPayload(readJson(args.applyChartDataJson));
+  syncDashboardPricesFromChartData(dashboardData, chartData);
+  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
+  fs.writeFileSync(args.dashboard, nextHtml);
+}
+
 function refreshNewsBaseline(args) {
   const html = fs.readFileSync(args.dashboard, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
@@ -811,6 +829,9 @@ function main() {
   if (args.applyDashboardDataJson && !fs.existsSync(args.applyDashboardDataJson)) {
     throw new Error(`dashboard-data JSON file not found: ${args.applyDashboardDataJson}`);
   }
+  if (args.applyChartDataJson && !fs.existsSync(args.applyChartDataJson)) {
+    throw new Error(`chart-data JSON file not found: ${args.applyChartDataJson}`);
+  }
 
   if (args.scheduledPreflight) {
     const windowId = validateScheduledPreflight(args.dashboard, args.windowMode);
@@ -828,6 +849,14 @@ function main() {
 
   if (args.syncChartQuotes) {
     syncChartQuotes(args);
+    if (!args.skipValidate) {
+      runCommand('node', ['scripts/validate_dashboard.js', args.dashboard]);
+    }
+    return;
+  }
+
+  if (args.applyChartDataJson) {
+    applyChartDataJson(args);
     if (!args.skipValidate) {
       runCommand('node', ['scripts/validate_dashboard.js', args.dashboard]);
     }
@@ -919,6 +948,7 @@ module.exports = {
   earningsEditorialRequiredError,
   EARNINGS_EDITORIAL_REQUIRED_EXIT_CODE,
   applyDashboardDataJson,
+  applyChartDataJson,
   applyCryptoQuoteRows,
   applyCryptoStats,
   applyFuturesModule,

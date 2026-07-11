@@ -798,6 +798,48 @@ function testApplyDashboardDataJsonCliMode() {
   assert.equal(parsed.tape.rows[0].asOf, '2026-07-06');
 }
 
+function testApplyChartDataJsonCliMode() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-chart-apply-'));
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const payloadFile = path.join(dir, 'chart-data.json');
+  const shell = [
+    '<!-- ============ DATA START — edit this block to update the dashboard ============ -->',
+    '<script type="application/json" id="dashboard-data">{"editionId":"old","masthead":{"date":"Monday, July 6, 2026"},"footer":{"compiled":"Compiled Monday, July 6, 2026 at 4:00 PM CDT"},"tape":{"rows":[{"ticker":"SPX","group":"Equities","last":"stale","delta":"stale","pct":"stale","dir":"flat","asOf":"old"}]}}<\/script>',
+    '<!-- ============ DATA END ============ -->',
+    '<script type="application/json" id="chart-data">{"schemaVersion":1,"series":[]}</script>',
+    '<div class="page" id="app"><div id="mast-edition">Loading</div><div class="right" id="mast-date">Loading</div><h1 id="hero-headline">Loading</h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>',
+    '<script>(function () {})();</script>'
+  ].join('\n');
+  const chartData = {
+    schemaVersion: 1,
+    quoteRows: { tape: [], crypto: [] },
+    series: [{
+      ticker: 'SPX', section: 'tape', sourceSymbol: 'SPX',
+      bars: [
+        { time: '2026-07-03', open: 6000, high: 6000, low: 6000, close: 6000 },
+        { time: '2026-07-06', open: 6120, high: 6125, low: 6110, close: 6123.45 }
+      ]
+    }]
+  };
+  fs.writeFileSync(dashboardFile, shell);
+  fs.writeFileSync(payloadFile, JSON.stringify(chartData));
+  const result = spawnSync(process.execPath, [
+    path.join(root, 'scripts/run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--apply-chart-data-json', payloadFile,
+    '--skip-validate'
+  ], { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+
+  const updatedHtml = fs.readFileSync(dashboardFile, 'utf8');
+  const dashboard = readJsonBlock(updatedHtml, 'dashboard-data');
+  const embeddedChart = readJsonBlock(updatedHtml, 'chart-data');
+  assert.equal(dashboard.tape.rows[0].last, '6,123.45');
+  assert.equal(dashboard.tape.rows[0].asOf, '2026-07-06');
+  assert.equal(embeddedChart.barEncoding, 'tuple-v1');
+  assert.deepEqual(embeddedChart.series[0].bars.at(-1), ['2026-07-06', 6120, 6125, 6110, 6123.45, null]);
+}
+
 function testDashboardHtmlShellContract() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const countMatches = (pattern) => [...html.matchAll(pattern)].length;
@@ -1691,6 +1733,7 @@ function main() {
   testScheduledNewsBaselineMarkers();
   testRefreshNewsBaselineCliMode();
   testApplyDashboardDataJsonCliMode();
+  testApplyChartDataJsonCliMode();
   testDashboardHtmlShellContract();
   testDashboardValidatorAcceptsFridayBridgeCalendars();
   testCompactChartPayloadUsesFourDecimalTuples();

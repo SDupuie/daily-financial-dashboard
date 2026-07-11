@@ -576,7 +576,7 @@ if (!dashboardMatch) {
       }
     }
 
-    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
+    const requiredTapeTickers = ['SPX', 'NDX', 'DJI', 'RUT', 'VEA', 'VWO', 'VOX', 'VCR', 'VDC', 'VDE', 'VFH', 'VHT', 'VIS', 'VAW', 'VNQ', 'SMH', 'VGT', 'VPU', 'DBC', 'PDBC', 'XAU', 'XAG', 'CL', 'VIX', 'USYC', 'MOVE', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'UUP', 'IEF', 'AGG', 'LQD', 'HYG'];
     const tapeTickerSet = new Set(tapeRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
     for (const ticker of requiredTapeTickers) {
       if (!tapeTickerSet.has(ticker)) {
@@ -619,6 +619,7 @@ if (!dashboardMatch) {
       USYC: 'TREASURY:CURVE',
       MOVE: '^MOVE',
       UST3M: 'TREASURY:3M',
+      UST2Y: 'TREASURY:2Y',
       UST10Y: 'TREASURY:10Y',
       UST30Y: 'TREASURY:30Y',
       UUP: 'UUP',
@@ -860,7 +861,7 @@ if (!dashboardMatch) {
         }
 
         // These sources are price-only or lack usable volume; the UI depends on noVolume for the one-pane chart layout.
-        for (const ticker of ['USYC', 'UST3M', 'UST10Y', 'UST30Y', 'VIX', 'MOVE']) {
+        for (const ticker of ['USYC', 'UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'VIX', 'MOVE']) {
           const item = chartSeriesByTicker.get(ticker);
           if (item && item.noVolume !== true) {
             errors.push(`Embedded Tape chart data for ${ticker} must mark noVolume true for the chart hint/volume-pane contract.`);
