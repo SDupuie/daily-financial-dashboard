@@ -2412,12 +2412,15 @@ function testLocalRefreshIndicatorBehavior() {
     const selectors = [];
     const tooltip = { textContent: '' };
     const announcement = { textContent: '' };
+    const toggle = {
+      attributes: {},
+      setAttribute(name, value) { this.attributes[name] = value; }
+    };
     const indicator = {
       dataset: {},
-      attributes: {},
       set outerHTML(_value) { throw new Error('The focused indicator must not be replaced.'); },
-      setAttribute(name, value) { this.attributes[name] = value; },
       querySelector(selector) {
+        if (selector === '[data-local-refresh-toggle]') return toggle;
         if (selector === '[data-local-refresh-tooltip]') return tooltip;
         if (selector === '[data-local-refresh-announcement]') return announcement;
         return null;
@@ -2442,7 +2445,7 @@ function testLocalRefreshIndicatorBehavior() {
       markup: () => localRefreshIndicatorHtml(),
       snapshot: () => ({
         state: indicator.dataset.localRefreshState,
-        label: indicator.attributes['aria-label'],
+        label: toggle.attributes['aria-label'],
         tooltip: tooltip.textContent,
         announcement: announcement.textContent
       }),
@@ -2469,10 +2472,10 @@ function testLocalRefreshIndicatorBehavior() {
       announcement: message
     });
     assert.match(markup, new RegExp(`data-local-refresh-state="${state}"`));
-    assert.match(markup, /role="img"/);
-    assert.match(markup, /tabindex="0"/);
+    assert.match(markup, /<button class="local-refresh-toggle" type="button"/);
+    assert.match(markup, /aria-describedby="local-refresh-tooltip" aria-expanded="false" data-local-refresh-toggle/);
     assert.match(markup, /class="local-refresh-indicator-dot" aria-hidden="true"/);
-    assert.match(markup, /class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip"/);
+    assert.match(markup, /class="local-refresh-tooltip" id="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip"/);
     assert.match(markup, /data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"/);
     assert.match(markup, new RegExp(`aria-label="${message.replace('\n', '\\n')}"`));
     assert.doesNotMatch(markup, /\btitle=/);
@@ -2481,11 +2484,77 @@ function testLocalRefreshIndicatorBehavior() {
   runtime.setLocalRefreshIndicator('error', '<Local & "safe">');
   assert.equal(runtime.snapshot().label, '<Local & "safe">');
   assert.match(runtime.markup(), /aria-label="&lt;Local &amp; &quot;safe&quot;&gt;"/);
-  assert.match(runtime.markup(), /<span class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">&lt;Local &amp; &quot;safe&quot;&gt;<\/span>/);
+  assert.match(runtime.markup(), /<span class="local-refresh-tooltip" id="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">&lt;Local &amp; &quot;safe&quot;&gt;<\/span>/);
   assert.deepEqual(runtime.selectors(), Array.from({ length: states.length + 1 }, () => '[data-local-refresh-indicator]'));
 
   runtime.hideIndicator();
   assert.doesNotThrow(() => runtime.setLocalRefreshIndicator('idle', 'Local helper reached; no newer prices'));
+}
+
+function testTouchTooltipControls() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'touch-tooltip-controls');
+  const makeButton = () => ({
+    attributes: {},
+    blurred: false,
+    setAttribute(name, value) { this.attributes[name] = value; },
+    blur() { this.blurred = true; }
+  });
+  const makeWrap = (buttonSelector, button) => {
+    const names = new Set();
+    return {
+      classList: {
+        contains: (name) => names.has(name),
+        remove: (name) => names.delete(name),
+        toggle: (name, enabled) => {
+          if (enabled) names.add(name);
+          else names.delete(name);
+        }
+      },
+      querySelector: (selector) => selector === buttonSelector ? button : null
+    };
+  };
+  const localButton = makeButton();
+  const forecastButton = makeButton();
+  const localWrap = makeWrap('[data-local-refresh-toggle]', localButton);
+  const forecastWrap = makeWrap('[data-week-forecast-button]', forecastButton);
+  const document = {
+    querySelectorAll: (selector) => {
+      if (selector === '.local-refresh-indicator.is-open') return [localWrap];
+      if (selector === '.week-forecast-qualifier.is-open') return [forecastWrap];
+      return [];
+    }
+  };
+  const runtime = Function('document', `${source}\nreturn { routeLocalRefreshTooltipClick, routeWeekForecastTooltipClick, closeTouchTooltipsOnEscape };`)(document);
+  const eventFor = (wrapSelector, wrap, buttonSelector, button) => ({
+    target: {
+      closest: (selector) => {
+        if (selector === wrapSelector) return wrap;
+        if (selector === buttonSelector) return button;
+        return null;
+      }
+    }
+  });
+  const localEvent = eventFor('[data-local-refresh-indicator]', localWrap, '[data-local-refresh-toggle]', localButton);
+  const forecastEvent = eventFor('[data-week-forecast-info]', forecastWrap, '[data-week-forecast-button]', forecastButton);
+
+  assert.equal(runtime.routeLocalRefreshTooltipClick(localEvent), true);
+  assert.equal(localWrap.classList.contains('is-open'), true);
+  assert.equal(localButton.attributes['aria-expanded'], 'true');
+  assert.equal(runtime.routeLocalRefreshTooltipClick(localEvent), true);
+  assert.equal(localWrap.classList.contains('is-open'), false);
+  assert.equal(localButton.attributes['aria-expanded'], 'false');
+  assert.equal(localButton.blurred, true);
+
+  assert.equal(runtime.routeWeekForecastTooltipClick(forecastEvent), true);
+  assert.equal(forecastWrap.classList.contains('is-open'), true);
+  assert.equal(forecastButton.attributes['aria-expanded'], 'true');
+  runtime.closeTouchTooltipsOnEscape({ key: 'Escape', target: { closest: () => null } });
+  assert.equal(forecastWrap.classList.contains('is-open'), false);
+  assert.equal(forecastButton.attributes['aria-expanded'], 'false');
+
+  assert.match(html, /\.local-refresh-indicator\.is-open \.local-refresh-tooltip/);
+  assert.match(html, /\.week-forecast-qualifier\.is-open \.week-forecast-tooltip/);
 }
 
 function testEmbeddedPayloadLoadErrorsAreDistinct() {
@@ -3195,6 +3264,7 @@ async function main() {
     testDashboardValidatorAllowsPartialNewsCoverageWithoutRelaxingStoryQuality,
     testEditionStampChangesIdentity,
     testLocalRefreshIndicatorBehavior,
+    testTouchTooltipControls,
     testEmbeddedPayloadLoadErrorsAreDistinct,
     testLocalRefreshIndicatorLifecycle,
     testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,

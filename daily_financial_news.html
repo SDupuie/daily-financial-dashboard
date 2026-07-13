@@ -422,14 +422,27 @@
     }
     .local-refresh-indicator {
       align-items: center;
-      cursor: help;
       display: inline-flex;
       justify-content: center;
       min-height: 32px;
       min-width: 32px;
       position: relative;
     }
-    .local-refresh-indicator:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    .local-refresh-toggle {
+      appearance: none;
+      align-items: center;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      height: 32px;
+      justify-content: center;
+      padding: 0;
+      width: 32px;
+    }
+    .local-refresh-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
     .local-refresh-indicator-dot {
       align-items: center;
       background: var(--blue);
@@ -492,7 +505,8 @@
       white-space: pre-line;
     }
     .local-refresh-indicator:hover .local-refresh-tooltip,
-    .local-refresh-indicator:focus-visible .local-refresh-tooltip {
+    .local-refresh-indicator:focus-within .local-refresh-tooltip,
+    .local-refresh-indicator.is-open .local-refresh-tooltip {
       opacity: 1;
       visibility: visible;
     }
@@ -2069,7 +2083,8 @@
       z-index: 3;
     }
     .week-forecast-qualifier:hover .week-forecast-tooltip,
-    .week-forecast-qualifier:focus-within .week-forecast-tooltip { opacity: 1; visibility: visible; }
+    .week-forecast-qualifier:focus-within .week-forecast-tooltip,
+    .week-forecast-qualifier.is-open .week-forecast-tooltip { opacity: 1; visibility: visible; }
     .week-quiet,
     .week-closure {
       color: var(--muted);
@@ -24019,7 +24034,7 @@
       /* TEST BLOCK START: local-refresh-indicator */
       function localRefreshIndicatorHtml() {
         const { state, message } = localRefreshIndicator;
-        return `<span class="local-refresh-indicator" data-local-refresh-indicator data-local-refresh-state="${esc(state)}" role="img" aria-label="${esc(message)}" tabindex="0"><span class="local-refresh-indicator-dot" aria-hidden="true"></span><span class="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">${esc(message)}</span><span class="visually-hidden" data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span></span>`;
+        return `<span class="local-refresh-indicator" data-local-refresh-indicator data-local-refresh-state="${esc(state)}"><button class="local-refresh-toggle" type="button" aria-label="${esc(message)}" aria-describedby="local-refresh-tooltip" aria-expanded="false" data-local-refresh-toggle><span class="local-refresh-indicator-dot" aria-hidden="true"></span></button><span class="local-refresh-tooltip" id="local-refresh-tooltip" data-local-refresh-tooltip role="tooltip">${esc(message)}</span><span class="visually-hidden" data-local-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span></span>`;
       }
 
       function setLocalRefreshIndicator(state, message) {
@@ -24028,7 +24043,7 @@
         const indicator = document.querySelector('[data-local-refresh-indicator]');
         if (!indicator) return;
         indicator.dataset.localRefreshState = state;
-        indicator.setAttribute('aria-label', message);
+        indicator.querySelector('[data-local-refresh-toggle]')?.setAttribute('aria-label', message);
         const tooltip = indicator.querySelector('[data-local-refresh-tooltip]');
         if (tooltip) tooltip.textContent = message;
         const announcement = indicator.querySelector('[data-local-refresh-announcement]');
@@ -25281,7 +25296,7 @@
       /* TEST BLOCK START: news-coverage-notice */
       function newsCoverageNotice(coverage, count, target, label) {
         // Coverage is embedded audit metadata, never reader-facing copy.
-        // Do not surface it inline, in the footer, or through a tooltip.
+        // Keep it out of section copy and the footer.
         return '';
       }
       /* TEST BLOCK END: news-coverage-notice */
@@ -26269,7 +26284,7 @@
         if (!event.forecast || !['model', 'nowcast'].includes(event.forecastType)) return '';
         const pill = event.forecastType === 'model' ? 'Model' : 'Nowcast';
         const description = `Forecast source: ${event.forecastSource || 'FXMacroData'}. ${event.forecastType === 'model' ? 'Provider model estimate' : 'Central-bank nowcast'}, not market consensus.`;
-        return `<span class="week-forecast-qualifier"><button class="week-forecast-pill" type="button" aria-label="${esc(`${pill}. ${description}`)}">${pill}</button><span class="week-forecast-tooltip" role="tooltip">${esc(description)}</span></span>`;
+        return `<span class="week-forecast-qualifier" data-week-forecast-info><button class="week-forecast-pill" type="button" aria-label="${esc(`${pill}. ${description}`)}" aria-expanded="false" data-week-forecast-button>${pill}</button><span class="week-forecast-tooltip" role="tooltip">${esc(description)}</span></span>`;
       }
 
       function weekAheadEventKindHtml(event, label = null) {
@@ -26521,6 +26536,63 @@
         `;
       }
 
+      /* TEST BLOCK START: touch-tooltip-controls */
+      function closeLocalRefreshTooltip(except = null) {
+        document.querySelectorAll('.local-refresh-indicator.is-open').forEach((wrap) => {
+          if (wrap === except) return;
+          wrap.classList.remove('is-open');
+          wrap.querySelector('[data-local-refresh-toggle]')?.setAttribute('aria-expanded', 'false');
+        });
+      }
+
+      function routeLocalRefreshTooltipClick(event) {
+        const wrap = event.target.closest?.('[data-local-refresh-indicator]');
+        const button = event.target.closest?.('[data-local-refresh-toggle]');
+        if (!wrap) {
+          closeLocalRefreshTooltip();
+          return false;
+        }
+        if (!button) return false;
+        const shouldOpen = !wrap.classList.contains('is-open');
+        closeLocalRefreshTooltip(wrap);
+        wrap.classList.toggle('is-open', shouldOpen);
+        button.setAttribute('aria-expanded', String(shouldOpen));
+        if (!shouldOpen) button.blur?.();
+        return true;
+      }
+
+      function closeWeekForecastTooltips(except = null) {
+        document.querySelectorAll('.week-forecast-qualifier.is-open').forEach((wrap) => {
+          if (wrap === except) return;
+          wrap.classList.remove('is-open');
+          wrap.querySelector('[data-week-forecast-button]')?.setAttribute('aria-expanded', 'false');
+        });
+      }
+
+      function routeWeekForecastTooltipClick(event) {
+        const wrap = event.target.closest?.('[data-week-forecast-info]');
+        const button = event.target.closest?.('[data-week-forecast-button]');
+        if (!wrap) {
+          closeWeekForecastTooltips();
+          return false;
+        }
+        if (!button) return false;
+        const shouldOpen = !wrap.classList.contains('is-open');
+        closeWeekForecastTooltips(wrap);
+        wrap.classList.toggle('is-open', shouldOpen);
+        button.setAttribute('aria-expanded', String(shouldOpen));
+        if (!shouldOpen) button.blur?.();
+        return true;
+      }
+
+      function closeTouchTooltipsOnEscape(event) {
+        if (event.key !== 'Escape') return;
+        closeLocalRefreshTooltip();
+        closeWeekForecastTooltips();
+        event.target.closest?.('[data-local-refresh-toggle], [data-week-forecast-button]')?.blur?.();
+      }
+      /* TEST BLOCK END: touch-tooltip-controls */
+
       function closeDividendTooltips(except = null) {
         document.querySelectorAll('.div-info.is-open').forEach((wrap) => {
           if (wrap === except) return;
@@ -26603,6 +26675,7 @@
       }
 
       function routeDashboardKeydown(event) {
+        closeTouchTooltipsOnEscape(event);
         closeDividendTooltipsOnEscape(event);
         closeChartInfoTooltipsOnEscape(event);
         if (event.key === 'Escape') {
@@ -26614,6 +26687,8 @@
 
       function routeDashboardClick(event) {
         closeAppearanceControl(event);
+        if (routeLocalRefreshTooltipClick(event)) return;
+        if (routeWeekForecastTooltipClick(event)) return;
         routeDividendTooltipClick(event);
         if (routeChartInfoClick(event)) return;
         const earningsDayButton = event.target.closest?.('[data-earnings-day]');
