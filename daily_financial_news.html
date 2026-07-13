@@ -25280,8 +25280,10 @@
 
       /* TEST BLOCK START: news-coverage-notice */
       function newsCoverageNotice(coverage, count, target, label) {
-        if (coverage?.status !== 'partial') return '';
-        return `<div class="empty-row">Limited ${esc(label)} coverage: showing ${count} of ${target} qualifying fresh items. Retrying on the next update.</div>`;
+        // Coverage is embedded audit metadata, not reader-facing section copy.
+        // It may be surfaced only through an explicitly requested footer or
+        // information tooltip, never as an inline warning above news cards.
+        return '';
       }
       /* TEST BLOCK END: news-coverage-notice */
 
@@ -25539,8 +25541,7 @@
             </article>
           `;
         }).join('');
-        const coverageHtml = newsCoverageNotice(data.storiesCoverage, data.stories.length, 9, 'News Flow');
-        return section('News Flow', 'What’s Moving Today', '', `${coverageHtml}<div class="story-grid">${cards}</div>`, 'section-news');
+        return section('News Flow', 'What’s Moving Today', '', `<div class="story-grid">${cards}</div>`, 'section-news');
       }
 
       function renderCrypto(data) {
@@ -25681,7 +25682,6 @@
             </article>
           `;
         }).join('');
-        const notesCoverageHtml = newsCoverageNotice(c.notesCoverage, c.notes.length, 4, 'Crypto news');
         return section('Digital Assets', 'Crypto', '', `
           <div class="crypto-grid">
             <div class="crypto-stats">
@@ -25695,7 +25695,6 @@
               ${statsHtml}
             </div>
             <div class="crypto-notes">
-              ${notesCoverageHtml}
               ${notes}
             </div>
           </div>

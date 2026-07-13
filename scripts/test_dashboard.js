@@ -1967,16 +1967,14 @@ function testDashboardEmbeddedRuntimeParses() {
   assert.doesNotMatch(runtime, /story\.tag\s*\|\|/, 'The Futures renderer must require canonical story tags.');
 }
 
-function testNewsCoverageNoticeRendering() {
+function testNewsCoverageMetadataDoesNotRenderInline() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const source = extractDashboardRuntimeTestBlock(html, 'news-coverage-notice');
   const newsCoverageNotice = Function('esc', `${source}\nreturn newsCoverageNotice;`)((value) => String(value));
 
   assert.equal(newsCoverageNotice({ status: 'complete' }, 9, 9, 'News Flow'), '');
-  assert.match(
-    newsCoverageNotice({ status: 'partial' }, 5, 9, 'News Flow'),
-    /Limited News Flow coverage: showing 5 of 9 qualifying fresh items\. Retrying on the next update\./
-  );
+  assert.equal(newsCoverageNotice({ status: 'partial' }, 5, 9, 'News Flow'), '');
+  assert.doesNotMatch(source, /Limited .*coverage: showing/);
 }
 
 function testExpandedEarningsTimingGroupsPreserveMarketCapOrder() {
@@ -3177,7 +3175,7 @@ async function main() {
     testApplyChartDataJsonCliMode,
     testChartFetcherTickerFilterAndMergeChartDataCliMode,
     testDashboardEmbeddedRuntimeParses,
-    testNewsCoverageNoticeRendering,
+  testNewsCoverageMetadataDoesNotRenderInline,
     testExpandedEarningsTimingGroupsPreserveMarketCapOrder,
     testDashboardValidatorRejectsRemoteRuntimeEndpoint,
     testDashboardValidatorAcceptsFridayBridgeCalendars,
