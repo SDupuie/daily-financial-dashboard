@@ -5,10 +5,12 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { isIsoDate } = require('./calendar_contract');
+const { atomicWriteJson } = require('./staging_writer');
 
 const REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_PORTFOLIO_OUTPUT = path.resolve(process.cwd(), 'generated', 'asset_allocation_portfolio.json');
 const DEFAULT_SUMMARY_OUTPUT = path.resolve(process.cwd(), 'generated', 'asset_allocation_summary.json');
+const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
 const DEFAULT_REFRESH_URL = 'http://127.0.0.1:2200/api/asset-market-data';
 const DEFAULT_EXPORT_PATH = '/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json';
 
@@ -29,6 +31,7 @@ function parseArgs(argv) {
   const args = {
     portfolioOutput: DEFAULT_PORTFOLIO_OUTPUT,
     summaryOutput: DEFAULT_SUMMARY_OUTPUT,
+    input: DEFAULT_INPUT,
     refreshUrl: DEFAULT_REFRESH_URL,
     exportPath: DEFAULT_EXPORT_PATH,
     timeoutMs: REQUEST_TIMEOUT_MS,
@@ -42,6 +45,12 @@ function parseArgs(argv) {
     if (arg === '--portfolio-output') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--portfolio-output requires a path.');
       args.portfolioOutput = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--input') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--input requires a path.');
+      args.input = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
@@ -99,6 +108,7 @@ function printHelp() {
   process.stdout.write(`Usage: node scripts/fetch_asset_allocation.js [options]
 
 Options:
+  --input PATH             Canonical dashboard used for row-level carry-forward
   --portfolio-output PATH  Portfolio rows JSON output (default: generated/asset_allocation_portfolio.json)
   --summary-output PATH    Sanitized summary JSON output (default: generated/asset_allocation_summary.json)
   --refresh-url URL        Local Asset Allocation refresh endpoint
@@ -366,16 +376,26 @@ async function fetchHolding(holding, args, period1, period2, monthStart, now, cu
   return parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
 }
 
-async function fetchPortfolioRows(args) {
-  const now = new Date();
+function readCanonicalPortfolio(input) {
+  try {
+    const html = fs.readFileSync(input, 'utf8');
+    const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
+    return match ? JSON.parse(match[1])?.assetAllocationPortfolio || null : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function fetchPortfolioRows(args, dependencies = {}) {
+  const now = dependencies.now instanceof Date ? dependencies.now : new Date();
   const monthStart = utcDate(now.getUTCFullYear(), now.getUTCMonth(), 1);
   const currentMonthEnd = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 1, 0);
   const lookaheadEndExclusive = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 2, 1);
   const lookbackStart = utcDate(now.getUTCFullYear(), now.getUTCMonth() - 1, 20);
   const period1 = Math.floor(lookbackStart.getTime() / 1000);
   const period2 = Math.floor(lookaheadEndExclusive.getTime() / 1000);
-  const rows = await Promise.all(
-    HOLDINGS.map((holding) => fetchHolding(
+  const settled = await Promise.allSettled(
+    HOLDINGS.map((holding) => (dependencies.fetchHolding || fetchHolding)(
       holding,
       args,
       period1,
@@ -386,11 +406,65 @@ async function fetchPortfolioRows(args) {
       lookaheadEndExclusive
     ))
   );
+  const currentMonth = monthKey(now);
+  const canonical = readCanonicalPortfolio(args.input);
+  const priorByTicker = new Map(
+    (canonical?.month === currentMonth && Array.isArray(canonical?.rows) ? canonical.rows : [])
+      .map((row) => [row?.ticker, row])
+  );
+  const failures = [];
+  const rows = settled.map((result, index) => {
+    if (result.status === 'fulfilled') return result.value;
+    const holding = HOLDINGS[index];
+    failures.push({ ticker: holding.symbol, message: result.reason?.message || 'source unavailable' });
+    const prior = priorByTicker.get(holding.symbol);
+    if (prior) {
+      return {
+        ...prior,
+        availability: {
+          status: 'carried_forward',
+          reason: 'source_refresh_failed',
+          checkedAt: now.toISOString()
+        }
+      };
+    }
+    return {
+      ticker: holding.symbol,
+      sleeve: holding.sleeve,
+      swatch: holding.swatch,
+      price: 'Unavailable',
+      monthDivPerShare: 'Unavailable',
+      dailyPriceChange: 'Unavailable',
+      dailyTR: 'Unavailable',
+      mtdPriceChange: 'Unavailable',
+      mtdTR: 'Unavailable',
+      dividends: [],
+      upcomingCurrentMonthDividends: 'Unavailable',
+      upcomingCurrentMonthDividendsValue: 0,
+      upcomingCurrentMonthDividendEvents: [],
+      futureMonthDividends: 'Unavailable',
+      futureMonthDividendsValue: 0,
+      futureMonthDividendEvents: [],
+      availability: {
+        status: 'unavailable',
+        reason: 'source_refresh_failed',
+        checkedAt: now.toISOString()
+      }
+    };
+  });
   return {
     compiledAt: now.toISOString(),
     source: 'Yahoo Finance Chart API',
-    month: monthKey(now),
-    rows
+    month: currentMonth,
+    rows,
+    ...(failures.length ? {
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: now.toISOString(),
+        failures
+      }
+    } : {})
   };
 }
 
@@ -415,6 +489,80 @@ function normalizedSummary(raw, stale, refreshError) {
   };
 }
 
+function buildAssetAllocationFallback(canonicalPortfolio, { month, asOf, checkedAt = new Date() } = {}) {
+  const timestamp = new Date(checkedAt).toISOString();
+  const sameMonth = canonicalPortfolio?.month === month
+    && Array.isArray(canonicalPortfolio?.rows)
+    && canonicalPortfolio.rows.length === HOLDINGS.length;
+  if (sameMonth) {
+    return {
+      ...structuredClone(canonicalPortfolio),
+      portfolioMtdReturnStale: true,
+      availability: {
+        status: 'carried_forward',
+        reason: 'source_refresh_failed',
+        checkedAt: timestamp
+      }
+    };
+  }
+  return {
+    ...structuredClone(canonicalPortfolio || {}),
+    compiledAt: timestamp,
+    source: 'Yahoo Finance Chart API',
+    month,
+    rows: [],
+    portfolioMtdReturnAsOf: asOf,
+    portfolioMtdReturnValue: null,
+    portfolioMtdReturnStatus: 'unavailable',
+    portfolioMtdReturnStale: false,
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    }
+  };
+}
+
+function buildAssetAllocationSummaryFallback(canonicalPortfolio, { asOf } = {}) {
+  const priorAsOf = String(canonicalPortfolio?.portfolioMtdReturnAsOf || '');
+  const sameMonth = /^\d{4}-\d{2}-\d{2}$/.test(priorAsOf) && priorAsOf.slice(0, 7) === String(asOf || '').slice(0, 7);
+  const priorValue = Number(canonicalPortfolio?.portfolioMtdReturnValue);
+  const available = sameMonth
+    && canonicalPortfolio?.portfolioMtdReturnStatus === 'available'
+    && Number.isFinite(priorValue);
+  return {
+    asOf: available ? priorAsOf : asOf,
+    portfolioMtdReturnValue: available ? priorValue : null,
+    status: available ? 'available' : 'unavailable',
+    stale: available,
+    refreshError: 'Source refresh failed; retrying on the next run.'
+  };
+}
+
+function validateAssetAllocationPortfolioPayload(payload) {
+  const errors = [];
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Asset Allocation portfolio staging payload must be an object.'];
+  const unavailable = payload.availability?.status === 'unavailable';
+  if (!Array.isArray(payload.rows)) return ['Asset Allocation portfolio staging rows must be an array.'];
+  if (!unavailable) {
+    for (const holding of HOLDINGS) {
+      if (!payload.rows.some((row) => row?.ticker === holding.symbol)) errors.push(`Asset Allocation portfolio staging is missing ${holding.symbol}.`);
+    }
+  } else if (payload.rows.length) {
+    errors.push('Unavailable Asset Allocation portfolio staging must contain no rows.');
+  }
+  return errors;
+}
+
+function validateAssetAllocationSummaryPayload(payload) {
+  try {
+    normalizedSummary(payload, Boolean(payload?.stale), payload?.refreshError || '');
+    return [];
+  } catch (error) {
+    return [error.message];
+  }
+}
+
 async function fetchPortfolioSummary(args) {
   let stale = false;
   let refreshError = '';
@@ -437,8 +585,7 @@ async function fetchPortfolioSummary(args) {
 }
 
 function writeJson(file, payload) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+  atomicWriteJson(file, payload);
 }
 
 function compactPortfolioText(portfolio) {
@@ -467,7 +614,17 @@ async function main() {
   }
 
   if (!args.skipSummary) {
-    summary = await fetchPortfolioSummary(args);
+    try {
+      summary = await fetchPortfolioSummary(args);
+    } catch (error) {
+      summary = {
+        asOf: dateText(new Date()),
+        portfolioMtdReturnValue: null,
+        status: 'unavailable',
+        stale: false,
+        refreshError: error.message
+      };
+    }
     writeJson(args.summaryOutput, summary);
     messages.push(args.compact ? compactSummaryText(summary) : `Wrote ${args.summaryOutput}`);
   }
@@ -483,5 +640,10 @@ if (require.main === module) {
 }
 
 module.exports = {
-  normalizedSummary
+  buildAssetAllocationFallback,
+  buildAssetAllocationSummaryFallback,
+  fetchPortfolioRows,
+  normalizedSummary,
+  validateAssetAllocationPortfolioPayload,
+  validateAssetAllocationSummaryPayload
 };

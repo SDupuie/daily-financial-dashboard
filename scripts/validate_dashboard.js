@@ -8,7 +8,17 @@ const { validateWeekAheadPayload } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { superlativeClaims, validateReviewManifest } = require('./editorial_review_contract');
 const { cryptoQuoteRowFromSeries, quoteRowFromSeries } = require('./fetch_chart_data');
-const { canonicalStoryUrl, dashboardNewsItems, storyIdentity } = require('./news_contract');
+const {
+  NEWS_COVERAGE_POLICIES,
+  allowedNewsDates,
+  canonicalStoryUrl,
+  dashboardNewsItems,
+  futuresStoryPublicationWindow,
+  sharedFuturesReferenceDate,
+  sharedFuturesSessionDate,
+  storyIdentity,
+  validateNewsCoverageState
+} = require('./news_contract');
 
 const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
@@ -588,8 +598,6 @@ const maxFuturesStoryTagLength = 24;
 
 const errors = [];
 const warnings = [];
-const MONDAY_MORNING_NEWS_START_MINUTES = 6 * 60 + 45;
-const MONDAY_MORNING_NEWS_END_MINUTES = 7 * 60 + 30;
 
 function escRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -677,109 +685,38 @@ function chicagoClockMinutes(epochSeconds) {
   return (hour % 24) * 60 + minute;
 }
 
-function allowedNewsDates(now) {
-  const current = chicagoDateParts(now);
-  const allowed = new Set([
-    current.isoDate,
-    chicagoIsoDate(new Date(now.getTime() - 24 * 60 * 60 * 1000))
-  ]);
-  // Article-age freshness is identical for scheduled and manual editions; the
-  // Monday-morning allowance reflects the weekend news cycle, not scheduler state.
-  if (
-    current.weekday === 'Mon' &&
-    current.clockMinutes !== null &&
-    current.clockMinutes >= MONDAY_MORNING_NEWS_START_MINUTES &&
-    current.clockMinutes <= MONDAY_MORNING_NEWS_END_MINUTES
-  ) {
-    allowed.add(chicagoIsoDate(new Date(now.getTime() - 48 * 60 * 60 * 1000)));
-  }
-  return allowed;
-}
-
 function isOffsetBearingIsoDateTime(value) {
   return isIsoDateTime(value);
 }
 
-/* TEST BLOCK START: futures-story-window */
-function zonedDateParts(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  const part = (type) => Number(parts.find((item) => item.type === type)?.value || 0);
-  return {
-    year: part('year'),
-    month: part('month'),
-    day: part('day'),
-    hour: part('hour') % 24,
-    minute: part('minute'),
-    second: part('second')
-  };
-}
-
-function zonedDateTime({ year, month, day, hour, minute }, timeZone) {
-  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
-  const offsetParts = zonedDateParts(new Date(utcGuess), timeZone);
-  const observedAsUtc = Date.UTC(
-    offsetParts.year,
-    offsetParts.month - 1,
-    offsetParts.day,
-    offsetParts.hour,
-    offsetParts.minute,
-    offsetParts.second
-  );
-  return new Date(utcGuess - (observedAsUtc - utcGuess));
-}
-
-function sharedFuturesReferenceDate(futures) {
-  const dates = (Array.isArray(futures) ? futures : [])
-    .map((future) => String(future?.raw?.referenceDate || '').trim());
-  if (!dates.length || dates.some((date) => !isIsoDate(date))) return '';
-  return new Set(dates).size === 1 ? dates[0] : '';
-}
-
-function sharedFuturesSessionDate(futures) {
-  const dates = (Array.isArray(futures) ? futures : [])
-    .map((future) => String(future?.raw?.sessionDate || '').trim());
-  if (!dates.length || dates.some((date) => !isIsoDate(date))) return '';
-  return new Set(dates).size === 1 ? dates[0] : '';
-}
-
-function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
-  const runAt = isIsoDateTime(editionId) ? new Date(editionId) : now;
-  const sessionDate = sharedFuturesSessionDate(futures);
-  const [year, month, day] = sessionDate.split('-').map(Number);
-  const eastern = sessionDate
-    ? { year, month, day }
-    : zonedDateParts(runAt, 'America/New_York');
-  if (sectionTitle === 'Pre-Market Futures') {
-    const referenceDate = sharedFuturesReferenceDate(futures);
-    if (!referenceDate) return null;
-    const [year, month, day] = referenceDate.split('-').map(Number);
-    return {
-      start: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
-      end: runAt,
-      description: 'the fetched prior U.S. regular-session close and the dashboard run time'
-    };
+function validateSectionAvailability(errors, availability, label, allowedStatuses) {
+  if (availability === undefined) return '';
+  if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
+    errors.push(`${label}.availability must be an object.`);
+    return '';
   }
-  if (sectionTitle === 'Session Futures') {
-    const start = zonedDateTime({ ...eastern, hour: 9, minute: 30 }, 'America/New_York');
-    const marketClose = zonedDateTime({ ...eastern, hour: 16, minute: 0 }, 'America/New_York');
-    return {
-      start,
-      end: new Date(Math.min(runAt.getTime(), marketClose.getTime())),
-      description: 'the current U.S. regular-session open and the earlier of the regular-session close or dashboard run time'
-    };
+  if (!allowedStatuses.includes(availability.status)) {
+    errors.push(`${label}.availability.status must be ${allowedStatuses.join(' or ')}.`);
   }
-  return null;
+  if (availability.reason !== 'source_refresh_failed') {
+    errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+  }
+  if (!isOffsetBearingIsoDateTime(availability.checkedAt)) {
+    errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+  }
+  if (availability.failures !== undefined) {
+    if (!Array.isArray(availability.failures) || !availability.failures.length) {
+      errors.push(`${label}.availability.failures must be a non-empty array when present.`);
+    } else {
+      availability.failures.forEach((failure, index) => {
+        if (!failure || typeof failure !== 'object' || Array.isArray(failure) || typeof failure.message !== 'string' || !failure.message.trim()) {
+          errors.push(`${label}.availability.failures[${index}] must be an object with a message.`);
+        }
+      });
+    }
+  }
+  return availability.status;
 }
-/* TEST BLOCK END: futures-story-window */
 
 function numericPercent(value) {
   const match = String(value ?? '').trim().match(/^([+-]?\d+(?:\.\d+)?)%$/);
@@ -900,15 +837,8 @@ if (!dashboardMatch) {
 
   if (data) {
     const now = getNow();
-    for (const message of validateWeekAheadPayload(data.weekAhead, { now })) {
+    for (const message of validateWeekAheadPayload(data.weekAhead, { now, requireOutcomeDisposition: requireEditorialReview })) {
       errors.push(`weekAhead: ${message}`);
-    }
-    if (requireEditorialReview) {
-      for (const [dayIndex, day] of (data.weekAhead?.days || []).entries()) {
-        if (day?.lifecycle === 'close_available' && (!day.outcome?.title?.trim() || !day.outcome?.body?.trim() || day.outcome?.source !== 'editorial')) {
-          errors.push(`weekAhead.days[${dayIndex}].outcome requires editorial title and body text before publication.`);
-        }
-      }
     }
     if (data.editorialReview) {
       let receiptChartData = null;
@@ -930,6 +860,10 @@ if (!dashboardMatch) {
     // README Data Contracts split chartable crypto tickers from crypto-only section stats.
     const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
     const cryptoStatRows = data.crypto?.stats ?? [];
+    const cryptoAvailability = validateSectionAvailability(errors, data.crypto?.availability, 'crypto', ['carried_forward', 'partial', 'unavailable']);
+    if (cryptoAvailability === 'unavailable' && cryptoStatRows.length) {
+      errors.push('Unavailable crypto.stats must be empty.');
+    }
     const seenTapeTickers = new Set();
     for (const [index, rowRaw] of tapeRows.entries()) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
@@ -1087,6 +1021,7 @@ if (!dashboardMatch) {
       }
     }
 
+    const tapeAvailability = validateSectionAvailability(errors, data.tape?.availability, 'tape', ['carried_forward', 'partial']);
     if (!chartDataMatch) {
       errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
     } else {
@@ -1098,6 +1033,10 @@ if (!dashboardMatch) {
       }
 
       if (chartData) {
+        const chartAvailability = validateSectionAvailability(errors, chartData.availability, 'chart-data', ['carried_forward', 'partial']);
+        if (chartAvailability !== tapeAvailability || JSON.stringify(chartData.availability || null) !== JSON.stringify(data.tape?.availability || null)) {
+          errors.push('tape.availability must exactly match embedded chart-data.availability.');
+        }
         if (chartData.barEncoding !== 'tuple-v1') {
           errors.push('chart-data.barEncoding must be tuple-v1.');
         }
@@ -1228,6 +1167,7 @@ if (!dashboardMatch) {
     requireString(futuresModule.sectionTitle, 'futuresModule.sectionTitle');
     const futuresSectionLabel = String(futuresModule.sectionLabel || '').trim();
     const futuresSectionTitle = String(futuresModule.sectionTitle || '').trim();
+    const futuresAvailability = validateSectionAvailability(errors, futuresModule.availability, 'futuresModule', ['partial', 'unavailable']);
     const knownFuturesWindow = (
       (futuresSectionLabel === 'Before The Open' && futuresSectionTitle === 'Pre-Market Futures')
       || (futuresSectionLabel === 'After The Bell' && futuresSectionTitle === 'Session Futures')
@@ -1243,7 +1183,9 @@ if (!dashboardMatch) {
 
     // Runtime does not fetch sidecar files; futures-module rows must be embedded and chart-ready.
     const futures = Array.isArray(futuresModule.futures) ? futuresModule.futures : [];
-    if (futures.length !== 4) {
+    if (futuresAvailability === 'unavailable' && futures.length) {
+      errors.push('Unavailable futuresModule.futures must contain no rows.');
+    } else if (futuresAvailability !== 'unavailable' && futures.length !== 4) {
       errors.push('futuresModule.futures must contain exactly four index-futures rows.');
     }
     const tapeSessionDate = futures.find((row) => isIsoDate(row?.raw?.sessionDate))?.raw?.sessionDate;
@@ -1261,6 +1203,11 @@ if (!dashboardMatch) {
       requireString(future.label, `futuresModule.futures[${index}].label`);
       requireString(future.value, `futuresModule.futures[${index}].value`);
       requireString(future.body, `futuresModule.futures[${index}].body`);
+      if (future.availability?.status === 'unavailable') {
+        if (future.value !== 'Unavailable') errors.push(`futuresModule.futures[${index}].value must be Unavailable when the row is unavailable.`);
+        validateSectionAvailability(errors, future.availability, `futuresModule.futures[${index}]`, ['unavailable']);
+        continue;
+      }
       let firstSeriesPrice = null;
       let lastSeriesPrice = null;
       let lastSeriesTime = null;
@@ -1354,9 +1301,10 @@ if (!dashboardMatch) {
     }
 
     const isPreMarketFutures = futuresSectionTitle === 'Pre-Market Futures';
-    if (isPreMarketFutures) {
+    if (isPreMarketFutures && futuresAvailability !== 'unavailable') {
       for (const [index, futureRaw] of futures.entries()) {
         const future = futureRaw && typeof futureRaw === 'object' ? futureRaw : {};
+        if (future.availability?.status === 'unavailable') continue;
         if (!isIsoDate(future.raw?.referenceDate)) {
           errors.push(`futuresModule.futures[${index}].raw.referenceDate must be an ISO date for Pre-Market Futures.`);
         }
@@ -1364,16 +1312,19 @@ if (!dashboardMatch) {
           errors.push(`futuresModule.futures[${index}].raw.referenceCloseEastern must store the prior U.S. regular-session close for Pre-Market Futures.`);
         }
       }
-      if (!sharedFuturesReferenceDate(futures)) {
+      if (futures.some((future) => future?.availability?.status !== 'unavailable') && !sharedFuturesReferenceDate(futures)) {
         errors.push('Pre-Market Futures rows must share one valid raw.referenceDate from the fetched prior regular-session close.');
       }
     }
 
     const futuresModuleStories = Array.isArray(futuresModule.stories) ? futuresModule.stories : [];
     const futuresStoryWindow = futuresStoryPublicationWindow(futuresSectionTitle, data.editionId, now, futures);
-    if (futuresModuleStories.length !== 3) {
-      errors.push('futuresModule.stories must contain exactly three priority stories.');
-    }
+    if (!Array.isArray(futuresModule.stories)) errors.push('futuresModule.stories must be an array.');
+    errors.push(...validateNewsCoverageState(
+      futuresModule.storiesCoverage,
+      futuresModuleStories.length,
+      NEWS_COVERAGE_POLICIES.futuresStories
+    ));
     const futuresStoryUrls = new Map();
     for (const [index, storyRaw] of futuresModuleStories.entries()) {
       const story = storyRaw && typeof storyRaw === 'object' ? storyRaw : {};
@@ -1412,6 +1363,7 @@ if (!dashboardMatch) {
     const portfolio = data.assetAllocationPortfolio && typeof data.assetAllocationPortfolio === 'object'
       ? data.assetAllocationPortfolio
       : {};
+    const portfolioAvailability = validateSectionAvailability(errors, portfolio.availability, 'assetAllocationPortfolio', ['carried_forward', 'partial', 'unavailable']);
     const hasPortfolioReturn = portfolio.portfolioMtdReturnStatus !== undefined
       || portfolio.portfolioMtdReturnValue !== undefined
       || portfolio.portfolioMtdReturnAsOf !== undefined
@@ -1436,14 +1388,19 @@ if (!dashboardMatch) {
     const portfolioRows = Array.isArray(data.assetAllocationPortfolio?.rows) ? data.assetAllocationPortfolio.rows : [];
     const requiredPortfolioTickers = ['VTI', 'VEA', 'VWO', 'VNQ', 'DBC', 'GLD', 'IEF', 'BOXX'];
     const portfolioTickerSet = new Set(portfolioRows.map((row) => String(row?.ticker ?? '').toUpperCase()));
-    for (const ticker of requiredPortfolioTickers) {
-      if (!portfolioTickerSet.has(ticker)) {
-        errors.push(`assetAllocationPortfolio.rows is missing ${ticker}.`);
+    if (portfolioAvailability === 'unavailable') {
+      if (portfolioRows.length) errors.push('Unavailable assetAllocationPortfolio.rows must be empty.');
+    } else {
+      for (const ticker of requiredPortfolioTickers) {
+        if (!portfolioTickerSet.has(ticker)) {
+          errors.push(`assetAllocationPortfolio.rows is missing ${ticker}.`);
+        }
       }
     }
     for (const rowRaw of portfolioRows) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
       const label = `assetAllocationPortfolio row ${row.ticker ?? '(unknown)'}`;
+      if (row.availability !== undefined) validateSectionAvailability(errors, row.availability, label, ['carried_forward', 'unavailable']);
       for (const key of ['ticker', 'sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']) {
         requireString(row[key], `${label}.${key}`);
       }
@@ -1481,6 +1438,7 @@ if (!dashboardMatch) {
     const cryptoNotes = data.crypto?.notes ?? [];
     const fng = cryptoStatRows.find(row => row.sym === 'F&G');
     const altcoinSeason = cryptoStatRows.find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
+    const cryptoStatUnavailable = (row) => row?.availability?.status === 'unavailable';
     const staleFngPattern = /(numeric read|pull still failed|F&G ~|unavailable|not retrievable|not extractable)/i;
 
     for (const rowRaw of cryptoTickerRows) {
@@ -1512,27 +1470,25 @@ if (!dashboardMatch) {
       }
     }
 
-    if (!Array.isArray(cryptoNotes) || cryptoNotes.length === 0) {
-      errors.push('Crypto notes must include fresh daily crypto stories/items.');
-    } else if (cryptoNotes.length > 6) {
-      errors.push('Crypto notes must contain no more than six daily stories/items.');
-    }
-
     const cryptoTotal = cryptoStatRows.find(row => row.sym === 'TOTAL' || /(?:total )?crypto market cap/i.test(String(row?.name ?? '')));
-    if (!cryptoTotal) {
+    if (cryptoAvailability !== 'unavailable' && !cryptoTotal) {
       errors.push('crypto.stats is missing the Crypto Market Cap stat row.');
-    } else {
+    } else if (cryptoTotal) {
+      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable']);
       requireString(cryptoTotal.price, 'Crypto Market Cap price');
       requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
     }
 
-    if (!fng) {
+    if (cryptoAvailability !== 'unavailable' && !fng) {
       errors.push('crypto.stats is missing the F&G row.');
-    } else {
+    } else if (fng) {
+      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable']);
       const fngPrice = String(fng.price ?? '').trim();
       const fngChange = String(fng.chg ?? '').trim();
 
-      if (!/^\d{1,3}$/.test(fngPrice)) {
+      if (cryptoStatUnavailable(fng)) {
+        if (fngPrice !== 'Unavailable') errors.push('Unavailable F&G price must be Unavailable.');
+      } else if (!/^\d{1,3}$/.test(fngPrice)) {
         errors.push('F&G price must be a numeric 0-100 reading, not a placeholder.');
       } else {
         const value = Number(fngPrice);
@@ -1541,18 +1497,21 @@ if (!dashboardMatch) {
         }
       }
 
-      if (!fngChange || /^unavailable$/i.test(fngChange)) {
+      if (!cryptoStatUnavailable(fng) && (!fngChange || /^unavailable$/i.test(fngChange))) {
         errors.push('F&G change/classification must be populated.');
       }
     }
 
-    if (!altcoinSeason) {
+    if (cryptoAvailability !== 'unavailable' && !altcoinSeason) {
       errors.push('crypto.stats is missing the Altcoin Season Index stat row.');
-    } else {
+    } else if (altcoinSeason) {
+      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable']);
       const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
       const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
 
-      if (!/^\d{1,3}$/.test(altcoinSeasonPrice)) {
+      if (cryptoStatUnavailable(altcoinSeason)) {
+        if (altcoinSeasonPrice !== 'Unavailable') errors.push('Unavailable Altcoin Season Index price must be Unavailable.');
+      } else if (!/^\d{1,3}$/.test(altcoinSeasonPrice)) {
         errors.push('Altcoin Season Index price must be a numeric 0-100 reading, not a placeholder.');
       } else {
         const value = Number(altcoinSeasonPrice);
@@ -1561,28 +1520,27 @@ if (!dashboardMatch) {
         }
       }
 
-      if (!altcoinSeason.sub || /^unavailable$/i.test(String(altcoinSeason.sub))) {
+      if (!cryptoStatUnavailable(altcoinSeason) && (!altcoinSeason.sub || /^unavailable$/i.test(String(altcoinSeason.sub)))) {
         errors.push('Altcoin Season Index classification must be populated.');
       }
-      if (!String(altcoinSeason.delta ?? '').trim()) {
+      if (!cryptoStatUnavailable(altcoinSeason) && !String(altcoinSeason.delta ?? '').trim()) {
         errors.push('Altcoin Season Index change must be populated for the stat-card value line.');
       }
-      if (!/^\/?100$/.test(altcoinSeasonRange)) {
+      if (!cryptoStatUnavailable(altcoinSeason) && !/^\/?100$/.test(altcoinSeasonRange)) {
         errors.push('Altcoin Season Index chg must show the /100 range label.');
       }
     }
 
-    if (!/Alternative\.me Crypto Fear & Greed Index/i.test(String(data.footer?.compiled ?? ''))) {
+    if (cryptoAvailability !== 'unavailable' && fng && !cryptoStatUnavailable(fng) && !/Alternative\.me Crypto Fear & Greed Index/i.test(String(data.footer?.compiled ?? ''))) {
       errors.push('Footer source list must include Alternative.me Crypto Fear & Greed Index when F&G is shown.');
     }
-    if (!/CoinMarketCap Altcoin Season Index/i.test(String(data.footer?.compiled ?? ''))) {
+    if (cryptoAvailability !== 'unavailable' && altcoinSeason && !cryptoStatUnavailable(altcoinSeason) && !/CoinMarketCap Altcoin Season Index/i.test(String(data.footer?.compiled ?? ''))) {
       errors.push('Footer source list must include CoinMarketCap Altcoin Season Index when Altcoin Season is shown.');
     }
 
     const stories = Array.isArray(data.stories) ? data.stories : [];
-    if (stories.length !== 9) {
-      errors.push('stories must contain exactly 9 fresh market/news items.');
-    }
+    if (!Array.isArray(data.stories)) errors.push('stories must be an array.');
+    errors.push(...validateNewsCoverageState(data.storiesCoverage, stories.length, NEWS_COVERAGE_POLICIES.stories));
     const trackedNewsItems = dashboardNewsItems(data);
     const storyIds = trackedNewsItems.map(storyIdentity).filter(Boolean);
     if (storyIds.length !== trackedNewsItems.length) {
@@ -1661,9 +1619,12 @@ if (!dashboardMatch) {
       }
     }
 
-    if (cryptoNotes.length < 4 || cryptoNotes.length > 6) {
-      errors.push('crypto.notes must contain 4-6 fresh crypto notes/items.');
-    }
+    if (!Array.isArray(cryptoNotes)) errors.push('crypto.notes must be an array.');
+    errors.push(...validateNewsCoverageState(
+      data.crypto?.notesCoverage,
+      Array.isArray(cryptoNotes) ? cryptoNotes.length : 0,
+      NEWS_COVERAGE_POLICIES.cryptoNotes
+    ));
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};
       requireString(note.kicker, 'Crypto note kicker');

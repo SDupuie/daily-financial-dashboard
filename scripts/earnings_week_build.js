@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { atomicWriteJson } = require('./staging_writer');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
@@ -11,18 +12,20 @@ const {
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
-  earningsApiMonthEntry,
-  earningsApiUsageMonth,
+  earningsApiDayEntry,
+  earningsApiUsageDay,
   emptyEarningsApiUsage,
   hasEarningsApiBudget,
   isDisplayEligibleEarningsRow,
   isEarningsApiUsage,
+  migrateEarningsApiUsage,
   metricResult,
   normalizeEarningsTiming,
   normalizeFinnhubCalendarFields,
   numberOrNull,
   pctChange,
-  recordEarningsApiRequest
+  recordEarningsApiRequest,
+  recordEarningsApiResponse
 } = require('./earnings_week_contract');
 const {
   addDays,
@@ -43,11 +46,13 @@ const DEFAULT_FINNHUB_METRIC_RETRIES = 3;
 const DEFAULT_FINNHUB_PROFILE_CACHE = path.resolve(process.cwd(), 'generated', 'finnhub_profile_cache.json');
 const DEFAULT_FINNHUB_METRIC_CACHE = path.resolve(process.cwd(), 'generated', 'finnhub_metric_cache.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(process.cwd(), 'generated', 'earningsapi_usage.json');
-const DEFAULT_EARNINGSAPI_MONTHLY_LIMIT = 1000;
-const DEFAULT_EARNINGSAPI_RESERVE = 150;
+const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
+const DEFAULT_EARNINGSAPI_RESERVE = 20;
 const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
 const SECONDARY_RECOVERY_MIN_MARKET_CAP = 1000000000;
+const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
+const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 14;
 const REACTION_LOOKBACK_DAYS = 5;
 const REACTION_LOOKAHEAD_DAYS = 5;
 
@@ -98,6 +103,7 @@ function parseArgs(argv) {
     from: '',
     to: '',
     output: DEFAULT_OUTPUT,
+    asOf: new Date().toISOString(),
     timeoutMs: REQUEST_TIMEOUT_MS,
     finnhubDelayMs: DEFAULT_FINNHUB_DELAY_MS,
     finnhubProfileRetries: DEFAULT_FINNHUB_PROFILE_RETRIES,
@@ -105,9 +111,8 @@ function parseArgs(argv) {
     finnhubMetricDelayMs: DEFAULT_FINNHUB_METRIC_DELAY_MS,
     finnhubMetricRetries: DEFAULT_FINNHUB_METRIC_RETRIES,
     finnhubMetricCache: DEFAULT_FINNHUB_METRIC_CACHE,
-    minFinnhubRows: null,
     earningsApiUsage: DEFAULT_EARNINGSAPI_USAGE,
-    earningsApiMonthlyLimit: DEFAULT_EARNINGSAPI_MONTHLY_LIMIT,
+    earningsApiDailyLimit: DEFAULT_EARNINGSAPI_DAILY_LIMIT,
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
     scheduleConfirmations: DEFAULT_SCHEDULE_CONFIRMATIONS,
     scheduleReview: DEFAULT_SCHEDULE_REVIEW,
@@ -129,6 +134,11 @@ function parseArgs(argv) {
     }
     if (arg === '--output') {
       args.output = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_OUTPUT);
+      i += 1;
+      continue;
+    }
+    if (arg === '--as-of') {
+      args.asOf = String(argv[i + 1] || '').trim();
       i += 1;
       continue;
     }
@@ -167,18 +177,13 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
-    if (arg === '--min-finnhub-rows') {
-      args.minFinnhubRows = Math.max(1, Math.floor(Number(argv[i + 1] || 1)));
-      i += 1;
-      continue;
-    }
     if (arg === '--earningsapi-usage') {
       args.earningsApiUsage = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_EARNINGSAPI_USAGE);
       i += 1;
       continue;
     }
-    if (arg === '--earningsapi-monthly-limit') {
-      args.earningsApiMonthlyLimit = Math.max(0, Number(argv[i + 1] || DEFAULT_EARNINGSAPI_MONTHLY_LIMIT));
+    if (arg === '--earningsapi-daily-limit') {
+      args.earningsApiDailyLimit = Math.max(0, Number(argv[i + 1] || DEFAULT_EARNINGSAPI_DAILY_LIMIT));
       i += 1;
       continue;
     }
@@ -218,13 +223,13 @@ function parseArgs(argv) {
   if (compareIsoDate(args.from, args.to) > 0) {
     throw new Error('--from must be on or before --to.');
   }
+  if (Number.isNaN(Date.parse(args.asOf))) {
+    throw new Error('--as-of must be a parseable date/time.');
+  }
   if (!isSupportedFiveTradingDayRange(args.from, args.to)) {
     throw new Error('Earnings range must be Monday-Friday or Friday plus next Monday-Thursday.');
   }
   args.displayDates = displayDatesForRange(args.from, args.to);
-  if (args.minFinnhubRows === null) {
-    args.minFinnhubRows = defaultMinFinnhubRows(args.from, args.to);
-  }
 
   return args;
 }
@@ -236,6 +241,7 @@ Options:
   --from YYYY-MM-DD            Monday for a Monday-Friday slate, or Friday for the bridge slate
   --to YYYY-MM-DD              Friday for a Monday-Friday slate, or following Thursday for the bridge slate
   --output PATH                Output JSON path (default: generated/earnings_week.json)
+  --as-of ISO                  Build lifecycle and reaction state as of this timestamp (default: now)
   --timeout-ms 20000           HTTP timeout in ms per request
   --finnhub-delay-ms 700       Delay between Finnhub profile requests
   --finnhub-profile-retries 3  Retries for Finnhub profile requests that hit HTTP 429
@@ -244,10 +250,9 @@ Options:
                                Delay between Finnhub metric requests and 429 retries
   --finnhub-metric-retries 3   Retries for Finnhub metric requests that hit HTTP 429
   --finnhub-metric-cache PATH  Successful Finnhub metric market-cap cache
-  --min-finnhub-rows N         Minimum usable Finnhub rows before secondary recovery (default: weekdays * 2)
-  --earningsapi-usage PATH     EarningsAPI monthly usage ledger
-  --earningsapi-monthly-limit  Monthly EarningsAPI call cap (default: 1000)
-  --earningsapi-reserve 150    Calls reserved for other dashboard runs
+  --earningsapi-usage PATH     EarningsAPI daily usage ledger
+  --earningsapi-daily-limit    Daily EarningsAPI call cap (default: 100)
+  --earningsapi-reserve 20     Calls reserved for result refreshes
   --schedule-confirmations PATH
                                Event-scoped official IR dates for conflicts, complete-response omissions, outages, and recovery rows
   --schedule-review PATH       Generated review queue for rows requiring an official date confirmation
@@ -274,10 +279,6 @@ function loadEnv(file = path.resolve(process.cwd(), '.env')) {
     const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, '');
     if (key && !process.env[key]) process.env[key] = value;
   }
-}
-
-function defaultMinFinnhubRows(from, to) {
-  return Math.max(1, displayDatesForRange(from, to).length * 2);
 }
 
 function sleep(ms) {
@@ -332,27 +333,10 @@ function fetchJson(url, args, headers = {}) {
   });
 }
 
-function ensureFinnhubPrimaryUsable(finnhubCalendar, options = {}) {
+function ensureFinnhubPrimaryUsable(finnhubCalendar) {
   if (!finnhubCalendar?.ok) {
-    throw new Error(`Finnhub primary calendar failed; refusing to build an EarningsAPI-only slate. ${finnhubCalendar?.error || ''}`.trim());
+    throw new Error(`Finnhub primary calendar is unavailable. ${finnhubCalendar?.error || ''}`.trim());
   }
-  const rowCount = Array.isArray(finnhubCalendar.rows) ? finnhubCalendar.rows.length : 0;
-  if (rowCount === 0) {
-    throw new Error('Finnhub primary calendar returned zero usable rows; refusing to build an EarningsAPI-only slate.');
-  }
-  const minimumRows = Number.isFinite(options.minFinnhubRows)
-    ? Math.max(1, Math.floor(options.minFinnhubRows))
-    : defaultMinFinnhubRows(options.from, options.to);
-  if (rowCount < minimumRows) {
-    throw new Error(`Finnhub primary calendar returned ${rowCount} usable rows, below the minimum ${minimumRows}; refusing to spend EarningsAPI calls backfilling a suspiciously sparse primary slate.`);
-  }
-}
-
-function marketCapNumber(value) {
-  const text = String(value || '').trim();
-  if (!text || /^n\/a$/i.test(text)) return null;
-  const number = Number(text.replace(/[$,\s]/g, ''));
-  return Number.isFinite(number) ? number : null;
 }
 
 function normalizeFinnhubCalendarRow(row) {
@@ -393,22 +377,30 @@ function dedupeCalendarRows(rows) {
   });
 }
 
-async function fetchFinnhubCalendar(args, token) {
-  const url = `https://finnhub.io/api/v1/calendar/earnings?from=${encodeURIComponent(args.from)}&to=${encodeURIComponent(args.to)}&token=${encodeURIComponent(token)}`;
-  const result = await fetchJson(url, args);
-  const rawRows = result.ok && Array.isArray(result.data?.earningsCalendar) ? result.data.earningsCalendar : [];
+function finnhubCalendarFromResponse(result, args) {
+  const hasCalendar = result.ok && Array.isArray(result.data?.earningsCalendar);
+  const rawRows = hasCalendar ? result.data.earningsCalendar : [];
   const rows = dedupeCalendarRows(rawRows
     .map(normalizeFinnhubCalendarRow)
     .filter((row) => row.symbol && isIsoDate(row.reportDate))
     .filter((row) => args.displayDates.includes(row.reportDate)));
   return {
-    ok: result.ok,
+    ok: hasCalendar,
     status: result.status,
     responseMs: result.ms,
     rowCount: rows.length,
     rows,
-    error: result.ok ? '' : result.parseError || result.bodyPreview || `HTTP ${result.status}`
+    error: hasCalendar
+      ? ''
+      : result.ok
+        ? 'Finnhub response is missing earningsCalendar[].'
+        : result.parseError || result.bodyPreview || `HTTP ${result.status}`
   };
+}
+
+async function fetchFinnhubCalendar(args, token) {
+  const url = `https://finnhub.io/api/v1/calendar/earnings?from=${encodeURIComponent(args.from)}&to=${encodeURIComponent(args.to)}&token=${encodeURIComponent(token)}`;
+  return finnhubCalendarFromResponse(await fetchJson(url, args), args);
 }
 
 function readEarningsApiUsage(file) {
@@ -416,21 +408,23 @@ function readEarningsApiUsage(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (isEarningsApiUsage(data)) return data;
-  } catch {
-    // Ignore a corrupt local ledger and start a fresh one for this run.
+    if (data?.schemaVersion === 1 && data.months && typeof data.months === 'object') {
+      return migrateEarningsApiUsage(data);
+    }
+    throw new Error('unsupported usage-ledger schema');
+  } catch (error) {
+    throw new Error(`EarningsAPI usage ledger is unreadable: ${file}: ${error.message}`);
   }
-  return emptyEarningsApiUsage();
 }
 
 function writeEarningsApiUsage(file, usage) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(usage, null, 2)}\n`);
+  atomicWriteJson(file, usage);
 }
 
 function canUseEarningsApi(args, usage, token) {
   if (args.skipEarningsApi) return false;
   if (!token) return false;
-  return hasEarningsApiBudget(usage, args.earningsApiMonthlyLimit, args.earningsApiReserve);
+  return hasEarningsApiBudget(usage, args.earningsApiDailyLimit, args.earningsApiReserve);
 }
 
 async function fetchEarningsApiJson(pathname, args, token, usage, requestType) {
@@ -441,19 +435,22 @@ async function fetchEarningsApiJson(pathname, args, token, usage, requestType) {
       status: 0,
       ms: 0,
       data: null,
-      parseError: 'EarningsAPI skipped because the monthly budget is unavailable or reserved.',
+      parseError: 'EarningsAPI skipped because the daily budget is unavailable or reserved.',
       bodyPreview: ''
     };
   }
   const url = new URL(pathname, 'https://api.earningsapi.com');
   url.searchParams.set('apikey', token);
-  recordEarningsApiRequest(usage, {
+  const request = recordEarningsApiRequest(usage, {
     type: requestType,
     path: url.pathname,
     queryKeys: url.searchParams.keys()
   });
   writeEarningsApiUsage(args.earningsApiUsage, usage);
-  return fetchJson(url.toString(), args);
+  const result = await fetchJson(url.toString(), args);
+  recordEarningsApiResponse(request, result);
+  writeEarningsApiUsage(args.earningsApiUsage, usage);
+  return result;
 }
 
 function normalizeEarningsApiTiming(value, bucket = '') {
@@ -488,31 +485,6 @@ function normalizeEarningsApiRow(row, reportDate, bucket = '') {
   };
 }
 
-function normalizeNasdaqRow(row, reportDate) {
-  const marketCap = marketCapNumber(row?.marketCap);
-  return {
-    symbol: String(row?.symbol || '').trim().toUpperCase(),
-    company: String(row?.name || '').trim(),
-    marketCap,
-    marketCapDisplay: marketCapDisplay(marketCap),
-    reportDate,
-    reportTiming: normalizeEarningsApiTiming(row?.time),
-    fiscalQuarterEnding: String(row?.fiscalQuarterEnding || '').trim(),
-    eps: {
-      estimate: numberOrNull(String(row?.epsForecast || '').replace(/[()$,\s]/g, (match) => match === '(' ? '-' : '')),
-      actual: null
-    },
-    revenue: {
-      estimate: null,
-      actual: null
-    },
-    source: {
-      provider: 'nasdaq',
-      row
-    }
-  };
-}
-
 async function fetchEarningsApiCalendarDay(date, args, token, usage) {
   const result = await fetchEarningsApiJson(`/v1/calendar/earnings?date=${encodeURIComponent(date)}`, args, token, usage, 'calendar-day');
   const rows = [];
@@ -535,9 +507,11 @@ async function fetchEarningsApiCalendarDay(date, args, token, usage) {
 }
 
 function calendarVerificationDates(args) {
-  return Array.isArray(args.displayDates)
-    ? [...args.displayDates]
-    : displayDatesForRange(args.from, args.to);
+  const dates = [];
+  const first = addDays(args.from, -CALENDAR_VERIFICATION_LOOKBACK_DAYS);
+  const last = addDays(args.to, CALENDAR_VERIFICATION_LOOKAHEAD_DAYS);
+  for (let date = first; compareIsoDate(date, last) <= 0; date = addDays(date, 1)) dates.push(date);
+  return dates;
 }
 
 async function fetchEarningsApiCalendar(args, token, usage, dates = args.displayDates, fetchDay = fetchEarningsApiCalendarDay) {
@@ -548,48 +522,6 @@ async function fetchEarningsApiCalendar(args, token, usage, dates = args.display
     // A quota response applies to the account, not one date. Do not spend the
     // remaining daily allowance proving that every other date is also blocked.
     if (day.status === 429) break;
-  }
-  return days;
-}
-
-async function fetchNasdaqCalendarDay(date, args) {
-  const url = `https://api.nasdaq.com/api/calendar/earnings?date=${encodeURIComponent(date)}`;
-  const result = await fetchJson(url, args, {
-    Referer: 'https://www.nasdaq.com/market-activity/earnings'
-  });
-  const rawRows = Array.isArray(result.data?.data?.rows) ? result.data.data.rows : [];
-  const rows = rawRows.map((row) => normalizeNasdaqRow(row, date)).filter((row) => row.symbol);
-  return {
-    date,
-    ok: result.ok,
-    status: result.status,
-    responseMs: result.ms,
-    rowCount: rows.length,
-    rows,
-    error: result.ok ? '' : result.parseError || result.bodyPreview || `HTTP ${result.status}`
-  };
-}
-
-function symbolsWithProviderDateConflicts(finnhubRows, earningsApiCalendarDays) {
-  const finnhubDatesBySymbol = new Map();
-  for (const row of finnhubRows) {
-    if (!finnhubDatesBySymbol.has(row.symbol)) finnhubDatesBySymbol.set(row.symbol, new Set());
-    finnhubDatesBySymbol.get(row.symbol).add(row.reportDate);
-  }
-
-  const symbols = new Set();
-  for (const row of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
-    const finnhubDates = finnhubDatesBySymbol.get(row.symbol);
-    if (finnhubDates && !finnhubDates.has(row.reportDate)) symbols.add(row.symbol);
-  }
-  return symbols;
-}
-
-async function fetchNasdaqCalendarForConflicts(finnhubRows, earningsApiCalendarDays, args) {
-  if (symbolsWithProviderDateConflicts(finnhubRows, earningsApiCalendarDays).size === 0) return [];
-  const days = [];
-  for (const date of args.displayDates) {
-    days.push(await fetchNasdaqCalendarDay(date, args));
   }
   return days;
 }
@@ -613,7 +545,11 @@ async function fetchEarningsApiCompany(symbol, args, token, usage) {
 async function fetchEarningsApiCompanies(tasks, args, token, usage) {
   const output = [];
   for (const task of tasks) {
-    output.push(await fetchEarningsApiCompany(task.symbol, args, token, usage));
+    const company = await fetchEarningsApiCompany(task.symbol, args, token, usage);
+    output.push(company);
+    // A quota response applies to the whole account, so further company
+    // lookups would only consume (or attempt to consume) the same allowance.
+    if (company.status === 429) break;
   }
   return output;
 }
@@ -662,35 +598,26 @@ function cloneCalendarDay(day, rows) {
   };
 }
 
-function providerDateConflictAudit(symbol, finnhubRows, earningsApiRows, nasdaqRows, selectedDate, selectedProvider, selectedDateSource, reason) {
+function providerDateConflictAudit(symbol, finnhubRows, earningsApiRows, selectedDate) {
   return {
     symbol,
-    status: selectedDateSource === 'nasdaq' ? 'resolved' : 'fallback',
+    status: 'fallback',
     selectedDate,
-    selectedProvider,
-    selectedDateSource,
-    reason,
+    selectedProvider: 'finnhub',
+    selectedDateSource: 'finnhub_fallback',
+    reason: 'provider_date_conflict_finnhub_retained',
     candidates: {
       finnhub: finnhubRows.map(compactCalendarSnapshot),
-      earningsApiCalendar: earningsApiRows.map(compactCalendarSnapshot),
-      nasdaq: nasdaqRows.map(compactCalendarSnapshot)
+      earningsApiCalendar: earningsApiRows.map(compactCalendarSnapshot)
     }
   };
 }
 
-function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasdaqCalendarDays = [], options = {}) {
-  // Nasdaq is a strict tie-breaker only: it may confirm one of the provider dates,
-  // but it must not introduce a third date or upgrade timing by itself.
+function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays) {
   const originalFinnhubRowsBySymbol = new Map();
   for (const row of finnhubRows) {
     if (!originalFinnhubRowsBySymbol.has(row.symbol)) originalFinnhubRowsBySymbol.set(row.symbol, []);
     originalFinnhubRowsBySymbol.get(row.symbol).push({ ...row });
-  }
-
-  const nasdaqRowsBySymbol = new Map();
-  for (const row of nasdaqCalendarDays.flatMap((day) => day.rows || [])) {
-    if (!nasdaqRowsBySymbol.has(row.symbol)) nasdaqRowsBySymbol.set(row.symbol, []);
-    nasdaqRowsBySymbol.get(row.symbol).push(row);
   }
 
   const earningsApiRowsBySymbol = new Map();
@@ -708,44 +635,11 @@ function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasd
 
     const finnhubRowsForSymbol = resolvedFinnhubRows.filter((item) => item.symbol === row.symbol);
     const originalFinnhubRowsForSymbol = originalFinnhubRowsBySymbol.get(row.symbol) || finnhubRowsForSymbol;
-    const finnhubDates = [...new Set(finnhubRowsForSymbol.map((item) => item.reportDate))];
-    const earningsApiDates = [...new Set(conflictingEarningsApiRows.map((item) => item.reportDate))];
-    const nasdaqRows = nasdaqRowsBySymbol.get(row.symbol) || [];
-    const nasdaqDates = [...new Set(nasdaqRows.map((item) => item.reportDate))];
-    let selectedDate = row.reportDate;
-    let selectedProvider = 'finnhub';
-    let selectedDateSource = 'finnhub_fallback';
-    let reason = 'nasdaq_unavailable_or_unmatched_finnhub_symbol_present';
-
-    if (options.allowNasdaqResolution !== false && finnhubDates.length === 1 && earningsApiDates.length === 1 && nasdaqDates.length === 1) {
-      if (nasdaqDates[0] === finnhubDates[0]) {
-        selectedDate = finnhubDates[0];
-        selectedProvider = 'finnhub';
-        selectedDateSource = 'nasdaq';
-        reason = 'nasdaq_matched_finnhub_date';
-      } else if (nasdaqDates[0] === earningsApiDates[0]) {
-        const selectedEarningsApiRow = conflictingEarningsApiRows.find((item) => item.reportDate === nasdaqDates[0]);
-        const selectedNasdaqRow = nasdaqRows.find((item) => item.reportDate === nasdaqDates[0]);
-        selectedDate = earningsApiDates[0];
-        selectedProvider = 'earningsApiCalendar';
-        selectedDateSource = 'nasdaq';
-        reason = 'nasdaq_matched_earningsapi_date';
-        row.reportDate = selectedDate;
-        row.reportTiming = selectedNasdaqRow?.reportTiming !== 'unknown' && selectedNasdaqRow?.reportTiming === selectedEarningsApiRow?.reportTiming
-          ? selectedNasdaqRow.reportTiming
-          : 'unknown';
-      }
-    }
-
     const audit = providerDateConflictAudit(
       row.symbol,
       originalFinnhubRowsForSymbol,
       conflictingEarningsApiRows,
-      nasdaqRows,
-      selectedDate,
-      selectedProvider,
-      selectedDateSource,
-      reason
+      row.reportDate
     );
     for (const item of finnhubRowsForSymbol) item.providerDateConflict = audit;
     conflictsBySymbol.set(row.symbol, audit);
@@ -764,28 +658,57 @@ function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasd
 }
 
 function readScheduleConfirmations(file) {
-  if (!fs.existsSync(file)) return [];
-  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.rows)) {
-    throw new Error('earnings_schedule_confirmations.json must contain schemaVersion 2 and event-scoped rows[].');
+  if (!fs.existsSync(file)) return { rows: [], diagnostics: [] };
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    return {
+      rows: [],
+      diagnostics: [{ code: 'confirmation_file_invalid_json', message: error.message }]
+    };
   }
-  const seen = new Set();
-  return payload.rows.map((row, index) => {
+  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.rows)) {
+    return {
+      rows: [],
+      diagnostics: [{
+        code: 'confirmation_file_invalid_contract',
+        message: 'earnings_schedule_confirmations.json must contain schemaVersion 2 and event-scoped rows[].'
+      }]
+    };
+  }
+  const diagnostics = [];
+  const rowsByEvent = new Map();
+  payload.rows.forEach((row, index) => {
     const symbol = String(row?.symbol || '').trim().toUpperCase();
     const primaryDate = String(row?.primaryDate || '').trim();
     const reportDate = String(row?.reportDate || '').trim();
     const sourceUrl = String(row?.sourceUrl || '').trim();
     const sourceName = String(row?.sourceName || '').trim();
     if (!/^[A-Z0-9.-]+$/.test(symbol) || !isIsoDate(primaryDate) || !isIsoDate(reportDate) || !/^https:\/\//.test(sourceUrl) || !sourceName) {
-      throw new Error(`earnings_schedule_confirmations.rows[${index}] must provide symbol, ISO primaryDate, ISO reportDate, sourceName, and HTTPS sourceUrl.`);
+      diagnostics.push({
+        code: 'confirmation_row_invalid',
+        rowIndex: index,
+        message: `rows[${index}] must provide symbol, ISO primaryDate, ISO reportDate, sourceName, and HTTPS sourceUrl.`
+      });
+      return;
     }
     // The provider's original date identifies one earnings event. Symbol-only
     // confirmations would let an old quarter silently affect a later slate.
     const key = `${symbol}:${primaryDate}`;
-    if (seen.has(key)) throw new Error(`earnings_schedule_confirmations contains duplicate ${key}.`);
-    seen.add(key);
-    return { symbol, primaryDate, reportDate, sourceUrl, sourceName };
+    if (!rowsByEvent.has(key)) rowsByEvent.set(key, []);
+    rowsByEvent.get(key).push({ symbol, primaryDate, reportDate, sourceUrl, sourceName });
   });
+  const rows = [];
+  for (const [key, candidates] of rowsByEvent) {
+    if (candidates.length === 1) rows.push(candidates[0]);
+    else diagnostics.push({
+      code: 'confirmation_event_duplicate',
+      event: key,
+      message: `Duplicate confirmations for ${key} were ignored.`
+    });
+  }
+  return { rows, diagnostics };
 }
 
 function scheduleAudit(status, row, secondaryDates, official = null) {
@@ -797,11 +720,24 @@ function scheduleAudit(status, row, secondaryDates, official = null) {
   };
 }
 
+function officialScheduleReview(row, secondaryDates, reason) {
+  return {
+    symbol: row.symbol,
+    company: row.company,
+    primaryDate: row.reportDate,
+    secondaryDates,
+    reason,
+    required: 'company_investor_relations_then_sec_date_confirmation',
+    sourceOrder: ['company_investor_relations', 'sec_filing']
+  };
+}
+
 function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirmations = []) {
   const activeDates = new Set(displayDatesForRange(range.from, range.to));
   const secondaryCalendarComplete = [...activeDates].every((date) =>
     earningsApiCalendarDays.some((day) => day.date === date && day.ok)
   );
+  const secondaryCalendarUnavailable = earningsApiCalendarDays.some((day) => day?.ok === false);
   const secondaryDatesBySymbol = new Map();
   for (const candidate of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
     if (!secondaryDatesBySymbol.has(candidate.symbol)) secondaryDatesBySymbol.set(candidate.symbol, new Set());
@@ -849,48 +785,42 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       continue;
     }
     if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
-    // A secondary outage is not evidence that Finnhub is wrong. Without current-
-    // event IR evidence, preserve the row and expose the degraded provenance.
-    if (!secondaryCalendarComplete && secondaryDates.length === 0) {
-      verifiedRows.push({
-        ...row,
-        sourceStatus: 'partial',
-        sourceAudit: {
-          ...row.sourceAudit,
-          scheduleVerification: scheduleAudit('primary_only', row, secondaryDates)
-        }
-      });
-      continue;
-    }
-    const reason = hasCrossWeekConflict
+    const reason = secondaryCalendarUnavailable
+      ? 'secondary_calendar_unavailable'
+      : hasCrossWeekConflict
       ? 'cross_week_calendar_date_conflict'
       : hasInWeekConflict
         ? 'in_week_calendar_date_conflict'
         : 'uncorroborated_primary_calendar_date';
-    review.push({
-      symbol: row.symbol,
-      company: row.company,
-      primaryDate: row.reportDate,
-      secondaryDates,
-      reason,
-      required: 'official_company_ir_date_confirmation'
+    // A missing or conflicting secondary date is not evidence that Finnhub is
+    // wrong. Keep its row as the fail-open primary while retaining actionable
+    // review evidence for a later official upgrade or exclusion.
+    verifiedRows.push({
+      ...row,
+      sourceStatus: 'partial',
+      sourceAudit: {
+        ...row.sourceAudit,
+        scheduleVerification: scheduleAudit('primary_only', row, secondaryDates)
+      }
     });
+    if (secondaryCalendarComplete || secondaryDates.length > 0 || secondaryCalendarUnavailable) {
+      review.push(officialScheduleReview(row, secondaryDates, reason));
+    }
   }
   return { rows: verifiedRows, review };
 }
 
-function verifyEarningsApiRecoveryRows(rows, range, confirmations = []) {
+function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidates = []) {
   const activeDates = new Set(displayDatesForRange(range.from, range.to));
   const confirmationsByEvent = new Map(confirmations.map((row) => [`${row.symbol}:${row.primaryDate}`, row]));
   const verifiedRows = [];
   const review = [];
+  const rowKeys = new Set(rows.map((row) => `${row.reportDate}:${row.symbol}`));
   for (const row of rows) {
     if (!isDisplayEligibleEarningsRow(row)) {
       verifiedRows.push(row);
       continue;
     }
-    // Unlike a Finnhub row, a secondary-only discovery has no independent date
-    // corroboration, so only matching event-scoped IR evidence can publish it.
     const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     if (confirmation && activeDates.has(confirmation.reportDate)) {
       verifiedRows.push({
@@ -904,13 +834,30 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = []) {
       continue;
     }
     if (confirmation) continue;
+    // The calendar and company endpoints independently agree on the same event.
+    // Publish it with degraded provenance while retaining the IR review request.
+    verifiedRows.push({
+      ...row,
+      sourceStatus: 'partial',
+      sourceAudit: {
+        ...row.sourceAudit,
+        scheduleVerification: scheduleAudit('secondary_only', row, [])
+      }
+    });
+    review.push(officialScheduleReview(row, [], 'uncorroborated_earningsapi_recovery_date'));
+  }
+  for (const candidate of candidates) {
+    const key = `${candidate.reportDate}:${candidate.symbol}`;
+    if (rowKeys.has(key)) continue;
+    const confirmation = confirmationsByEvent.get(`${candidate.symbol}:${candidate.reportDate}`) || null;
+    if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
     review.push({
-      symbol: row.symbol,
-      company: row.company,
-      primaryDate: row.reportDate,
+      symbol: candidate.symbol,
+      company: candidate.company,
+      primaryDate: candidate.reportDate,
       secondaryDates: [],
-      reason: 'uncorroborated_earningsapi_recovery_date',
-      required: 'official_company_ir_date_confirmation'
+      reason: 'earningsapi_company_date_unavailable',
+      required: 'matching_earningsapi_company_date'
     });
   }
   return { rows: verifiedRows, review };
@@ -1054,8 +1001,11 @@ function readFinnhubProfileCache(file) {
 
 function writeFinnhubProfileCache(file, cache) {
   if (!file) return;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(cache, null, 2)}\n`);
+  try {
+    atomicWriteJson(file, cache);
+  } catch (error) {
+    process.stderr.write(`Finnhub profile cache could not be refreshed; continuing without the cache update: ${error.message}\n`);
+  }
 }
 
 function profileFromCache(symbol, cache, fallback = {}) {
@@ -1202,8 +1152,11 @@ function readFinnhubMetricCache(file) {
 
 function writeFinnhubMetricCache(file, cache) {
   if (!file) return;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(cache, null, 2)}\n`);
+  try {
+    atomicWriteJson(file, cache);
+  } catch (error) {
+    process.stderr.write(`Finnhub metric cache could not be refreshed; continuing without the cache update: ${error.message}\n`);
+  }
 }
 
 function metricFromCache(symbol, cache) {
@@ -1347,30 +1300,6 @@ function profileRecoveryForRow(calendarRow, profile, metricsBySymbol, earningsAp
   };
 }
 
-function conflictRecoveryForRow(providerDateConflict, profile) {
-  if (!providerDateConflict || profileHasIdentity(profile)) return null;
-  const selectedDate = providerDateConflict.selectedDate;
-  const earningsApiCandidate = (providerDateConflict.candidates?.earningsApiCalendar || [])
-    .find((item) => item.reportDate === selectedDate);
-  const nasdaqCandidate = (providerDateConflict.candidates?.nasdaq || [])
-    .find((item) => item.reportDate === selectedDate);
-  const marketCap = Number.isFinite(nasdaqCandidate?.marketCap) ? nasdaqCandidate.marketCap : null;
-  const company = earningsApiCandidate?.company || nasdaqCandidate?.company || '';
-  if (!company && !Number.isFinite(marketCap)) return null;
-  // Conflict recovery only preserves display identity after a strict date decision.
-  // EPS/revenue remain tied to the selected calendar provider above.
-  return {
-    company,
-    country: '',
-    exchange: '',
-    currency: '',
-    marketCap,
-    marketCapDisplay: marketCapDisplay(marketCap),
-    earningsApiCalendar: earningsApiCandidate || null,
-    nasdaqCalendar: nasdaqCandidate || null
-  };
-}
-
 function buildRows(calendarRows, profiles, options = {}) {
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
   const metricsBySymbol = new Map((options.finnhubMetrics || []).map((metric) => [metric.symbol, metric]));
@@ -1379,13 +1308,10 @@ function buildRows(calendarRows, profiles, options = {}) {
     const profile = profilesBySymbol.get(calendarRow.symbol);
     const profileRecovery = profileRecoveryForRow(calendarRow, profile, metricsBySymbol, earningsApiByKey);
     const providerDateConflict = calendarRow.providerDateConflict || null;
-    const conflictRecovery = conflictRecoveryForRow(providerDateConflict, profile);
     const auditedFinnhubCalendar = providerDateConflict?.candidates?.finnhub?.[0] || calendarRow;
-    const company = profile?.name || profileRecovery?.company || conflictRecovery?.company || calendarRow.symbol;
-    const marketCap = profile?.marketCap ?? profileRecovery?.marketCap ?? conflictRecovery?.marketCap ?? null;
-    const fallbacks = profileRecovery
-      ? ['earningsApiCalendar', 'finnhubMetric']
-      : conflictRecovery ? ['providerDateConflict'] : [];
+    const company = profile?.name || profileRecovery?.company || calendarRow.symbol;
+    const marketCap = profile?.marketCap ?? profileRecovery?.marketCap ?? null;
+    const fallbacks = profileRecovery ? ['earningsApiCalendar', 'finnhubMetric'] : [];
     const eps = metricPayload(calendarRow.eps.estimate, calendarRow.eps.actual, {
       basis: '',
       note: ''
@@ -1397,9 +1323,9 @@ function buildRows(calendarRows, profiles, options = {}) {
     return {
       symbol: calendarRow.symbol,
       company,
-      exchange: profile?.exchange || profileRecovery?.exchange || conflictRecovery?.exchange || '',
-      country: profile?.country || profileRecovery?.country || conflictRecovery?.country || '',
-      currency: profile?.currency || profileRecovery?.currency || conflictRecovery?.currency || '',
+      exchange: profile?.exchange || profileRecovery?.exchange || '',
+      country: profile?.country || profileRecovery?.country || '',
+      currency: profile?.currency || profileRecovery?.currency || '',
       marketCap,
       marketCapDisplay: marketCapDisplay(marketCap),
       reportDate: calendarRow.reportDate,
@@ -1475,8 +1401,8 @@ function buildRows(calendarRows, profiles, options = {}) {
         providerDateConflict,
         selectedSources: {
           slate: 'finnhub',
-          company: profile?.name ? 'finnhubProfile' : profileRecovery?.company ? 'earningsApiCalendar' : conflictRecovery?.company ? 'providerDateConflict' : 'symbol',
-          marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : Number.isFinite(profileRecovery?.marketCap) ? 'finnhubMetric' : Number.isFinite(conflictRecovery?.marketCap) ? 'providerDateConflict' : 'none',
+          company: profile?.name ? 'finnhubProfile' : profileRecovery?.company ? 'earningsApiCalendar' : 'symbol',
+          marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : Number.isFinite(profileRecovery?.marketCap) ? 'finnhubMetric' : 'none',
           timing: calendarRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
           eps: {
             estimate: calendarRow.eps.estimate === null ? 'none' : 'finnhub',
@@ -1526,7 +1452,7 @@ function earningsApiCompanyAudit(fetch, companyRow) {
       }
     } : null,
     rowCount: fetch?.rows?.length || 0,
-    error: fetch?.error || ''
+    error: fetch?.error || (!companyRow ? 'No matching EarningsAPI company row was returned; retry is required.' : '')
   };
 }
 
@@ -1662,16 +1588,6 @@ function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTas
           error: item.error
         }))
       },
-      nasdaqCalendar: {
-        requests: fetches.nasdaqCalendarDays.length,
-        ok: fetches.nasdaqCalendarDays.filter((item) => item.ok).length,
-        rows: fetches.nasdaqCalendarDays.reduce((sum, item) => sum + item.rowCount, 0),
-        errors: fetches.nasdaqCalendarDays.filter((item) => !item.ok).map((item) => ({
-          date: item.date,
-          status: item.status,
-          error: item.error
-        }))
-      },
       earningsApiCompany: {
         requests: fetches.earningsApiCompanyFetches.length,
         ok: fetches.earningsApiCompanyFetches.filter((item) => item.ok).length,
@@ -1752,11 +1668,16 @@ async function runBuild(argv = process.argv.slice(2)) {
   }
 
   const earningsApiUsage = readEarningsApiUsage(args.earningsApiUsage);
+  // Persist schema migrations before deciding whether another metered request
+  // is permitted; an unreadable ledger must never become an unmetered retry.
+  writeEarningsApiUsage(args.earningsApiUsage, earningsApiUsage);
   const finnhubCalendar = await fetchFinnhubCalendar(args, token);
-  ensureFinnhubPrimaryUsable(finnhubCalendar, args);
+  ensureFinnhubPrimaryUsable(finnhubCalendar);
 
-  // Calendar rebuilds own only the five displayed trading dates. Tests exercise
-  // the reconciliation policy with fixtures; they never widen this live scan.
+  // The 26-date production window catches surrounding-date conflicts while
+  // discovery remains limited to the five visible trading dates. Official
+  // company IR, then SEC, is the fallback when this secondary check is
+  // unavailable or does not corroborate the primary date.
   const earningsApiCalendarDays = await fetchEarningsApiCalendar(
     args,
     earningsApiToken,
@@ -1764,12 +1685,9 @@ async function runBuild(argv = process.argv.slice(2)) {
     calendarVerificationDates(args)
   );
   const activeEarningsApiCalendarDays = earningsApiCalendarDays.filter((day) => args.displayDates.includes(day.date));
-  const nasdaqCalendarDays = await fetchNasdaqCalendarForConflicts(finnhubCalendar.rows, activeEarningsApiCalendarDays, args);
   const calendarResolution = resolveProviderDateConflicts(
     finnhubCalendar.rows,
-    activeEarningsApiCalendarDays,
-    nasdaqCalendarDays,
-    { allowNasdaqResolution: false }
+    activeEarningsApiCalendarDays
   );
   const earningsApiCandidateRows = calendarResolution.earningsApiCalendarDays
     .flatMap((day) => day.rows)
@@ -1784,37 +1702,38 @@ async function runBuild(argv = process.argv.slice(2)) {
     finnhubMetrics,
     earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays
   });
-  const scheduleConfirmations = readScheduleConfirmations(args.scheduleConfirmations);
+  const scheduleConfirmationInput = readScheduleConfirmations(args.scheduleConfirmations);
   const scheduleVerification = verifyFinnhubScheduleRows(
     finnhubRows,
     earningsApiCalendarDays,
     { from: args.from, to: args.to },
-    scheduleConfirmations
+    scheduleConfirmationInput.rows
   );
   const earningsApiRows = buildEarningsApiRows(secondaryRecoveryCandidates, earningsApiCompanyFetches);
   const earningsApiScheduleVerification = verifyEarningsApiRecoveryRows(
     earningsApiRows,
     { from: args.from, to: args.to },
-    scheduleConfirmations
+    scheduleConfirmationInput.rows,
+    secondaryRecoveryCandidates
   );
-  fs.mkdirSync(path.dirname(args.scheduleReview), { recursive: true });
-  fs.writeFileSync(args.scheduleReview, `${JSON.stringify({
+  atomicWriteJson(args.scheduleReview, {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt: args.asOf,
     range: { from: args.from, to: args.to },
     rows: [...scheduleVerification.review, ...earningsApiScheduleVerification.review],
+    diagnostics: scheduleConfirmationInput.diagnostics,
     outputPath: args.scheduleReview
-  }, null, 2)}\n`);
+  });
   const mergedRows = [...scheduleVerification.rows, ...earningsApiScheduleVerification.rows].sort((left, right) => {
     const dateCompare = left.reportDate.localeCompare(right.reportDate);
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
   });
-  const generatedAt = new Date();
+  const generatedAt = new Date(args.asOf);
   const yahooFetches = await fetchYahooBarsForRows(mergedRows, args, fetchJson);
   const rows = attachReactions(mergedRows, yahooFetches, { asOf: generatedAt });
   const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows);
-  const earningsApiEntry = earningsApiMonthEntry(earningsApiUsage);
+  const earningsApiEntry = earningsApiDayEntry(earningsApiUsage, generatedAt);
 
   const payload = {
     schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
@@ -1832,15 +1751,14 @@ async function runBuild(argv = process.argv.slice(2)) {
       finnhubProfiles,
       finnhubMetrics,
       earningsApiCalendarDays,
-      nasdaqCalendarDays,
       earningsApiCompanyFetches,
       earningsApiBudget: {
         usageFile: path.relative(process.cwd(), args.earningsApiUsage),
-        month: earningsApiUsageMonth(),
+        day: earningsApiUsageDay(generatedAt),
         callsUsed: earningsApiEntry.calls,
-        monthlyLimit: args.earningsApiMonthlyLimit,
+        dailyLimit: args.earningsApiDailyLimit,
         reserve: args.earningsApiReserve,
-        callsAvailableForThisScript: Math.max(0, args.earningsApiMonthlyLimit - args.earningsApiReserve - earningsApiEntry.calls),
+        callsAvailableForThisScript: Math.max(0, args.earningsApiDailyLimit - args.earningsApiReserve - earningsApiEntry.calls),
         skipped: args.skipEarningsApi || !earningsApiToken
       },
       yahooFetches
@@ -1848,8 +1766,7 @@ async function runBuild(argv = process.argv.slice(2)) {
     outputPath: args.output
   };
 
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, `${JSON.stringify(payload, null, 2)}\n`);
+  atomicWriteJson(args.output, payload);
   printReport(payload, args.compact);
 }
 
@@ -1865,8 +1782,8 @@ module.exports = {
   buildRows,
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
-  fetchNasdaqCalendarForConflicts,
   fetchEarningsApiCalendar,
+  finnhubCalendarFromResponse,
   fetchFinnhubMetrics,
   fetchYahooBars,
   fetchYahooBarsForRows,

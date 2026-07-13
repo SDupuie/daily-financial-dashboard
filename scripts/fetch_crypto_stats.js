@@ -3,8 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { atomicWriteJson } = require('./staging_writer');
 
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'crypto_stats.json');
+const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
 const REQUEST_TIMEOUT_MS = 15000;
 const FEAR_GREED_URL = 'https://api.alternative.me/fng/?limit=2';
 const COINGECKO_GLOBAL_URL = 'https://api.coingecko.com/api/v3/global';
@@ -14,6 +16,7 @@ const ALTCOIN_SEASON_API_URL = 'https://api.coinmarketcap.com/data-api/v3/altcoi
 function parseArgs(argv) {
   const args = {
     output: DEFAULT_OUTPUT,
+    input: DEFAULT_INPUT,
     timeoutMs: REQUEST_TIMEOUT_MS,
     lookbackDays: 31,
     compact: false
@@ -25,6 +28,13 @@ function parseArgs(argv) {
     if (arg === '--output') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--output requires a path.');
       args.output = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+      continue;
+    }
+
+    if (arg === '--input') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--input requires a path.');
+      args.input = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
@@ -66,6 +76,7 @@ function printHelp() {
   process.stdout.write(`Usage: node scripts/fetch_crypto_stats.js [options]
 
 Options:
+  --input PATH            Canonical dashboard used for per-card carry-forward
   --output PATH           JSON output path (default: generated/crypto_stats.json)
   --timeout-ms 15000      HTTP timeout in ms
   --lookback-days 31      Altcoin Season history window requested from CoinMarketCap
@@ -338,10 +349,9 @@ function normalizeAltcoinSeason(payload, apiUrl) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const normalized = await fetchCryptoStats(args);
+  const normalized = await fetchCryptoStatsPartial(args);
 
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, `${JSON.stringify(normalized, null, 2)}\n`);
+  atomicWriteJson(args.output, normalized);
 
   if (args.compact) {
     process.stdout.write(
@@ -353,6 +363,99 @@ async function main() {
   }
 
   process.stdout.write(`Wrote ${args.output}\n`);
+}
+
+function canonicalCryptoStats(input) {
+  try {
+    const html = fs.readFileSync(input, 'utf8');
+    const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
+    const data = match ? JSON.parse(match[1]) : null;
+    return Array.isArray(data?.crypto?.stats) ? data.crypto.stats : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+function unavailableCryptoStat(symbol, name, checkedAt, error) {
+  return {
+    sym: symbol,
+    name,
+    sub: 'Unavailable',
+    price: 'Unavailable',
+    delta: 'Unavailable',
+    chg: '',
+    dir: 'flat',
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: checkedAt.toISOString(),
+      message: error?.message || String(error || 'source unavailable')
+    }
+  };
+}
+
+async function fetchCryptoStatsPartial(args, dependencies = {}) {
+  const checkedAt = dependencies.now instanceof Date ? dependencies.now : new Date();
+  const altcoinApiUrl = buildAltcoinSeasonApiUrl(args.lookbackDays);
+  const tasks = [
+    {
+      key: 'fearGreed', sym: 'F&G', name: 'Fear & Greed Index',
+      fetch: () => fetchJson(FEAR_GREED_URL, args.timeoutMs, {}),
+      normalize: normalizeFearGreed
+    },
+    {
+      key: 'altcoinSeason', sym: 'ALTSEASON', name: 'Altcoin Season Index',
+      fetch: () => fetchJson(altcoinApiUrl, args.timeoutMs, { Origin: 'https://coinmarketcap.com', Referer: ALTCOIN_SEASON_PAGE_URL }),
+      normalize: (payload) => normalizeAltcoinSeason(payload, altcoinApiUrl)
+    },
+    {
+      key: 'totalMarketCap', sym: 'TOTAL', name: 'Crypto Market Cap',
+      fetch: () => fetchJson(COINGECKO_GLOBAL_URL, args.timeoutMs, {}),
+      normalize: normalizeTotalMarketCap
+    }
+  ];
+  const priorBySymbol = new Map(canonicalCryptoStats(args.input).map((row) => [row?.sym, row]));
+  const settled = await Promise.allSettled(tasks.map(async (task) => (
+    dependencies.collectProvider ? dependencies.collectProvider(task) : task.normalize(await task.fetch())
+  )));
+  const stats = [];
+  const details = {};
+  const failures = [];
+  settled.forEach((result, index) => {
+    const task = tasks[index];
+    if (result.status === 'fulfilled') {
+      details[task.key] = result.value;
+      stats.push(result.value.stat);
+      return;
+    }
+    failures.push({ provider: task.key, message: result.reason?.message || 'source unavailable' });
+    const prior = priorBySymbol.get(task.sym);
+    const stat = prior
+      ? {
+        ...prior,
+        availability: {
+          status: 'carried_forward',
+          reason: 'source_refresh_failed',
+          checkedAt: checkedAt.toISOString()
+        }
+      }
+      : unavailableCryptoStat(task.sym, task.name, checkedAt, result.reason);
+    stats.push(stat);
+    details[task.key] = { source: 'Unavailable', stat };
+  });
+  return {
+    fetchedAt: checkedAt.toISOString(),
+    stats,
+    ...details,
+    ...(failures.length ? {
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: checkedAt.toISOString(),
+        failures
+      }
+    } : {})
+  };
 }
 
 async function fetchCryptoStats(options = {}) {
@@ -391,9 +494,41 @@ async function fetchCryptoStats(options = {}) {
   return normalized;
 }
 
+function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date()) {
+  const timestamp = new Date(checkedAt).toISOString();
+  const stats = Array.isArray(canonicalCrypto?.stats) ? structuredClone(canonicalCrypto.stats) : [];
+  return {
+    fetchedAt: timestamp,
+    stats,
+    availability: {
+      status: stats.length ? 'carried_forward' : 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    }
+  };
+}
+
+function validateCryptoStatsPayload(payload) {
+  const errors = [];
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Crypto stats staging payload must be an object.'];
+  const unavailable = payload.availability?.status === 'unavailable';
+  if (!Array.isArray(payload.stats)) return ['Crypto stats staging stats must be an array.'];
+  if (!unavailable) {
+    for (const symbol of ['F&G', 'ALTSEASON', 'TOTAL']) {
+      if (!payload.stats.some((row) => row?.sym === symbol)) errors.push(`Crypto stats staging is missing ${symbol}.`);
+    }
+  } else if (payload.stats.length) {
+    errors.push('Unavailable Crypto stats staging must contain no rows.');
+  }
+  return errors;
+}
+
 module.exports = {
   REQUEST_TIMEOUT_MS,
-  fetchCryptoStats
+  buildCryptoStatsFallback,
+  fetchCryptoStats,
+  fetchCryptoStatsPartial,
+  validateCryptoStatsPayload
 };
 
 if (require.main === module) {

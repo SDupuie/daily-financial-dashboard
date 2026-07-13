@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const https = require('https');
+const { atomicWriteJson } = require('./staging_writer');
 const path = require('path');
 const {
   applyWeekAheadLifecycle,
@@ -221,34 +222,40 @@ function authoritySummary(authority, now, status = authority.mode === 'live' ? '
   };
 }
 
-function buildOfficialSchedule(range, { censusHtml = '', beaHtml = '', now = new Date() } = {}) {
+function buildOfficialSchedule(range, { censusHtml = '', beaHtml = '', now = new Date(), failures = [] } = {}) {
   if (!isIsoDate(range?.from) || !isIsoDate(range?.to) || displayDatesForRange(range).length !== 5) {
     throw new Error('Official Week Ahead schedule requires a supported five-day display range.');
   }
-  if (range.from.slice(0, 4) !== '2026') {
-    throw new Error('The maintained BLS/EIA/FOMC Week Ahead schedules must be renewed for the requested calendar year.');
-  }
-  if (!censusHtml || !beaHtml) throw new Error('Official Census and BEA schedules are required for Week Ahead verification.');
-  const censusEvents = parseCensusSchedule(censusHtml);
-  const beaEvents = parseBeaSchedule(beaHtml);
-  if (!censusEvents.length || !beaEvents.length) {
-    throw new Error('Official Census or BEA schedule returned no recognized covered releases.');
+  const maintainedYearAvailable = range.from.slice(0, 4) === '2026';
+  const censusEvents = censusHtml ? parseCensusSchedule(censusHtml) : [];
+  const beaEvents = beaHtml ? parseBeaSchedule(beaHtml) : [];
+  const unavailableAuthorities = new Set(failures.map((item) => item.authority));
+  if (!censusEvents.length) unavailableAuthorities.add('census');
+  if (!beaEvents.length) unavailableAuthorities.add('bea');
+  if (!maintainedYearAvailable) {
+    unavailableAuthorities.add('bls');
+    unavailableAuthorities.add('eia');
+    unavailableAuthorities.add('fed');
   }
   const events = [
-    ...filterRange(BLS_2026_EVENTS, range),
-    ...filterRange(FOMC_2026_EVENTS, range),
-    ...eiaEventsForRange(range),
+    ...(maintainedYearAvailable ? filterRange(BLS_2026_EVENTS, range) : []),
+    ...(maintainedYearAvailable ? filterRange(FOMC_2026_EVENTS, range) : []),
+    ...(maintainedYearAvailable ? eiaEventsForRange(range) : []),
     ...filterRange(censusEvents, range),
     ...filterRange(beaEvents, range)
   ].sort((left, right) => left.date.localeCompare(right.date) || left.time.localeCompare(right.time) || left.authority.localeCompare(right.authority));
   return {
     events,
     authorities: [
-      authoritySummary(AUTHORITIES.bls, now),
-      authoritySummary(AUTHORITIES.census, now),
-      authoritySummary(AUTHORITIES.bea, now),
-      authoritySummary(AUTHORITIES.eia, now),
-      authoritySummary(AUTHORITIES.fed, now)
+      authoritySummary(AUTHORITIES.bls, now, unavailableAuthorities.has('bls') ? 'unavailable' : 'maintained'),
+      authoritySummary(AUTHORITIES.census, now, unavailableAuthorities.has('census') ? 'unavailable' : 'fresh'),
+      authoritySummary(AUTHORITIES.bea, now, unavailableAuthorities.has('bea') ? 'unavailable' : 'fresh'),
+      authoritySummary(AUTHORITIES.eia, now, unavailableAuthorities.has('eia') ? 'unavailable' : 'maintained'),
+      authoritySummary(AUTHORITIES.fed, now, unavailableAuthorities.has('fed') ? 'unavailable' : 'maintained')
+    ],
+    failures: [
+      ...failures,
+      ...(!maintainedYearAvailable ? [{ authority: 'maintained_schedules', message: 'Maintained BLS/EIA/FOMC schedules are unavailable for this year.' }] : [])
     ]
   };
 }
@@ -356,20 +363,30 @@ async function requestJson(url, timeoutMs) {
   }
 }
 
-async function requestFxMacroValues(officialSchedule, timeoutMs) {
+async function requestFxMacroValues(officialSchedule, timeoutMs, dependencies = {}) {
   const requests = fxMacroValueRequests(officialSchedule);
   const fetchEntries = async (kind, indicators) => {
-    const responses = await Promise.all(indicators.map(async (indicator) => [
+    const settled = await Promise.allSettled(indicators.map(async (indicator) => [
       indicator,
-      await requestJson(`${FX_MACRO_BASE_URL}/${kind}/usd/${indicator}?limit=100`, timeoutMs)
+      await (dependencies.requestJson || requestJson)(`${FX_MACRO_BASE_URL}/${kind}/usd/${indicator}?limit=100`, timeoutMs)
     ]));
-    return Object.fromEntries(responses);
+    const failures = [];
+    const responses = [];
+    settled.forEach((result, index) => {
+      if (result.status === 'fulfilled') responses.push(result.value);
+      else failures.push({ kind, indicator: indicators[index], message: result.reason?.message || 'source unavailable' });
+    });
+    return { values: Object.fromEntries(responses), failures };
   };
   const [announcements, predictions] = await Promise.all([
     fetchEntries('announcements', requests.announcements),
     fetchEntries('predictions', requests.predictions)
   ]);
-  return { announcements, predictions };
+  return {
+    announcements: announcements.values,
+    predictions: predictions.values,
+    failures: [...announcements.failures, ...predictions.failures]
+  };
 }
 
 function readCache(output, range, now) {
@@ -395,8 +412,7 @@ function isTransient(error) {
 }
 
 function writePayload(output, payload) {
-  fs.mkdirSync(path.dirname(output), { recursive: true });
-  fs.writeFileSync(output, `${JSON.stringify(payload, null, 2)}\n`);
+  atomicWriteJson(output, payload);
 }
 
 async function run(args = parseArgs(process.argv.slice(2))) {
@@ -414,11 +430,19 @@ async function run(args = parseArgs(process.argv.slice(2))) {
   }
   try {
     const officialSchedule = staged?.officialSchedule || await (async () => {
-      const [censusHtml, beaHtml] = await Promise.all([
+      const settled = await Promise.allSettled([
         requestText(CENSUS_SCHEDULE_URL, args.timeoutMs),
         requestText(BEA_SCHEDULE_URL, args.timeoutMs)
       ]);
-      return buildOfficialSchedule(range, { censusHtml, beaHtml, now });
+      const failures = [];
+      if (settled[0].status === 'rejected') failures.push({ authority: 'census', message: settled[0].reason?.message || 'source unavailable' });
+      if (settled[1].status === 'rejected') failures.push({ authority: 'bea', message: settled[1].reason?.message || 'source unavailable' });
+      return buildOfficialSchedule(range, {
+        censusHtml: settled[0].status === 'fulfilled' ? settled[0].value : '',
+        beaHtml: settled[1].status === 'fulfilled' ? settled[1].value : '',
+        now,
+        failures
+      });
     })();
     const valuePayload = await requestFxMacroValues(officialSchedule, args.timeoutMs);
     const payload = normalizeWeekAhead(valuePayload, { range, officialSchedule, now });

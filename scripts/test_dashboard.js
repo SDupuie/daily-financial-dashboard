@@ -16,15 +16,30 @@ const {
   refreshWindow
 } = require('./local_market_server');
 const {
+  buildChartDataFallback,
+  buildUnavailableFuturesPayload,
   compactChartPayload,
   finnhubQuoteBarFromPayload,
   mergeFinnhubQuoteBar,
+  parseFuture,
   parseArgs: parseFetchChartDataArgs,
+  premarketCutoff,
   quoteRowFromSeries,
+  runChart,
+  runFutures,
   shouldUseFinnhubQuoteFallback,
+  validateChartStagingPayload,
   validateFuturesPayload,
 } = require('./fetch_chart_data');
-const { normalizedSummary } = require('./fetch_asset_allocation');
+const {
+  buildAssetAllocationFallback,
+  buildAssetAllocationSummaryFallback,
+  fetchPortfolioRows,
+  normalizedSummary,
+  validateAssetAllocationPortfolioPayload,
+  validateAssetAllocationSummaryPayload
+} = require('./fetch_asset_allocation');
+const { buildCryptoStatsFallback, fetchCryptoStatsPartial, validateCryptoStatsPayload } = require('./fetch_crypto_stats');
 const {
   chartableRowsFromDashboardHtml,
   decodeObjectSeries,
@@ -35,22 +50,36 @@ const {
   validateDashboardHtml
 } = require('./validate_dashboard');
 const {
+  acquireRunLock,
   applyAssetAllocationPortfolio,
   applyAssetAllocationSummary,
   applyEditionMetadata,
+  applyEditorialEarningsNarrative,
   patchDashboardDataBlock,
+  patchDashboard,
   applyCryptoQuoteRows,
   applyCryptoStats,
+  applyFocusedNewsFallback,
+  buildFocusedReviewManifest,
   commitDashboardCandidate,
   applyFuturesModule,
   applyTapeQuoteRows,
+  loadDashboardBase,
   readJsonBlock,
+  releaseRunLock,
   replaceJsonBlock,
+  requiresUnavailableRolloverRetry,
+  earningsStagingNeedsRebuild,
+  weekAheadStagingNeedsRebuild,
+  runWithSectionFallback,
   syncDashboardPricesFromChartData,
   stampDashboardEdition
 } = require('./run_daily_update');
-const { normalizeWeekAhead } = require('./week_ahead_contract');
-const { EARNINGS_USER_ACTION_REQUIRED_EXIT_CODE, buildEarningsWeekPolicy } = require('./earnings_week_contract');
+const { buildWeekAheadPreparationFallback, normalizeWeekAhead } = require('./week_ahead_contract');
+const { attachReactions, buildEarningsPreparationFallback, buildEarningsWeekPolicy, computeEarningsWeekCounts } = require('./earnings_week_contract');
+const { buildRows } = require('./earnings_week_build');
+const { applyNewsCoverageState, futuresStoryPublicationWindow } = require('./news_contract');
+const { atomicWriteFile } = require('./staging_writer');
 const {
   REQUIRED_EDITORIAL_SECTIONS,
   buildEditorialReview,
@@ -202,13 +231,15 @@ function createDashboardValidationFixture() {
         rows: quotes.map((quote) => ({ ...quote, group: quote.ticker === 'VCR' ? 'Sectors' : quote.ticker === 'UST10Y' ? 'Rates & Credit' : 'Equities' }))
       },
       stories,
+      storiesCoverage: { status: 'complete' },
       crypto: {
         stats: [
           { sym: 'TOTAL', name: 'Crypto Market Cap', price: '$1.00T', delta: '+$0.01T' },
           { sym: 'F&G', name: 'Fear & Greed', price: '50', chg: 'Neutral' },
           { sym: 'ALTSEASON', name: 'Altcoin Season Index', price: '25', sub: 'Bitcoin Season', delta: '+1', chg: '/100' }
         ],
-        notes: cryptoNotes
+        notes: cryptoNotes,
+        notesCoverage: { status: 'complete' }
       },
       earnings: { week: fixtureEarningsWeek() },
       weekAhead: normalizeWeekAhead({ announcements: {}, predictions: {} }, {
@@ -234,7 +265,8 @@ function createDashboardValidationFixture() {
         sectionLabel: 'After The Bell',
         sectionTitle: 'Session Futures',
         futures: fixtureFutures(),
-        stories: futuresStories
+        stories: futuresStories,
+        storiesCoverage: { status: 'complete' }
       },
       assetAllocationPortfolio: {
         rows: fixturePortfolioRows(),
@@ -291,10 +323,48 @@ function testArchitecturePolicyOwnershipMatrix() {
   ];
   assert.match(policy, /### Section ownership matrix/);
   for (const row of requiredRows) assert.ok(policy.includes(`| ${row} |`), `AGENTS.md ownership matrix must include ${row}.`);
+  assert.match(policy, /### Fail-open invariant/);
+  assert.match(policy, /Every recoverable source, staging, evidence, or editorial-content failure must be converted into the domain's documented nonblocking fallback before complete-candidate validation/);
+  assert.match(policy, /Final validation remains strict: it validates the selected fallback rather than requiring unavailable source data/);
+  const fallbackSection = policy.split('### Fail-open invariant')[1].split('Architecture invariants enforced by tests:')[0];
+  const fallbackRows = fallbackSection.split('\n')
+    .filter((line) => /^\| (?!Section |---)/.test(line))
+    .map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()));
+  const requiredFallbackRows = [
+    'Futures',
+    'Chart/Tape',
+    'Crypto',
+    'Asset Allocation',
+    'News Flow and promoted stories',
+    'Week Ahead',
+    'Earnings',
+    'Editorial content',
+    'Canonical artifact',
+    'Post-commit staging'
+  ];
+  assert.deepEqual(fallbackRows.map((row) => row[0]), requiredFallbackRows);
+  assert.match(fallbackSection, /test_dashboard\.js:testArchitecturePreparationLeavesCanonicalUnchanged.*deterministic preparation does not modify the canonical dashboard/);
+  assert.match(fallbackSection, /test_dashboard\.js:testDeterministicSectionFallbackContracts.*validator-clean assembly of the mixed deterministic fallback candidate/);
+  for (const [section, boundary, fallback, retry, owners] of fallbackRows) {
+    assert.ok(boundary && fallback && retry, `${section} fallback matrix row must define its boundary, fallback, and retry behavior.`);
+    const references = owners.split(';').map((item) => item.replaceAll('`', '').trim());
+    assert.ok(references.length, `${section} fallback matrix row must assign a test owner.`);
+    for (const reference of references) {
+      const [file, test] = reference.split(':');
+      assert.match(file || '', /^test_[a-z_]+\.js$/, `${section} test owner must name a test suite.`);
+      assert.match(test || '', /^test[A-Z][A-Za-z0-9]+$/, `${section} test owner must name a test function.`);
+      const source = fs.readFileSync(path.join(root, 'scripts', file), 'utf8');
+      assert.ok(source.includes(`function ${test}(`) || source.includes(`async function ${test}(`), `${section} test owner ${reference} must exist.`);
+      assert.match(source, new RegExp(`^\\s*(?:await\\s+)?${test}(?:\\(\\);?|,)?$`, 'm'), `${section} test owner ${reference} must be registered by its suite entry point.`);
+    }
+  }
 }
 
 function testArchitectureSingleWriterAndCliBoundaries() {
   const scriptsDir = path.join(root, 'scripts');
+  const stagingWriterSource = fs.readFileSync(path.join(scriptsDir, 'staging_writer.js'), 'utf8');
+  assert.match(stagingWriterSource, /module\.exports = \{\s*atomicWriteFile,\s*atomicWriteJson\s*\};/);
+  assert.doesNotMatch(stagingWriterSource, /readFile|readJson/, 'staging_writer.js must own atomic staging writes only.');
   const directWriterPatterns = [
     /fs\.writeFileSync\(\s*args\.dashboard\b/,
     /fs\.writeFileSync\(\s*input\s*,\s*html\b/,
@@ -349,13 +419,12 @@ function testDedicatedDashboardApplyModes() {
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-dashboard-writer-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const earningsFile = path.join(dir, 'earnings.json');
-  const canonical = readJsonBlock(fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8'), 'dashboard-data');
   const initial = {
     editionId: 'old',
     earnings: { label: 'old', week: null },
     crypto: { stats: [{ sym: 'OLD' }] }
   };
-  const stalePolicyWeek = structuredClone(canonical.earnings.week);
+  const stalePolicyWeek = fixtureEarningsWeek();
   stalePolicyWeek.policy.enrichment = 'Finnhub and EarningsAPI are used.';
   fs.writeFileSync(dashboardFile, `<main>preserved</main><script type="application/json" id="dashboard-data">${JSON.stringify(initial)}</script>`);
   fs.writeFileSync(earningsFile, JSON.stringify(stalePolicyWeek));
@@ -370,18 +439,83 @@ function testDedicatedDashboardApplyModes() {
   const html = fs.readFileSync(dashboardFile, 'utf8');
   const data = readJsonBlock(html, 'dashboard-data');
   assert.equal(data.earnings.label, 'Earnings · Week Monitor');
-  assert.equal(data.earnings.week.generatedAt, canonical.earnings.week.generatedAt);
+  assert.equal(data.earnings.week.generatedAt, stalePolicyWeek.generatedAt);
   assert.deepEqual(data.earnings.week.policy, buildEarningsWeekPolicy());
   assert.match(html, /<main>preserved<\/main>/);
 }
 
-function testFocusedEarningsApplyRejectsPendingScheduleReview() {
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-earnings-review-gate-');
+function testEditorialEarningsMissingCopyBlocksFinalApplyUntilAttempted() {
+  const stagedRows = buildRows([{
+    symbol: 'VERIFY',
+    reportDate: '2026-01-06',
+    reportTiming: 'amc',
+    fiscalQuarter: 4,
+    fiscalYear: 2025,
+    eps: { estimate: 1, actual: 1.25 },
+    revenue: { estimate: 1000000000, actual: 1100000000 }
+  }], [{
+    symbol: 'VERIFY', ok: true, status: 200, responseMs: 1,
+    name: 'VERIFY Corp', ticker: 'VERIFY', exchange: 'NYSE', country: 'US', currency: 'USD',
+    marketCap: 5000000000, marketCapMillions: 5000, shareOutstanding: 100, industry: 'Technology', error: ''
+  }]);
+  stagedRows[0].sourceAudit.scheduleVerification = {
+    status: 'corroborated',
+    primaryDate: '2026-01-06',
+    secondaryDates: ['2026-01-06'],
+    official: null
+  };
+  const rows = attachReactions(stagedRows, [{
+    symbol: 'VERIFY', ok: true, status: 200, responseMs: 1, error: '',
+    bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 105 }]
+  }], { asOf: '2026-01-07T22:00:00.000Z' });
+  const week = fixtureEarningsWeek();
+  week.generatedAt = '2026-01-07T22:00:00.000Z';
+  week.range = { from: '2026-01-05', to: '2026-01-09' };
+  week.rows = rows;
+  week.summary.counts = computeEarningsWeekCounts(rows);
+  const candidateDashboardData = { earnings: { week } };
+  const row = rows[0];
+  const dashboardData = structuredClone(candidateDashboardData);
+  const missingNarrativePath = path.join(os.tmpdir(), `missing-earnings-narrative-${process.pid}`, 'earnings_narrative.json');
+
+  assert.throws(
+    () => applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, missingNarrativePath),
+    /Earnings editorial research is incomplete for 1 row\(s\)/,
+    'Final Earnings apply must not silently convert a skipped editorial pass into unavailable copy.'
+  );
+  fs.mkdirSync(path.dirname(missingNarrativePath), { recursive: true });
+  fs.writeFileSync(missingNarrativePath, JSON.stringify({
+    schemaVersion: 1,
+    sourceArtifact: 'generated/earnings_week.json',
+    sourceGeneratedAt: week.generatedAt,
+    sourceRange: week.range,
+    rows: [{
+      symbol: row.symbol,
+      reportDate: row.reportDate,
+      eps: { note: '' },
+      revenue: { note: '' },
+      outcome: {
+        guide: '',
+        interpretation: 'Loan growth and deposit pricing drove the read.',
+        interpretationDisposition: { status: 'verified' }
+      },
+      reaction: { note: '' },
+      editorialAttempted: true,
+      postReportRefreshRequired: true
+    }]
+  }));
+  const attempted = applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, missingNarrativePath);
+  assert.equal(attempted.week.rows[0].outcome.interpretation, 'Loan growth and deposit pricing drove the read.');
+}
+
+function testFocusedEarningsApplyAllowsPendingScheduleReview() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-earnings-review-gate-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const earningsFile = path.join(dir, 'earnings_week.json');
   const reviewFile = path.join(dir, 'earnings_schedule_review.json');
-  const originalHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const week = readJsonBlock(originalHtml, 'dashboard-data').earnings.week;
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const week = dashboard.earnings.week;
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(earningsFile, JSON.stringify(week));
   fs.writeFileSync(reviewFile, JSON.stringify({
@@ -400,13 +534,292 @@ function testFocusedEarningsApplyRejectsPendingScheduleReview() {
   const result = spawnSync(process.execPath, [
     path.join(root, 'scripts', 'run_daily_update.js'),
     '--dashboard', dashboardFile,
-    '--apply-earnings-week-json', earningsFile,
-    '--test-skip-validation'
-  ], { cwd: root, encoding: 'utf8', env: { ...process.env, DASHBOARD_TEST_MODE: '1' } });
+    '--apply-earnings-week-json', earningsFile
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW } });
 
-  assert.equal(result.status, EARNINGS_USER_ACTION_REQUIRED_EXIT_CODE);
-  assert.match(result.stderr, /Official company IR date confirmation is required/);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Earnings schedule review remains pending; retain Finnhub primary-only rows and research company investor relations before SEC/);
+  assert.deepEqual(
+    readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').earnings.week,
+    week
+  );
+}
+
+function testFocusedEarningsApplyIgnoresMalformedOptionalAndStagingArtifacts() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-earnings-fail-open-');
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const earningsFile = path.join(dir, 'earnings_week.json');
+  const reviewFile = path.join(dir, 'earnings_schedule_review.json');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const week = dashboard.earnings.week;
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(earningsFile, JSON.stringify(week));
+  fs.writeFileSync(reviewFile, '{');
+  const malformedReview = spawnSync(process.execPath, [
+    path.join(root, 'scripts', 'run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--apply-earnings-week-json', earningsFile
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW } });
+  assert.equal(malformedReview.status, 0, malformedReview.stderr);
+  assert.match(malformedReview.stderr, /schedule_review_invalid_json/);
+  assert.deepEqual(
+    readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').earnings.week,
+    week
+  );
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(earningsFile, '{');
+  const malformedWeek = spawnSync(process.execPath, [
+    path.join(root, 'scripts', 'run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--apply-earnings-week-json', earningsFile
+  ], { cwd: root, encoding: 'utf8', env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW } });
+  assert.equal(malformedWeek.status, 0, malformedWeek.stderr);
+  assert.match(malformedWeek.stderr, /focused apply skipped; staging JSON could not be read/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
+}
+
+function testDashboardCandidateAppliesEarningsSectionFallback() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-earnings-fallback-');
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData));
+  const canonical = dashboard.earnings.week;
+  const fallback = buildEarningsPreparationFallback(canonical, {
+    from: '2026-07-17',
+    to: '2026-07-23'
+  }, { checkedAt: '2026-07-17T21:00:00.000Z' });
+  const html = patchDashboard({
+    dashboard: dashboardFile,
+    windowMode: 'afternoon',
+    scheduled: false,
+    skipChartData: true,
+    skipFutures: true,
+    skipCryptoStats: true,
+    skipAssetAllocationPortfolio: true,
+    skipAssetAllocationSummary: true,
+    skipWeekAhead: true,
+    skipEarnings: false,
+    earningsFallbackWeek: fallback.week
+  });
+  const applied = readJsonBlock(html, 'dashboard-data').earnings.week;
+  assert.equal(applied.range.from, '2026-07-17');
+  assert.equal(applied.availability.status, 'unavailable');
+  assert.deepEqual(applied.rows, []);
+  const carried = buildEarningsPreparationFallback(canonical, canonical.range, {
+    checkedAt: '2026-07-10T21:00:00.000Z'
+  });
+  const previousScheduledNow = process.env.SCHEDULED_NOW_ISO;
+  process.env.SCHEDULED_NOW_ISO = '2026-07-10T21:01:00.000Z';
+  let carriedHtml;
+  try {
+    carriedHtml = patchDashboard({
+      dashboard: dashboardFile,
+      windowMode: 'afternoon',
+      scheduled: false,
+      skipChartData: true,
+      skipFutures: true,
+      skipCryptoStats: true,
+      skipAssetAllocationPortfolio: true,
+      skipAssetAllocationSummary: true,
+      skipWeekAhead: true,
+      skipEarnings: false,
+      earningsFallbackWeek: carried.week
+    });
+  } finally {
+    if (previousScheduledNow === undefined) delete process.env.SCHEDULED_NOW_ISO;
+    else process.env.SCHEDULED_NOW_ISO = previousScheduledNow;
+  }
+  const fallbackData = readJsonBlock(carriedHtml, 'dashboard-data');
+  const fallbackChartData = readJsonBlock(carriedHtml, 'chart-data');
+  const fallbackValidation = validateDashboardAndChartFixture(fallbackData, fallbackChartData);
+  assert.equal(fallbackValidation.status, 0, fallbackValidation.stderr);
+
+  fallbackData.earnings.week = canonical;
+  const recoveredValidation = validateDashboardAndChartFixture(fallbackData, fallbackChartData);
+  assert.equal(recoveredValidation.status, 0, recoveredValidation.stderr);
+  assert.equal(fallbackData.earnings.week.availability, undefined, 'A later successful Earnings build must clear the unavailable rollover fallback.');
+}
+
+function testEarningsStagingPolicyDriftTriggersRebuild() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-earnings-policy-drift-');
+  const artifact = path.join(dir, 'earnings_week.json');
+  const valid = fixtureEarningsWeek();
+  fs.writeFileSync(artifact, JSON.stringify(valid));
+  assert.equal(earningsStagingNeedsRebuild(artifact, new Date(FIXTURE_NOW)), false);
+
+  const legacy = structuredClone(valid);
+  legacy.summary.fetches = { nasdaqCalendar: { requests: 0 } };
+  fs.writeFileSync(artifact, JSON.stringify(legacy));
+  assert.equal(earningsStagingNeedsRebuild(artifact, new Date(FIXTURE_NOW)), true);
+
+  fs.writeFileSync(artifact, '{');
+  assert.equal(earningsStagingNeedsRebuild(artifact, new Date(FIXTURE_NOW)), true);
+}
+
+function testWeekAheadStagingContractDriftTriggersRebuild() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-week-ahead-contract-drift-');
+  const artifact = path.join(dir, 'week_ahead.json');
+  const valid = createDashboardValidationFixture().dashboard.weekAhead;
+  fs.writeFileSync(artifact, JSON.stringify(valid));
+  assert.equal(weekAheadStagingNeedsRebuild(artifact), false);
+
+  const invalid = structuredClone(valid);
+  invalid.schemaVersion = 999;
+  fs.writeFileSync(artifact, JSON.stringify(invalid));
+  assert.equal(weekAheadStagingNeedsRebuild(artifact), true);
+
+  fs.writeFileSync(artifact, '{');
+  assert.equal(weekAheadStagingNeedsRebuild(artifact), true);
+}
+
+function testDeterministicSectionFallbackContracts() {
+  const checkedAt = '2026-07-10T21:05:00.000Z';
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const acceptedWeekAhead = structuredClone(dashboard.weekAhead);
+  const chartFallback = buildChartDataFallback(chartData, checkedAt);
+  dashboard.tape.availability = chartFallback.availability;
+
+  applyFuturesModule(dashboard, buildUnavailableFuturesPayload('session', checkedAt), 'afternoon');
+
+  applyCryptoStats(dashboard, buildCryptoStatsFallback(dashboard.crypto, checkedAt));
+  assert.equal(dashboard.crypto.availability.status, 'carried_forward');
+
+  const assetFallback = buildAssetAllocationFallback(dashboard.assetAllocationPortfolio, {
+    month: '2026-08',
+    asOf: '2026-08-03',
+    checkedAt
+  });
+  applyAssetAllocationPortfolio(dashboard, assetFallback);
+  assert.equal(dashboard.assetAllocationPortfolio.availability.status, 'unavailable');
+  assert.deepEqual(dashboard.assetAllocationPortfolio.rows, []);
+
+  const weekFallback = buildWeekAheadPreparationFallback(dashboard.weekAhead, {
+    from: '2026-07-17',
+    to: '2026-07-23'
+  }, { checkedAt });
+  dashboard.weekAhead = weekFallback.week;
+  assert.equal(weekFallback.mode, 'unavailable');
+  assert.equal(requiresUnavailableRolloverRetry(weekFallback.week), true);
+  assert.deepEqual(dashboard.weekAhead.days.map((day) => day.date), [
+    '2026-07-17', '2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23'
+  ]);
+  dashboard.weekAhead = buildWeekAheadPreparationFallback(null, {
+    from: '2026-07-10',
+    to: '2026-07-16'
+  }, { checkedAt }).week;
+
+  const result = validateDashboardAndChartFixture(dashboard, compactChartPayload(chartFallback));
+  assert.equal(result.status, 0, result.stderr);
+
+  dashboard.weekAhead = acceptedWeekAhead;
+  assert.equal(dashboard.weekAhead.availability, undefined, 'A later successful Week Ahead refresh must clear the fallback state.');
+  const recoveredResult = validateDashboardAndChartFixture(dashboard, compactChartPayload(chartFallback));
+  assert.equal(recoveredResult.status, 0, recoveredResult.stderr);
+
+  const invalidArtifact = runWithSectionFallback(
+    () => undefined,
+    () => ({ status: 'carried_forward' }),
+    {
+      label: 'Fixture',
+      readFresh: () => ({ malformed: true }),
+      validateFresh: () => ['fixture artifact is invalid'],
+      validateFallback: () => []
+    }
+  );
+  assert.match(invalidArtifact.error.message, /fixture artifact is invalid/);
+  assert.equal(invalidArtifact.payload.status, 'carried_forward');
+}
+
+function testPartialDeterministicRowsValidate() {
+  const checkedAt = '2026-07-10T21:05:00.000Z';
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.futuresModule.availability = {
+    status: 'partial', reason: 'source_refresh_failed', checkedAt,
+    failures: [{ symbol: 'ES=F', message: 'fixture failure' }]
+  };
+  dashboard.futuresModule.futures[0] = {
+    symbol: 'ES=F', label: 'S&P Futures', value: 'Unavailable',
+    body: 'Current contract data is unavailable; retrying on the next update.',
+    dir: 'flat', series: [], raw: {},
+    availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt, message: 'fixture failure' }
+  };
+  dashboard.crypto.availability = {
+    status: 'partial', reason: 'source_refresh_failed', checkedAt,
+    failures: [{ provider: 'fearGreed', message: 'fixture failure' }]
+  };
+  const fearGreed = dashboard.crypto.stats.find((row) => row.sym === 'F&G');
+  Object.assign(fearGreed, {
+    sub: 'Unavailable', price: 'Unavailable', delta: 'Unavailable', chg: '', dir: 'flat',
+    availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt, message: 'fixture failure' }
+  });
+  dashboard.assetAllocationPortfolio.availability = {
+    status: 'partial', reason: 'source_refresh_failed', checkedAt,
+    failures: [{ ticker: 'VTI', message: 'fixture failure' }]
+  };
+  const vti = dashboard.assetAllocationPortfolio.rows.find((row) => row.ticker === 'VTI');
+  for (const key of ['price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']) vti[key] = 'Unavailable';
+  vti.availability = { status: 'unavailable', reason: 'source_refresh_failed', checkedAt };
+  const partialChart = compactChartPayload({
+    ...chartData,
+    availability: {
+      status: 'partial', reason: 'source_refresh_failed', checkedAt,
+      failures: [{ ticker: 'SPX', message: 'fixture failure' }]
+    }
+  });
+  dashboard.tape.availability = partialChart.availability;
+  const result = validateDashboardAndChartFixture(dashboard, partialChart);
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function testPreparationRunLock() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-run-lock-');
+  const lock = path.join(dir, 'daily_update.lock');
+  assert.equal(acquireRunLock(lock), true);
+  assert.equal(acquireRunLock(lock), false, 'A live owner must prevent a concurrent preparation.');
+  releaseRunLock(lock);
+  fs.writeFileSync(lock, '{malformed');
+  assert.equal(acquireRunLock(lock), true, 'A malformed stale lock must be recovered automatically.');
+  releaseRunLock(lock);
+}
+
+function testLastGoodDashboardRecovery() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-last-good-');
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const lastGoodFile = path.join(dir, 'dashboard.last-good.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const lastGoodHtml = renderDashboardValidationFixture(dashboard, chartData);
+  fs.writeFileSync(dashboardFile, '<script type="application/json" id="dashboard-data">{broken}</script>');
+  fs.writeFileSync(lastGoodFile, lastGoodHtml);
+  const recovered = loadDashboardBase(dashboardFile, { lastGoodPath: lastGoodFile, allowRecovery: true });
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.sourcePath, lastGoodFile);
+  assert.equal(readJsonBlock(recovered.html, 'dashboard-data').editionId, dashboard.editionId);
+  const nextHtml = recovered.html.replace('Fixture headline', 'Recovered fixture headline');
+  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
+  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
+  try {
+    commitDashboardCandidate({ dashboard: dashboardFile, testSkipValidation: false }, nextHtml, {
+      refreshLastGood: true,
+      lastGoodPath: lastGoodFile
+    });
+  } finally {
+    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
+    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
+  }
+  assert.equal(readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').opening.headline, 'Recovered fixture headline');
+  assert.equal(fs.readFileSync(lastGoodFile, 'utf8'), nextHtml, 'The next successful replacement must refresh the recovery snapshot.');
+
+  fs.writeFileSync(dashboardFile, '<script type="application/json" id="dashboard-data">{broken}</script>');
+  fs.writeFileSync(lastGoodFile, '<script type="application/json" id="dashboard-data">{also-broken}</script>');
+  const malformedBytes = fs.readFileSync(dashboardFile, 'utf8');
+  assert.throws(
+    () => loadDashboardBase(dashboardFile, { lastGoodPath: lastGoodFile, allowRecovery: true }),
+    /Canonical dashboard and last-good snapshot are both unusable/
+  );
+  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), malformedBytes);
 }
 
 function testFocusedApplyValidatesBeforeAtomicReplace() {
@@ -429,6 +842,81 @@ function testFocusedApplyValidatesBeforeAtomicReplace() {
   });
   assert.notEqual(result.status, 0, 'An invalid focused repair candidate must fail validation.');
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml, 'A failed candidate must not replace the dashboard artifact.');
+
+  const committedHtml = originalHtml.replace('Fixture headline', 'Committed despite snapshot failure');
+  const snapshotFile = path.join(dir, 'dashboard.last-good.html');
+  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
+  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
+  try {
+    assert.doesNotThrow(() => commitDashboardCandidate(
+      { dashboard: dashboardFile, testSkipValidation: false },
+      committedHtml,
+      {
+        refreshLastGood: true,
+        lastGoodPath: snapshotFile,
+        snapshotWriter: () => { throw new Error('fixture synchronization failure'); }
+      }
+    ));
+  } finally {
+    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
+    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
+  }
+  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), committedHtml, 'Post-commit synchronization failure must not roll back the validated dashboard.');
+  assert.equal(fs.existsSync(snapshotFile), false);
+
+  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
+  try {
+    commitDashboardCandidate(
+      { dashboard: dashboardFile, testSkipValidation: false },
+      committedHtml,
+      { refreshLastGood: true, lastGoodPath: snapshotFile }
+    );
+  } finally {
+    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
+    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
+  }
+  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), committedHtml, 'A synchronization retry must preserve the committed dashboard.');
+  assert.equal(fs.readFileSync(snapshotFile, 'utf8'), committedHtml, 'The next successful run must complete the deferred snapshot synchronization.');
+
+  const stagingFile = path.join(dir, 'staging.json');
+  fs.writeFileSync(stagingFile, 'validated prior staging');
+  assert.throws(() => atomicWriteFile(stagingFile, 'partial replacement', {}, {
+    fs: {
+      ...fs,
+      renameSync: () => { throw new Error('fixture rename interruption'); }
+    }
+  }), /fixture rename interruption/);
+  assert.equal(fs.readFileSync(stagingFile, 'utf8'), 'validated prior staging');
+  assert.equal(fs.readdirSync(dir).some((name) => name.startsWith('.staging.json.')), false, 'Interrupted staging writes must remove temporary files.');
+}
+
+function testFocusedEarningsApplyUsesNewsPartialFallback() {
+  const { dashboard } = createDashboardValidationFixture();
+  dashboard.stories[0].publishedOn = '2026-07-08';
+  dashboard.crypto.notes[0].publishedOn = '2026-07-08';
+  const result = applyFocusedNewsFallback(dashboard, new Date(FIXTURE_NOW));
+  assert.equal(result.storiesRemoved, 1);
+  assert.equal(result.cryptoNotesRemoved, 1);
+  assert.equal(dashboard.stories.length, 8);
+  assert.equal(dashboard.crypto.notes.length, 3);
+  assert.equal(dashboard.storiesCoverage.status, 'partial');
+  assert.equal(dashboard.crypto.notesCoverage.status, 'partial');
+}
+
+function testFocusedEarningsApplyRestampsEditorialReview() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalEditionId = dashboard.editionId;
+  const manifest = buildFocusedReviewManifest(dashboard, null, [{
+    section: 'stories', path: 'stories', action: 'omitted', reason: 'stale_editorial_items'
+  }], new Date(FIXTURE_NOW));
+  dashboard.editionId = '2026-07-10T13:30:01.000Z';
+  buildEditorialReview(dashboard, manifest, chartData);
+  assert.equal(dashboard.editorialReview.reviewedBaseEditionId, originalEditionId);
+  assert.equal(dashboard.editorialReview.reviewedEditionId, dashboard.editionId);
+  assert.deepEqual(validateReviewManifest(dashboard.editorialReview, dashboard, {
+    requireEmbedded: true,
+    chartData
+  }), []);
 }
 
 function testSkipValidateCannotTargetCanonicalDashboard() {
@@ -551,7 +1039,7 @@ function extractDashboardRuntimeTestBlock(html, name) {
   return extractRuntimeTestBlock(dashboardRuntimeSource(html), name);
 }
 
-function testUpdaterQuoteAndCryptoPatches() {
+async function testUpdaterQuoteAndCryptoPatches() {
   const data = dashboardFixture();
 
   applyTapeQuoteRows(data, [{
@@ -587,7 +1075,7 @@ function testUpdaterQuoteAndCryptoPatches() {
   assert.equal(data.tape.rows[1].pct, '+1.67%');
   assert.equal(data.tape.rows[1].asOf, 'crypto-asof');
 
-  applyCryptoStats(data, [{
+  applyCryptoStats(data, { stats: [{
     sym: 'FNG',
     value: '53',
     delta: '+2'
@@ -595,12 +1083,54 @@ function testUpdaterQuoteAndCryptoPatches() {
     sym: 'ALT',
     value: '53',
     delta: '+2'
-  }]);
+  }] });
 
   assert.deepEqual(data.crypto.stats.map((row) => row.sym), ['FNG', 'ALT']);
+
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-crypto-partial-');
+  const input = path.join(dir, 'dashboard.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalInput = renderDashboardValidationFixture(dashboard, chartData);
+  fs.writeFileSync(input, originalInput);
+  const partial = await fetchCryptoStatsPartial({ input, timeoutMs: 1000, lookbackDays: 31 }, {
+    now: new Date('2026-07-10T21:05:00.000Z'),
+    collectProvider: async (task) => {
+      if (task.key === 'altcoinSeason') throw new Error('fixture provider failure');
+      return {
+        source: 'Fixture provider',
+        stat: task.key === 'fearGreed'
+          ? { sym: 'F&G', name: task.name, price: '55', delta: '+5', chg: 'Greed', dir: 'up' }
+          : { sym: 'TOTAL', name: task.name, price: '$2.00T', delta: '+$0.10T', chg: '+5.00%', dir: 'up' }
+      };
+    }
+  });
+  assert.equal(partial.availability.status, 'partial');
+  assert.deepEqual(partial.availability.failures, [{ provider: 'altcoinSeason', message: 'fixture provider failure' }]);
+  assert.equal(partial.stats.find((row) => row.sym === 'F&G').price, '55');
+  assert.equal(partial.stats.find((row) => row.sym === 'TOTAL').price, '$2.00T');
+  assert.equal(partial.stats.find((row) => row.sym === 'ALTSEASON').availability.status, 'carried_forward');
+  assert.deepEqual(validateCryptoStatsPayload(partial), []);
+  applyCryptoStats(dashboard, partial);
+  assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
+  assert.equal(fs.readFileSync(input, 'utf8'), originalInput);
+
+  const recovered = await fetchCryptoStatsPartial({ input, timeoutMs: 1000, lookbackDays: 31 }, {
+    now: new Date('2026-07-10T21:10:00.000Z'),
+    collectProvider: async (task) => ({
+      source: 'Fixture provider',
+      stat: task.key === 'fearGreed'
+        ? { sym: 'F&G', name: task.name, price: '56', delta: '+1', chg: 'Greed', dir: 'up' }
+        : task.key === 'altcoinSeason'
+          ? { sym: 'ALTSEASON', name: task.name, sub: 'Bitcoin Season', price: '30', delta: '+5', chg: '/100', dir: 'up' }
+          : { sym: 'TOTAL', name: task.name, price: '$2.10T', delta: '+$0.10T', chg: '+5.00%', dir: 'up' }
+    })
+  });
+  assert.equal(recovered.availability, undefined);
+  assert.ok(recovered.stats.every((row) => row.availability === undefined));
+  assert.deepEqual(validateCryptoStatsPayload(recovered), []);
 }
 
-function testUpdaterModulePatches() {
+async function testUpdaterModulePatches() {
   const data = dashboardFixture();
   const futures = fixtureFutures();
 
@@ -632,9 +1162,60 @@ function testUpdaterModulePatches() {
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnAsOf, '2026-07-06');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnValue, '+1.23%');
   assert.equal(data.assetAllocationPortfolio.portfolioMtdReturnStale, false);
+
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-asset-partial-');
+  const input = path.join(dir, 'dashboard.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.assetAllocationPortfolio.month = '2026-07';
+  const originalInput = renderDashboardValidationFixture(dashboard, chartData);
+  fs.writeFileSync(input, originalInput);
+  const rows = fixturePortfolioRows();
+  const partial = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-07-10T21:05:00.000Z'),
+    fetchHolding: async (holding) => {
+      if (holding.symbol === 'VTI') throw new Error('fixture holding failure');
+      return structuredClone(rows.find((row) => row.ticker === holding.symbol));
+    }
+  });
+  assert.equal(partial.availability.status, 'partial');
+  assert.deepEqual(partial.availability.failures, [{ ticker: 'VTI', message: 'fixture holding failure' }]);
+  assert.equal(partial.rows.find((row) => row.ticker === 'VTI').availability.status, 'carried_forward');
+  assert.deepEqual(partial.rows.find((row) => row.ticker === 'VEA'), rows.find((row) => row.ticker === 'VEA'));
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(partial), []);
+  applyAssetAllocationPortfolio(dashboard, partial);
+  assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
+  assert.equal(fs.readFileSync(input, 'utf8'), originalInput);
+  const acceptedRows = structuredClone(dashboard.assetAllocationPortfolio.rows);
+  const summaryFailure = runWithSectionFallback(
+    () => { throw new Error('fixture summary failure'); },
+    () => buildAssetAllocationSummaryFallback(dashboard.assetAllocationPortfolio, { asOf: '2026-07-10' }),
+    { validateFallback: validateAssetAllocationSummaryPayload }
+  );
+  applyAssetAllocationSummary(dashboard, summaryFailure.payload);
+  assert.deepEqual(dashboard.assetAllocationPortfolio.rows, acceptedRows, 'A summary failure must not discard accepted holding rows.');
+  assert.equal(dashboard.assetAllocationPortfolio.portfolioMtdReturnStatus, 'unavailable');
+  assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
+
+  const recovered = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-07-10T21:10:00.000Z'),
+    fetchHolding: async (holding) => structuredClone(rows.find((row) => row.ticker === holding.symbol))
+  });
+  assert.equal(recovered.availability, undefined);
+  assert.ok(recovered.rows.every((row) => row.availability === undefined));
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(recovered), []);
+  applyAssetAllocationPortfolio(dashboard, recovered);
+  applyAssetAllocationSummary(dashboard, {
+    asOf: '2026-07-10',
+    portfolioMtdReturnValue: 1.23,
+    status: 'available',
+    stale: false
+  });
+  assert.equal(dashboard.assetAllocationPortfolio.portfolioMtdReturnStatus, 'available');
+  assert.equal(dashboard.assetAllocationPortfolio.portfolioMtdReturnStale, false);
+  assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
 }
 
-function testFuturesStagingPayloadContract() {
+async function testFuturesStagingPayloadContract() {
   const valid = {
     compiledAt: '2026-07-10T20:00:00.000Z',
     source: 'Yahoo Finance Chart API',
@@ -671,6 +1252,89 @@ function testFuturesStagingPayloadContract() {
     () => applyFuturesModule(dashboardFixture(), shortRoster, 'afternoon'),
     /Generated Futures staging payload is invalid: Futures staging payload must contain exactly 4 rows/
   );
+
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-partial-');
+  const output = path.join(dir, 'futures.json');
+  const rows = fixtureFutures();
+  await runFutures(['--session', '--output', output], {
+    now: new Date('2026-07-10T21:05:00.000Z'),
+    fetchFuture: async (spec) => {
+      if (spec.symbol === 'NQ=F') throw new Error('fixture contract failure');
+      return structuredClone(rows.find((row) => row.symbol === spec.symbol));
+    }
+  });
+  const partial = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(partial.availability.status, 'partial');
+  assert.deepEqual(partial.availability.failures, [{ symbol: 'NQ=F', message: 'fixture contract failure' }]);
+  assert.deepEqual(partial.futures.filter((row) => row.symbol !== 'NQ=F'), rows.filter((row) => row.symbol !== 'NQ=F'));
+  assert.equal(partial.futures.find((row) => row.symbol === 'NQ=F').value, 'Unavailable');
+  assert.deepEqual(validateFuturesPayload(partial, { expectedMode: 'session' }), []);
+  const { dashboard: partialDashboard, chartData: partialChartData } = createDashboardValidationFixture();
+  applyFuturesModule(partialDashboard, partial, 'afternoon');
+  assert.equal(validateDashboardAndChartFixture(partialDashboard, partialChartData).status, 0);
+
+  await runFutures(['--session', '--output', output], {
+    now: new Date('2026-07-10T21:10:00.000Z'),
+    fetchFuture: async (spec) => structuredClone(rows.find((row) => row.symbol === spec.symbol))
+  });
+  const recovered = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(recovered.availability, undefined);
+  assert.deepEqual(recovered.futures, rows);
+  assert.deepEqual(validateFuturesPayload(recovered, { expectedMode: 'session' }), []);
+}
+
+function testPremarketFuturesCutoffUsesRunTimeOrCashOpen() {
+  const points = [
+    ['2026-07-12T22:00:00Z', 100],
+    ['2026-07-13T12:55:00Z', 101],
+    ['2026-07-13T13:00:00Z', 102],
+    ['2026-07-13T13:30:00Z', 103],
+    ['2026-07-13T20:00:00Z', 104]
+  ];
+  const payload = {
+    chart: {
+      result: [{
+        timestamp: points.map(([timestamp]) => Date.parse(timestamp) / 1000),
+        indicators: { quote: [{ close: points.map(([, price]) => price) }] },
+        meta: {
+          chartPreviousClose: 99,
+          regularMarketPrice: 104,
+          regularMarketTime: Date.parse('2026-07-13T20:00:00Z') / 1000,
+          instrumentType: 'FUTURE',
+          exchangeName: 'CME'
+        }
+      }]
+    }
+  };
+  const referencePayload = {
+    chart: {
+      result: [{
+        timestamp: [
+          Date.parse('2026-07-10T13:30:00Z') / 1000,
+          Date.parse('2026-07-10T20:00:00Z') / 1000,
+          Date.parse('2026-07-13T13:30:00Z') / 1000,
+          Date.parse('2026-07-13T20:00:00Z') / 1000
+        ],
+        indicators: { quote: [{ close: [98, 99, 100, 101] }] }
+      }]
+    }
+  };
+  const spec = { symbol: 'ES=F', label: 'S&P Futures' };
+  const args = { mode: 'premarket' };
+  assert.equal(premarketCutoff(new Date('2026-07-13T13:00:00Z')).toISOString(), '2026-07-13T13:00:00.000Z');
+  assert.equal(premarketCutoff(new Date('2026-07-13T16:00:00Z')).toISOString(), '2026-07-13T13:30:00.000Z');
+
+  const early = parseFuture(spec, payload, args, referencePayload, new Date('2026-07-13T13:00:00Z'));
+  assert.equal(early.raw.price, 102);
+  assert.equal(early.raw.referenceDate, '2026-07-10');
+  assert.equal(early.raw.quoteTime, Date.parse('2026-07-13T13:00:00Z') / 1000);
+  assert.equal(early.series.at(-1)[0], Date.parse('2026-07-13T13:00:00Z') / 1000);
+
+  const later = parseFuture(spec, payload, args, referencePayload, new Date('2026-07-13T16:00:00Z'));
+  assert.equal(later.raw.price, 103);
+  assert.equal(later.raw.referenceDate, '2026-07-10');
+  assert.equal(later.raw.quoteTime, Date.parse('2026-07-13T13:30:00Z') / 1000);
+  assert.equal(later.series.at(-1)[0], Date.parse('2026-07-13T13:30:00Z') / 1000);
 }
 
 function testEditorialReviewContract() {
@@ -714,6 +1378,22 @@ function testEditorialReviewContract() {
     verifiedClaims: [{ text: 'An obsolete record claim.', evidenceUrl: 'https://example.com/obsolete-claim' }]
   }, data).join('\n'), /does not match current editorial text/);
   assert.match(validateReviewManifest({ ...manifest, sections: manifest.sections.slice(1) }, data).join('\n'), /missing opening/);
+  const fallbackData = structuredClone(data);
+  fallbackData.opening.headline = 'Markets test the outlook';
+  const fallbackManifest = {
+    ...manifest,
+    systemFallbacks: [{
+      section: 'opening',
+      path: 'opening.headline',
+      action: 'retained_candidate',
+      reason: 'unsupported_claim'
+    }]
+  };
+  assert.deepEqual(validateReviewManifest(fallbackManifest, fallbackData), []);
+  buildEditorialReview(fallbackData, fallbackManifest, reviewChartData);
+  assert.deepEqual(fallbackData.editorialReview.systemFallbacks, fallbackManifest.systemFallbacks);
+  assert.deepEqual(validateReviewManifest(fallbackData.editorialReview, fallbackData, { requireEmbedded: true, chartData: reviewChartData }), []);
+  assert.match(validateReviewManifest({ ...manifest, systemFallbacks: [{ section: 'opening', path: '', action: 'reviewed', reason: '' }] }, data).join('\n'), /path must be populated[\s\S]*action is invalid[\s\S]*reason must be populated/);
 }
 
 function testDeterministicEditionMetadata() {
@@ -801,28 +1481,28 @@ function testArchitectureEditorialWorkspaceHandoff() {
 }
 
 function testArchitecturePreparationLeavesCanonicalUnchanged() {
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-deterministic-stage-');
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-deterministic-stage-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const candidateFile = path.join(dir, 'dashboard-candidate.html');
-  const originalHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, originalHtml);
 
   const result = spawnSync(process.execPath, [
     path.join(root, 'scripts/run_daily_update.js'),
     '--dashboard', dashboardFile,
     '--candidate', candidateFile,
-    '--morning',
+    '--afternoon',
     '--skip-earnings',
     '--skip-futures',
     '--skip-chart-data',
     '--skip-crypto-stats',
     '--skip-asset-allocation',
-    '--skip-week-ahead',
-    '--test-skip-validation'
+    '--skip-week-ahead'
   ], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, DASHBOARD_TEST_MODE: '1', SCHEDULED_NOW_ISO: '2026-07-13T12:05:00.000Z' }
+    env: { ...process.env, SCHEDULED_NOW_ISO: '2026-07-10T21:05:00.000Z', VALIDATE_NOW_ISO: FIXTURE_NOW }
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -1013,6 +1693,11 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   const invalidPayload = structuredClone(dashboard);
   invalidPayload.opening.catalysts = [];
+  invalidPayload.stories[0].publishedOn = '2000-01-01';
+  invalidPayload.stories[1] = structuredClone(invalidPayload.futuresModule.stories[1]);
+  invalidPayload.futuresModule.stories[0].publishedAt = '2000-01-01T00:00:00Z';
+  invalidPayload.crypto.notes[0].url = 'http://insecure.example/story';
+  invalidPayload.tape.rows[0].note = 'Reuters source recap repeats a static latest quote without meaningful market context for readers.';
   const eventDays = dashboard.weekAhead.days.filter((day) => day.events.length);
   const review = {
     schemaVersion: 1,
@@ -1024,8 +1709,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   };
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
-  const originalHash = crypto.createHash('sha256').update(originalHtml).digest('hex');
-  const originalMtimeMs = fs.statSync(dashboardFile).mtimeMs;
   fs.writeFileSync(payloadFile, JSON.stringify(invalidPayload));
   fs.writeFileSync(reviewFile, JSON.stringify(review));
   const command = [
@@ -1042,12 +1725,23 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     VALIDATE_NOW_ISO: FIXTURE_NOW
   };
   const invalidResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(invalidResult.status, 0, 'An invalid editorial candidate must fail before replacement.');
-  assert.match(invalidResult.stderr, /Editorial candidate failed validation; the published dashboard was not changed/);
-  const unchangedHtml = fs.readFileSync(dashboardFile, 'utf8');
-  assert.equal(crypto.createHash('sha256').update(unchangedHtml).digest('hex'), originalHash);
-  assert.equal(fs.statSync(dashboardFile).mtimeMs, originalMtimeMs);
-  assert.equal(fs.readdirSync(dir).some((name) => name.startsWith('.dashboard.html.')), false, 'Failed candidate files must be removed.');
+  assert.equal(invalidResult.status, 0, invalidResult.stderr);
+  const quarantined = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.deepEqual(quarantined.opening.catalysts, dashboard.opening.catalysts, 'Malformed optional editorial catalysts must retain the validated candidate catalysts.');
+  assert.equal(quarantined.stories.length, dashboard.stories.length - 2, 'Stale and cross-section duplicate editorial stories must be omitted instead of blocking the candidate.');
+  assert.equal(quarantined.futuresModule.stories.length, dashboard.futuresModule.stories.length - 1, 'An out-of-window Futures story must be omitted.');
+  assert.equal(quarantined.crypto.notes.length, dashboard.crypto.notes.length - 1, 'An insecure Crypto story must be omitted.');
+  assert.equal(quarantined.tape.rows[0].note, dashboard.tape.rows[0].note, 'Invalid Tape commentary must retain the validated candidate note.');
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'opening.catalysts[0]' && item.action === 'retained_candidate'));
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'stories[0]' && item.action === 'omitted'));
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'stories.accepted[0]' && item.reason === 'promoted_story_duplicate'));
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'futuresModule.stories[0]' && item.action === 'omitted'));
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'crypto.notes[0]' && item.action === 'omitted'));
+  assert.ok(quarantined.editorialReview.systemFallbacks.some((item) => item.path === 'tape.rows.SPX.note' && item.action === 'retained_candidate'));
+  assert.deepEqual(quarantined.editorialReview.verifiedClaims, []);
+  assert.equal(fs.readdirSync(dir).some((name) => name.startsWith('.dashboard.html.')), false, 'Temporary candidate files must be removed.');
+
+  fs.writeFileSync(dashboardFile, originalHtml);
 
   const editorialPayload = structuredClone(dashboard);
   editorialPayload.masthead.date = 'Saturday · January 1, 2000';
@@ -1061,6 +1755,9 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   editorialPayload.tape.rows[0].note = 'Reviewed Tape commentary explains the current market drivers without restating the quote.';
   editorialPayload.crypto.stats[0].price = '$9.99T';
   editorialPayload.crypto.notes[0].title = 'Reviewed crypto story';
+  editorialPayload.stories = editorialPayload.stories.slice(0, 5);
+  editorialPayload.futuresModule.stories = editorialPayload.futuresModule.stories.slice(0, 2);
+  editorialPayload.crypto.notes = editorialPayload.crypto.notes.slice(0, 2);
   editorialPayload.assetAllocationPortfolio.rows[0].price = '$999.00';
   editorialPayload.footer.compiled = dashboard.footer.compiled.replace(' · Market data:', ' · Holiday context: Reviewed. · Market data:');
   const editorialEventDay = editorialPayload.weekAhead.days.find((day) => day.events.length);
@@ -1076,6 +1773,10 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.stories[0].title, 'Reviewed market story');
   assert.equal(finalized.futuresModule.stories[0].title, 'Reviewed futures story');
   assert.equal(finalized.crypto.notes[0].title, 'Reviewed crypto story');
+  assert.equal(finalized.storiesCoverage.status, 'partial');
+  assert.equal(finalized.futuresModule.storiesCoverage.status, 'partial');
+  assert.equal(finalized.crypto.notesCoverage.status, 'partial');
+  assert.equal(finalized.storiesCoverage.reason, 'insufficient_qualifying_fresh_coverage');
   assert.equal(finalized.tape.rows[0].note, 'Reviewed Tape commentary explains the current market drivers without restating the quote.');
   assert.match(finalized.tape.label, /^Friday After The Bell · Reviewed drivers$/);
   assert.match(finalized.footer.compiled, /^Compiled Friday, July 10, 2026 at 4:01 PM CDT · Holiday context: Reviewed\./);
@@ -1085,6 +1786,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.deepEqual(finalized.weekAhead.days.map((day) => day.events), dashboard.weekAhead.days.map((day) => day.events));
   assert.equal(finalized.masthead.date, 'Friday · July 10, 2026');
   assert.notEqual(finalized.tape.rows[0].last, '99,999.00');
+  assert.equal(finalized.editorialReview.systemFallbacks, undefined, 'A later valid editorial apply must clear system fallback dispositions.');
 }
 
 function testApplyChartDataJsonCliMode() {
@@ -1129,7 +1831,7 @@ function testApplyChartDataJsonCliMode() {
   assert.deepEqual(embeddedChart.series[0].bars.at(-1), ['2026-07-06', 6120, 6125, 6110, 6123.45, null]);
 }
 
-function testChartFetcherTickerFilterAndMergeChartDataCliMode() {
+async function testChartFetcherTickerFilterAndMergeChartDataCliMode() {
   assert.deepEqual(parseFetchChartDataArgs(['--ticker', 'HG', '--ticker', 'NG']).tickers, ['HG', 'NG']);
 
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-merge-');
@@ -1169,11 +1871,112 @@ function testChartFetcherTickerFilterAndMergeChartDataCliMode() {
   assert.deepEqual(chart.series.map((series) => series.ticker), ['SPX', 'HG']);
   assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'SPX').last, '6,123.45');
   assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'HG').last, '4.60');
+
+  const producerInput = path.join(dir, 'producer-input.html');
+  const producerOutput = path.join(dir, 'producer-chart-data.json');
+  const { dashboard: producerDashboard, chartData: producerChartData } = createDashboardValidationFixture();
+  const originalProducerInput = renderDashboardValidationFixture(producerDashboard, producerChartData);
+  fs.writeFileSync(producerInput, originalProducerInput);
+  await runChart([
+    '--input', producerInput,
+    '--output', producerOutput,
+    '--ticker', 'SPX',
+    '--ticker', 'VCR',
+    '--ticker', 'UST10Y',
+    '--days', '1826',
+    '--delay-ms', '0'
+  ], {
+    now: new Date('2026-07-10T21:05:00.000Z'),
+    fetchSeries: async (row) => {
+      if (row.ticker === 'VCR') throw new Error('fixture ticker failure');
+      return {
+        ticker: row.ticker,
+        name: row.name,
+        section: row.section,
+        sourceSymbol: row.sourceSymbol,
+        note: row.note,
+        source: 'Yahoo Finance Chart API',
+        dataKind: 'ohlc',
+        priceOnly: false,
+        noVolume: false,
+        bars: [
+          { time: '2026-07-09', open: 6100, high: 6110, low: 6090, close: 6100, volume: 1000 },
+          { time: '2026-07-10', open: 6190, high: 6210, low: 6180, close: 6200, volume: 1100 }
+        ]
+      };
+    }
+  });
+  const partial = JSON.parse(fs.readFileSync(producerOutput, 'utf8'));
+  assert.equal(partial.availability.status, 'partial');
+  assert.deepEqual(partial.availability.failures, [{ ticker: 'VCR', message: 'fixture ticker failure' }]);
+  assert.equal(partial.series.find((row) => row.ticker === 'SPX').bars.at(-1).close, 6200);
+  assert.equal(partial.series.find((row) => row.ticker === 'VCR').availability.status, 'carried_forward');
+  assert.deepEqual(validateChartStagingPayload(partial, producerDashboard.tape.rows), []);
+  applyTapeQuoteRows(producerDashboard, partial.quoteRows.tape);
+  producerDashboard.tape.availability = partial.availability;
+  const partialValidation = validateDashboardAndChartFixture(producerDashboard, compactChartPayload(partial));
+  assert.equal(partialValidation.status, 0, partialValidation.stderr);
+  assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
+
+  await runChart([
+    '--input', producerInput,
+    '--output', producerOutput,
+    '--ticker', 'SPX',
+    '--ticker', 'VCR',
+    '--ticker', 'UST10Y',
+    '--days', '1826',
+    '--delay-ms', '0'
+  ], {
+    now: new Date('2026-07-10T21:10:00.000Z'),
+    fetchSeries: async (row) => ({
+      ticker: row.ticker,
+      name: row.name,
+      section: row.section,
+      sourceSymbol: row.sourceSymbol,
+      note: row.note,
+      source: 'Yahoo Finance Chart API',
+      dataKind: 'ohlc',
+      priceOnly: false,
+      noVolume: false,
+      bars: row.ticker === 'VCR'
+        ? [
+            { time: '2026-07-09', open: 4.5, high: 4.6, low: 4.4, close: 4.5, volume: 1000 },
+            { time: '2026-07-10', open: 4.6, high: 4.8, low: 4.5, close: 4.7, volume: 1100 }
+          ]
+        : [
+            { time: '2026-07-09', open: 6100, high: 6110, low: 6090, close: 6100, volume: 1000 },
+            { time: '2026-07-10', open: 6190, high: 6210, low: 6180, close: 6200, volume: 1100 }
+          ]
+    })
+  });
+  const recovered = JSON.parse(fs.readFileSync(producerOutput, 'utf8'));
+  assert.equal(recovered.availability, undefined);
+  assert.ok(recovered.series.every((row) => row.availability === undefined));
+  assert.deepEqual(validateChartStagingPayload(recovered, producerDashboard.tape.rows), []);
+  assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
 }
 
 function testDashboardEmbeddedRuntimeParses() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  assert.doesNotThrow(() => new Function(dashboardRuntimeSource(html)), 'The complete dashboard runtime must parse as JavaScript.');
+  const runtime = dashboardRuntimeSource(html);
+  assert.doesNotThrow(() => new Function(runtime), 'The complete dashboard runtime must parse as JavaScript.');
+  assert.doesNotMatch(runtime, /futuresModule\.section(?:Label|Title)\s*\|\|/, 'The Futures renderer must require canonical section labels.');
+  assert.doesNotMatch(runtime, /item\.label\s*\|\|\s*item\.name/, 'The Futures renderer must require canonical row labels.');
+  assert.doesNotMatch(runtime, /item\.body\s*\|\|\s*item\.note/, 'The Futures renderer must require canonical row commentary.');
+  assert.doesNotMatch(runtime, /item\.value\s*\|\|/, 'The Futures renderer must require canonical row values.');
+  assert.doesNotMatch(runtime, /story\.tag\s*\|\|/, 'The Futures renderer must require canonical story tags.');
+}
+
+function testNewsCoverageNoticeRendering() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'news-coverage-notice');
+  const newsCoverageNotice = Function('esc', `${source}\nreturn newsCoverageNotice;`)((value) => String(value));
+
+  assert.equal(newsCoverageNotice({ status: 'complete' }, 9, 9, 'News Flow'), '');
+  assert.match(
+    newsCoverageNotice({ status: 'partial' }, 5, 9, 'News Flow'),
+    /Limited News Flow coverage: showing 5 of 9 qualifying fresh items\. Retrying on the next update\./
+  );
 }
 
 function testExpandedEarningsTimingGroupsPreserveMarketCapOrder() {
@@ -1351,6 +2154,43 @@ function testDashboardValidatorRequiresCryptoNoteDisplayFields() {
     assert.notEqual(result.status, 0, `Crypto notes must require ${field}.`);
     assert.match(result.stderr, new RegExp(`Crypto note ${field} must be populated`));
   }
+}
+
+function testDashboardValidatorAllowsPartialNewsCoverageWithoutRelaxingStoryQuality() {
+  const data = validationDashboardData();
+  data.stories = data.stories.slice(0, 5);
+  data.crypto.notes = data.crypto.notes.slice(0, 2);
+  data.futuresModule.stories = data.futuresModule.stories.slice(0, 2);
+  applyNewsCoverageState(data, { now: new Date(FIXTURE_NOW) });
+
+  const partialResult = validateDashboardFixture(data);
+  assert.equal(partialResult.status, 0, partialResult.stderr);
+
+  const missingCoverage = structuredClone(data);
+  delete missingCoverage.storiesCoverage;
+  const missingCoverageResult = validateDashboardFixture(missingCoverage);
+  assert.notEqual(missingCoverageResult.status, 0, 'Reduced news counts must carry explicit partial coverage metadata.');
+  assert.match(missingCoverageResult.stderr, /storiesCoverage must record complete or partial coverage/);
+
+  const invalidUrl = structuredClone(data);
+  invalidUrl.crypto.notes[0].url = 'http://example.com/not-secure';
+  const invalidUrlResult = validateDashboardFixture(invalidUrl);
+  assert.notEqual(invalidUrlResult.status, 0, 'Partial coverage must not relax per-story URL validation.');
+  assert.match(invalidUrlResult.stderr, /must include an HTTPS url/);
+
+  const staleStory = structuredClone(data);
+  staleStory.stories[0].publishedOn = '2026-07-01';
+  const staleStoryResult = validateDashboardFixture(staleStory);
+  assert.notEqual(staleStoryResult.status, 0, 'Partial coverage must not relax per-story freshness validation.');
+  assert.match(staleStoryResult.stderr, /must follow the local calendar-date freshness rule/);
+
+  const recovered = validationDashboardData();
+  applyNewsCoverageState(recovered, { now: new Date(FIXTURE_NOW) });
+  assert.equal(recovered.storiesCoverage.status, 'complete');
+  assert.equal(recovered.crypto.notesCoverage.status, 'complete');
+  assert.equal(recovered.futuresModule.storiesCoverage.status, 'complete');
+  const recoveredResult = validateDashboardFixture(recovered);
+  assert.equal(recoveredResult.status, 0, recoveredResult.stderr);
 }
 
 
@@ -1536,13 +2376,6 @@ function testDashboardValidatorAcceptsMorningFuturesStoryWindow() {
 }
 
 function testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday() {
-  const validator = fs.readFileSync(path.join(root, 'scripts', 'validate_dashboard.js'), 'utf8');
-  const source = extractRuntimeTestBlock(validator, 'futures-story-window');
-  const { futuresStoryPublicationWindow } = Function(
-    'isIsoDate',
-    'isIsoDateTime',
-    `${source}\nreturn { futuresStoryPublicationWindow };`
-  )(isIsoDate, isIsoDateTime);
   const futures = Array.from({ length: 4 }, () => ({ raw: { referenceDate: '2026-07-02' } }));
   const window = futuresStoryPublicationWindow(
     'Pre-Market Futures',
@@ -2309,8 +3142,17 @@ const architectureContractTests = Object.freeze([
   testArchitecturePolicyOwnershipMatrix,
   testArchitectureSingleWriterAndCliBoundaries,
   testDedicatedDashboardApplyModes,
-  testFocusedEarningsApplyRejectsPendingScheduleReview,
+  testFocusedEarningsApplyAllowsPendingScheduleReview,
+    testFocusedEarningsApplyIgnoresMalformedOptionalAndStagingArtifacts,
+    testDashboardCandidateAppliesEarningsSectionFallback,
+    testEarningsStagingPolicyDriftTriggersRebuild,
+    testWeekAheadStagingContractDriftTriggersRebuild,
+    testDeterministicSectionFallbackContracts,
+  testPreparationRunLock,
+  testLastGoodDashboardRecovery,
   testFocusedApplyValidatesBeforeAtomicReplace,
+  testFocusedEarningsApplyUsesNewsPartialFallback,
+  testFocusedEarningsApplyRestampsEditorialReview,
   testSkipValidateCannotTargetCanonicalDashboard,
   testArchitecturePreparationLeavesCanonicalUnchanged,
   testArchitectureEditorialWorkspaceHandoff,
@@ -2321,7 +3163,10 @@ async function main() {
   const tests = [
     testUpdaterQuoteAndCryptoPatches,
     testUpdaterModulePatches,
+    testPartialDeterministicRowsValidate,
+    testEditorialEarningsMissingCopyBlocksFinalApplyUntilAttempted,
     testFuturesStagingPayloadContract,
+    testPremarketFuturesCutoffUsesRunTimeOrCashOpen,
     testEditorialReviewContract,
     testDeterministicEditionMetadata,
     testChartSeriesOwnsDerivedQuoteViews,
@@ -2332,6 +3177,7 @@ async function main() {
     testApplyChartDataJsonCliMode,
     testChartFetcherTickerFilterAndMergeChartDataCliMode,
     testDashboardEmbeddedRuntimeParses,
+    testNewsCoverageNoticeRendering,
     testExpandedEarningsTimingGroupsPreserveMarketCapOrder,
     testDashboardValidatorRejectsRemoteRuntimeEndpoint,
     testDashboardValidatorAcceptsFridayBridgeCalendars,
@@ -2348,6 +3194,7 @@ async function main() {
     testMorningFuturesWindowUsesFetchedReferenceDateAcrossHoliday,
     testDashboardValidatorRejectsReferencePagesInAllNewsSections,
     testDashboardValidatorRequiresCryptoNoteDisplayFields,
+    testDashboardValidatorAllowsPartialNewsCoverageWithoutRelaxingStoryQuality,
     testEditionStampChangesIdentity,
     testLocalRefreshIndicatorBehavior,
     testEmbeddedPayloadLoadErrorsAreDistinct,

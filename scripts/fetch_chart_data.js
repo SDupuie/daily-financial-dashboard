@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { atomicWriteJson } = require('./staging_writer');
 
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
@@ -65,8 +66,23 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
   if (typeof payload.source !== 'string' || !payload.source.trim()) errors.push('Futures staging source must be populated.');
   if (!FUTURES_MODES.has(payload.mode)) errors.push('Futures staging mode must be premarket or session.');
   if (expectedMode && payload.mode !== expectedMode) errors.push(`Futures staging mode must be ${expectedMode} for this update window.`);
+  const unavailable = payload.availability?.status === 'unavailable';
+  const partial = payload.availability?.status === 'partial';
+  if (payload.availability !== undefined) {
+    if (!payload.availability || typeof payload.availability !== 'object' || Array.isArray(payload.availability)) {
+      errors.push('Futures staging availability must be an object.');
+    } else {
+      if (!unavailable && !partial) errors.push('Futures staging availability.status must be partial or unavailable.');
+      if (payload.availability.reason !== 'source_refresh_failed') errors.push('Futures staging availability.reason must be source_refresh_failed.');
+      if (!isOffsetIsoTimestamp(payload.availability.checkedAt)) errors.push('Futures staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+    }
+  }
   if (!Array.isArray(payload.futures)) {
     errors.push('Futures staging futures must be an array.');
+    return errors;
+  }
+  if (unavailable) {
+    if (payload.futures.length) errors.push('Unavailable Futures staging must contain no rows.');
     return errors;
   }
   if (payload.futures.length !== FUTURES.length) {
@@ -80,6 +96,12 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
       continue;
     }
     if (row.symbol !== spec.symbol) errors.push(`${label}.symbol must be ${spec.symbol}.`);
+    if (row.availability?.status === 'unavailable') {
+      if (typeof row.label !== 'string' || !row.label.trim()) errors.push(`${label}.label must be populated.`);
+      if (row.value !== 'Unavailable') errors.push(`${label}.value must be Unavailable when the row is unavailable.`);
+      if (typeof row.body !== 'string' || !row.body.trim()) errors.push(`${label}.body must explain unavailable data.`);
+      continue;
+    }
     for (const field of ['label', 'value', 'body']) {
       if (typeof row[field] !== 'string' || !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
     }
@@ -106,6 +128,39 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
     if (Number.isFinite(row.raw.pct) && row.dir !== expectedDir) errors.push(`${label}.dir must match raw.pct.`);
   }
   return errors;
+}
+
+function buildUnavailableFuturesPayload(mode, checkedAt = new Date()) {
+  const timestamp = new Date(checkedAt).toISOString();
+  return {
+    compiledAt: timestamp,
+    source: 'Yahoo Finance Chart API',
+    mode,
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    },
+    futures: []
+  };
+}
+
+function unavailableFutureRow(spec, error, checkedAt = new Date()) {
+  return {
+    symbol: spec.symbol,
+    label: spec.label,
+    value: 'Unavailable',
+    body: 'Current contract data is unavailable; retrying on the next update.',
+    dir: 'flat',
+    series: [],
+    raw: {},
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: new Date(checkedAt).toISOString(),
+      message: error?.message || String(error || 'source unavailable')
+    }
+  };
 }
 
 function parseArgs(argv) {
@@ -259,6 +314,17 @@ function chicagoIsoDate(epochSeconds) {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+function easternIsoDate(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
 function isRegularSessionPoint(timestamp) {
   const minutes = chicagoClockMinutes(timestamp);
   return minutes !== null && minutes >= 8 * 60 + 30 && minutes <= 15 * 60;
@@ -310,6 +376,46 @@ function withLatestQuotePoint(points, quoteTime, quotePrice) {
   return normalized;
 }
 
+function easternCashOpen(runAt) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric'
+  }).formatToParts(runAt);
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value);
+  const year = value('year');
+  const month = value('month');
+  const day = value('day');
+  const targetUtc = Date.UTC(year, month - 1, day, 9, 30);
+  const observed = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false
+  }).formatToParts(new Date(targetUtc));
+  const observedValue = (type) => Number(observed.find((part) => part.type === type)?.value);
+  const targetLocalMs = Date.UTC(year, month - 1, day, 9, 30);
+  const observedLocalMs = Date.UTC(
+    observedValue('year'),
+    observedValue('month') - 1,
+    observedValue('day'),
+    observedValue('hour'),
+    observedValue('minute')
+  );
+  return new Date(targetUtc + targetLocalMs - observedLocalMs);
+}
+
+function premarketCutoff(runAt) {
+  const runTime = runAt instanceof Date ? runAt : new Date(runAt);
+  if (Number.isNaN(runTime.getTime())) throw new Error('Premarket run time must be a valid date.');
+  const cashOpen = easternCashOpen(runTime);
+  return new Date(Math.min(runTime.getTime(), cashOpen.getTime()));
+}
+
 function regularSessionComparison(points, symbol) {
   const sessions = new Map();
   for (const point of points) {
@@ -343,12 +449,17 @@ function regularSessionComparison(points, symbol) {
   };
 }
 
-function latestRegularSessionClose(points, symbol) {
+function latestRegularSessionClose(points, symbol, latestTimestamp = Number.POSITIVE_INFINITY, beforeDate = '') {
+  const cutoffTimestamp = Number.isFinite(latestTimestamp)
+    ? latestTimestamp
+    : Number.POSITIVE_INFINITY;
   const sessions = new Map();
   for (const point of points) {
     const [timestamp] = point;
+    if (timestamp > cutoffTimestamp) continue;
     if (!isRegularSessionPoint(timestamp)) continue;
     const date = chicagoIsoDate(timestamp);
+    if (beforeDate && date >= beforeDate) continue;
     if (!date) continue;
     if (!sessions.has(date)) sessions.set(date, []);
     sessions.get(date).push(point);
@@ -365,7 +476,13 @@ function latestRegularSessionClose(points, symbol) {
   };
 }
 
-function parseFuture(spec, payload, args, referencePayload = null) {
+function scheduledNow() {
+  const override = process.env.SCHEDULED_NOW_ISO;
+  const parsed = override ? new Date(override) : new Date();
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function parseFuture(spec, payload, args, referencePayload = null, runAt = new Date()) {
   const meta = payload?.chart?.result?.[0]?.meta;
   const previousClose = Number(meta?.chartPreviousClose);
   const quotePrice = Number(meta?.regularMarketPrice);
@@ -378,12 +495,17 @@ function parseFuture(spec, payload, args, referencePayload = null) {
   const sessionComparison = args.mode === 'session'
     ? regularSessionComparison(pricePoints, spec.symbol)
     : null;
+  const cutoff = args.mode === 'premarket' ? premarketCutoff(runAt) : null;
   const premarketReference = args.mode === 'premarket'
-    ? latestRegularSessionClose(parsePricePoints(referencePayload), spec.symbol)
+    ? latestRegularSessionClose(parsePricePoints(referencePayload), spec.symbol, cutoff?.getTime() / 1000, easternIsoDate(runAt))
     : null;
+  const boundedPricePoints = cutoff
+    ? pricePoints.filter(([timestamp]) => timestamp <= cutoff.getTime() / 1000)
+    : pricePoints;
+  const boundedQuoteTime = cutoff && quoteTime > cutoff.getTime() / 1000 ? null : quoteTime;
   const comparisonPoints = sessionComparison
     ? sessionComparison.sessionPoints
-    : withLatestQuotePoint(pricePoints, quoteTime, quotePrice);
+    : withLatestQuotePoint(boundedPricePoints, boundedQuoteTime, quotePrice);
   if (comparisonPoints.length < 2) {
     throw new Error(`${spec.symbol} response did not include at least two chart points`);
   }
@@ -417,8 +539,8 @@ function parseFuture(spec, payload, args, referencePayload = null) {
         referenceTime: sessionComparison?.referenceTime || premarketReference.referenceTime,
         referenceCloseEastern: '4:00 PM ET'
       } : {}),
-      quotePrice,
-      quoteTime: Number.isFinite(quoteTime) ? quoteTime : null,
+      quotePrice: price,
+      quoteTime: Number.isFinite(regularMarketTime) ? regularMarketTime : null,
       previousClose,
       ...(sessionComparison ? {
         sessionDate: sessionComparison.sessionDate,
@@ -433,30 +555,44 @@ function parseFuture(spec, payload, args, referencePayload = null) {
   };
 }
 
-async function fetchFuture(spec, args) {
+async function fetchFuture(spec, args, runAt = new Date()) {
   const payloadPromise = fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
   const referencePayloadPromise = args.mode === 'premarket'
     ? fetchJson(yahooChartUrl(spec.symbol, args, '5d'), args.timeoutMs)
     : Promise.resolve(null);
   const [payload, referencePayload] = await Promise.all([payloadPromise, referencePayloadPromise]);
-  return parseFuture(spec, payload, args, referencePayload);
+  return parseFuture(spec, payload, args, referencePayload, runAt);
 }
 
-async function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2), dependencies = {}) {
   const args = parseArgs(argv);
-  const results = await Promise.all(FUTURES.map((spec) => fetchFuture(spec, args)));
+  const checkedAt = dependencies.now instanceof Date ? dependencies.now : scheduledNow();
+  const settled = await Promise.allSettled(FUTURES.map((spec) => (dependencies.fetchFuture || fetchFuture)(spec, args, checkedAt)));
+  const failures = [];
+  const results = settled.map((result, index) => {
+    if (result.status === 'fulfilled') return result.value;
+    failures.push({ symbol: FUTURES[index].symbol, message: result.reason?.message || 'source unavailable' });
+    return unavailableFutureRow(FUTURES[index], result.reason, checkedAt);
+  });
   // Output is a staging payload; the published page renders embedded futuresModule.futures only.
   const output = {
-    compiledAt: new Date().toISOString(),
+    compiledAt: checkedAt.toISOString(),
     source: 'Yahoo Finance Chart API',
     mode: args.mode,
+    ...(failures.length ? {
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: checkedAt.toISOString(),
+        failures
+      }
+    } : {}),
     futures: results
   };
   const errors = validateFuturesPayload(output, { expectedMode: args.mode });
   if (errors.length) throw new Error(`Generated Futures staging payload is invalid: ${errors.join(' ')}`);
 
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, `${JSON.stringify(output, null, 2)}\n`);
+  (dependencies.writeJson || atomicWriteJson)(args.output, output);
 
   if (args.compact) {
     process.stdout.write(results.map((row) => `${row.symbol} ${row.value}`).join(' | '));
@@ -466,7 +602,16 @@ async function main(argv = process.argv.slice(2)) {
   }
 }
 
-  return { parseArgs, run: main, validateFuturesPayload };
+  return {
+    buildUnavailableFuturesPayload,
+    easternCashOpen,
+    parseArgs,
+    parseFuture,
+    premarketCutoff,
+    run: main,
+    scheduledNow,
+    validateFuturesPayload
+  };
 })();
 
 function parseArgs(argv) {
@@ -618,6 +763,18 @@ function readCryptoRows(input) {
 
 function readChartableRows(input) {
   return [...readTapeRows(input), ...readCryptoRows(input)];
+}
+
+function readEmbeddedChartPayload(input) {
+  try {
+    const html = fs.readFileSync(input, 'utf8');
+    const match = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
+    if (!match) return null;
+    const payload = roundChartPayload(JSON.parse(match[1]));
+    return Array.isArray(payload.series) ? payload : null;
+  } catch (_error) {
+    return null;
+  }
 }
 
 function sleep(ms) {
@@ -786,6 +943,43 @@ function compactChartPayload(payload) {
       bars: series.bars.map(compactChartBar)
     }))
   };
+}
+
+function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
+  const timestamp = new Date(checkedAt).toISOString();
+  return {
+    ...roundChartPayload(canonicalChartData),
+    availability: {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    }
+  };
+}
+
+function validateChartStagingPayload(payload, expectedRows = []) {
+  const errors = [];
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
+  if (payload.schemaVersion !== 1) errors.push('Chart staging schemaVersion must be 1.');
+  if (!Array.isArray(payload.series)) return [...errors, 'Chart staging series must be an array.'];
+  const byTicker = new Map();
+  for (const [index, item] of payload.series.entries()) {
+    const ticker = String(item?.ticker || '').trim().toUpperCase();
+    if (!ticker) errors.push(`Chart staging series[${index}].ticker must be populated.`);
+    else if (byTicker.has(ticker)) errors.push(`Chart staging series contains duplicate ticker ${ticker}.`);
+    else byTicker.set(ticker, item);
+    if (!Array.isArray(item?.bars) || item.bars.length < 2) errors.push(`Chart staging ${ticker || `series[${index}]`} must contain at least two bars.`);
+  }
+  for (const row of expectedRows) {
+    const ticker = String(row?.ticker || '').trim().toUpperCase();
+    if (ticker && !byTicker.has(ticker)) errors.push(`Chart staging series is missing ${ticker}.`);
+  }
+  try {
+    deriveQuoteRowsFromSeries(payload.series);
+  } catch (error) {
+    errors.push(`Chart staging quote derivation failed: ${error.message}`);
+  }
+  return errors;
 }
 
 function sortBars(bars) {
@@ -1283,26 +1477,45 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
   return fetchYahooSeries(row, args, startDate, endDate);
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const args = parseArgs(argv);
   const requestedTickers = new Set(args.tickers.filter(Boolean));
   const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
   if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
-  const endDate = new Date();
+  const endDate = dependencies.now instanceof Date ? dependencies.now : new Date();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
   const series = [];
+  const failures = [];
+  const canonicalPayload = readEmbeddedChartPayload(args.input);
+  const canonicalByTicker = new Map(
+    (canonicalPayload?.series || []).map((item) => [String(item?.ticker || '').toUpperCase(), item])
+  );
 
   for (const row of inputRows) {
-    const item = await fetchSeries(row, args, startDate, endDate, treasuryMonthCache);
-    series.push(item);
-    if (args.delayMs) await sleep(args.delayMs);
+    try {
+      const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
+      series.push(item);
+    } catch (error) {
+      const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
+      failures.push({ ticker: row.ticker, message: error.message });
+      if (!prior) throw new Error(`${row.ticker} refresh failed and no validated embedded series is available: ${error.message}`);
+      series.push({
+        ...prior,
+        availability: {
+          status: 'carried_forward',
+          reason: 'source_refresh_failed',
+          checkedAt: endDate.toISOString()
+        }
+      });
+    }
+    if (args.delayMs) await (dependencies.sleep || sleep)(args.delayMs);
   }
 
   const quoteRows = deriveQuoteRowsFromSeries(series);
   const output = {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt: endDate.toISOString(),
     dashboardSource: path.relative(process.cwd(), args.input) || path.basename(args.input),
     range: {
       days: args.days,
@@ -1310,13 +1523,20 @@ async function main() {
       endDate: isoDateFromDate(endDate)
     },
     sourceFamilies: Array.from(new Set(series.map((item) => item.source).filter(Boolean))),
+    ...(failures.length ? {
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: endDate.toISOString(),
+        failures
+      }
+    } : {}),
     // quoteRows are staging output for daily updates; the published dashboard still renders quotes from dashboard-data.
     quoteRows,
     series
   };
 
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, `${JSON.stringify(output, null, 2)}\n`);
+  (dependencies.writeJson || atomicWriteJson)(args.output, output);
 
   if (args.compact) {
     process.stdout.write(series.map((item) => `${item.ticker}:${item.bars.length}`).join(' | '));
@@ -1330,6 +1550,9 @@ async function main() {
 module.exports = {
   DEFAULT_DAYS,
   REQUEST_TIMEOUT_MS,
+  buildChartDataFallback,
+  buildUnavailableFuturesPayload: futuresModule.buildUnavailableFuturesPayload,
+    easternCashOpen: futuresModule.easternCashOpen,
   deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,
   compactChartPayload,
@@ -1339,8 +1562,15 @@ module.exports = {
   mergeFinnhubQuoteBar,
   quoteRowFromSeries,
   parseArgs,
+    parseFuture: futuresModule.parseFuture,
+    premarketCutoff: futuresModule.premarketCutoff,
+    scheduledNow: futuresModule.scheduledNow,
+  runFutures: futuresModule.run,
   roundChartPayload,
+  runChart: main,
+  validateChartStagingPayload,
   readChartableRows,
+  readEmbeddedChartPayload,
   readCryptoRows,
   readTapeRows,
   shouldUseFinnhubQuoteFallback,

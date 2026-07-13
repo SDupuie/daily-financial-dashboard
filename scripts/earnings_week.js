@@ -2,21 +2,25 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteJson } = require('./staging_writer');
 const {
   buildEarningsWeekPolicy,
   combinedOutcome,
+  computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  earningsApiUsageDay,
   earningsCalendarRangeNeedsBuild,
+  earningsNarrativeDispositions,
   earningsRowKey: rowKey,
   applyEarningsLifecycle,
-  earningsScheduleConfirmationRequiredError,
   earningsScheduleReviewRows,
   metricResult,
+  isDisplayEligibleEarningsRow,
   numberOrNull,
   pctChange,
   reportWindowArrived
 } = require('./earnings_week_contract');
-const { fetchYahooBars, fetchYahooBarsForRows, runBuild } = require('./earnings_week_build');
+const { fetchYahooBars, runBuild } = require('./earnings_week_build');
 const { runValidation, validateEarningsWeekPayload } = require('./earnings_week_validation');
 const root = path.resolve(__dirname, '..');
 const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.json');
@@ -48,25 +52,63 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function earningsCalendarNeedsBuild(range, earningsWeekPath = DEFAULT_EARNINGS_WEEK) {
+function earningsCalendarNeedsBuild(range, earningsWeekPath = DEFAULT_EARNINGS_WEEK, now = new Date()) {
   if (!fs.existsSync(earningsWeekPath)) return earningsCalendarRangeNeedsBuild(range, null);
   try {
-    return earningsCalendarRangeNeedsBuild(range, readJson(earningsWeekPath).range);
+    const week = readJson(earningsWeekPath);
+    if (earningsCalendarRangeNeedsBuild(range, week.range)) return true;
+    const primaryOnly = (week.rows || []).some((row) => isDisplayEligibleEarningsRow(row)
+      && row.sourceAudit?.scheduleVerification?.status === 'primary_only');
+    // Retry a degraded schedule once on the next Central-time day, never by
+    // re-running the metered 26-date scan throughout a development session.
+    return primaryOnly && earningsApiUsageDay(week.generatedAt) !== earningsApiUsageDay(now);
   } catch (_error) {
     return Boolean(range);
   }
 }
 
-function pendingEarningsScheduleReviews(scheduleReviewPath = DEFAULT_SCHEDULE_REVIEW, earningsWeekPath = DEFAULT_EARNINGS_WEEK) {
-  if (!fs.existsSync(scheduleReviewPath)) return [];
-  const review = readJson(scheduleReviewPath);
-  const week = readJson(earningsWeekPath);
-  return earningsScheduleReviewRows(review, week);
+function pendingEarningsScheduleReviews(scheduleReviewPath = DEFAULT_SCHEDULE_REVIEW, activeRange = null) {
+  if (!fs.existsSync(scheduleReviewPath)) return { rows: [], diagnostics: [] };
+  let review;
+  try {
+    review = readJson(scheduleReviewPath);
+  } catch (error) {
+    return {
+      rows: [],
+      diagnostics: [{ code: 'schedule_review_invalid_json', message: error.message }]
+    };
+  }
+  if (review?.schemaVersion !== 1 || !Array.isArray(review.rows) || !review.range) {
+    return {
+      rows: [],
+      diagnostics: [{
+        code: 'schedule_review_invalid_contract',
+        message: 'earnings_schedule_review.json must contain schemaVersion 1, range, and rows[].'
+      }]
+    };
+  }
+  const diagnostics = Array.isArray(review.diagnostics)
+    ? review.diagnostics.filter((item) => item && typeof item.code === 'string' && typeof item.message === 'string')
+    : [];
+  const validRows = [];
+  review.rows.forEach((row, index) => {
+    if (row && typeof row.symbol === 'string' && typeof row.primaryDate === 'string') {
+      validRows.push(row);
+    } else {
+      diagnostics.push({
+        code: 'schedule_review_row_invalid',
+        message: `earnings_schedule_review.rows[${index}] was ignored.`
+      });
+    }
+  });
+  return {
+    rows: earningsScheduleReviewRows({ ...review, rows: validRows }, { range: activeRange }),
+    diagnostics
+  };
 }
 
 function writeJson(file, payload) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+  atomicWriteJson(file, payload);
 }
 
 function parseApplyReleaseArgs(argv) {
@@ -170,6 +212,44 @@ function reactionSource(reaction) {
   return reaction?.status === 'computed' ? 'yahoo' : 'none';
 }
 
+function clearAppliedNarrative(row) {
+  const output = {
+    ...row,
+    eps: { ...row.eps, note: '' },
+    revenue: { ...row.revenue, note: '' },
+    outcome: { ...row.outcome, guide: '', interpretation: '' },
+    reaction: { ...row.reaction, note: '' }
+  };
+  delete output.outcome.guidanceDisposition;
+  delete output.outcome.interpretationDisposition;
+  delete output.reaction.commentaryDisposition;
+  return output;
+}
+
+function preserveAppliedNarrative(row, prior) {
+  const output = {
+    ...row,
+    eps: { ...row.eps, note: prior.eps?.note || '' },
+    revenue: { ...row.revenue, note: prior.revenue?.note || '' },
+    outcome: {
+      ...row.outcome,
+      guide: prior.outcome?.guide || '',
+      interpretation: prior.outcome?.interpretation || ''
+    },
+    reaction: { ...row.reaction, note: prior.reaction?.note || '' }
+  };
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (Object.prototype.hasOwnProperty.call(prior.outcome || {}, field)) output.outcome[field] = structuredClone(prior.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(prior.reaction || {}, 'commentaryDisposition')) {
+    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
+  return output;
+}
+
 function rowFromTask(task, resolution) {
   const profile = task.sourceAudit?.finnhubProfile || null;
   return {
@@ -265,7 +345,7 @@ function applyResolution(row, task, resolution) {
     sourceSummary: {
       primary: 'sec_company_release',
       fallbacks: row.sourceAudit?.selectedSources?.slate === 'finnhub'
-        ? ['finnhub', ...(['company', 'marketCap'].some((field) => row.sourceAudit?.selectedSources?.[field] === 'providerDateConflict') ? ['providerDateConflict'] : []), ...(row.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric' ? ['finnhubMetric'] : [])]
+        ? ['finnhub', ...(row.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric' ? ['finnhubMetric'] : [])]
         : ['earningsApiCompany', 'finnhubProfile'].filter((item) => item !== 'finnhubProfile' || row.sourceAudit?.finnhubProfile),
       reaction: reactionSource(reaction)
     },
@@ -276,17 +356,94 @@ function applyResolution(row, task, resolution) {
       yahoo: reaction.sourceAudit || row.sourceAudit?.yahoo || {}
     }
   };
+  delete updated.sourceAudit.resultRefresh;
   const resolved = applyEarningsLifecycle(updated);
   // Official actuals preserve the preview while the market response is still
   // pending. The lifecycle transition to close_available clears it instead.
   if (resolved.lifecycle === 'released_awaiting_close' && resolved.reaction?.status === 'awaiting_close') {
-    resolved.eps.note = row.eps?.note || '';
-    resolved.revenue.note = row.revenue?.note || '';
-    resolved.outcome.guide = row.outcome?.guide || '';
-    resolved.outcome.interpretation = row.outcome?.interpretation || '';
-    resolved.reaction.note = row.reaction?.note || '';
+    return preserveAppliedNarrative(resolved, row);
   }
   return resolved;
+}
+
+function applyPartialResolutionMetrics(row, resolution) {
+  const epsFields = resolution.fields?.eps || {};
+  const revenueFields = resolution.fields?.revenue || {};
+  const promoteEps = Number.isFinite(numberOrNull(epsFields.actual));
+  const promoteRevenue = Number.isFinite(numberOrNull(revenueFields.actual));
+  if (!promoteEps && !promoteRevenue) {
+    return {
+      row: {
+        ...row,
+        sourceAudit: {
+          ...row.sourceAudit,
+          companyReleaseResolution: resolution
+        }
+      },
+      factsChanged: false
+    };
+  }
+  const factsSnapshot = (value) => JSON.stringify({
+    eps: value.eps,
+    revenue: value.revenue,
+    outcomeOverall: value.outcome?.overall,
+    lifecycle: value.lifecycle,
+    reaction: value.reaction
+  });
+  const before = factsSnapshot(row);
+  const eps = promoteEps
+    ? {
+        ...row.eps,
+        ...metricPayload({ estimate: row.eps?.estimate, actual: epsFields.actual }, {
+          basis: epsFields.basis || row.eps?.basis || '',
+          note: epsFields.adjustment?.note || row.eps?.note || ''
+        })
+      }
+    : row.eps;
+  const revenue = promoteRevenue
+    ? {
+        ...row.revenue,
+        ...metricPayload({ estimate: row.revenue?.estimate, actual: revenueFields.actual }, {
+          note: row.revenue?.note || ''
+        })
+      }
+    : row.revenue;
+  const selectedSources = {
+    ...row.sourceAudit.selectedSources,
+    eps: {
+      ...row.sourceAudit.selectedSources.eps,
+      ...(promoteEps ? { actual: epsFields.actualSource || 'sec_company_release' } : {})
+    },
+    revenue: {
+      ...row.sourceAudit.selectedSources.revenue,
+      ...(promoteRevenue ? { actual: 'sec_company_release' } : {})
+    }
+  };
+  const fallbacks = [...(row.sourceSummary?.fallbacks || [])];
+  if ((promoteEps || promoteRevenue) && !fallbacks.includes('sec_company_release')) fallbacks.push('sec_company_release');
+  let updated = applyEarningsLifecycle({
+    ...row,
+    eps,
+    revenue,
+    outcome: {
+      ...row.outcome,
+      overall: combinedOutcome(eps.result, revenue.result)
+    },
+    sourceSummary: {
+      ...row.sourceSummary,
+      fallbacks
+    },
+    sourceAudit: {
+      ...row.sourceAudit,
+      companyReleaseResolution: resolution,
+      selectedSources
+    }
+  });
+  const factsChanged = factsSnapshot(updated) !== before;
+  if (factsChanged && !(updated.lifecycle === 'released_awaiting_close' && updated.reaction?.status === 'awaiting_close')) {
+    updated = clearAppliedNarrative(updated);
+  }
+  return { row: updated, factsChanged };
 }
 
 function updateSummary(source) {
@@ -305,13 +462,10 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
   const taskMap = new Map((output.companyReleaseTasks || []).map((task) => [task.id, task]));
   const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
   const applied = [];
-  const skipped = [];
+  const dispositions = [];
+  let deterministicFactsChanged = false;
 
   for (const resolution of resolutionPayload.companyReleaseResolutions || []) {
-    if (resolution.status !== 'resolved') {
-      skipped.push({ taskId: resolution.taskId, reason: resolution.status || 'not_resolved' });
-      continue;
-    }
     const task = taskMap.get(resolution.taskId);
     if (!task) throw new Error(`${resolution.taskId} does not map to companyReleaseTasks.`);
     if (task.symbol !== resolution.symbol) throw new Error(`${resolution.taskId} symbol does not match resolution.`);
@@ -321,6 +475,33 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
 
     const key = rowKey(resolution);
     const existing = rowsByKey.get(key) || rowsByKey.get(rowKey(task));
+    dispositions.push({
+      taskId: resolution.taskId,
+      symbol: resolution.symbol,
+      status: resolution.status,
+      reason: resolution.status === 'resolved' ? '' : String(resolution.notes?.[0] || resolution.status || 'unresolved')
+    });
+    if (resolution.status !== 'resolved') {
+      if (!existing) throw new Error(`${resolution.taskId} non-resolved disposition has no admitted canonical row.`);
+      const partial = resolution.status === 'needs_review'
+        ? applyPartialResolutionMetrics(existing.row, resolution)
+        : {
+            row: {
+              ...existing.row,
+              sourceAudit: {
+                ...existing.row.sourceAudit,
+                companyReleaseResolution: resolution
+              }
+            },
+            factsChanged: false
+          };
+      const updated = partial.row;
+      updated.sourceStatus = computeEarningsSourceStatus(updated);
+      deterministicFactsChanged = deterministicFactsChanged || partial.factsChanged;
+      output.rows[existing.index] = updated;
+      rowsByKey.set(rowKey(updated), { row: updated, index: existing.index });
+      continue;
+    }
     const baseRow = existing?.row || rowFromTask(task, resolution);
     const updated = applyResolution(baseRow, task, resolution);
     if (existing) {
@@ -332,6 +513,8 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
     applied.push({ taskId: resolution.taskId, symbol: resolution.symbol });
   }
 
+  if (deterministicFactsChanged) delete output.narrativeApply;
+
   output.rows.sort((left, right) => {
     const dateCompare = left.reportDate.localeCompare(right.reportDate);
     if (dateCompare) return dateCompare;
@@ -341,7 +524,7 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
     generatedAt: new Date().toISOString(),
     resolutionArtifact: resolutionPayload.outputPath || '',
     applied,
-    skipped
+    dispositions
   };
   updateSummary(output);
   return output;
@@ -391,13 +574,14 @@ function applyEarningsNarrative(source, narrativePayload, options = {}) {
   output.policy = buildEarningsWeekPolicy();
   const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
   const applied = [];
+  const appliedAt = new Date(options.appliedAt || Date.now()).toISOString();
 
   for (const item of narrativePayload.rows || []) {
     const key = rowKey(item);
     const target = rowsByKey.get(key);
     if (!target) throw new Error(`${key} narrative does not match a canonical earnings row.`);
     const row = target.row;
-    output.rows[target.index] = {
+    const next = {
       ...row,
       eps: applyMetricNote(row.eps, item.eps),
       revenue: applyMetricNote(row.revenue, item.revenue),
@@ -411,11 +595,34 @@ function applyEarningsNarrative(source, narrativePayload, options = {}) {
         note: stringValue(item.reaction?.note ?? row.reaction?.note)
       }
     };
+    const dispositions = earningsNarrativeDispositions(next, {
+      outcome: {
+        ...next.outcome,
+        ...(Object.prototype.hasOwnProperty.call(item.outcome || {}, 'guidanceDisposition')
+          ? { guidanceDisposition: item.outcome.guidanceDisposition }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(item.outcome || {}, 'interpretationDisposition')
+          ? { interpretationDisposition: item.outcome.interpretationDisposition }
+          : {})
+      },
+      reaction: {
+        ...next.reaction,
+        ...(Object.prototype.hasOwnProperty.call(item.reaction || {}, 'commentaryDisposition')
+          ? { commentaryDisposition: item.reaction.commentaryDisposition }
+          : {})
+      }
+    }, appliedAt);
+    next.outcome.interpretationDisposition = dispositions.interpretation;
+    if (dispositions.guidance) next.outcome.guidanceDisposition = dispositions.guidance;
+    else delete next.outcome.guidanceDisposition;
+    if (dispositions.reaction) next.reaction.commentaryDisposition = dispositions.reaction;
+    else delete next.reaction.commentaryDisposition;
+    output.rows[target.index] = next;
     applied.push({ symbol: item.symbol, reportDate: item.reportDate });
   }
 
   output.narrativeApply = {
-    generatedAt: new Date().toISOString(),
+    generatedAt: appliedAt,
     narrativeArtifact: options.narrativeArtifact || narrativePayload.outputPath || '',
     applied
   };
@@ -446,7 +653,7 @@ function applyReleaseCommand(argv) {
   const outputErrors = validateEarningsWeekPayload(output);
   if (outputErrors.length) throw new Error(`Applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
   writeJson(args.output, output);
-  process.stdout.write(`Applied ${output.companyReleaseApply.applied.length} company-release resolution(s) to ${args.output}\n`);
+  process.stdout.write(`Recorded ${output.companyReleaseApply.dispositions.length} company-release disposition(s); applied ${output.companyReleaseApply.applied.length} resolved result(s) to ${args.output}\n`);
 }
 
 function applyNarrativeCommand(argv) {
@@ -478,12 +685,14 @@ const {
   earningsRowKey: rowKey,
   hasEarningsApiBudget,
   isEarningsApiUsage,
+  migrateEarningsApiUsage,
   metricResult,
   normalizeFinnhubCalendarFields,
   normalizeEarningsTiming: normalizeTiming,
   numberOrNull,
   pctChange,
-  recordEarningsApiRequest
+  recordEarningsApiRequest,
+  recordEarningsApiResponse
 } = require('./earnings_week_contract');
 const { compareIsoDate, displayDatesForRange, isIsoDate } = require('./calendar_contract');
 
@@ -491,8 +700,10 @@ const root = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
 const DEFAULT_COMPANY_RELEASE_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(root, 'generated', 'earningsapi_usage.json');
-const DEFAULT_EARNINGSAPI_MONTHLY_LIMIT = 1000;
-const DEFAULT_EARNINGSAPI_RESERVE = 150;
+const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
+// The slate build holds back 20 calls. Result refresh may use that remaining
+// capacity, but still stops immediately when the provider returns a 429.
+const DEFAULT_EARNINGSAPI_RESERVE = 0;
 const REQUEST_TIMEOUT_MS = 20000;
 
 function parseArgs(argv) {
@@ -502,7 +713,7 @@ function parseArgs(argv) {
     asOf: new Date().toISOString(),
     timeoutMs: REQUEST_TIMEOUT_MS,
     earningsApiUsage: DEFAULT_EARNINGSAPI_USAGE,
-    earningsApiMonthlyLimit: DEFAULT_EARNINGSAPI_MONTHLY_LIMIT,
+    earningsApiDailyLimit: DEFAULT_EARNINGSAPI_DAILY_LIMIT,
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
     compact: false
   };
@@ -534,8 +745,8 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
-    if (arg === '--earningsapi-monthly-limit') {
-      args.earningsApiMonthlyLimit = Math.max(0, Number(argv[i + 1] || DEFAULT_EARNINGSAPI_MONTHLY_LIMIT));
+    if (arg === '--earningsapi-daily-limit') {
+      args.earningsApiDailyLimit = Math.max(0, Number(argv[i + 1] || DEFAULT_EARNINGSAPI_DAILY_LIMIT));
       i += 1;
       continue;
     }
@@ -570,15 +781,17 @@ Options:
   --as-of ISO                 Refresh rows whose report window has arrived
                                (default: now)
   --timeout-ms 20000          HTTP timeout in ms per request
-  --earningsapi-usage PATH    EarningsAPI monthly usage ledger
-  --earningsapi-monthly-limit Monthly EarningsAPI call cap (default: 1000)
-  --earningsapi-reserve 150   Calls reserved for other dashboard runs
+  --earningsapi-usage PATH    EarningsAPI daily usage ledger
+  --earningsapi-daily-limit   Daily EarningsAPI call cap (default: 100)
+  --earningsapi-reserve 0     Calls excluded from this result-refresh run
   --compact                   Print compact refresh report
   --help                      Show this help
 
 Environment:
-  FINNHUB_API_KEY             Required for Finnhub-covered row actuals
-  EARNINGSAPI_API_KEY         Required only for previously recovered rows
+  FINNHUB_API_KEY             Used for Finnhub-covered row actuals; absence is
+                               recorded on affected rows without aborting refresh
+  EARNINGSAPI_API_KEY         Used only for previously recovered rows; absence is
+                               recorded on affected rows without aborting refresh
 
 This result-refresh path never calls the EarningsAPI calendar endpoint.
 `);
@@ -603,8 +816,7 @@ function readJson(file) {
 }
 
 function writeJson(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+  atomicWriteJson(file, data);
 }
 
 function removeStaleCompanyReleaseResolutionSidecar(week, resolutionPath) {
@@ -633,6 +845,24 @@ function metricPayload(current, incoming, options = {}) {
 
 function sourceFor(value, source) {
   return Number.isFinite(value) ? source : 'none';
+}
+
+function hasPromotedCompanyReleaseActual(row, metric) {
+  return row.sourceAudit?.companyReleaseResolution?.status === 'needs_review'
+    && Number.isFinite(row[metric]?.actual)
+    && String(row.sourceAudit?.selectedSources?.[metric]?.actual || '').startsWith('sec_company_release');
+}
+
+function providerMetricInput(row, providerRow, metric) {
+  return hasPromotedCompanyReleaseActual(row, metric)
+    ? { ...providerRow[metric], actual: row[metric].actual }
+    : providerRow[metric];
+}
+
+function refreshedActualSource(row, metric, providerSource, actual) {
+  return hasPromotedCompanyReleaseActual(row, metric)
+    ? row.sourceAudit.selectedSources[metric].actual
+    : sourceFor(actual, providerSource);
 }
 
 function fetchJson(url, args, headers = {}) {
@@ -689,7 +919,10 @@ async function fetchFinnhubCalendarRows(args, token, range) {
   if (!result.ok) {
     throw new Error(`Finnhub result refresh failed: ${result.parseError || result.bodyPreview || `HTTP ${result.status}`}`);
   }
-  return (Array.isArray(result.data?.earningsCalendar) ? result.data.earningsCalendar : [])
+  if (!Array.isArray(result.data?.earningsCalendar)) {
+    throw new Error('Finnhub result refresh response is missing earningsCalendar[].');
+  }
+  return result.data.earningsCalendar
     .map(normalizeFinnhubCalendarFields)
     .filter((row) => row.symbol && isIsoDate(row.reportDate))
     .filter((row) => displayDatesForRange(range.from, range.to).includes(row.reportDate));
@@ -700,6 +933,10 @@ function readEarningsApiUsage(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (isEarningsApiUsage(data)) return data;
+    if (data?.schemaVersion === 1 && data.months && typeof data.months === 'object') {
+      return migrateEarningsApiUsage(data);
+    }
+    throw new Error('unsupported usage-ledger schema');
   } catch {
     // A corrupt local ledger should not turn into silent unmetered calls.
   }
@@ -712,7 +949,7 @@ function writeEarningsApiUsage(file, usage) {
 
 function canUseEarningsApi(args, usage, token) {
   if (!token) return false;
-  return hasEarningsApiBudget(usage, args.earningsApiMonthlyLimit, args.earningsApiReserve);
+  return hasEarningsApiBudget(usage, args.earningsApiDailyLimit, args.earningsApiReserve);
 }
 
 async function fetchEarningsApiCompanyRows(symbol, args, token, usage) {
@@ -722,7 +959,7 @@ async function fetchEarningsApiCompanyRows(symbol, args, token, usage) {
   const url = new URL('/v1/earnings', 'https://api.earningsapi.com');
   url.searchParams.set('symbol', symbol);
   url.searchParams.set('apikey', token);
-  recordEarningsApiRequest(usage, {
+  const request = recordEarningsApiRequest(usage, {
     type: 'company-earnings-result-refresh',
     path: url.pathname,
     queryKeys: url.searchParams.keys()
@@ -730,6 +967,8 @@ async function fetchEarningsApiCompanyRows(symbol, args, token, usage) {
   writeEarningsApiUsage(args.earningsApiUsage, usage);
 
   const result = await fetchJson(url.toString(), args);
+  recordEarningsApiResponse(request, result);
+  writeEarningsApiUsage(args.earningsApiUsage, usage);
   if (!result.ok) {
     throw new Error(`EarningsAPI company refresh failed for ${symbol}: ${result.parseError || result.bodyPreview || `HTTP ${result.status}`}`);
   }
@@ -781,7 +1020,7 @@ function deterministicSnapshot(row) {
 }
 
 function clearNarrative(row) {
-  return {
+  const output = {
     ...row,
     eps: {
       ...row.eps,
@@ -801,10 +1040,14 @@ function clearNarrative(row) {
       note: ''
     }
   };
+  delete output.outcome.guidanceDisposition;
+  delete output.outcome.interpretationDisposition;
+  delete output.reaction.commentaryDisposition;
+  return output;
 }
 
 function preserveNarrative(row, prior) {
-  return {
+  const output = {
     ...row,
     eps: {
       ...row.eps,
@@ -824,6 +1067,16 @@ function preserveNarrative(row, prior) {
       note: prior.reaction?.note || ''
     }
   };
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (Object.prototype.hasOwnProperty.call(prior.outcome || {}, field)) output.outcome[field] = structuredClone(prior.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(prior.reaction || {}, 'commentaryDisposition')) {
+    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
+  return output;
 }
 
 function finalizeRow(row) {
@@ -851,11 +1104,11 @@ function finalizeRow(row) {
 
 function applyFinnhubRefresh(row, providerRow) {
   if (!providerRow) return row;
-  const eps = metricPayload(row.eps, providerRow.eps, {
+  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerRow.revenue, {
+  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -881,10 +1134,9 @@ function applyFinnhubRefresh(row, providerRow) {
           actual: providerRow.revenue.actual
         }
       },
-      // A provider-date conflict can move the dashboard row to a date verified
-      // by Nasdaq while Finnhub keeps publishing the matching quarter under its
-      // original calendar date. Preserve that returned row in the conflict audit
-      // so the result refresh remains traceable instead of silently stranding it.
+      // Official company evidence can move the dashboard row while Finnhub keeps
+      // publishing the matching quarter under its original calendar date. Preserve
+      // that returned row in the conflict audit so the refresh remains traceable.
       providerDateConflict: row.sourceAudit?.providerDateConflict ? {
         ...row.sourceAudit.providerDateConflict,
         candidates: {
@@ -900,11 +1152,11 @@ function applyFinnhubRefresh(row, providerRow) {
         timing: providerRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
         eps: {
           estimate: sourceFor(eps.estimate, 'finnhub'),
-          actual: sourceFor(eps.actual, 'finnhub')
+          actual: refreshedActualSource(row, 'eps', 'finnhub', eps.actual)
         },
         revenue: {
           estimate: sourceFor(revenue.estimate, 'finnhub'),
-          actual: sourceFor(revenue.actual, 'finnhub')
+          actual: refreshedActualSource(row, 'revenue', 'finnhub', revenue.actual)
         }
       }
     }
@@ -936,12 +1188,12 @@ function mergeFinnhubConflictCandidates(candidates, providerRow) {
 }
 
 function applyEarningsApiCompanyRefresh(row, providerRow) {
-  if (!providerRow || isObject(row.sourceAudit?.companyReleaseResolution)) return row;
-  const eps = metricPayload(row.eps, providerRow.eps, {
+  if (!providerRow || row.sourceAudit?.companyReleaseResolution?.status === 'resolved') return row;
+  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerRow.revenue, {
+  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -971,11 +1223,11 @@ function applyEarningsApiCompanyRefresh(row, providerRow) {
         timing: providerRow.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
         eps: {
           estimate: sourceFor(eps.estimate, 'earningsApiCompany'),
-          actual: sourceFor(eps.actual, 'earningsApiCompany')
+          actual: refreshedActualSource(row, 'eps', 'earningsApiCompany', eps.actual)
         },
         revenue: {
           estimate: sourceFor(revenue.estimate, 'earningsApiCompany'),
-          actual: sourceFor(revenue.actual, 'earningsApiCompany')
+          actual: refreshedActualSource(row, 'revenue', 'earningsApiCompany', revenue.actual)
         }
       }
     }
@@ -1018,11 +1270,14 @@ function selectFinnhubRefreshRow(rows, target) {
   const exact = rows.find((row) => rowKey(row) === rowKey(target));
   if (exact) return exact;
 
-  const conflict = target.sourceAudit?.providerDateConflict;
-  if (!conflict || conflict.selectedProvider === 'finnhub') return null;
+  const scheduleVerification = target.sourceAudit?.scheduleVerification;
+  const officiallyRedated = scheduleVerification?.status === 'official_confirmed'
+    && scheduleVerification?.official?.reportDate === target.reportDate
+    && scheduleVerification.primaryDate !== target.reportDate;
+  if (!officiallyRedated) return null;
 
-  // Once a non-Finnhub date wins a verified calendar conflict, Finnhub can
-  // still publish the quarter's actuals under its original (or revised) date.
+  // After an official redate, Finnhub can still publish the quarter's actuals
+  // under its original (or revised) date.
   // Match only the same reported fiscal period and require an actual so a
   // neighboring estimate-only entry cannot overwrite the dashboard row.
   return rows
@@ -1051,6 +1306,22 @@ function refreshTargetRows(source, asOf) {
     .filter((row) => reportWindowArrived(row, asOf) || taskKeys.has(rowKey(row)));
 }
 
+function applyResultRefreshDiagnostics(row, failures, checkedAt) {
+  const output = structuredClone(row);
+  output.sourceAudit = { ...output.sourceAudit };
+  if (failures.length) {
+    output.sourceAudit.resultRefresh = {
+      status: 'partial',
+      checkedAt: new Date(checkedAt).toISOString(),
+      failures: failures.map((failure) => ({ ...failure }))
+    };
+  } else {
+    delete output.sourceAudit.resultRefresh;
+  }
+  output.sourceStatus = computeEarningsSourceStatus(output);
+  return output;
+}
+
 async function refreshEarningsResults(source, refreshData, options = {}) {
   const output = JSON.parse(JSON.stringify(source));
   output.policy = buildEarningsWeekPolicy();
@@ -1073,7 +1344,10 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     return next;
   });
 
-  const reactionRows = output.rows.filter((row) => targetKeys.has(rowKey(row)));
+  const hasCollectedDiagnostics = Object.prototype.hasOwnProperty.call(refreshData, 'rowDiagnosticsByKey');
+  const successfulYahooSymbols = new Set((refreshData.yahooFetches || []).filter((item) => item?.ok).map((item) => item.symbol));
+  const reactionRows = output.rows.filter((row) => targetKeys.has(rowKey(row)))
+    .filter((row) => !hasCollectedDiagnostics || successfulYahooSymbols.has(row.symbol));
   if (reactionRows.length && refreshData.yahooFetches) {
     const reactionSnapshots = new Map(reactionRows.map((row) => [rowKey(row), deterministicSnapshot(row)]));
     const reactionRowsByKey = new Map(reactionRows.map((row) => [rowKey(row), row]));
@@ -1103,50 +1377,146 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     delete output.narrativeApply;
   }
 
+  const rowDiagnosticsByKey = refreshData.rowDiagnosticsByKey || {};
+  output.rows = output.rows.map((row) => targetKeys.has(rowKey(row))
+    ? applyResultRefreshDiagnostics(row, rowDiagnosticsByKey[rowKey(row)] || [], asOf)
+    : row);
+
   output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
     shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
   });
-  if (output.companyReleaseTasks.length === 0) delete output.companyReleaseApply;
+  const activeTaskIds = new Set(output.companyReleaseTasks.map((task) => task.id));
+  output.rows = output.rows.map((row) => {
+    const resolution = row.sourceAudit?.companyReleaseResolution;
+    if (!['needs_review', 'unresolved'].includes(resolution?.status) || activeTaskIds.has(resolution.taskId)) return row;
+    const next = structuredClone(row);
+    delete next.sourceAudit.companyReleaseResolution;
+    next.sourceStatus = computeEarningsSourceStatus(next);
+    return next;
+  });
+  const recordedTaskIds = new Set((output.companyReleaseApply?.dispositions || []).map((item) => item?.taskId).filter(Boolean));
+  if (activeTaskIds.size === 0 || activeTaskIds.size !== recordedTaskIds.size || [...activeTaskIds].some((id) => !recordedTaskIds.has(id))) {
+    delete output.companyReleaseApply;
+  }
   updateSummary(output);
   output.generatedAt = new Date(asOf).toISOString();
   output.outputPath = options.outputPath || output.outputPath;
   return {
     payload: output,
     refreshedRows: targetKeys.size,
-    changedRows: changedKeys.size
+    changedRows: changedKeys.size,
+    failedRows: output.rows.filter((row) => targetKeys.has(rowKey(row)) && row.sourceAudit?.resultRefresh?.status === 'partial').length
   };
 }
 
-async function collectRefreshData(source, args) {
+function refreshFailure(provider, code, message) {
+  return {
+    provider,
+    code,
+    message: String(message || 'Source refresh failed.').trim().slice(0, 240)
+  };
+}
+
+async function collectRefreshData(source, args, dependencies = {}) {
   const targetRows = refreshTargetRows(source, args.asOf);
-  const needsFinnhub = targetRows.some((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub');
-  const needsEarningsApiCompany = targetRows
+  const finnhubTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub');
+  const earningsApiTargets = targetRows
     .filter((row) => row.sourceAudit?.selectedSources?.slate === 'earningsApiCalendar')
-    .filter((row) => !isObject(row.sourceAudit?.companyReleaseResolution));
-  const finnhubToken = process.env.FINNHUB_API_KEY;
-  const earningsApiToken = process.env.EARNINGSAPI_API_KEY;
-  const earningsApiUsage = readEarningsApiUsage(args.earningsApiUsage);
+    .filter((row) => row.sourceAudit?.companyReleaseResolution?.status !== 'resolved');
+  const environment = dependencies.env || process.env;
+  const finnhubToken = environment.FINNHUB_API_KEY;
+  const earningsApiToken = environment.EARNINGSAPI_API_KEY;
+  const fetchFinnhub = dependencies.fetchFinnhubCalendarRows || fetchFinnhubCalendarRows;
+  const fetchEarningsApi = dependencies.fetchEarningsApiCompanyRows || fetchEarningsApiCompanyRows;
+  const fetchYahoo = dependencies.fetchYahooBars || fetchYahooBars;
+  const loadEarningsApiUsage = dependencies.readEarningsApiUsage || readEarningsApiUsage;
+  const rowDiagnostics = new Map();
+  const addFailure = (rows, failure) => {
+    for (const row of rows) {
+      const key = rowKey(row);
+      const current = rowDiagnostics.get(key) || [];
+      if (!current.some((item) => item.provider === failure.provider)) current.push(failure);
+      rowDiagnostics.set(key, current);
+    }
+  };
 
-  if (needsFinnhub && !finnhubToken) throw new Error('FINNHUB_API_KEY is required to refresh Finnhub-covered earnings rows.');
-  if (needsEarningsApiCompany.length && !earningsApiToken) {
-    throw new Error('EARNINGSAPI_API_KEY is required to refresh previously recovered EarningsAPI rows.');
+  let finnhubRows = [];
+  if (finnhubTargets.length && !finnhubToken) {
+    addFailure(finnhubTargets, refreshFailure('finnhub', 'missing_api_key', 'Finnhub API key is unavailable; prior Finnhub row facts were retained.'));
+  } else if (finnhubTargets.length) {
+    try {
+      finnhubRows = await fetchFinnhub(args, finnhubToken, source.range);
+      for (const row of finnhubTargets) {
+        if (!selectFinnhubRefreshRow(finnhubRows, row)) {
+          addFailure([row], refreshFailure('finnhub', 'provider_row_unavailable', 'Finnhub returned no matching result row; prior Finnhub row facts were retained.'));
+        }
+      }
+    } catch (error) {
+      addFailure(finnhubTargets, refreshFailure('finnhub', 'provider_request_failed', error.message));
+    }
   }
 
-  const finnhubRows = needsFinnhub ? await fetchFinnhubCalendarRows(args, finnhubToken, source.range) : [];
   const earningsApiCompanyRowsBySymbol = {};
-  for (const symbol of [...new Set(needsEarningsApiCompany.map((row) => row.symbol))]) {
-    earningsApiCompanyRowsBySymbol[symbol] = await fetchEarningsApiCompanyRows(symbol, args, earningsApiToken, earningsApiUsage);
+  let earningsApiUsage = null;
+  if (earningsApiTargets.length && !earningsApiToken) {
+    addFailure(earningsApiTargets, refreshFailure('earningsApiCompany', 'missing_api_key', 'EarningsAPI key is unavailable; prior company-result facts were retained.'));
+  } else if (earningsApiTargets.length) {
+    try {
+      earningsApiUsage = loadEarningsApiUsage(args.earningsApiUsage);
+    } catch (_error) {
+      addFailure(earningsApiTargets, refreshFailure('earningsApiCompany', 'usage_ledger_unreadable', 'EarningsAPI usage ledger is unreadable; no metered company calls were attempted and prior facts were retained.'));
+    }
   }
-  const yahooFetches = targetRows.length ? await fetchYahooBarsForRows(targetRows, {
-    from: source.range.from,
-    to: source.range.to,
-    timeoutMs: args.timeoutMs
-  }, fetchJson) : [];
+  if (earningsApiUsage) {
+    const symbols = [...new Set(earningsApiTargets.map((row) => row.symbol))];
+    for (let index = 0; index < symbols.length; index += 1) {
+      const symbol = symbols[index];
+      const symbolTargets = earningsApiTargets.filter((row) => row.symbol === symbol);
+      if (!canUseEarningsApi(args, earningsApiUsage, earningsApiToken)) {
+        addFailure(symbolTargets, refreshFailure('earningsApiCompany', 'budget_unavailable', 'EarningsAPI call budget is unavailable; prior company-result facts were retained.'));
+        continue;
+      }
+      try {
+        const rows = await fetchEarningsApi(symbol, args, earningsApiToken, earningsApiUsage);
+        earningsApiCompanyRowsBySymbol[symbol] = rows;
+        for (const row of symbolTargets) {
+          if (!selectCompanyRow(rows, row)) {
+            addFailure([row], refreshFailure('earningsApiCompany', 'provider_row_unavailable', 'EarningsAPI returned no matching company result row; prior company-result facts were retained.'));
+          }
+        }
+      } catch (error) {
+        const rateLimited = /\bHTTP 429\b/.test(String(error.message));
+        addFailure(symbolTargets, refreshFailure('earningsApiCompany', rateLimited ? 'provider_rate_limited' : 'provider_request_failed', error.message));
+        if (rateLimited) {
+          const remaining = symbols.slice(index + 1)
+            .flatMap((remainingSymbol) => earningsApiTargets.filter((row) => row.symbol === remainingSymbol));
+          addFailure(remaining, refreshFailure('earningsApiCompany', 'provider_rate_limited', 'EarningsAPI rate-limited the account; remaining company-result calls were not attempted and prior facts were retained.'));
+          break;
+        }
+      }
+    }
+  }
+
+  const yahooFetches = [];
+  for (const symbol of [...new Set(targetRows.map((row) => row.symbol))]) {
+    const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
+    try {
+      const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
+      if (result?.ok) {
+        yahooFetches.push(result);
+      } else {
+        addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
+      }
+    } catch (error) {
+      addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', error.message));
+    }
+  }
 
   return {
     finnhubRows,
     earningsApiCompanyRowsBySymbol,
-    yahooFetches
+    yahooFetches,
+    rowDiagnosticsByKey: Object.fromEntries([...rowDiagnostics.entries()])
   };
 }
 
@@ -1161,6 +1531,7 @@ function printReport(result, outputPath, compact) {
 =======================
 Rows eligible for refresh: ${result.refreshedRows}
 Rows with deterministic changes: ${result.changedRows}
+Rows retaining prior values after a source failure: ${result.failedRows}
 Output: ${outputPath}
 `);
   if (!compact && result.changedRows > 0) {
@@ -1191,13 +1562,14 @@ async function run(argv) {
 return {
   run,
   applyEarningsApiCompanyRefresh,
-    applyFinnhubRefresh,
-    mergeFinnhubConflictCandidates,
-    refreshEarningsResults,
-    refreshTargetRows,
-    removeStaleCompanyReleaseResolutionSidecar,
-    reportWindowArrived,
-    selectFinnhubRefreshRow
+  applyFinnhubRefresh,
+  collectRefreshData,
+  mergeFinnhubConflictCandidates,
+  refreshEarningsResults,
+  refreshTargetRows,
+  removeStaleCompanyReleaseResolutionSidecar,
+  reportWindowArrived,
+  selectFinnhubRefreshRow
 };
 }
 
@@ -1774,8 +2146,7 @@ async function run(argv) {
     outputPath: args.output
   };
 
-  fs.mkdirSync(path.dirname(args.output), { recursive: true });
-  fs.writeFileSync(args.output, `${JSON.stringify(payload, null, 2)}\n`);
+  atomicWriteJson(args.output, payload);
 
   process.stdout.write(`Earnings Company-Release Resolution Summary
 ===========================================
@@ -1830,8 +2201,8 @@ module.exports = {
   applyEarningsNarrative,
   applyEarningsApiCompanyRefresh: refreshCommand.applyEarningsApiCompanyRefresh,
   applyFinnhubRefresh: refreshCommand.applyFinnhubRefresh,
+  collectRefreshData: refreshCommand.collectRefreshData,
   earningsCalendarNeedsBuild,
-  earningsScheduleConfirmationRequiredError,
   mergeFinnhubConflictCandidates: refreshCommand.mergeFinnhubConflictCandidates,
   pendingEarningsScheduleReviews,
   refreshEarningsResults: refreshCommand.refreshEarningsResults,

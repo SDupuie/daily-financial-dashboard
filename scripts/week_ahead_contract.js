@@ -7,6 +7,7 @@ const SCHEMA_VERSION = 4;
 const FX_MACRO_PROVIDER = 'FXMacroData';
 const FX_MACRO_ENDPOINT = '/v1/announcements/{currency}/{indicator} + /v1/predictions/{currency}/{indicator}';
 const TIME_INTERPRETATION = 'Official U.S. release schedule times are stored as America/New_York and converted by the dashboard renderer.';
+const WEEK_AHEAD_OUTCOME_STATUSES = new Set(['verified', 'commentary_unavailable']);
 const {
   addDays,
   displayDatesForRange: calendarDisplayDatesForRange,
@@ -352,6 +353,65 @@ function dayLabel(isoDate) {
   }).format(new Date(`${isoDate}T12:00:00Z`));
 }
 
+function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checkedAt = new Date() } = {}) {
+  const timestamp = new Date(checkedAt).toISOString();
+  const range = {
+    ...targetRange,
+    timeZone: TIME_ZONE,
+    marketTimeZone: SOURCE_TIME_ZONE
+  };
+  const targetDates = displayDatesForRange(range);
+  if (targetDates.length !== 5) throw new Error('Week Ahead fallback range must contain the five displayed dates.');
+  const sameRange = canonicalWeek?.range?.from === range.from
+    && canonicalWeek?.range?.to === range.to
+    && Array.isArray(canonicalWeek?.days)
+    && canonicalWeek.days.length === 5;
+  if (sameRange) {
+    const week = applyWeekAheadLifecycle(structuredClone(canonicalWeek), null, { now: new Date(timestamp) });
+    week.availability = {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    };
+    return { mode: 'carried_forward', week };
+  }
+  const week = {
+    schemaVersion: SCHEMA_VERSION,
+    range,
+    generatedAt: timestamp,
+    source: {
+      provider: FX_MACRO_PROVIDER,
+      endpoint: FX_MACRO_ENDPOINT,
+      status: 'unavailable',
+      fetchedAt: timestamp,
+      timeInterpretation: TIME_INTERPRETATION
+    },
+    officialSchedule: { events: [], authorities: [] },
+    days: targetDates.map((date) => {
+      const closureName = MARKET_CLOSURES[Number(date.slice(0, 4))]?.[date] || '';
+      return {
+        date,
+        label: dayLabel(date),
+        closure: closureName ? { label: 'U.S. Markets Closed', reason: closureName } : null,
+        events: []
+      };
+    }),
+    sourceSummary: {
+      returnedEvents: 0,
+      includedEvents: 0,
+      officialScheduledEvents: 0,
+      officialConflicts: 0,
+      omittedRecognizedEvents: 0
+    },
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    }
+  };
+  return { mode: 'unavailable', week };
+}
+
 function variantsForRule(rule) {
   return rule.variants
     ? rule.variants.map((variant) => ({ key: `${rule.key}-${variant.key}`, period: variant.period }))
@@ -622,6 +682,36 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
   return { ...week, days };
 }
 
+function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
+  const attemptedAt = new Date(now).toISOString();
+  const days = (Array.isArray(week?.days) ? week.days : []).map((day) => {
+    if (day?.lifecycle !== 'close_available') return day;
+    if (day.outcome === undefined) {
+      return {
+        ...day,
+        outcome: {
+          status: 'commentary_unavailable',
+          source: 'editorial',
+          reason: 'not_verified_for_current_run',
+          attemptedAt
+        }
+      };
+    }
+    if (day.outcome?.status === undefined && day.outcome?.title?.trim() && day.outcome?.body?.trim()) {
+      return { ...day, outcome: { ...day.outcome, status: 'verified' } };
+    }
+    if (day.outcome?.status === 'commentary_unavailable'
+      && day.outcome.source === 'editorial'
+      && day.outcome.reason?.trim()
+      && !String(day.outcome.title || '').trim()
+      && !String(day.outcome.body || '').trim()) {
+      return { ...day, outcome: { ...day.outcome, attemptedAt } };
+    }
+    return day;
+  });
+  return { ...week, days };
+}
+
 function ruleForEventId(id) {
   const variantKey = String(id || '').split(':').slice(3).join(':');
   return EVENT_RULES.find((rule) => variantKey === rule.key || variantKey.startsWith(`${rule.key}-`)) || null;
@@ -670,10 +760,29 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
     .filter((release) => targetDaySet.has(release?.date) && isIsoTime(release?.time) && Array.isArray(release?.keys));
   const valuesById = fxMacroValuesForSchedule({ ...officialSchedule, events: officialEvents }, valuePayload);
   const normalized = [];
+  const failures = [
+    ...(Array.isArray(officialSchedule.failures) ? officialSchedule.failures : []).map((failure) => ({
+      source: `official_schedule:${failure.authority || 'unknown'}`,
+      item: failure.authority || 'schedule',
+      message: String(failure.message || 'Official schedule source unavailable.')
+    })),
+    ...(Array.isArray(valuePayload?.failures) ? valuePayload.failures : []).map((failure) => ({
+      source: `fxmacro:${failure.kind || 'values'}`,
+      item: failure.indicator || 'indicator',
+      message: String(failure.message || 'Indicator values unavailable.')
+    }))
+  ];
   for (const release of officialEvents) {
     for (const key of release.keys) {
       const rule = ruleForKey(key);
-      if (!rule) throw new Error(`Official Week Ahead schedule references unknown event key: ${key}.`);
+      if (!rule) {
+        failures.push({
+          source: `official_schedule:${release.authority || 'unknown'}`,
+          item: `${release.date}:${release.time}:${key}`,
+          message: `Unknown event key ${key} was omitted.`
+        });
+        continue;
+      }
       for (const variant of variantsForRule(rule)) {
         const values = valuesById.get(`${release.date}:${release.time}:${variant.key}`) || null;
         normalized.push({ ...officialEvent(release, rule, variant, values), date: release.date, sortMinutes: Number(release.time.slice(0, 2)) * 60 + Number(release.time.slice(3, 5)) });
@@ -716,7 +825,7 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
     source: {
       provider: FX_MACRO_PROVIDER,
       endpoint: FX_MACRO_ENDPOINT,
-      status: 'fresh',
+      status: failures.length ? 'partial' : 'fresh',
       fetchedAt: now.toISOString(),
       timeInterpretation: TIME_INTERPRETATION
     },
@@ -730,8 +839,17 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
       includedEvents: deduped.length,
       officialScheduledEvents: officialEvents.length,
       officialConflicts: 0,
-      omittedRecognizedEvents: 0
-    }
+      omittedRecognizedEvents: failures.filter((failure) => /Unknown event key/.test(failure.message)).length,
+      unavailableSources: failures.length
+    },
+    ...(failures.length ? {
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: now.toISOString(),
+        failures
+      }
+    } : {})
   }, null, { now });
   const errors = validateWeekAheadPayload(result, { now });
   if (errors.length) throw new Error(`Normalized Week Ahead payload is invalid: ${errors.join(' ')}`);
@@ -822,7 +940,7 @@ function validateMarketLens(lens, day, source, prefix = 'marketLens') {
   return errors;
 }
 
-function validateWeekAheadPayload(payload, { now = null } = {}) {
+function validateWeekAheadPayload(payload, { now = null, requireOutcomeDisposition = false } = {}) {
   const errors = [];
   if (!isPlainObject(payload)) return ['weekAhead must be an object.'];
   if (payload.schemaVersion !== SCHEMA_VERSION) errors.push(`weekAhead.schemaVersion must be ${SCHEMA_VERSION}.`);
@@ -835,17 +953,50 @@ function validateWeekAheadPayload(payload, { now = null } = {}) {
   if (payload.range?.timeZone !== TIME_ZONE) errors.push(`weekAhead.range.timeZone must be ${TIME_ZONE}.`);
   if (payload.range?.marketTimeZone !== SOURCE_TIME_ZONE) errors.push(`weekAhead.range.marketTimeZone must be ${SOURCE_TIME_ZONE}.`);
   if (!isIsoDateTime(payload.generatedAt)) errors.push('weekAhead.generatedAt must be an offset-bearing ISO timestamp.');
-  if (!isPlainObject(payload.source) || !['fresh', 'cached'].includes(payload.source.status)) errors.push('weekAhead.source.status must be fresh or cached.');
+  if (!isPlainObject(payload.source) || !['fresh', 'partial', 'cached', 'unavailable'].includes(payload.source.status)) errors.push('weekAhead.source.status must be fresh, partial, cached, or unavailable.');
   if (payload.source?.provider !== FX_MACRO_PROVIDER) errors.push(`weekAhead.source.provider must be ${FX_MACRO_PROVIDER}.`);
   if (payload.source?.endpoint !== FX_MACRO_ENDPOINT) errors.push('weekAhead.source.endpoint must identify the FXMacroData announcement and prediction endpoints.');
   if (payload.source?.timeInterpretation !== TIME_INTERPRETATION) errors.push('weekAhead.source.timeInterpretation must describe official U.S. release schedules stored in Eastern time.');
   if (!isIsoDateTime(payload.source?.fetchedAt)) errors.push('weekAhead.source.fetchedAt must be an offset-bearing ISO timestamp.');
+  if (payload.availability !== undefined) {
+    if (!isPlainObject(payload.availability)) {
+      errors.push('weekAhead.availability must be an object.');
+    } else {
+      if (!['carried_forward', 'partial', 'unavailable'].includes(payload.availability.status)) errors.push('weekAhead.availability.status must be carried_forward, partial, or unavailable.');
+      if (payload.availability.reason !== 'source_refresh_failed') errors.push('weekAhead.availability.reason must be source_refresh_failed.');
+      if (!isIsoDateTime(payload.availability.checkedAt)) errors.push('weekAhead.availability.checkedAt must be an offset-bearing ISO timestamp.');
+      if (payload.availability.failures !== undefined) {
+        if (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length) {
+          errors.push('weekAhead.availability.failures must be a non-empty array when present.');
+        } else {
+          payload.availability.failures.forEach((failure, index) => {
+            if (!isPlainObject(failure) || typeof failure.source !== 'string' || !failure.source.trim() || typeof failure.item !== 'string' || !failure.item.trim() || typeof failure.message !== 'string' || !failure.message.trim()) {
+              errors.push(`weekAhead.availability.failures[${index}] must contain source, item, and message.`);
+            }
+          });
+        }
+      }
+    }
+  }
+  if (payload.source?.status === 'unavailable' && payload.availability?.status !== 'unavailable') {
+    errors.push('weekAhead.source.status unavailable requires weekAhead.availability.status unavailable.');
+  }
+  if (payload.source?.status !== 'unavailable' && payload.availability?.status === 'unavailable') {
+    errors.push('weekAhead.availability.status unavailable requires weekAhead.source.status unavailable.');
+  }
+  if (payload.source?.status === 'partial' && payload.availability?.status !== 'partial') {
+    errors.push('weekAhead.source.status partial requires weekAhead.availability.status partial.');
+  }
   if (!isPlainObject(payload.officialSchedule) || !Array.isArray(payload.officialSchedule.events) || !Array.isArray(payload.officialSchedule.authorities)) {
     errors.push('weekAhead.officialSchedule must contain events and authorities.');
   }
   if (!Array.isArray(payload.days) || payload.days.length !== 5) {
     errors.push('weekAhead.days must contain exactly five weekdays.');
     return errors;
+  }
+  if (payload.availability?.status === 'unavailable') {
+    if (payload.days.some((day) => Array.isArray(day?.events) && day.events.length)) errors.push('Unavailable Week Ahead fallback must contain no events.');
+    if (payload.officialSchedule.events.length || payload.officialSchedule.authorities.length) errors.push('Unavailable Week Ahead fallback must contain no official schedule rows.');
   }
   const ids = new Set();
   payload.days.forEach((day, dayIndex) => {
@@ -916,10 +1067,30 @@ function validateWeekAheadPayload(payload, { now = null } = {}) {
     } else if (day?.marketReaction !== undefined) {
       errors.push(`weekAhead.days[${dayIndex}].marketReaction is allowed only when lifecycle is close_available.`);
     }
+    if (requireOutcomeDisposition && day?.lifecycle === 'close_available' && day?.outcome === undefined) {
+      errors.push(`weekAhead.days[${dayIndex}].outcome requires a verified or commentary_unavailable disposition before publication.`);
+    }
     if (day?.outcome !== undefined) {
       if (day.lifecycle !== 'close_available') errors.push(`weekAhead.days[${dayIndex}].outcome is allowed only after the close reaction is available.`);
-      if (!isPlainObject(day.outcome) || typeof day.outcome.title !== 'string' || !day.outcome.title.trim() || typeof day.outcome.body !== 'string' || !day.outcome.body.trim() || day.outcome.source !== 'editorial') {
-        errors.push(`weekAhead.days[${dayIndex}].outcome must contain editorial title and body text.`);
+      if (!isPlainObject(day.outcome)) {
+        errors.push(`weekAhead.days[${dayIndex}].outcome must be an object.`);
+      } else {
+        const legacyVerified = day.outcome.status === undefined && day.outcome.title?.trim() && day.outcome.body?.trim();
+        const status = legacyVerified ? 'verified' : day.outcome.status;
+        if (!WEEK_AHEAD_OUTCOME_STATUSES.has(status)) {
+          errors.push(`weekAhead.days[${dayIndex}].outcome.status must be verified or commentary_unavailable.`);
+        } else if (status === 'verified') {
+          if (typeof day.outcome.title !== 'string' || !day.outcome.title.trim() || typeof day.outcome.body !== 'string' || !day.outcome.body.trim() || day.outcome.source !== 'editorial') {
+            errors.push(`weekAhead.days[${dayIndex}].outcome verified status requires editorial title and body text.`);
+          }
+        } else {
+          if (String(day.outcome.title || '').trim() || String(day.outcome.body || '').trim()) {
+            errors.push(`weekAhead.days[${dayIndex}].outcome commentary_unavailable status must not carry unsupported editorial copy.`);
+          }
+          if (day.outcome.source !== 'editorial') errors.push(`weekAhead.days[${dayIndex}].outcome.source must be editorial.`);
+          if (typeof day.outcome.reason !== 'string' || !day.outcome.reason.trim()) errors.push(`weekAhead.days[${dayIndex}].outcome.reason is required when commentary is unavailable.`);
+          if (!isIsoDateTime(day.outcome.attemptedAt)) errors.push(`weekAhead.days[${dayIndex}].outcome.attemptedAt must be an offset-bearing ISO timestamp.`);
+        }
       }
     }
     let previousTime = '';
@@ -1039,41 +1210,59 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
   };
 }
 
-function applyMarketLensDecisions(weekAhead, payload, { validateEditorialReferences = () => [] } = {}) {
+function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialReferences = () => [] } = {}) {
   const decisions = Array.isArray(payload) ? payload : payload?.decisions;
-  if (!Array.isArray(decisions)) throw new Error('Market Lens decisions must be an array or a decisions[] object.');
+  const eventDays = (Array.isArray(weekAhead?.days) ? weekAhead.days : [])
+    .filter((day) => Array.isArray(day.events) && day.events.length);
+  const expectedDates = new Set(eventDays.map((day) => day.date));
+  const accepted = new Map();
+  const seenDates = new Set();
+  for (const decision of Array.isArray(decisions) ? decisions : []) {
+    const date = String(decision?.date || '');
+    if (!expectedDates.has(date) || seenDates.has(date)) continue;
+    seenDates.add(date);
+    const day = eventDays.find((item) => item.date === date);
+    if (decision.action === 'retain-generated') {
+      accepted.set(date, { date, action: 'retain-generated' });
+      continue;
+    }
+    if (decision.action !== 'replace') continue;
+    if (day.lifecycle === 'close_available'
+      && !isDeepStrictEqual(decision.marketLens?.reactions || [], day.marketLens?.reactions || [])) continue;
+    const lensErrors = validateMarketLens(decision.marketLens, day, 'editorial', `Market Lens decision for ${date}`);
+    let referenceErrors = [];
+    if (!lensErrors.length) {
+      try {
+        referenceErrors = validateEditorialReferences(decision.marketLens, day) || [];
+      } catch (_error) {
+        referenceErrors = ['Editorial references could not be validated.'];
+      }
+    }
+    if (!lensErrors.length && !referenceErrors.length) accepted.set(date, decision);
+  }
+  return eventDays.map((day) => {
+    if (accepted.has(day.date)) return accepted.get(day.date);
+    if (day.lifecycle === 'close_available' && day.marketLensSource === 'editorial'
+      && validateMarketLens(day.marketLens, day, 'editorial').length === 0) {
+      return { date: day.date, action: 'replace', marketLens: day.marketLens };
+    }
+    return { date: day.date, action: 'retain-generated' };
+  });
+}
+
+function applyMarketLensDecisions(weekAhead, payload, { validateEditorialReferences = () => [] } = {}) {
   const days = (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => ({ ...day }));
   const eventDays = days.filter((day) => Array.isArray(day.events) && day.events.length);
-  const expectedDates = new Set(eventDays.map((day) => day.date));
-  const seenDates = new Set();
-  for (const decision of decisions) {
-    const date = String(decision?.date || '');
-    if (!expectedDates.has(date)) throw new Error(`Market Lens decision date ${date || '(missing)'} is not an event day in the current Week Ahead range.`);
-    if (seenDates.has(date)) throw new Error(`Market Lens decision date ${date} is duplicated.`);
-    seenDates.add(date);
-  }
-  const missingDates = [...expectedDates].filter((date) => !seenDates.has(date));
-  if (missingDates.length) throw new Error(`Market Lens decisions must cover every event day; missing ${missingDates.join(', ')}.`);
-
+  const decisions = normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialReferences });
   const decisionByDate = new Map(decisions.map((decision) => [decision.date, decision]));
   for (const day of eventDays) {
     const decision = decisionByDate.get(day.date);
     if (decision.action === 'retain-generated') {
       const generatedLens = defaultMarketLensForEvents(day.events);
-      if (day.lifecycle === 'close_available' && !isDeepStrictEqual(generatedLens?.reactions || [], day.marketLens?.reactions || [])) {
-        throw new Error(`Market Lens decision for ${day.date} cannot change reaction tickers after the close is available.`);
-      }
       day.marketLens = generatedLens;
       day.marketLensSource = 'generated';
       continue;
     }
-    if (decision.action !== 'replace') throw new Error(`Market Lens decision for ${day.date} must use replace or retain-generated.`);
-    if (day.lifecycle === 'close_available') {
-      if (!isDeepStrictEqual(decision.marketLens?.reactions || [], day.marketLens?.reactions || [])) throw new Error(`Market Lens decision for ${day.date} cannot change reaction tickers after the close is available.`);
-    }
-    const lensErrors = validateMarketLens(decision.marketLens, day, 'editorial', `Market Lens decision for ${day.date}`);
-    const referenceErrors = lensErrors.length ? [] : validateEditorialReferences(decision.marketLens, day);
-    if (lensErrors.length || referenceErrors.length) throw new Error([...lensErrors, ...referenceErrors].join(' '));
     day.marketLens = decision.marketLens;
     day.marketLensSource = 'editorial';
   }
@@ -1095,13 +1284,16 @@ module.exports = {
   addDays,
   applyWeekAheadLifecycle,
   applyMarketLensDecisions,
+  buildWeekAheadPreparationFallback,
   comparableWeekAheadSurprise,
   defaultMarketLensForEvents,
   displayDatesForRange,
+  finalizeWeekAheadOutcomes,
   formatFxMacroValue,
   fxMacroValueRequests,
   mondayForDate,
   mergeWeekAheadPayload,
+  normalizeMarketLensDecisions,
   normalizeWeekAhead,
   rangeForDate,
   validateMarketLens,

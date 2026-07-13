@@ -6,6 +6,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
+  NEWS_COVERAGE_POLICIES,
+  NEWS_COVERAGE_REASON,
+  applyNewsCoverageState,
   applyScheduledNewsBaseline,
   canonicalStoryUrl,
   dashboardNewsItems,
@@ -13,7 +16,8 @@ const {
   normalizeStoryTitle,
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,
-  storyIdentity
+  storyIdentity,
+  validateNewsCoverageState
 } = require('./news_contract');
 const { readJsonBlock, validateScheduledPreflight } = require('./run_daily_update');
 const root = path.resolve(__dirname, '..');
@@ -67,6 +71,58 @@ function testDashboardNewsCollections() {
 
   data.crypto.notes.push({ ...market });
   assert.deepEqual(sortedDashboardNewsIds(data), [storyIdentity(crypto), storyIdentity(market)].sort());
+}
+
+function testNewsCoverageState() {
+  const checkedAt = new Date('2026-07-06T12:00:00.000Z');
+  const data = {
+    stories: Array.from({ length: 8 }, (_item, index) => story(`Market ${index}`, `https://example.com/market/${index}`)),
+    crypto: { notes: [] },
+    futuresModule: { stories: Array.from({ length: 3 }, (_item, index) => story(`Futures ${index}`, `https://example.com/futures/${index}`)) }
+  };
+  applyNewsCoverageState(data, { now: checkedAt });
+
+  assert.deepEqual(data.storiesCoverage, {
+    status: 'partial',
+    reason: NEWS_COVERAGE_REASON,
+    checkedAt: checkedAt.toISOString()
+  });
+  assert.deepEqual(data.crypto.notesCoverage, {
+    status: 'partial',
+    reason: NEWS_COVERAGE_REASON,
+    checkedAt: checkedAt.toISOString()
+  });
+  assert.deepEqual(data.futuresModule.storiesCoverage, { status: 'complete' });
+  assert.deepEqual(
+    validateNewsCoverageState(data.storiesCoverage, data.stories.length, NEWS_COVERAGE_POLICIES.stories),
+    []
+  );
+  assert.deepEqual(
+    validateNewsCoverageState(data.crypto.notesCoverage, data.crypto.notes.length, NEWS_COVERAGE_POLICIES.cryptoNotes),
+    []
+  );
+  assert.match(
+    validateNewsCoverageState({ status: 'complete' }, 8, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /status can be complete only/
+  );
+  assert.match(
+    validateNewsCoverageState({ status: 'partial', reason: NEWS_COVERAGE_REASON, checkedAt: checkedAt.toISOString() }, 9, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /status must be complete once/
+  );
+  assert.match(
+    validateNewsCoverageState({ status: 'partial', reason: 'unknown', checkedAt: 'not-a-time' }, 2, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
+    /reason must be insufficient_qualifying_fresh_coverage.*checkedAt must be an offset-bearing ISO timestamp/
+  );
+  assert.match(
+    validateNewsCoverageState({ status: 'complete' }, 10, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /no more than 9 qualifying fresh items/
+  );
+
+  data.stories.push(story('Market 8', 'https://example.com/market/8'));
+  data.crypto.notes = Array.from({ length: 4 }, (_item, index) => story(`Crypto ${index}`, `https://example.com/crypto/${index}`));
+  applyNewsCoverageState(data, { now: new Date('2026-07-06T12:05:00.000Z') });
+  assert.deepEqual(data.storiesCoverage, { status: 'complete' });
+  assert.deepEqual(data.crypto.notesCoverage, { status: 'complete' });
 }
 
 function testBaselineSanitization() {
@@ -258,6 +314,9 @@ function testRefreshNewsBaselineCliMode() {
     storyIdentity(newStory)
   ].sort());
   assert.match(parsed.newsBaseline.lastScheduledWindow, /^\d{4}-\d{2}-\d{2}:morning$/);
+  assert.equal(parsed.storiesCoverage.status, 'partial');
+  assert.equal(parsed.crypto.notesCoverage.status, 'partial');
+  assert.equal(parsed.storiesCoverage.checkedAt, '2026-07-06T12:00:00.000Z');
 }
 
 function testManualBaselineRefreshIsTimeUnrestrictedAndNonAdvancing() {
@@ -359,6 +418,7 @@ function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
 function main() {
   testStoryIdentityContract();
   testDashboardNewsCollections();
+  testNewsCoverageState();
   testBaselineSanitization();
   testNewMarkerAssignment();
   testManualBaselineTransition();

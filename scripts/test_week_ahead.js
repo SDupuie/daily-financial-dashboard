@@ -14,6 +14,8 @@ const {
 } = require('./calendar_contract');
 const {
   applyWeekAheadLifecycle,
+  buildWeekAheadPreparationFallback,
+  finalizeWeekAheadOutcomes,
   fxMacroValueRequests,
   formatFxMacroValue,
   applyMarketLensDecisions,
@@ -30,7 +32,8 @@ const {
   isTransient,
   parseArgs,
   parseBeaSchedule,
-  parseCensusSchedule
+  parseCensusSchedule,
+  requestFxMacroValues
 } = require('./fetch_week_ahead');
 const { calendarRolloverRange } = require('./run_daily_update');
 const root = path.resolve(__dirname, '..');
@@ -213,12 +216,14 @@ function testMarketLensDecisionApplication() {
   data.weekAhead = applyMarketLensDecisions(data.weekAhead, [{ date: '2026-07-13', action: 'retain-generated' }]);
   assert.equal(data.weekAhead.days[0].marketLensSource, 'generated');
   assert.equal(data.weekAhead.days[0].marketLens.title, 'Household demand tests growth');
-  assert.throws(() => applyMarketLensDecisions(data.weekAhead, []), /must cover every event day/);
-  assert.throws(() => applyMarketLensDecisions(data.weekAhead, [{
+  const missingDecisionFallback = applyMarketLensDecisions(data.weekAhead, []);
+  assert.equal(missingDecisionFallback.days[0].marketLensSource, 'generated');
+  const invalidReplacementFallback = applyMarketLensDecisions(data.weekAhead, [{
     date: '2026-07-13',
     action: 'replace',
     marketLens: { ...editorialLens, reactions: [{ ticker: 'QQQ', role: 'Legacy alias' }] }
-  }]), /not eligible for the selected transmission channels/);
+  }]);
+  assert.equal(invalidReplacementFallback.days[0].marketLensSource, 'generated');
 }
 
 
@@ -270,6 +275,15 @@ function testWeekAheadOutcomeRendererUsesActualCloseMoves() {
   assert.match(rendered, /UUP \+0\.50%/);
   assert.doesNotMatch(rendered, /SPX/);
   assert.doesNotMatch(rendered, /Watch the reaction in/);
+  const unavailable = weekAheadOutcomeHtml({
+    date: '2026-07-14',
+    label: 'Tuesday',
+    lifecycle: 'close_available',
+    outcome: { status: 'commentary_unavailable' },
+    marketReaction: { rows: [] }
+  });
+  assert.match(unavailable, /Post-event commentary unavailable/);
+  assert.match(unavailable, /Released facts and event-day close moves remain visible/);
 }
 
 function testWeekAheadRendererGroupsReleaseFamilies() {
@@ -360,7 +374,7 @@ function normalizedWeekAheadFixture() {
   return { officialSchedule, payload, range };
 }
 
-function testProducerAndScheduleNormalization() {
+async function testProducerAndScheduleNormalization() {
   const { officialSchedule, payload, range } = normalizedWeekAheadFixture();
   assert.deepEqual(fxMacroValueRequests(officialSchedule), {
     announcements: ['inflation', 'core_inflation', 'ppi', 'retail_sales'],
@@ -436,10 +450,59 @@ function testProducerAndScheduleNormalization() {
   });
   assert.ok(builtSchedule.events.some((item) => item.date === '2026-07-14' && item.keys.includes('cpi')));
   assert.ok(builtSchedule.events.some((item) => item.date === '2026-07-15' && item.keys.includes('crude-oil-inventories')));
-  assert.throws(() => buildOfficialSchedule(range, {
+  const partialSchedule = buildOfficialSchedule(range, {
     censusHtml: '<h1>2026 Economic Indicator Release Schedule</h1>',
     beaHtml: '<h1>Release Schedule Year 2026</h1>'
-  }), /no recognized covered releases/);
+  });
+  assert.ok(partialSchedule.events.some((item) => item.keys.includes('cpi')), 'Available maintained authority events should survive unavailable live schedules.');
+  assert.equal(partialSchedule.authorities.find((item) => item.id === 'census-economic-indicators').status, 'unavailable');
+  assert.equal(partialSchedule.authorities.find((item) => item.id === 'bea-release-schedule').status, 'unavailable');
+  const partialPayload = normalizeWeekAhead({
+    announcements: {},
+    predictions: {},
+    failures: [{ kind: 'announcements', indicator: 'cpi', message: 'fixture values unavailable' }]
+  }, {
+    range,
+    officialSchedule: {
+      ...builtSchedule,
+      failures: [{ authority: 'census', message: 'fixture schedule unavailable' }]
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  assert.equal(partialPayload.source.status, 'partial');
+  assert.equal(partialPayload.availability.status, 'partial');
+  assert.equal(partialPayload.availability.failures.length, 2);
+  assert.deepEqual(validateWeekAheadPayload(partialPayload), []);
+
+  const partialValues = await requestFxMacroValues(builtSchedule, 1000, {
+    requestJson: async (url) => {
+      if (url.includes('/ppi?')) throw new Error('fixture indicator failure');
+      return [];
+    }
+  });
+  assert.ok(Object.keys(partialValues.announcements).length > 0);
+  assert.ok(Object.keys(partialValues.predictions).length > 0);
+  assert.ok(partialValues.failures.length > 0);
+  assert.ok(partialValues.failures.every((item) => item.indicator === 'ppi'));
+  const collectedPartialPayload = normalizeWeekAhead(partialValues, {
+    range,
+    officialSchedule: builtSchedule,
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  assert.equal(collectedPartialPayload.source.status, 'partial');
+  assert.deepEqual(validateWeekAheadPayload(collectedPartialPayload), []);
+
+  const recoveredValues = await requestFxMacroValues(builtSchedule, 1000, {
+    requestJson: async () => []
+  });
+  assert.deepEqual(recoveredValues.failures, []);
+  const recoveredPayload = normalizeWeekAhead(recoveredValues, {
+    range,
+    officialSchedule: builtSchedule,
+    now: new Date('2026-07-10T18:05:00Z')
+  });
+  assert.equal(recoveredPayload.availability, undefined);
+  assert.deepEqual(validateWeekAheadPayload(recoveredPayload), []);
 }
 
 function testLifecycleAndCloseReactionTransitions() {
@@ -471,14 +534,31 @@ function testLifecycleAndCloseReactionTransitions() {
   assert.equal(closedTuesday.lifecycle, 'close_available');
   assert.deepEqual(closedTuesday.marketReaction.rows.map((row) => row.ticker), ['UST2Y', 'UUP']);
   assert.match(validateWeekAheadPayload(afterClose, { now: new Date('2026-07-14T19:59:00Z') }).join('\n'), /cannot precede the event-day market close/);
+  assert.match(
+    validateWeekAheadPayload(afterClose, { requireOutcomeDisposition: true }).join('\n'),
+    /requires a verified or commentary_unavailable disposition/,
+    'Publication validation must require a disposition, not necessarily prose.'
+  );
+  const failOpenOutcome = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
+  const unavailableTuesday = failOpenOutcome.days.find((day) => day.date === '2026-07-14');
+  assert.equal(unavailableTuesday.outcome.status, 'commentary_unavailable');
+  assert.equal(unavailableTuesday.outcome.reason, 'not_verified_for_current_run');
+  assert.deepEqual(validateWeekAheadPayload(failOpenOutcome, { requireOutcomeDisposition: true }), []);
+  const retriedOutcome = finalizeWeekAheadOutcomes(failOpenOutcome, { now: new Date('2026-07-15T22:05:00Z') });
+  assert.equal(retriedOutcome.days.find((day) => day.date === '2026-07-14').outcome.attemptedAt, '2026-07-15T22:05:00.000Z');
+  const contradictoryOutcome = structuredClone(failOpenOutcome);
+  contradictoryOutcome.days.find((day) => day.date === '2026-07-14').outcome.title = 'Unsupported interpretation';
+  assert.match(validateWeekAheadPayload(contradictoryOutcome, { requireOutcomeDisposition: true }).join('\n'), /must not carry unsupported editorial copy/);
   closedTuesday.outcome = { source: 'editorial', title: 'Inflation firmed', body: 'The release and close reaction reinforced a firmer expected policy path.' };
+  const finalizedVerified = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
+  assert.equal(finalizedVerified.days.find((day) => day.date === '2026-07-14').outcome.status, 'verified');
   assert.deepEqual(validateWeekAheadPayload(afterClose), []);
   closedTuesday.marketReaction.rows[0].unit = 'basis_points';
   assert.match(validateWeekAheadPayload(afterClose).join('\n'), /marketReaction\.rows\[0\]\.unit is invalid/);
   closedTuesday.marketReaction.rows[0].unit = 'percent_yield';
   const sameValues = mergeWeekAheadPayload(afterClose, awaitingClose);
   assert.equal(sameValues.days.find((day) => day.date === '2026-07-14').outcome.title, 'Inflation firmed');
-  assert.throws(() => applyMarketLensDecisions(sameValues, sameValues.days
+  const quarantinedLens = applyMarketLensDecisions(sameValues, sameValues.days
     .filter((day) => day.events.length)
     .map((day) => day.date === '2026-07-14'
       ? {
@@ -486,7 +566,10 @@ function testLifecycleAndCloseReactionTransitions() {
           action: 'replace',
           marketLens: { ...closedTuesday.marketLens, reactions: [{ ticker: 'UST10Y', role: 'Long-rate reaction' }, { ticker: 'UUP', role: 'Dollar-policy reaction' }] }
         }
-      : { date: day.date, action: 'retain-generated' })), /cannot change reaction tickers after the close/);
+      : { date: day.date, action: 'retain-generated' }));
+  const quarantinedTuesday = quarantinedLens.days.find((day) => day.date === '2026-07-14');
+  assert.equal(quarantinedTuesday.marketLensSource, 'generated');
+  assert.deepEqual(quarantinedTuesday.marketLens.reactions, closedTuesday.marketLens.reactions);
   const correctedClose = applyWeekAheadLifecycle(sameValues, {
     series: [
       { ticker: 'UST2Y', unit: 'percent_yield', bars: [{ time: '2026-07-13', close: 4.1 }, { time: '2026-07-14', close: 4.2 }] },
@@ -505,7 +588,6 @@ function testLifecycleAndCloseReactionTransitions() {
   const revisedProvenanceMerge = mergeWeekAheadPayload(afterClose, revisedProvenance);
   assert.equal(revisedProvenanceMerge.days.find((day) => day.date === '2026-07-14').outcome, undefined);
 
-  testWeekAheadOutcomeRendererUsesActualCloseMoves();
 }
 
 function testMarketLensDecisions() {
@@ -528,10 +610,6 @@ function testMarketLensDecisions() {
   invalidEditorial.days[1].marketLensSource = 'editorial';
   assert.match(validateWeekAheadPayload(invalidEditorial).join('\n'), /setup must contain|scenarios must explain/);
 
-  testUpdaterWeekAheadPreservesEditorialLens();
-  testMarketLensDecisionApplication();
-  testWeekAheadRendererGroupsReleaseFamilies();
-  testMarketLensReactionOpensChartBelowDay();
 }
 
 function testPayloadValidationMutations() {
@@ -551,6 +629,41 @@ function testPayloadValidationMutations() {
     mutate(invalid);
     assert.match(validateWeekAheadPayload(invalid).join('\n'), expectedError, name);
   }
+}
+
+function testWeekAheadPreparationFallbacks() {
+  const { payload } = normalizedWeekAheadFixture();
+  const carried = buildWeekAheadPreparationFallback(payload, payload.range, {
+    checkedAt: '2026-07-10T21:05:00.000Z'
+  });
+  assert.equal(carried.mode, 'carried_forward');
+  assert.equal(carried.week.availability.status, 'carried_forward');
+  assert.deepEqual(validateWeekAheadPayload(carried.week), []);
+
+  const unavailable = buildWeekAheadPreparationFallback(payload, {
+    from: '2026-07-17',
+    to: '2026-07-23'
+  }, { checkedAt: '2026-07-17T21:05:00.000Z' });
+  assert.equal(unavailable.mode, 'unavailable');
+  assert.equal(unavailable.week.source.status, 'unavailable');
+  assert.equal(unavailable.week.days.length, 5);
+  assert.ok(unavailable.week.days.every((day) => day.events.length === 0));
+  assert.deepEqual(validateWeekAheadPayload(unavailable.week), []);
+
+  const recovered = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: { from: '2026-07-17', to: '2026-07-23' },
+    officialSchedule: {
+      events: [{ date: '2026-07-20', time: '08:30', keys: ['retail-sales'], authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/schedule' }],
+      authorities: []
+    },
+    now: new Date('2026-07-17T21:10:00.000Z')
+  });
+  assert.equal(recovered.availability, undefined);
+  assert.equal(recovered.days.find((day) => day.date === '2026-07-20').events.length, 1);
+  assert.deepEqual(validateWeekAheadPayload(recovered), []);
+
+  unavailable.week.availability.reason = 'unknown';
+  assert.match(validateWeekAheadPayload(unavailable.week).join('\n'), /source_refresh_failed/);
 }
 
 function testCliDateAndParserCases() {
@@ -583,21 +696,27 @@ function testCliDateAndParserCases() {
   assert.equal(isTransient(Object.assign(new Error('HTTP 503'), { status: 503 })), true);
   assert.equal(isTransient(Object.assign(new Error('Socket reset'), { transient: true })), true);
   assert.equal(formatFxMacroValue(1413, 'millions'), '1.413M');
-  testCalendarRolloverRange();
-  testWeekAheadRendererConvertsMarketTime();
 }
 
-function run() {
+async function run() {
   const tests = [
+    testUpdaterWeekAheadPreservesEditorialLens,
+    testMarketLensDecisionApplication,
+    testCalendarRolloverRange,
+    testWeekAheadRendererConvertsMarketTime,
+    testWeekAheadOutcomeRendererUsesActualCloseMoves,
+    testWeekAheadRendererGroupsReleaseFamilies,
+    testMarketLensReactionOpensChartBelowDay,
     testProducerAndScheduleNormalization,
     testLifecycleAndCloseReactionTransitions,
     testMarketLensDecisions,
     testPayloadValidationMutations,
+    testWeekAheadPreparationFallbacks,
     testCliDateAndParserCases
   ];
   for (const test of tests) {
     try {
-      test();
+      await test();
     } catch (error) {
       error.message = `${test.name}: ${error.message}`;
       throw error;
@@ -606,4 +725,7 @@ function run() {
   process.stdout.write('Calendar and Week Ahead tests passed.\n');
 }
 
-run();
+run().catch((error) => {
+  process.stderr.write(`${error.stack || error.message}\n`);
+  process.exitCode = 1;
+});

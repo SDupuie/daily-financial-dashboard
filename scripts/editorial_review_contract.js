@@ -110,6 +110,24 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
   const decisions = Array.isArray(manifest.marketLensDecisions) ? manifest.marketLensDecisions : null;
   if (!decisions) errors.push('editorial review marketLensDecisions must be an array.');
 
+  const systemFallbacks = manifest.systemFallbacks === undefined
+    ? []
+    : Array.isArray(manifest.systemFallbacks) ? manifest.systemFallbacks : null;
+  if (!systemFallbacks) {
+    errors.push('editorial review systemFallbacks must be an array when present.');
+  } else {
+    const identities = new Set();
+    for (const [index, fallback] of systemFallbacks.entries()) {
+      if (!REQUIRED_EDITORIAL_SECTIONS.includes(fallback?.section)) errors.push(`editorial review systemFallbacks[${index}].section is invalid.`);
+      if (typeof fallback?.path !== 'string' || !fallback.path.trim()) errors.push(`editorial review systemFallbacks[${index}].path must be populated.`);
+      if (!['retained_candidate', 'omitted', 'generated_default', 'unavailable_disposition'].includes(fallback?.action)) errors.push(`editorial review systemFallbacks[${index}].action is invalid.`);
+      if (typeof fallback?.reason !== 'string' || !fallback.reason.trim()) errors.push(`editorial review systemFallbacks[${index}].reason must be populated.`);
+      const identity = `${fallback?.section || ''}:${fallback?.path || ''}:${fallback?.action || ''}`;
+      if (identities.has(identity)) errors.push(`editorial review systemFallbacks contains duplicate disposition ${identity}.`);
+      identities.add(identity);
+    }
+  }
+
   const verifiedClaims = Array.isArray(manifest.verifiedClaims) ? manifest.verifiedClaims : [];
   const editorialTexts = new Set(data ? editorialTextEntries(data).map((entry) => entry.text) : []);
   for (const [index, claim] of verifiedClaims.entries()) {
@@ -184,6 +202,9 @@ function buildEditorialReview(data, manifest, chartData) {
     sections: [...manifest.sections].sort(),
     marketLensDecisions: manifest.marketLensDecisions.map(({ date, action }) => ({ date, action })),
     verifiedClaims: (manifest.verifiedClaims || []).map(({ text, evidenceUrl }) => ({ text, evidenceUrl })),
+    ...((manifest.systemFallbacks || []).length ? {
+      systemFallbacks: manifest.systemFallbacks.map(({ section, path, action, reason }) => ({ section, path, action, reason }))
+    } : {}),
     payloadHash: ''
   };
   data.editorialReview = review;
