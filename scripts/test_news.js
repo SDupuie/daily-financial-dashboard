@@ -331,7 +331,10 @@ function testManualBaselineRefreshIsTimeUnrestrictedAndNonAdvancing() {
   const data = {
     editionId: 'old',
     newsBaseline: baseline,
-    stories: [story('Current', 'https://example.com/current'), story('Manual', 'https://example.com/manual')],
+    stories: [
+      story('Current', 'https://example.com/current', { tag: 'Markets', body: 'Current market context remains relevant for the baseline test.', publishedOn: '2026-07-11' }),
+      story('Manual', 'https://example.com/manual', { tag: 'Markets', body: 'Manual market context remains relevant for the baseline test.', publishedOn: '2026-07-11' })
+    ],
     crypto: { notes: [] }
   };
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify(data)}</script>`);

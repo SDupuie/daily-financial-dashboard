@@ -478,11 +478,8 @@ function testEditorialEarningsMissingCopyBlocksFinalApplyUntilAttempted() {
   const dashboardData = structuredClone(candidateDashboardData);
   const missingNarrativePath = path.join(os.tmpdir(), `missing-earnings-narrative-${process.pid}`, 'earnings_narrative.json');
 
-  assert.throws(
-    () => applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, missingNarrativePath),
-    /Earnings editorial research is incomplete for 1 row\(s\)/,
-    'Final Earnings apply must not silently convert a skipped editorial pass into unavailable copy.'
-  );
+  const unavailable = applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, missingNarrativePath);
+  assert.equal(unavailable.week.rows[0].outcome.interpretationDisposition.status, 'commentary_unavailable');
   fs.mkdirSync(path.dirname(missingNarrativePath), { recursive: true });
   fs.writeFileSync(missingNarrativePath, JSON.stringify({
     schemaVersion: 1,
@@ -577,8 +574,9 @@ function testFocusedEarningsApplyIgnoresMalformedOptionalAndStagingArtifacts() {
     '--apply-earnings-week-json', earningsFile
   ], { cwd: root, encoding: 'utf8', env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW } });
   assert.equal(malformedWeek.status, 0, malformedWeek.stderr);
-  assert.match(malformedWeek.stderr, /focused apply skipped; staging JSON could not be read/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
+  assert.match(malformedWeek.stderr, /Earnings focused apply input was unusable; applying the Earnings fallback/);
+  const fallbackWeek = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').earnings.week;
+  assert.equal(fallbackWeek.availability.status, 'carried_forward');
 }
 
 function testDashboardCandidateAppliesEarningsSectionFallback() {
@@ -840,8 +838,12 @@ function testFocusedApplyValidatesBeforeAtomicReplace() {
     encoding: 'utf8',
     env: { ...process.env, VALIDATE_NOW_ISO: FIXTURE_NOW }
   });
-  assert.notEqual(result.status, 0, 'An invalid focused repair candidate must fail validation.');
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml, 'A failed candidate must not replace the dashboard artifact.');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').crypto.availability.status,
+    'carried_forward',
+    'An invalid source payload must publish the validated Crypto fallback instead of blocking the dashboard.'
+  );
 
   const committedHtml = originalHtml.replace('Fixture headline', 'Committed despite snapshot failure');
   const snapshotFile = path.join(dir, 'dashboard.last-good.html');
@@ -894,11 +896,15 @@ function testFocusedEarningsApplyUsesNewsPartialFallback() {
   const { dashboard } = createDashboardValidationFixture();
   dashboard.stories[0].publishedOn = '2026-07-08';
   dashboard.crypto.notes[0].publishedOn = '2026-07-08';
-  const result = applyFocusedNewsFallback(dashboard, new Date(FIXTURE_NOW));
-  assert.equal(result.storiesRemoved, 1);
+  dashboard.futuresModule.stories[0].publishedOn = '2026-07-08';
+  dashboard.stories[1] = structuredClone(dashboard.futuresModule.stories[1]);
+  const result = applyFocusedNewsFallback(dashboard, new Date('2026-07-10T21:00:00Z'));
+  assert.equal(result.storiesRemoved, 2);
   assert.equal(result.cryptoNotesRemoved, 1);
-  assert.equal(dashboard.stories.length, 8);
+  assert.equal(result.futuresStoriesRemoved, 1);
+  assert.equal(dashboard.stories.length, 7);
   assert.equal(dashboard.crypto.notes.length, 3);
+  assert.equal(dashboard.futuresModule.stories.length, 2);
   assert.equal(dashboard.storiesCoverage.status, 'partial');
   assert.equal(dashboard.crypto.notesCoverage.status, 'partial');
 }
@@ -1742,6 +1748,28 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(fs.readdirSync(dir).some((name) => name.startsWith('.dashboard.html.')), false, 'Temporary candidate files must be removed.');
 
   fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, '{');
+  fs.writeFileSync(payloadFile, '{');
+  fs.writeFileSync(reviewFile, '{');
+  const unavailableInputsResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(unavailableInputsResult.status, 0, unavailableInputsResult.stderr);
+  assert.match(unavailableInputsResult.stderr, /Staged candidate was unavailable or stale; retaining the validated dashboard/);
+  assert.match(unavailableInputsResult.stderr, /Editorial review was unusable; retaining validated candidate decisions/);
+  assert.ok(readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').editorialReview, 'Missing or malformed editorial inputs must publish a reconstructed receipt.');
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  fs.writeFileSync(reviewFile, '{');
+  const unavailableMarketLensResult = spawnSync(process.execPath, [
+    path.join(root, 'scripts/run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--apply-market-lens-json', reviewFile,
+    '--afternoon'
+  ], { cwd: root, encoding: 'utf8', env });
+  assert.equal(unavailableMarketLensResult.status, 0, unavailableMarketLensResult.stderr);
+  assert.match(unavailableMarketLensResult.stderr, /Market Lens apply input was unusable; retaining generated lenses/);
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
 
   const editorialPayload = structuredClone(dashboard);
   editorialPayload.masthead.date = 'Saturday · January 1, 2000';
