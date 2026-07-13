@@ -116,7 +116,7 @@ Architecture invariants enforced by tests:
 - Pre-event editorial commentary remains valid through `released_awaiting_close`. The required close response—not the intermediate arrival of an actual—invalidates that preview and triggers post-event editorial replacement. A genuinely unresolvable reaction may invalidate the preview when the workflow can no longer reach `close_available`. Finalization stops when the editorial handoff still has unattempted narrative work; `commentary_unavailable` is valid only after the editorial pass records an explicit attempt.
 - Missing post-event editorial verification is a valid, retryable disposition rather than a publication blocker. Deterministic actuals and market reactions remain visible; `unverified` must never be interpreted as proof that guidance was not provided, and stale or generic copy must not be substituted.
 - Masthead date/edition, session labels, compile prefix, and scheduled baseline metadata are updater-derived envelope fields.
-- News collection coverage metadata is updater-derived from the finalized qualifying story collections; partial coverage relaxes only minimum cardinality and remains retryable on later runs. It is audit metadata, never inline reader-facing section copy or footer content; surface it only through an explicitly requested information tooltip.
+- News collection coverage metadata is updater-derived from the finalized qualifying story collections; partial coverage relaxes only minimum cardinality and remains retryable on later runs. It is audit metadata only and must never be rendered inline, in the footer, or through a tooltip.
 - Generated and editorial sidecars are staging inputs only and are never published runtime dependencies.
 
 ### Public commands and private modules

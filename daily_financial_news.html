@@ -25280,9 +25280,8 @@
 
       /* TEST BLOCK START: news-coverage-notice */
       function newsCoverageNotice(coverage, count, target, label) {
-        // Coverage is embedded audit metadata, not reader-facing section copy.
-        // It may be surfaced only through an explicitly requested footer or
-        // information tooltip, never as an inline warning above news cards.
+        // Coverage is embedded audit metadata, never reader-facing copy.
+        // Do not surface it inline, in the footer, or through a tooltip.
         return '';
       }
       /* TEST BLOCK END: news-coverage-notice */
