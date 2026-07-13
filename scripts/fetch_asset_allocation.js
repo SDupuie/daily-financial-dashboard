@@ -40,27 +40,32 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--portfolio-output') {
-      args.portfolioOutput = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_PORTFOLIO_OUTPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--portfolio-output requires a path.');
+      args.portfolioOutput = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--summary-output') {
-      args.summaryOutput = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_SUMMARY_OUTPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--summary-output requires a path.');
+      args.summaryOutput = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--refresh-url') {
-      args.refreshUrl = argv[i + 1] || DEFAULT_REFRESH_URL;
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--refresh-url requires a URL.');
+      args.refreshUrl = argv[i + 1];
       i += 1;
       continue;
     }
     if (arg === '--export-path') {
-      args.exportPath = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_EXPORT_PATH);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--export-path requires a path.');
+      args.exportPath = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--timeout-ms') {
-      args.timeoutMs = Math.max(1000, Number(argv[i + 1] || REQUEST_TIMEOUT_MS));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 1000) throw new Error('--timeout-ms must be a finite number of at least 1000 milliseconds.');
+      args.timeoutMs = Number(argv[i + 1]);
       i += 1;
       continue;
     }
@@ -80,6 +85,7 @@ function parseArgs(argv) {
       printHelp();
       process.exit(0);
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   if (args.skipPortfolio && args.skipSummary) {

@@ -22,11 +22,101 @@ Use each repository artifact only for the scope it owns:
 - Files under `generated/` are staging or cache artifacts. A workflow may treat one as its current build input, but it does not supersede the published artifact or documented contract.
 - Validators are executable enforcement of selected documented contracts. Tests are regression evidence for implementation paths. Neither validators, tests, nor fixtures independently define product or data policy, and fixtures are never production data.
 
+## Dashboard Architecture Policy
+
+Use a single-writer, staged, contract-driven architecture across every dashboard section.
+
+### Section lifecycle
+
+Every section follows the same lifecycle: produce deterministic staging data, reject source data the producer cannot reliably normalize, assemble it into a complete dashboard candidate, perform only explicitly editorial work in the editorial workspace, validate the finalized candidate, and atomically replace the canonical dashboard artifact.
+
+- Fetchers and domain commands may write only staging/cache artifacts; operational defaults belong under `generated/`, while explicit test/diagnostic outputs may use temporary paths. They must never edit dashboard HTML.
+- `scripts/run_daily_update.js` is the sole operational writer for `daily_financial_news.html`. It owns sequencing, cross-section integration, editorial handoff, receipt application, candidate validation, and atomic replacement.
+- Normal deterministic preparation must not partially update the canonical dashboard. Focused repair modes are explicit transactions and must use the same candidate-validation and atomic-replacement path.
+- `scripts/validate_dashboard.js` is the public validation, complete-test, and readiness entry point. Validation is read-only.
+- `scripts/publish_main.sh` owns publishing only and must not fetch, normalize, or edit dashboard data.
+- `scripts/local_market_server.js` owns only the ephemeral browser refresh overlay and must never update the canonical artifact.
+
+### Section ownership matrix
+
+This matrix is the canonical implementation partition for the normal daily workflow. A change that adds a section, staging artifact, editorial sidecar, validation boundary, or write path must update this matrix, the corresponding executable architecture tests, and the README runbook in the same change.
+
+| Surface | Deterministic owner and staging input | Domain contract or staging gate | Editorial workspace scope | Final application and write authority |
+| --- | --- | --- | --- | --- |
+| Envelope: masthead, edition/session labels, compile prefix, scheduled baseline | `run_daily_update.js` derives these cross-section fields while assembling `generated/daily_financial_news.candidate.html` | Updater-owned cross-section derivation plus independent dashboard validation | Only the documented driver/source/holiday context may be edited; generated envelope fields remain unchanged | `run_daily_update.js` re-derives the envelope and may write it only through validated final candidate replacement |
+| Opening | No independent producer; prior editorial content is carried into the staged complete candidate | Editorial completeness and final dashboard validation | `generated/editorial/dashboard-data.json` owns headline, deck, and catalyst copy | `run_daily_update.js` applies reviewed dashboard data; no other script writes the section |
+| Futures | `fetch_chart_data.js futures` writes `generated/futures_module.json` | The Chart/Futures owner exports and invokes the pure Futures staging-payload validator before writing; final dashboard validation remains independent | Only `futuresModule.stories[]` is editorial | `run_daily_update.js` invokes the domain validator, applies accepted rows, and derives window labels without redefining Futures policy |
+| Tape and embedded charts | `fetch_chart_data.js` writes `generated/chart_data.json`; embedded `chart-data.series` is canonical | Chart normalization/projection lives in the consolidated Chart owner; `validate_dashboard.js` independently checks final series, quotes, and Tape coherence | Tape roster changes are intentional editorial decisions; every retained row's commentary is editorial | `run_daily_update.js` embeds series and re-derives `chart-data.quoteRows` plus visible Tape quote fields on every apply path |
+| Crypto | `fetch_crypto_stats.js` writes `generated/crypto_stats.json`; crypto quote series come from the Chart producer | Crypto producer normalization rejects unusable provider responses; final dashboard validation enforces stat-card and Tape placement contracts | `crypto.notes[]` and crypto Tape commentary are editorial; stat values and quote fields are not | `run_daily_update.js` applies staged stats and chart-derived crypto quotes through the complete candidate |
+| Asset Allocation | `fetch_asset_allocation.js` writes `generated/asset_allocation_portfolio.json` and `generated/asset_allocation_summary.json` from instrument data and the sanitized export | Producer sanity checks own source normalization; final dashboard validation enforces the published display contract | Review only; do not create strategy logic or hand-edit deterministic values | `run_daily_update.js` applies staged rows and sanitized summary fields only |
+| News Flow and promoted stories | No market-fact producer; `news_contract.js` owns pure identity, URL, baseline, and New-pill transitions | News contract plus final freshness, link, count, duplication, and claim validation | `stories[]`, `crypto.notes[]`, and `futuresModule.stories[]` are edited in `generated/editorial/dashboard-data.json` | `run_daily_update.js` applies reviewed stories and scheduled-baseline transitions |
+| Week Ahead | `fetch_week_ahead.js` writes `generated/week_ahead.json` | `week_ahead_contract.js` owns schedule normalization, lifecycle, surprises, reactions, Market Lens policy, and domain validation | Market Lens decisions and required post-close outcomes are completed in the common editorial workspace and review manifest | `run_daily_update.js` merges deterministic facts, applies reviewed decisions, derives lifecycle views, and commits only the complete candidate |
+| Earnings | `earnings_week.js` owns build/refresh/apply commands and `generated/earnings_week.json`; deterministic preparation stages pending narrative tasks | `earnings_week_contract.js` owns row/lifecycle/narrative policy; `earnings_week_validation.js` is the private validation implementation reached through the public Earnings CLI | Required copy is completed only in `generated/editorial/earnings_narrative.json`; the general dashboard JSON must not alter Earnings facts | `run_daily_update.js` binds the editorial sidecar to staged facts, enforces final narrative completeness, and applies the validated section during finalization |
+| Editorial review and receipt | `editorial_review_contract.js` creates the review skeleton/receipt contract; `generated/editorial/editorial-review.json` is the staging input | The pure review contract validates section coverage, claims, base edition, decisions, and payload hash | Review every declared section and complete all decision/evidence fields | Only `run_daily_update.js` may stamp the hash-bound receipt into the final candidate |
+| Canonical artifact and publication | `generated/daily_financial_news.candidate.html` is the deterministic complete staging candidate; `daily_financial_news.html` remains unchanged during preparation | `validate_dashboard.js` validates staging and finalized candidates with the appropriate editorial-completeness gate | No direct HTML editing is part of the daily workflow | Only `run_daily_update.js` may atomically replace `daily_financial_news.html`; only `publish_main.sh` may run readiness and push publication |
+
+Architecture invariants enforced by tests:
+
+- Deterministic preparation leaves the canonical dashboard byte-for-byte unchanged and writes only the staged complete candidate.
+- The editorial handoff contains exactly `dashboard-data.json`, `earnings_narrative.json`, and `editorial-review.json`; new editorial sidecars require an explicit matrix and test update.
+- A stale candidate/base-edition binding is rejected before editorial handoff or final replacement.
+- Producers and domain contracts own reusable domain acceptance rules and must validate before persistent staging writes when the lifecycle requires it. The updater may invoke those rules but must not redefine them.
+- Final dashboard validation is independent of producer acceptance validation and must be capable of rejecting a malformed assembled artifact even when a producer check passed.
+- Focused repair modes are an explicit allowlist, use complete candidate validation, and reach the canonical artifact only through the same atomic replacement function.
+- The complete test entry point and publishing path must execute the architecture contract tests; changing or bypassing those tests is an architecture-policy change, not routine implementation work.
+
+### Validation gates
+
+- Every producer must reject source data it cannot reliably normalize. These producer sanity checks protect the staging boundary but do not need a separate validator file or reusable domain-validation API.
+- A staging artifact must have explicit domain validation before downstream consumption when it persists across runs, anchors sidecars or later decisions, supports editorial work, or passes through multiple domain commands. Keep that validation in the owning contract or, when its implementation is substantial, in a private module reached through the domain's public CLI.
+- Every dashboard change, including changes assembled from one-hop staging payloads, must pass complete candidate validation before atomic replacement of the canonical dashboard artifact.
+- Do not create domain validators merely for structural symmetry. Add one only when the staging artifact's lifecycle requires an independently enforced boundary.
+
+### Domain ownership
+
+- `*_contract.js` files own deterministic normalization, payload validation, stable identities, derived-field rules, and domain-specific editorial-completeness policy for domains with a separate contract module. Contract modules must not use filesystem, network, environment, CLI-argument, child-process, or process-exit APIs.
+- `fetch_*.js` files own external-source retrieval and staging output. A producer may expose subcommands for closely related outputs in the same dashboard domain.
+- A documented consolidated domain producer may also export pure staging transformations used by the updater, validator, or local service when a separate contract file would not own an independently understandable responsibility.
+- A complex domain may expose one public core CLI, such as `scripts/earnings_week.js`. Large build or validation implementations may remain separate private modules, but the core CLI must import them directly rather than spawning sibling JavaScript files.
+- Private implementation modules must export callable functions and fail fast with guidance when executed directly.
+- Cross-domain orchestration may invoke documented public domain CLIs as subprocess boundaries; within one domain, use direct imports.
+- Domain policy must not live in `run_daily_update.js`; the updater may contain only thin application wiring and genuinely cross-section derivations.
+
+### Canonical and derived fields
+
+- Each deterministic value has one canonical owner. Derived display values must be rebuilt from that owner during every apply path.
+- Embedded `chart-data.series` owns chart history; `chart-data.quoteRows` and visible Tape prices are derived views.
+- Week Ahead calendar facts, release states, comparable surprises, and event-day close reactions are deterministic; pre-release Market Lens decisions, post-close Week Ahead outcomes, and explicitly requested earnings narrative fields are editorial.
+- Event-driven sections must expose the shared deterministic lifecycle states `scheduled`, `awaiting_actual`, `released_awaiting_close`, and `close_available`. A domain may retain additional error detail outside that lifecycle, but it must not use an error label for a merely incomplete time window.
+- Pre-event editorial commentary remains valid through `released_awaiting_close`. The required close response—not the intermediate arrival of an actual—invalidates that preview and triggers post-event editorial replacement. A genuinely unresolvable reaction may invalidate the preview when the workflow can no longer reach `close_available`.
+- Masthead date/edition, session labels, compile prefix, and scheduled baseline metadata are updater-derived envelope fields.
+- Generated and editorial sidecars are staging inputs only and are never published runtime dependencies.
+
+### Public commands and private modules
+
+- Keep the approved public operational commands documented in `README.md`.
+- Do not introduce a second public CLI for an existing domain. Small CLI adapters belong in their public owner.
+- Do not merge files solely because one has a single caller, and do not split files solely because one is long. Split only for a stable, independently understandable responsibility; merge adapters and subcontracts that do not own one.
+- No new production file is justified without a documented owner, callers, inputs, outputs, write authority, and public/private status.
+
+### Test architecture
+
+- `test_<domain>.js` owns self-contained domain policy, producer, and domain-command coverage.
+- `test_dashboard.js` owns complete-artifact, cross-section, embedded-runtime, candidate-commit, and local-service integration coverage.
+- Test-suite entry points must not import other test-suite entry points. Small local fixture/runtime helpers are preferable to cross-suite dependencies.
+- `node scripts/validate_dashboard.js test` is the complete regression command and must enforce JavaScript/shell syntax, plist validity, contract purity, test independence, all domain/integration suites, canonical dashboard validation, HTML validation, and whitespace checks.
+- Regression, audit, commenting, and source-verification work must not invoke live production fetches for evidence. Exercise fetch behavior with deterministic fixtures or injected responses. Metered EarningsAPI calendar calls are reserved for the five displayed dates during Monday-morning, Friday-afternoon, or explicitly requested manual calendar rollovers.
+
 Default file-change policy:
 
+- A request to run, refresh, or publish dashboard data authorizes changes only to staging artifacts and canonical generated data through the documented updater workflow. It does not authorize edits to source code, tests, documentation, repository configuration, or project policy. If an update exposes a source defect or contract gap, stop the update before changing those files, report the blocker, and obtain explicit user approval for the source change.
+- Do not change any browser-visible styling, geometry, spacing, typography, color, markup, interaction affordance, or responsive behavior unless the user explicitly requested that visual or interaction change. Accessibility, touch-target, consistency, modernization, and best-practice arguments are recommendations to raise with the user; they are not authorization to alter the UI.
+- Functional, data-contract, validation, accessibility, and refactoring work must preserve existing visual presentation unless a visible change is inherently required by the explicitly requested behavior. When a visible consequence is required, identify it before implementation and keep it to the smallest necessary surface. Do not opportunistically resize, restyle, harmonize, or otherwise “improve” nearby controls.
+- Treat the current working file as authoritative when the worktree is dirty or another task may have edited the repository. Re-read the exact current ranges immediately before applying a narrow patch. Do not use a stale full-file snapshot, broad replacement, or carried-forward diff that can restore previously rejected or removed changes.
+- After any source edit, inspect the resulting diff for browser-visible changes outside the user-authorized scope. Remove only unintended changes introduced by the current work. If authorship or intent is uncertain, stop and ask rather than preserving, reverting, or publishing the questionable visual change.
 - Do not create, edit, or delete project files outside `mockups/` for visual design exploration unless the user specifically asks to modify dashboard source, data, scripts, tests, documentation, repository configuration, or publishing assets.
 - When the user asks for a visual design concept or UI mockup that is not yet meant to be wired into the real dashboard, keep new files under `mockups/`.
-- When the user asks to update the real dashboard data, rendering path, validation, publishing scripts, or documentation, edit the canonical files directly.
+- When the user asks to update real dashboard data, rendering, validation, publishing, or documentation, work in the canonical owning files and use the documented staged updater path for generated dashboard data; do not redirect production work into mockups.
 - Prefer reusing an existing appropriate file over creating a new one.
 - If a new top-level directory seems necessary, ask the user first.
 
@@ -65,7 +155,7 @@ For this repository:
 - Asset Allocation dividend lookahead buckets are display-only; do not include upcoming or future ex-date events in current MTD dividend totals or returns.
 - Portfolio-level Asset Allocation return must come only from the sanitized local export. During local daily updates, refresh it via `http://127.0.0.1:2200/api/asset-market-data` before reading `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`; never call that endpoint from the published dashboard or use it for display data.
 - Keep removed or filtered dashboard items out of prominent visible summaries. For example, if a row is filtered out of the active mockup, do not foreground that row’s source details in the visible footer.
-- Crypto has its own section; do not duplicate crypto rows inside The Tape unless the user explicitly asks.
+- Crypto news and stat cards have their own section. Crypto ticker quote rows belong only in the Tape's `group: "Crypto"`; do not duplicate them in a separate `crypto.tape[]` payload.
 - When labels are renamed, sweep generated data, fetch scripts, validation, mockups, and visible UI strings for stale wording.
 
 ## Validation and Browser Checks

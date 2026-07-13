@@ -35,6 +35,440 @@ const TREASURY_CURVE_POINTS = [
   { label: '30Y', field: 'BC_30YEAR', years: 30 }
 ];
 
+// Intraday index futures use the same Yahoo chart provider but retain their
+// separate staging payload and session-comparison rules behind a CLI subcommand.
+const futuresModule = (() => {
+const REQUEST_TIMEOUT_MS = 10000;
+const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'futures_module.json');
+
+// Staging helper only: production reads embedded futuresModule.futures from daily_financial_news.html.
+const FUTURES = [
+  { symbol: 'ES=F', label: 'S&P Futures', body: 'S&P 500 futures before the cash open.' },
+  { symbol: 'NQ=F', label: 'Nasdaq Futures', body: 'Growth and AI tone before the cash open.' },
+  { symbol: 'YM=F', label: 'Dow Futures', body: 'Blue-chip and defensive leadership read.' },
+  { symbol: 'RTY=F', label: 'Russell Futures', body: 'Small-cap and domestic cyclicals read.' }
+];
+const FUTURES_MODES = new Set(['premarket', 'session']);
+
+function isOffsetIsoTimestamp(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && !Number.isNaN(Date.parse(value));
+}
+
+function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
+  const errors = [];
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return ['Futures staging payload must be an object.'];
+  }
+  if (!isOffsetIsoTimestamp(payload.compiledAt)) errors.push('Futures staging compiledAt must be an offset-bearing ISO timestamp.');
+  if (typeof payload.source !== 'string' || !payload.source.trim()) errors.push('Futures staging source must be populated.');
+  if (!FUTURES_MODES.has(payload.mode)) errors.push('Futures staging mode must be premarket or session.');
+  if (expectedMode && payload.mode !== expectedMode) errors.push(`Futures staging mode must be ${expectedMode} for this update window.`);
+  if (!Array.isArray(payload.futures)) {
+    errors.push('Futures staging futures must be an array.');
+    return errors;
+  }
+  if (payload.futures.length !== FUTURES.length) {
+    errors.push(`Futures staging payload must contain exactly ${FUTURES.length} rows.`);
+  }
+  for (const [index, spec] of FUTURES.entries()) {
+    const row = payload.futures[index];
+    const label = `Futures staging futures[${index}]`;
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      errors.push(`${label} must be an object.`);
+      continue;
+    }
+    if (row.symbol !== spec.symbol) errors.push(`${label}.symbol must be ${spec.symbol}.`);
+    for (const field of ['label', 'value', 'body']) {
+      if (typeof row[field] !== 'string' || !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
+    }
+    if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
+    if (!Array.isArray(row.series) || row.series.length < 2) {
+      errors.push(`${label}.series must contain at least two chart points.`);
+    } else if (row.series.some((point) => !Array.isArray(point) || point.length < 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[1] <= 0)) {
+      errors.push(`${label}.series points must contain finite numeric times and positive prices.`);
+    }
+    if (!row.raw || typeof row.raw !== 'object' || Array.isArray(row.raw)) {
+      errors.push(`${label}.raw must be an object.`);
+      continue;
+    }
+    for (const field of ['price', 'regularMarketTime', 'referencePrice', 'previousClose', 'delta', 'pct']) {
+      if (!Number.isFinite(row.raw[field])) errors.push(`${label}.raw.${field} must be numeric.`);
+    }
+    for (const field of ['price', 'referencePrice', 'previousClose']) {
+      if (Number.isFinite(row.raw[field]) && row.raw[field] <= 0) errors.push(`${label}.raw.${field} must be positive.`);
+    }
+    if (payload.mode === 'session' && (!Number.isFinite(row.raw.sessionOpen) || row.raw.sessionOpen <= 0)) {
+      errors.push(`${label}.raw.sessionOpen must be positive for Session Futures.`);
+    }
+    const expectedDir = row.raw.pct > 0 ? 'up' : row.raw.pct < 0 ? 'down' : 'flat';
+    if (Number.isFinite(row.raw.pct) && row.dir !== expectedDir) errors.push(`${label}.dir must match raw.pct.`);
+  }
+  return errors;
+}
+
+function parseArgs(argv) {
+  const args = {
+    output: DEFAULT_OUTPUT,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    compact: false,
+    mode: 'premarket'
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--output') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--output requires a path.');
+      args.output = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--timeout-ms') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 1000) throw new Error('--timeout-ms must be a finite number of at least 1000 milliseconds.');
+      args.timeoutMs = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--compact') {
+      args.compact = true;
+      continue;
+    }
+    if (arg === '--session') {
+      args.mode = 'session';
+      continue;
+    }
+    if (arg === '--premarket') {
+      args.mode = 'premarket';
+      continue;
+    }
+    if (arg === '--help' || arg === '-h') {
+      printHelp();
+      process.exit(0);
+    }
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  return args;
+}
+
+function printHelp() {
+  process.stdout.write(`Usage: node scripts/fetch_chart_data.js futures [options]
+
+Options:
+  --output PATH       JSON output path (default: generated/futures_module.json)
+  --timeout-ms 10000  HTTP timeout in ms per request
+  --compact           Print one-line symbol summary
+  --session           Scope series to 8:30 AM-3:00 PM Central; store official times as 9:30 AM-4:00 PM Eastern
+  --premarket         Use Yahoo's prior-close comparison (default)
+  --help              Show this help
+`);
+}
+
+function yahooChartUrl(symbol, args, rangeOverride = '') {
+  const range = rangeOverride || (args.mode === 'session' ? '5d' : '1d');
+  return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=5m`;
+}
+
+function fetchJson(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      timeout: timeoutMs,
+      headers: {
+        'User-Agent': 'Daily-Financial-Dashboard/1.0'
+      }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (error) {
+          reject(new Error(`Invalid JSON: ${error.message}`));
+        }
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy(new Error(`Timed out after ${timeoutMs}ms`));
+    });
+    req.on('error', reject);
+  });
+}
+
+function numberFormat(maximumFractionDigits = 2) {
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits });
+}
+
+function signedNumber(value) {
+  const formatted = numberFormat(2).format(value);
+  return value > 0 ? `+${formatted}` : formatted;
+}
+
+function signedPct(value) {
+  return `${new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    signDisplay: 'always'
+  }).format(value)}%`;
+}
+
+function timeText(epochSeconds) {
+  if (!Number.isFinite(epochSeconds)) return 'Live update';
+  return `Updated ${new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'America/Chicago',
+    timeZoneName: 'short'
+  }).format(new Date(epochSeconds * 1000))}`;
+}
+
+function chicagoClockMinutes(epochSeconds) {
+  const seconds = Number(epochSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date(seconds * 1000));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return (hour % 24) * 60 + minute;
+}
+
+function chicagoIsoDate(epochSeconds) {
+  const seconds = Number(epochSeconds);
+  if (!Number.isFinite(seconds)) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date(seconds * 1000));
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+function isRegularSessionPoint(timestamp) {
+  const minutes = chicagoClockMinutes(timestamp);
+  return minutes !== null && minutes >= 8 * 60 + 30 && minutes <= 15 * 60;
+}
+
+function downsample(points, maxPoints = 72) {
+  if (points.length <= maxPoints) return points;
+  const step = (points.length - 1) / (maxPoints - 1);
+  return Array.from({ length: maxPoints }, (_value, index) => {
+    const sourceIndex = Math.round(index * step);
+    return points[sourceIndex];
+  });
+}
+
+function parsePricePoints(payload) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = result?.timestamp || [];
+  const closes = result?.indicators?.quote?.[0]?.close || [];
+  return timestamps.map((timestamp, index) => {
+    const price = Number(closes[index]);
+    return Number.isFinite(timestamp) && Number.isFinite(price) && price > 0
+      ? [timestamp, price]
+      : null;
+  }).filter(Boolean);
+}
+
+function withLatestQuotePoint(points, quoteTime, quotePrice) {
+  const normalized = Array.isArray(points) ? points.slice() : [];
+  if (!Number.isFinite(quoteTime) || !Number.isFinite(quotePrice) || quotePrice <= 0) {
+    return normalized;
+  }
+  if (!normalized.length) {
+    return [[quoteTime, quotePrice]];
+  }
+
+  const lastPoint = normalized[normalized.length - 1];
+  const lastTime = Number(lastPoint?.[0]);
+  if (!Number.isFinite(lastTime)) {
+    normalized.push([quoteTime, quotePrice]);
+    return normalized;
+  }
+  if (quoteTime > lastTime) {
+    normalized.push([quoteTime, quotePrice]);
+    return normalized;
+  }
+  if (quoteTime === lastTime) {
+    normalized[normalized.length - 1] = [quoteTime, quotePrice];
+  }
+  return normalized;
+}
+
+function regularSessionComparison(points, symbol) {
+  const sessions = new Map();
+  for (const point of points) {
+    const [timestamp] = point;
+    if (!isRegularSessionPoint(timestamp)) continue;
+    const date = chicagoIsoDate(timestamp);
+    if (!date) continue;
+    if (!sessions.has(date)) sessions.set(date, []);
+    sessions.get(date).push(point);
+  }
+
+  const sessionDates = [...sessions.keys()].sort().filter((date) => sessions.get(date).length >= 2);
+  if (sessionDates.length < 2) {
+    throw new Error(`${symbol} response did not include at least two regular-session windows`);
+  }
+
+  const sessionDate = sessionDates[sessionDates.length - 1];
+  const referenceDate = sessionDates[sessionDates.length - 2];
+  const sessionPoints = sessions.get(sessionDate);
+  const referencePoint = sessions.get(referenceDate).at(-1);
+  if (!sessionPoints?.length || !referencePoint) {
+    throw new Error(`${symbol} response did not include usable regular-session comparison points`);
+  }
+
+  return {
+    sessionDate,
+    sessionPoints,
+    referenceDate,
+    referenceTime: referencePoint[0],
+    referencePrice: referencePoint[1]
+  };
+}
+
+function latestRegularSessionClose(points, symbol) {
+  const sessions = new Map();
+  for (const point of points) {
+    const [timestamp] = point;
+    if (!isRegularSessionPoint(timestamp)) continue;
+    const date = chicagoIsoDate(timestamp);
+    if (!date) continue;
+    if (!sessions.has(date)) sessions.set(date, []);
+    sessions.get(date).push(point);
+  }
+
+  const referenceDate = [...sessions.keys()].sort().at(-1);
+  const referencePoint = referenceDate ? sessions.get(referenceDate)?.at(-1) : null;
+  if (!referencePoint) {
+    throw new Error(`${symbol} response did not include a usable prior regular-session close`);
+  }
+  return {
+    referenceDate,
+    referenceTime: referencePoint[0]
+  };
+}
+
+function parseFuture(spec, payload, args, referencePayload = null) {
+  const meta = payload?.chart?.result?.[0]?.meta;
+  const previousClose = Number(meta?.chartPreviousClose);
+  const quotePrice = Number(meta?.regularMarketPrice);
+  const quoteTime = Number(meta?.regularMarketTime);
+  if (!Number.isFinite(quotePrice) || !Number.isFinite(previousClose)) {
+    throw new Error(`${spec.symbol} response was missing price metadata`);
+  }
+
+  const pricePoints = parsePricePoints(payload);
+  const sessionComparison = args.mode === 'session'
+    ? regularSessionComparison(pricePoints, spec.symbol)
+    : null;
+  const premarketReference = args.mode === 'premarket'
+    ? latestRegularSessionClose(parsePricePoints(referencePayload), spec.symbol)
+    : null;
+  const comparisonPoints = sessionComparison
+    ? sessionComparison.sessionPoints
+    : withLatestQuotePoint(pricePoints, quoteTime, quotePrice);
+  if (comparisonPoints.length < 2) {
+    throw new Error(`${spec.symbol} response did not include at least two chart points`);
+  }
+
+  const referencePrice = sessionComparison ? sessionComparison.referencePrice : previousClose;
+  const price = comparisonPoints.at(-1)[1];
+  const regularMarketTime = comparisonPoints.at(-1)[0];
+  const referenceLabel = args.mode === 'session' ? 'prior 4 PM ET close' : 'prior close';
+  const delta = price - referencePrice;
+  const pct = referencePrice ? (delta / referencePrice) * 100 : 0;
+
+  return {
+    label: spec.label,
+    symbol: spec.symbol,
+    value: signedPct(pct),
+    dir: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
+    body: `${numberFormat(2).format(price)} last · ${signedNumber(delta)} vs ${referenceLabel} · ${timeText(regularMarketTime)}`,
+    series: downsample(comparisonPoints),
+    raw: {
+      instrumentType: meta?.instrumentType || null,
+      exchangeName: meta?.exchangeName || null,
+      ...(sessionComparison || premarketReference ? {
+        marketTimeZone: 'America/New_York'
+      } : {}),
+      price,
+      regularMarketTime: Number(regularMarketTime) || null,
+      referencePrice,
+      referenceLabel,
+      ...(sessionComparison || premarketReference ? {
+        referenceDate: sessionComparison?.referenceDate || premarketReference.referenceDate,
+        referenceTime: sessionComparison?.referenceTime || premarketReference.referenceTime,
+        referenceCloseEastern: '4:00 PM ET'
+      } : {}),
+      quotePrice,
+      quoteTime: Number.isFinite(quoteTime) ? quoteTime : null,
+      previousClose,
+      ...(sessionComparison ? {
+        sessionDate: sessionComparison.sessionDate,
+        sessionStartEastern: '9:30 AM ET',
+        sessionEndEastern: '4:00 PM ET',
+        sessionOpen: comparisonPoints[0][1],
+        sessionOpenTime: comparisonPoints[0][0]
+      } : {}),
+      delta,
+      pct
+    }
+  };
+}
+
+async function fetchFuture(spec, args) {
+  const payloadPromise = fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
+  const referencePayloadPromise = args.mode === 'premarket'
+    ? fetchJson(yahooChartUrl(spec.symbol, args, '5d'), args.timeoutMs)
+    : Promise.resolve(null);
+  const [payload, referencePayload] = await Promise.all([payloadPromise, referencePayloadPromise]);
+  return parseFuture(spec, payload, args, referencePayload);
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const results = await Promise.all(FUTURES.map((spec) => fetchFuture(spec, args)));
+  // Output is a staging payload; the published page renders embedded futuresModule.futures only.
+  const output = {
+    compiledAt: new Date().toISOString(),
+    source: 'Yahoo Finance Chart API',
+    mode: args.mode,
+    futures: results
+  };
+  const errors = validateFuturesPayload(output, { expectedMode: args.mode });
+  if (errors.length) throw new Error(`Generated Futures staging payload is invalid: ${errors.join(' ')}`);
+
+  fs.mkdirSync(path.dirname(args.output), { recursive: true });
+  fs.writeFileSync(args.output, `${JSON.stringify(output, null, 2)}\n`);
+
+  if (args.compact) {
+    process.stdout.write(results.map((row) => `${row.symbol} ${row.value}`).join(' | '));
+    process.stdout.write('\n');
+  } else {
+    process.stdout.write(`Wrote ${args.output}\n`);
+  }
+}
+
+  return { parseArgs, run: main, validateFuturesPayload };
+})();
+
 function parseArgs(argv) {
   const args = {
     input: DEFAULT_INPUT,
@@ -43,40 +477,44 @@ function parseArgs(argv) {
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: 250,
     tickers: [],
-    embedCompact: false,
-    embedSource: '',
     compact: false
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_INPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--input requires a path.');
+      args.input = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--output') {
-      args.output = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_OUTPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--output requires a path.');
+      args.output = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--days') {
-      args.days = Math.max(5, Number(argv[i + 1] || DEFAULT_DAYS));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 5) throw new Error('--days must be a finite number of at least 5 days.');
+      args.days = Number(argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--timeout-ms') {
-      args.timeoutMs = Math.max(1000, Number(argv[i + 1] || REQUEST_TIMEOUT_MS));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 1000) throw new Error('--timeout-ms must be a finite number of at least 1000 milliseconds.');
+      args.timeoutMs = Number(argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--delay-ms') {
-      args.delayMs = Math.max(0, Number(argv[i + 1] || 0));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--delay-ms must be a finite nonnegative number.');
+      args.delayMs = Number(argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--ticker') {
-      args.tickers.push(String(argv[i + 1] || '').trim().toUpperCase());
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--ticker requires a symbol.');
+      args.tickers.push(String(argv[i + 1]).trim().toUpperCase());
       i += 1;
       continue;
     }
@@ -84,19 +522,14 @@ function parseArgs(argv) {
       args.compact = true;
       continue;
     }
-    if (arg === '--embed-compact') {
-      args.embedCompact = true;
-      continue;
-    }
-    if (arg === '--embed-source') {
-      args.embedSource = path.resolve(process.cwd(), argv[i + 1] || '');
-      i += 1;
-      continue;
+    if (arg === '--embed-compact' || arg === '--embed-source') {
+      throw new Error('Direct dashboard writes are not supported; use run_daily_update.js --apply-chart-data-json or --sync-chart-quotes.');
     }
     if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   return args;
@@ -104,6 +537,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   process.stdout.write(`Usage: node scripts/fetch_chart_data.js [options]
+       node scripts/fetch_chart_data.js futures [options]
 
 Options:
   --input PATH        Dashboard HTML to read (default: daily_financial_news.html)
@@ -112,8 +546,6 @@ Options:
   --timeout-ms 15000  HTTP timeout in ms per request
   --delay-ms 250      Delay between source requests
   --ticker SYMBOL     Fetch only this dashboard ticker (repeatable)
-  --embed-compact     Compact the existing embedded chart-data block without fetching
-  --embed-source PATH Use this generated chart-data JSON when compacting the embedded block
   --compact           Print one-line series summary
   --help              Show this help
 `);
@@ -122,6 +554,7 @@ Options:
 function loadEnv(file = path.resolve(process.cwd(), '.env')) {
   if (envLoaded) return;
   envLoaded = true;
+  if (process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1') return;
   if (!fs.existsSync(file)) return;
   const text = fs.readFileSync(file, 'utf8');
   for (const line of text.split(/\r?\n/)) {
@@ -353,17 +786,6 @@ function compactChartPayload(payload) {
       bars: series.bars.map(compactChartBar)
     }))
   };
-}
-
-function compactEmbeddedChartData(input, sourcePayload = null) {
-  const html = fs.readFileSync(input, 'utf8');
-  const match = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
-  if (!match) throw new Error(`Could not find embedded chart-data JSON in ${input}`);
-  const rounded = roundChartPayload(sourcePayload || JSON.parse(match[1]));
-  rounded.quoteRows = deriveQuoteRowsFromSeries(rounded.series);
-  const payload = compactChartPayload(rounded);
-  fs.writeFileSync(input, html.replace(match[0], `<script type="application/json" id="chart-data">${JSON.stringify(payload)}</script>`));
-  return payload;
 }
 
 function sortBars(bars) {
@@ -863,12 +1285,6 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.embedCompact) {
-    const sourcePayload = args.embedSource ? JSON.parse(fs.readFileSync(args.embedSource, 'utf8')) : null;
-    const payload = compactEmbeddedChartData(args.input, sourcePayload);
-    process.stdout.write(`Compacted embedded chart-data with ${payload.series.length} series\n`);
-    return;
-  }
   const requestedTickers = new Set(args.tickers.filter(Boolean));
   const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
   if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
@@ -917,7 +1333,6 @@ module.exports = {
   deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,
   compactChartPayload,
-  compactEmbeddedChartData,
   fetchSeries,
   finnhubQuoteBarFromPayload,
   isoDateFromDate,
@@ -929,12 +1344,15 @@ module.exports = {
   readCryptoRows,
   readTapeRows,
   shouldUseFinnhubQuoteFallback,
-  sleep
+  sleep,
+  validateFuturesPayload: futuresModule.validateFuturesPayload
 };
 
 if (require.main === module) {
-  main().catch((error) => {
-    process.stderr.write(`fetch_chart_data failed: ${error.message}\n`);
+  const futuresMode = process.argv[2] === 'futures';
+  const command = futuresMode ? futuresModule.run(process.argv.slice(3)) : main();
+  command.catch((error) => {
+    process.stderr.write(`${futuresMode ? 'fetch_chart_data futures' : 'fetch_chart_data'} failed: ${error.message}\n`);
     process.exit(1);
   });
 }

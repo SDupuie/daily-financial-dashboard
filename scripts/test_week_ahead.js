@@ -1,9 +1,24 @@
 #!/usr/bin/env node
 
 const assert = require('assert/strict');
+const fs = require('fs');
+const path = require('path');
 const {
+  addDays,
+  compareIsoDate,
+  displayDatesForRange,
+  isIsoDate,
+  isIsoDateTime,
+  isIsoTime,
+  isSupportedFiveTradingDayRange
+} = require('./calendar_contract');
+const {
+  applyWeekAheadLifecycle,
   fxMacroValueRequests,
   formatFxMacroValue,
+  applyMarketLensDecisions,
+  mergeWeekAheadPayload,
+  comparableWeekAheadSurprise,
   normalizeWeekAhead,
   rangeForDate,
   TIME_INTERPRETATION,
@@ -11,14 +26,36 @@ const {
 } = require('./week_ahead_contract');
 const {
   buildOfficialSchedule,
-  parseBeaSchedule,
-  parseCensusSchedule
-} = require('./week_ahead_official');
-const {
   dateFromArg,
   isTransient,
-  parseArgs
+  parseArgs,
+  parseBeaSchedule,
+  parseCensusSchedule
 } = require('./fetch_week_ahead');
+const { calendarRolloverRange } = require('./run_daily_update');
+const root = path.resolve(__dirname, '..');
+
+function extractDashboardRuntimeTestBlock(html, name) {
+  const runtimeMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
+  assert.equal(runtimeMatches.length, 1, `Expected one dashboard-runtime script; found ${runtimeMatches.length}`);
+  const source = runtimeMatches[0][1];
+  const startMarker = `/* TEST BLOCK START: ${name} */`;
+  const endMarker = `/* TEST BLOCK END: ${name} */`;
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker);
+  assert.equal(source.split(startMarker).length - 1, 1, `Expected one test block start ${name}`);
+  assert.equal(source.split(endMarker).length - 1, 1, `Expected one test block end ${name}`);
+  assert.ok(start < end, `Test block markers are out of order for ${name}`);
+  return source.slice(start + startMarker.length, end);
+}
+
+function weekAheadDashboardFixture() {
+  return {
+    opening: { headline: '', deck: '' },
+    tape: { rows: [{ ticker: 'SPX', group: 'Equities' }] },
+    weekAhead: { days: [] }
+  };
+}
 
 function officialScheduleFixture() {
   return {
@@ -77,32 +114,257 @@ function fxMacroFixture() {
   };
 }
 
-function run() {
-  const fridayRange = rangeForDate(new Date('2026-07-10T18:00:00Z'));
-  assert.deepEqual(fridayRange, { from: '2026-07-10', to: '2026-07-16' });
-  assert.equal(dateFromArg('2026-02-30'), null, 'Impossible calendar dates must not roll into another week.');
-  assert.equal(dateFromArg('2026-02-28')?.toISOString(), '2026-02-28T12:00:00.000Z');
-  assert.throws(() => parseArgs(['--timeout-ms', 'not-a-number']), /finite number/);
-  assert.throws(() => parseArgs(['--timeout-ms', '999']), /at least 1000/);
-  assert.equal(parseArgs(['--timeout-ms', '1000']).timeoutMs, 1000);
-  assert.equal(isTransient(new Error('Malformed provider payload')), false, 'Parser and contract errors must not use cached data.');
-  assert.equal(isTransient(Object.assign(new Error('HTTP 503'), { status: 503 })), true);
-  assert.equal(isTransient(Object.assign(new Error('Socket reset'), { transient: true })), true);
-  assert.equal(formatFxMacroValue(1413, 'millions'), '1.413M');
-  const sundayRange = rangeForDate(new Date('2026-07-12T18:00:00Z'));
-  assert.deepEqual(sundayRange, { from: '2026-07-10', to: '2026-07-16' });
-  const mondayRange = rangeForDate(new Date('2026-07-13T18:00:00Z'));
-  assert.deepEqual(mondayRange, { from: '2026-07-13', to: '2026-07-17' });
+function testUpdaterWeekAheadPreservesEditorialLens() {
+  const data = weekAheadDashboardFixture();
+  const payload = normalizeWeekAhead({
+    announcements: {
+      retail_sales: { data: [{ announcement_id: 'usd_retail_sales_2026-05-31', announcement_datetime: 1781699400, val: 0.1 }] }
+    },
+    predictions: {
+      retail_sales: { data: [{
+        announcement_id: 'usd_retail_sales_2026-06-30',
+        announcement_datetime: 1784205000,
+        announcement_datetime_local: '2026-07-13T08:30:00-04:00',
+        predictions: [{ prediction_type: 'market_consensus', predicted_value: 0.2 }]
+      }] }
+    }
+  }, {
+    range: { from: '2026-07-13', to: '2026-07-17' },
+    officialSchedule: {
+      events: [{
+        date: '2026-07-13', time: '08:30', keys: ['retail-sales'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  data.weekAhead = {
+    days: [{
+      date: '2026-07-13',
+      events: structuredClone(payload.days[0].events),
+      marketLens: {
+        question: 'Is current demand keeping rates elevated?',
+        setup: { statement: 'Consumer demand remains the active growth question.', evidence: [{ kind: 'opening', field: 'deck' }] },
+        relatedEventIds: ['2026-07-13:08:30:retail-sales'],
+        channels: ['consumer-demand', 'broad-growth'],
+        scenarios: { reinforces: 'A firmer result would reinforce demand.', challenges: 'A softer result would challenge demand.' },
+        reactions: [{ ticker: 'SPX', role: 'Broad growth reaction' }],
+        title: 'Custom lens',
+        body: 'Editorial copy stays separate from calendar facts.'
+      },
+      marketLensSource: 'editorial'
+    }]
+  };
+  data.weekAhead = mergeWeekAheadPayload(data.weekAhead, payload);
+  assert.equal(data.weekAhead.days[0].marketLens.title, 'Custom lens');
+  assert.equal(data.weekAhead.days[0].marketLensSource, 'editorial');
+  assert.equal(data.weekAhead.days[0].events[0].time, '08:30');
+  assert.equal(data.weekAhead.days[0].events[0].forecast, '0.2%');
 
+  const releasedPayload = structuredClone(payload);
+  releasedPayload.days[0].events[0].actual = '0.3%';
+  releasedPayload.days[0].events[0].status = 'released';
+  releasedPayload.days[0].events[0].surprise = comparableWeekAheadSurprise('0.3%', '0.2%');
+  releasedPayload.days[0].lifecycle = 'released_awaiting_close';
+  const releasedMerge = mergeWeekAheadPayload(data.weekAhead, releasedPayload);
+  assert.equal(releasedMerge.days[0].marketLens.title, 'Custom lens');
+  assert.equal(releasedMerge.days[0].marketLensSource, 'editorial');
+  assert.equal(releasedMerge.days[0].lifecycle, 'released_awaiting_close');
+
+  const generatedData = weekAheadDashboardFixture();
+  generatedData.weekAhead = {
+    days: [{
+      date: '2026-07-13',
+      marketLens: { title: 'Stale generated lens', body: 'This should not survive a calendar refresh.', reactions: [{ ticker: 'SPX', role: 'Stale' }] }
+    }]
+  };
+  generatedData.weekAhead = mergeWeekAheadPayload(generatedData.weekAhead, payload);
+  assert.equal(generatedData.weekAhead.days[0].marketLens.title, 'Household demand tests growth');
+  assert.equal(generatedData.weekAhead.days[0].marketLensSource, 'generated');
+}
+
+function testMarketLensDecisionApplication() {
+  const data = weekAheadDashboardFixture();
+  data.opening = { headline: 'Demand stays firm', deck: 'Consumer demand remains the current market question.' };
+  data.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: { from: '2026-07-13', to: '2026-07-17' },
+    officialSchedule: {
+      events: [{ date: '2026-07-13', time: '08:30', keys: ['retail-sales'], authorityName: 'Fixture schedule' }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  const editorialLens = {
+    question: 'Is consumer demand keeping growth firm?',
+    setup: { statement: 'Consumer demand remains the current market question.', evidence: [{ kind: 'opening', field: 'deck' }, { kind: 'tape', ticker: 'SPX' }] },
+    relatedEventIds: ['2026-07-13:08:30:retail-sales'],
+    channels: ['consumer-demand', 'broad-growth'],
+    scenarios: { reinforces: 'A firmer result would reinforce growth.', challenges: 'A softer result would challenge growth.' },
+    reactions: [{ ticker: 'SPX', role: 'Broad growth reaction' }],
+    title: 'Demand tests the growth outlook',
+    body: 'Retail sales will test whether household demand is keeping the growth outlook firm.'
+  };
+
+  data.weekAhead = applyMarketLensDecisions(data.weekAhead, [{ date: '2026-07-13', action: 'replace', marketLens: editorialLens }]);
+  assert.equal(data.weekAhead.days[0].marketLensSource, 'editorial');
+  assert.equal(data.weekAhead.days[0].marketLens.question, editorialLens.question);
+
+  data.weekAhead = applyMarketLensDecisions(data.weekAhead, [{ date: '2026-07-13', action: 'retain-generated' }]);
+  assert.equal(data.weekAhead.days[0].marketLensSource, 'generated');
+  assert.equal(data.weekAhead.days[0].marketLens.title, 'Household demand tests growth');
+  assert.throws(() => applyMarketLensDecisions(data.weekAhead, []), /must cover every event day/);
+  assert.throws(() => applyMarketLensDecisions(data.weekAhead, [{
+    date: '2026-07-13',
+    action: 'replace',
+    marketLens: { ...editorialLens, reactions: [{ ticker: 'QQQ', role: 'Legacy alias' }] }
+  }]), /not eligible for the selected transmission channels/);
+}
+
+
+function testCalendarRolloverRange() {
+  assert.deepEqual(calendarRolloverRange('afternoon', new Date('2026-07-10T21:00:00Z')), {
+    from: '2026-07-10', to: '2026-07-16'
+  });
+  assert.deepEqual(calendarRolloverRange('morning', new Date('2026-07-13T12:00:00Z')), {
+    from: '2026-07-13', to: '2026-07-17'
+  });
+  assert.equal(calendarRolloverRange('morning', new Date('2026-07-10T12:00:00Z')), null);
+  assert.equal(calendarRolloverRange('afternoon', new Date('2026-07-13T21:00:00Z')), null);
+
+}
+
+function testWeekAheadRendererConvertsMarketTime() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-time');
+  const weekAheadTimeLabel = new Function(`${source}\nreturn weekAheadTimeLabel;`)();
+  const rendered = weekAheadTimeLabel(
+    { date: '2026-07-14' },
+    { time: '08:30' },
+    { range: { marketTimeZone: 'America/New_York', timeZone: 'America/Chicago' } }
+  );
+  assert.equal(rendered, '7:30 AM');
+}
+
+function testWeekAheadOutcomeRendererUsesActualCloseMoves() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-outcome');
+  const esc = (value) => String(value).replace(/[&<>"']/g, '');
+  const weekReactionButtonHtml = (_day, _ticker, _role, label) => `<button>${label}</button>`;
+  const weekAheadOutcomeHtml = new Function('esc', 'weekReactionButtonHtml', `${source}\nreturn weekAheadOutcomeHtml;`)(esc, weekReactionButtonHtml);
+  const rendered = weekAheadOutcomeHtml({
+    date: '2026-07-14',
+    label: 'Tuesday',
+    lifecycle: 'close_available',
+    outcome: { title: 'Inflation firmed', body: 'Rates and the dollar strengthened into the close.' },
+    marketReaction: {
+      rows: [
+        { ticker: 'UST2Y', role: 'Policy reaction', unit: 'percent_yield', delta: 0.08, percentChange: 1.9 },
+        { ticker: 'UUP', role: 'Dollar reaction', unit: 'price', delta: 0.14, percentChange: 0.5 },
+        { ticker: 'SPX', role: 'Equity reaction', unit: 'price', delta: 0, percentChange: 0 }
+      ]
+    }
+  });
+  assert.match(rendered, /Outcome &amp; Close Reaction/);
+  assert.match(rendered, /UST2Y \+8 bp/);
+  assert.match(rendered, /UUP \+0\.50%/);
+  assert.doesNotMatch(rendered, /SPX/);
+  assert.doesNotMatch(rendered, /Watch the reaction in/);
+}
+
+function testWeekAheadRendererGroupsReleaseFamilies() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-family');
+  const runtime = new Function(`${source}\nreturn { weekAheadFamilyEvents, weekAheadEventGroups };`)();
+  const event = (name, period, agency = 'BLS', time = '08:30') => ({ name, period, agency, time, impact: 'high' });
+  const events = [
+    event('Consumer Price Index', 'YoY'),
+    event('Core Consumer Price Index', 'YoY'),
+    event('Consumer Price Index', 'MoM'),
+    event('Core Consumer Price Index', 'MoM'),
+    event('Producer Price Index', 'MoM'),
+    event('Core Producer Price Index', 'MoM'),
+    event('Retail Sales', 'MoM', 'Census'),
+    event('Retail Sales Control Group', 'MoM', 'Census'),
+    event('Core Retail Sales', 'MoM', 'Census'),
+    event('Core PCE Price Index', 'YoY', 'BEA')
+  ];
+  const groups = runtime.weekAheadEventGroups(events);
+
+  assert.deepEqual(groups.map((group) => group.family?.title || group.events[0].name), [
+    'Consumer Price Index',
+    'Producer Price Index',
+    'Retail Sales',
+    'Core PCE Price Index'
+  ]);
+  assert.deepEqual(
+    runtime.weekAheadFamilyEvents(groups[0].events, groups[0].family).map((item) => `${item.name}:${item.period}`),
+    [
+      'Core Consumer Price Index:MoM',
+      'Core Consumer Price Index:YoY',
+      'Consumer Price Index:MoM',
+      'Consumer Price Index:YoY'
+    ]
+  );
+  assert.deepEqual(
+    runtime.weekAheadFamilyEvents(groups[2].events, groups[2].family).map((item) => item.name),
+    ['Core Retail Sales', 'Retail Sales', 'Retail Sales Control Group']
+  );
+  assert.equal(groups[3].family, null, 'A standalone core release must not be collapsed into a family.');
+}
+
+function testMarketLensReactionOpensChartBelowDay() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'market-lens-routing');
+  const runtime = Function(`
+    const available = new Set(['UST2Y', 'CL']);
+    const calls = [];
+    let activeWeekChartDayKey = '';
+    let activeWeekChartTicker = '';
+    const chartSeriesForTicker = (ticker) => available.has(ticker) ? { ticker } : null;
+    const closeTapeChart = () => calls.push(['close-tape']);
+    const closeWeekAheadChart = () => {
+      activeWeekChartDayKey = '';
+      activeWeekChartTicker = '';
+      calls.push(['close-week']);
+    };
+    const syncWeekAheadChart = (options) => calls.push(['chart', activeWeekChartDayKey, activeWeekChartTicker, options]);
+    ${source}
+    return {
+      showWeekChartForTicker,
+      snapshot: () => ({ activeWeekChartDayKey, activeWeekChartTicker, calls: [...calls] })
+    };
+  `)();
+
+  runtime.showWeekChartForTicker('2026-07-14', 'ust2y');
+  assert.deepEqual(runtime.snapshot(), {
+    activeWeekChartDayKey: '2026-07-14',
+    activeWeekChartTicker: 'UST2Y',
+    calls: [['close-tape'], ['chart', '2026-07-14', 'UST2Y', { scrollIntoView: true, focusChart: true }]]
+  });
+  runtime.showWeekChartForTicker('2026-07-14', 'UST2Y');
+  assert.equal(runtime.snapshot().activeWeekChartTicker, '', 'Repeated activation collapses the chart below that day.');
+  assert.deepEqual(runtime.snapshot().calls.slice(-2), [['close-tape'], ['close-week']]);
+  runtime.showWeekChartForTicker('2026-07-15', 'QQQ');
+  assert.equal(runtime.snapshot().calls.length, 4, 'An unavailable or noncanonical ticker must not open a chart.');
+}
+
+function normalizedWeekAheadFixture() {
+  const range = { from: '2026-07-13', to: '2026-07-17' };
   const officialSchedule = officialScheduleFixture();
+  const payload = normalizeWeekAhead(fxMacroFixture(), {
+    range,
+    officialSchedule,
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  return { officialSchedule, payload, range };
+}
+
+function testProducerAndScheduleNormalization() {
+  const { officialSchedule, payload, range } = normalizedWeekAheadFixture();
   assert.deepEqual(fxMacroValueRequests(officialSchedule), {
     announcements: ['inflation', 'core_inflation', 'ppi', 'retail_sales'],
     predictions: ['inflation_mom', 'inflation', 'core_inflation_mom', 'core_inflation', 'ppi', 'ppi_mom', 'retail_sales']
-  });
-  const payload = normalizeWeekAhead(fxMacroFixture(), {
-    range: mondayRange,
-    officialSchedule,
-    now: new Date('2026-07-10T18:00:00Z')
   });
   assert.equal(payload.days.length, 5);
   assert.equal(payload.source.provider, 'FXMacroData');
@@ -122,9 +384,12 @@ function run() {
   assert.equal(tuesday.events[3].forecast, '3.9%');
   assert.equal(tuesday.events[3].previous, '4.2%');
   assert.equal(tuesday.events[3].valueSource, 'FXMacroData');
-  assert.equal(tuesday.marketLens.title, 'CPI is the rates reset');
-  assert.match(tuesday.marketLens.body, /2Y, dollar/);
+  assert.equal(tuesday.marketLens.title, 'Consumer inflation tests the rate path');
+  assert.deepEqual(tuesday.marketLens.relatedEventIds, tuesday.events.map((event) => event.id).sort());
+  assert.deepEqual(tuesday.marketLens.reactions.map((reaction) => reaction.ticker), ['UST2Y', 'UUP']);
   assert.equal(tuesday.marketLensSource, 'generated');
+  assert.equal(tuesday.lifecycle, 'scheduled');
+  assert.ok(tuesday.events.every((event) => event.status === 'scheduled'));
   const wednesday = payload.days.find((day) => day.date === '2026-07-15');
   assert.deepEqual(wednesday.events.map((event) => event.id), [
     '2026-07-15:08:30:core-ppi-mom',
@@ -148,41 +413,6 @@ function run() {
   assert.equal(thursday.events[1].previous, '0.9%');
   assert.deepEqual(validateWeekAheadPayload(payload), []);
 
-  const industrialPayload = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
-    range: mondayRange,
-    officialSchedule: {
-      events: [{ date: '2026-07-17', time: '09:15', keys: ['industrial-production'], authorityName: 'Fixture', authorityUrl: 'https://example.test/' }],
-      authorities: []
-    },
-    now: new Date('2026-07-10T18:00:00Z')
-  });
-  assert.equal(industrialPayload.days.find((day) => day.date === '2026-07-17').marketLens.title, 'Output tests the cyclical handoff');
-
-  const malformed = structuredClone(payload);
-  malformed.days[2].events[0].id = malformed.days[1].events[0].id;
-  assert.match(validateWeekAheadPayload(malformed).join('\n'), /must be unique/);
-
-  const invalidEventTime = structuredClone(payload);
-  invalidEventTime.days[1].events[0].time = '99:99';
-  assert.match(validateWeekAheadPayload(invalidEventTime).join('\n'), /must be an ordered HH:MM time/);
-
-  const invalidOfficialTime = structuredClone(payload);
-  invalidOfficialTime.officialSchedule.events[0].time = '99:99';
-  assert.match(validateWeekAheadPayload(invalidOfficialTime).join('\n'), /officialSchedule\.events contains an invalid release/);
-
-  const timezoneFreeTimestamp = structuredClone(payload);
-  timezoneFreeTimestamp.generatedAt = '2026-07-10T18:00:00';
-  assert.match(validateWeekAheadPayload(timezoneFreeTimestamp).join('\n'), /offset-bearing ISO timestamp/);
-
-  const staleProvenance = structuredClone(payload);
-  staleProvenance.source.timeInterpretation = 'Nasdaq schedule times';
-  assert.match(validateWeekAheadPayload(staleProvenance).join('\n'), /timeInterpretation/);
-
-  const shifted = structuredClone(payload);
-  shifted.range.from = '2026-07-14';
-  shifted.range.to = '2026-07-18';
-  assert.match(validateWeekAheadPayload(shifted).join('\n'), /Monday-Friday or Friday plus next Monday-Thursday/);
-
   const census = parseCensusSchedule(`
     <h1>2026 Economic Indicator Release Schedule</h1>
     <tr><td><a>Advance Monthly Sales for Retail and Food Services</a></td><td>July 16, 2026</td><td>8:30 AM</td></tr>
@@ -199,19 +429,181 @@ function run() {
     <tr><td>Advance Monthly Sales for Retail and Food Services</td><td></td><td>8:30 AM</td></tr>
     <tr><td>Advance Monthly Sales for Retail and Food Services</td><td>July 16, 2026</td><td>8:99 AM</td></tr>
   `), []);
-  const official = buildOfficialSchedule({ from: '2026-07-13', to: '2026-07-17' }, {
+  const builtSchedule = buildOfficialSchedule(range, {
     censusHtml: '<h1>2026 Economic Indicator Release Schedule</h1><tr><td>Advance Monthly Sales for Retail and Food Services</td><td>July 16, 2026</td><td>8:30 AM</td></tr>',
     beaHtml: '<h1>Release Schedule Year 2026</h1><tr><td><div class="release-date">July 30</div><small>8:30 AM</small></td><td class="release-title">GDP (Advance Estimate), 2nd Quarter 2026</td></tr>',
     now: new Date('2026-07-10T18:00:00Z')
   });
-  assert.ok(official.events.some((item) => item.date === '2026-07-14' && item.keys.includes('cpi')));
-  assert.ok(official.events.some((item) => item.date === '2026-07-15' && item.keys.includes('crude-oil-inventories')));
-  assert.throws(() => buildOfficialSchedule({ from: '2026-07-13', to: '2026-07-17' }, {
+  assert.ok(builtSchedule.events.some((item) => item.date === '2026-07-14' && item.keys.includes('cpi')));
+  assert.ok(builtSchedule.events.some((item) => item.date === '2026-07-15' && item.keys.includes('crude-oil-inventories')));
+  assert.throws(() => buildOfficialSchedule(range, {
     censusHtml: '<h1>2026 Economic Indicator Release Schedule</h1>',
     beaHtml: '<h1>Release Schedule Year 2026</h1>'
   }), /no recognized covered releases/);
+}
 
-  process.stdout.write('Week Ahead tests passed.\n');
+function testLifecycleAndCloseReactionTransitions() {
+  const { payload } = normalizedWeekAheadFixture();
+  const awaitingActual = applyWeekAheadLifecycle(payload, null, { now: new Date('2026-07-14T13:00:00Z'), windowMode: 'morning' });
+  assert.equal(awaitingActual.days.find((day) => day.date === '2026-07-14').lifecycle, 'awaiting_actual');
+  assert.match(validateWeekAheadPayload(payload, { now: new Date('2026-07-14T13:00:00Z') }).join('\n'), /status is stale|lifecycle is stale/);
+
+  const released = structuredClone(payload);
+  const releasedTuesday = released.days.find((day) => day.date === '2026-07-14');
+  releasedTuesday.events[0].actual = '0.4%';
+  const awaitingClose = applyWeekAheadLifecycle(released, null, { now: new Date('2026-07-14T14:00:00Z'), windowMode: 'morning' });
+  assert.equal(awaitingClose.days.find((day) => day.date === '2026-07-14').lifecycle, 'released_awaiting_close');
+  assert.deepEqual(comparableWeekAheadSurprise('0.4%', '0.2%'), { direction: 'above', delta: 0.2, unit: '%' });
+  const prematureClose = applyWeekAheadLifecycle(awaitingClose, {
+    series: [
+      { ticker: 'UST2Y', unit: 'percent_yield', bars: [{ time: '2026-07-13', close: 4.1 }, { time: '2026-07-14', close: 4.18 }] },
+      { ticker: 'UUP', unit: 'price', bars: [{ time: '2026-07-13', close: 28 }, { time: '2026-07-14', close: 28.14 }] }
+    ]
+  }, { now: new Date('2026-07-14T19:59:00Z'), windowMode: 'afternoon' });
+  assert.equal(prematureClose.days.find((day) => day.date === '2026-07-14').lifecycle, 'released_awaiting_close');
+  const afterClose = applyWeekAheadLifecycle(awaitingClose, {
+    series: [
+      { ticker: 'UST2Y', unit: 'percent_yield', bars: [{ time: '2026-07-13', close: 4.1 }, { time: '2026-07-14', close: 4.18 }] },
+      { ticker: 'UUP', unit: 'price', bars: [{ time: '2026-07-13', close: 28 }, { time: '2026-07-14', close: 28.14 }] }
+    ]
+  }, { now: new Date('2026-07-14T21:00:00Z'), windowMode: 'afternoon' });
+  const closedTuesday = afterClose.days.find((day) => day.date === '2026-07-14');
+  assert.equal(closedTuesday.lifecycle, 'close_available');
+  assert.deepEqual(closedTuesday.marketReaction.rows.map((row) => row.ticker), ['UST2Y', 'UUP']);
+  assert.match(validateWeekAheadPayload(afterClose, { now: new Date('2026-07-14T19:59:00Z') }).join('\n'), /cannot precede the event-day market close/);
+  closedTuesday.outcome = { source: 'editorial', title: 'Inflation firmed', body: 'The release and close reaction reinforced a firmer expected policy path.' };
+  assert.deepEqual(validateWeekAheadPayload(afterClose), []);
+  closedTuesday.marketReaction.rows[0].unit = 'basis_points';
+  assert.match(validateWeekAheadPayload(afterClose).join('\n'), /marketReaction\.rows\[0\]\.unit is invalid/);
+  closedTuesday.marketReaction.rows[0].unit = 'percent_yield';
+  const sameValues = mergeWeekAheadPayload(afterClose, awaitingClose);
+  assert.equal(sameValues.days.find((day) => day.date === '2026-07-14').outcome.title, 'Inflation firmed');
+  assert.throws(() => applyMarketLensDecisions(sameValues, sameValues.days
+    .filter((day) => day.events.length)
+    .map((day) => day.date === '2026-07-14'
+      ? {
+          date: day.date,
+          action: 'replace',
+          marketLens: { ...closedTuesday.marketLens, reactions: [{ ticker: 'UST10Y', role: 'Long-rate reaction' }, { ticker: 'UUP', role: 'Dollar-policy reaction' }] }
+        }
+      : { date: day.date, action: 'retain-generated' })), /cannot change reaction tickers after the close/);
+  const correctedClose = applyWeekAheadLifecycle(sameValues, {
+    series: [
+      { ticker: 'UST2Y', unit: 'percent_yield', bars: [{ time: '2026-07-13', close: 4.1 }, { time: '2026-07-14', close: 4.2 }] },
+      { ticker: 'UUP', unit: 'price', bars: [{ time: '2026-07-13', close: 28 }, { time: '2026-07-14', close: 28.14 }] }
+    ]
+  }, { now: new Date('2026-07-14T22:00:00Z'), windowMode: 'afternoon' });
+  assert.equal(correctedClose.days.find((day) => day.date === '2026-07-14').outcome, undefined);
+  const revised = structuredClone(awaitingClose);
+  revised.days.find((day) => day.date === '2026-07-14').events[0].actual = '0.5%';
+  revised.days.find((day) => day.date === '2026-07-14').events[0].surprise = comparableWeekAheadSurprise('0.5%', '0.2%');
+  const revisedMerge = mergeWeekAheadPayload(afterClose, revised);
+  assert.equal(revisedMerge.days.find((day) => day.date === '2026-07-14').outcome, undefined);
+  const revisedProvenance = structuredClone(awaitingClose);
+  revisedProvenance.days.find((day) => day.date === '2026-07-14').events.forEach((event) => { event.scheduleSource = 'Corrected official schedule'; });
+  revisedProvenance.officialSchedule.events.find((release) => release.date === '2026-07-14').authorityName = 'Corrected official schedule';
+  const revisedProvenanceMerge = mergeWeekAheadPayload(afterClose, revisedProvenance);
+  assert.equal(revisedProvenanceMerge.days.find((day) => day.date === '2026-07-14').outcome, undefined);
+
+  testWeekAheadOutcomeRendererUsesActualCloseMoves();
+}
+
+function testMarketLensDecisions() {
+  const { payload, range } = normalizedWeekAheadFixture();
+  const industrialPayload = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range,
+    officialSchedule: {
+      events: [{ date: '2026-07-17', time: '09:15', keys: ['industrial-production'], authorityName: 'Fixture', authorityUrl: 'https://example.test/' }],
+      authorities: []
+    },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  assert.equal(industrialPayload.days.find((day) => day.date === '2026-07-17').marketLens.title, 'Industry tests the cyclical pulse');
+
+  const generatedDrift = structuredClone(payload);
+  generatedDrift.days[1].marketLens.reactions[0].ticker = '2Y';
+  assert.match(validateWeekAheadPayload(generatedDrift).join('\n'), /canonical default transmission path/);
+
+  const invalidEditorial = structuredClone(payload);
+  invalidEditorial.days[1].marketLensSource = 'editorial';
+  assert.match(validateWeekAheadPayload(invalidEditorial).join('\n'), /setup must contain|scenarios must explain/);
+
+  testUpdaterWeekAheadPreservesEditorialLens();
+  testMarketLensDecisionApplication();
+  testWeekAheadRendererGroupsReleaseFamilies();
+  testMarketLensReactionOpensChartBelowDay();
+}
+
+function testPayloadValidationMutations() {
+  const { payload } = normalizedWeekAheadFixture();
+  const cases = [
+    ['duplicate event identity', (value) => { value.days[2].events[0].id = value.days[1].events[0].id; }, /must be unique/],
+    ['malformed day date', (value) => { value.days[1].date = '2026-02-30'; }, /must match the target weekday/],
+    ['malformed event time', (value) => { value.days[1].events[0].time = '99:99'; }, /must be an ordered HH:MM time/],
+    ['malformed official date', (value) => { value.officialSchedule.events[0].date = '2026-02-30'; }, /officialSchedule\.events contains an invalid release/],
+    ['malformed official time', (value) => { value.officialSchedule.events[0].time = '99:99'; }, /officialSchedule\.events contains an invalid release/],
+    ['timezone-free generated timestamp', (value) => { value.generatedAt = '2026-07-10T18:00:00'; }, /offset-bearing ISO timestamp/],
+    ['stale time provenance', (value) => { value.source.timeInterpretation = 'Nasdaq schedule times'; }, /timeInterpretation/],
+    ['unsupported display range', (value) => { value.range = { from: '2026-07-14', to: '2026-07-18' }; }, /Monday-Friday or Friday plus next Monday-Thursday/]
+  ];
+  for (const [name, mutate, expectedError] of cases) {
+    const invalid = structuredClone(payload);
+    mutate(invalid);
+    assert.match(validateWeekAheadPayload(invalid).join('\n'), expectedError, name);
+  }
+}
+
+function testCliDateAndParserCases() {
+  assert.equal(isIsoDate('2026-02-28'), true);
+  assert.equal(isIsoDate('2026-02-30'), false);
+  assert.equal(isIsoDateTime('2026-07-10T15:45:00-05:00'), true);
+  assert.equal(isIsoDateTime('2026-07-10T25:45:00Z'), false);
+  assert.equal(isIsoDateTime('2026-07-10'), false);
+  assert.equal(isIsoTime('08:30'), true);
+  assert.equal(isIsoTime('99:99'), false);
+  assert.equal(addDays('2026-07-10', 3), '2026-07-13');
+  assert.equal(compareIsoDate('2026-07-10', '2026-07-13') < 0, true);
+  assert.equal(isSupportedFiveTradingDayRange('2026-07-13', '2026-07-17'), true);
+  assert.equal(isSupportedFiveTradingDayRange('2026-07-10', '2026-07-16'), true);
+  assert.equal(isSupportedFiveTradingDayRange('2026-07-11', '2026-07-17'), false);
+  assert.deepEqual(displayDatesForRange('2026-07-10', '2026-07-16'), [
+    '2026-07-10', '2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16'
+  ]);
+  assert.deepEqual(rangeForDate(new Date('2026-07-10T18:00:00Z')), { from: '2026-07-10', to: '2026-07-16' });
+  assert.deepEqual(rangeForDate(new Date('2026-07-12T18:00:00Z')), { from: '2026-07-10', to: '2026-07-16' });
+  assert.deepEqual(rangeForDate(new Date('2026-07-13T18:00:00Z')), { from: '2026-07-13', to: '2026-07-17' });
+  assert.equal(dateFromArg('2026-02-30'), null, 'Impossible calendar dates must not roll into another week.');
+  assert.equal(dateFromArg('2026-02-28')?.toISOString(), '2026-02-28T12:00:00.000Z');
+  assert.throws(() => parseArgs(['--timeout-ms', 'not-a-number']), /finite number/);
+  assert.throws(() => parseArgs(['--timeout-ms', '999']), /at least 1000/);
+  assert.equal(parseArgs(['--timeout-ms', '1000']).timeoutMs, 1000);
+  assert.equal(parseArgs(['--refresh-values']).refreshValues, true);
+  assert.throws(() => parseArgs(['--refresh-values', '--date', '2026-07-13']), /cannot be combined/);
+  assert.equal(isTransient(new Error('Malformed provider payload')), false, 'Parser and contract errors must not use cached data.');
+  assert.equal(isTransient(Object.assign(new Error('HTTP 503'), { status: 503 })), true);
+  assert.equal(isTransient(Object.assign(new Error('Socket reset'), { transient: true })), true);
+  assert.equal(formatFxMacroValue(1413, 'millions'), '1.413M');
+  testCalendarRolloverRange();
+  testWeekAheadRendererConvertsMarketTime();
+}
+
+function run() {
+  const tests = [
+    testProducerAndScheduleNormalization,
+    testLifecycleAndCloseReactionTransitions,
+    testMarketLensDecisions,
+    testPayloadValidationMutations,
+    testCliDateAndParserCases
+  ];
+  for (const test of tests) {
+    try {
+      test();
+    } catch (error) {
+      error.message = `${test.name}: ${error.message}`;
+      throw error;
+    }
+  }
+  process.stdout.write('Calendar and Week Ahead tests passed.\n');
 }
 
 run();

@@ -5,24 +5,15 @@ const path = require('path');
 const https = require('https');
 
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'crypto_stats.json');
-const DEFAULT_DASHBOARD = path.resolve(process.cwd(), 'daily_financial_news.html');
 const REQUEST_TIMEOUT_MS = 15000;
 const FEAR_GREED_URL = 'https://api.alternative.me/fng/?limit=2';
 const COINGECKO_GLOBAL_URL = 'https://api.coingecko.com/api/v3/global';
 const ALTCOIN_SEASON_PAGE_URL = 'https://coinmarketcap.com/charts/altcoin-season-index/';
 const ALTCOIN_SEASON_API_URL = 'https://api.coinmarketcap.com/data-api/v3/altcoin-season/chart';
 
-function stampDashboardEdition(data) {
-  return {
-    ...data,
-    editionId: new Date().toISOString()
-  };
-}
-
 function parseArgs(argv) {
   const args = {
     output: DEFAULT_OUTPUT,
-    dashboard: '',
     timeoutMs: REQUEST_TIMEOUT_MS,
     lookbackDays: 31,
     compact: false
@@ -32,25 +23,26 @@ function parseArgs(argv) {
     const arg = argv[i];
 
     if (arg === '--output') {
-      args.output = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_OUTPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--output requires a path.');
+      args.output = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
 
     if (arg === '--dashboard') {
-      args.dashboard = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_DASHBOARD);
-      i += 1;
-      continue;
+      throw new Error('Direct dashboard writes are not supported; apply the staged payload with run_daily_update.js --apply-crypto-stats-json.');
     }
 
     if (arg === '--timeout-ms') {
-      args.timeoutMs = Math.max(1000, Number(argv[i + 1] || REQUEST_TIMEOUT_MS));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 1000) throw new Error('--timeout-ms must be a finite number of at least 1000 milliseconds.');
+      args.timeoutMs = Number(argv[i + 1]);
       i += 1;
       continue;
     }
 
     if (arg === '--lookback-days') {
-      args.lookbackDays = Math.max(7, Number(argv[i + 1] || 31));
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 7) throw new Error('--lookback-days must be a finite number of at least 7 days.');
+      args.lookbackDays = Number(argv[i + 1]);
       i += 1;
       continue;
     }
@@ -64,6 +56,7 @@ function parseArgs(argv) {
       printHelp();
       process.exit(0);
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   return args;
@@ -74,7 +67,6 @@ function printHelp() {
 
 Options:
   --output PATH           JSON output path (default: generated/crypto_stats.json)
-  --dashboard PATH        Optional dashboard HTML to patch with fetched crypto.stats[] rows
   --timeout-ms 15000      HTTP timeout in ms
   --lookback-days 31      Altcoin Season history window requested from CoinMarketCap
   --compact               Print one-line stat summary
@@ -344,45 +336,6 @@ function normalizeAltcoinSeason(payload, apiUrl) {
   };
 }
 
-function dashboardDataRegion(html) {
-  const region = html.match(/<!-- Daily refreshes update this quote\/story payload\. Chart history is embedded separately in chart-data below\. -->[\s\S]*?<!-- ============ DATA END ============ -->/);
-  if (!region) {
-    throw new Error('Could not find the marked dashboard-data region.');
-  }
-  const data = region[0].match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  if (!data) {
-    throw new Error('Could not find dashboard-data JSON inside the marked region.');
-  }
-  return { region: region[0], dataJson: data[1] };
-}
-
-function patchDashboard(html, normalized) {
-  // Manual patch mode is limited to the dashboard-owned JSON region so helper use cannot drift surrounding markup.
-  const { region, dataJson } = dashboardDataRegion(html);
-  let dashboardData = JSON.parse(dataJson);
-  const stats = dashboardData?.crypto?.stats;
-  if (!Array.isArray(stats)) {
-    throw new Error('dashboard-data crypto.stats is missing or invalid.');
-  }
-
-  const mapping = new Map(normalized.stats.map((row) => [row.sym, row]));
-  for (const row of stats) {
-    const sym = String(row?.sym || '').trim().toUpperCase();
-    if (mapping.has(sym)) {
-      Object.assign(row, mapping.get(sym));
-    }
-  }
-
-  dashboardData = stampDashboardEdition(dashboardData);
-
-  const nextRegion = region.replace(
-    /<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/,
-    `<script type="application/json" id="dashboard-data">${JSON.stringify(dashboardData, null, 2)}</script>`
-  );
-
-  return html.replace(region, nextRegion);
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const normalized = await fetchCryptoStats(args);
@@ -390,24 +343,16 @@ async function main() {
   fs.mkdirSync(path.dirname(args.output), { recursive: true });
   fs.writeFileSync(args.output, `${JSON.stringify(normalized, null, 2)}\n`);
 
-  let dashboardMessage = '';
-  if (args.dashboard) {
-    const html = fs.readFileSync(args.dashboard, 'utf8');
-    const nextHtml = patchDashboard(html, normalized);
-    fs.writeFileSync(args.dashboard, nextHtml);
-    dashboardMessage = `; patched ${args.dashboard}`;
-  }
-
   if (args.compact) {
     process.stdout.write(
       `F&G ${normalized.fearGreed.stat.price} ${normalized.fearGreed.stat.delta} | ` +
       `ALTSEASON ${normalized.altcoinSeason.stat.price} ${normalized.altcoinSeason.stat.delta} | ` +
-      `TOTAL ${normalized.totalMarketCap.stat.price} ${normalized.totalMarketCap.stat.chg}${dashboardMessage}\n`
+      `TOTAL ${normalized.totalMarketCap.stat.price} ${normalized.totalMarketCap.stat.chg}\n`
     );
     return;
   }
 
-  process.stdout.write(`Wrote ${args.output}${dashboardMessage}\n`);
+  process.stdout.write(`Wrote ${args.output}\n`);
 }
 
 async function fetchCryptoStats(options = {}) {
@@ -417,6 +362,8 @@ async function fetchCryptoStats(options = {}) {
     ...options
   };
   const altcoinApiUrl = buildAltcoinSeasonApiUrl(args.lookbackDays);
+  // Stat cards share one staging boundary: reject the entire snapshot if any
+  // provider cannot be normalized instead of mixing fresh and stale observations.
   const [fearGreedPayload, totalPayload, altcoinPayload] = await Promise.all([
     fetchJson(FEAR_GREED_URL, args.timeoutMs, {}),
     fetchJson(COINGECKO_GLOBAL_URL, args.timeoutMs, {}),
@@ -446,8 +393,7 @@ async function fetchCryptoStats(options = {}) {
 
 module.exports = {
   REQUEST_TIMEOUT_MS,
-  fetchCryptoStats,
-  patchDashboard
+  fetchCryptoStats
 };
 
 if (require.main === module) {

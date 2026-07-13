@@ -54,46 +54,55 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--host') {
-      args.host = argv[i + 1] || DEFAULT_HOST;
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--host requires an address.');
+      args.host = argv[i + 1];
       i += 1;
       continue;
     }
     if (arg === '--port' || arg === '-p') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--port requires a number.');
       args.port = numericOption(argv[i + 1], DEFAULT_PORT, '--port', { min: 1, max: 65535, integer: true });
       i += 1;
       continue;
     }
     if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_INPUT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--input requires a path.');
+      args.input = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--cert') {
-      args.cert = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_CERT);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--cert requires a path.');
+      args.cert = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--key') {
-      args.key = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_KEY);
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--key requires a path.');
+      args.key = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
     if (arg === '--days') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--days requires a number.');
       args.days = numericOption(argv[i + 1], AUTO_REFRESH_FALLBACK_DAYS, '--days', { min: 5, integer: true });
       i += 1;
       continue;
     }
     if (arg === '--source-timeout-ms') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--source-timeout-ms requires a number.');
       args.sourceTimeoutMs = numericOption(argv[i + 1], DEFAULT_SOURCE_TIMEOUT_MS, '--source-timeout-ms', { min: 1000, integer: true });
       i += 1;
       continue;
     }
     if (arg === '--cache-ms') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--cache-ms requires a number.');
       args.cacheMs = numericOption(argv[i + 1], DEFAULT_CACHE_MS, '--cache-ms', { min: 0, integer: true });
       i += 1;
       continue;
     }
     if (arg === '--concurrency') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--concurrency requires a number.');
       args.concurrency = numericOption(argv[i + 1], DEFAULT_CONCURRENCY, '--concurrency', { min: 1, integer: true });
       i += 1;
       continue;
@@ -106,6 +115,7 @@ function parseArgs(argv) {
       printHelp();
       process.exit(0);
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) {
@@ -304,6 +314,8 @@ async function buildMarketRefresh(args) {
   const endDate = new Date();
   const range = refreshWindow(args, endDate);
   // Refresh quote rows, chart bars, and crypto stat cards as one logical snapshot, but keep section failures isolated.
+  // The browser overlay receives explicit section status and may retain embedded
+  // canonical data for a failed section; this payload never mutates dashboard HTML.
   const [chartResult, cryptoResult] = await Promise.allSettled([
     fetchChartPayload(args, range.startDate, range.endDate),
     cryptoStats.fetchCryptoStats({ timeoutMs: args.sourceTimeoutMs })

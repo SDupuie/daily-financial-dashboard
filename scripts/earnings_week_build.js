@@ -4,12 +4,25 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const {
+  EARNINGS_WEEK_SCHEMA_VERSION,
+  attachReactions,
   buildEarningsWeekPolicy,
+  buildCompanyReleaseTasks,
+  combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  earningsApiMonthEntry,
+  earningsApiUsageMonth,
+  emptyEarningsApiUsage,
+  hasEarningsApiBudget,
   isDisplayEligibleEarningsRow,
+  isEarningsApiUsage,
+  metricResult,
   normalizeEarningsTiming,
-  numberOrNull
+  normalizeFinnhubCalendarFields,
+  numberOrNull,
+  pctChange,
+  recordEarningsApiRequest
 } = require('./earnings_week_contract');
 const {
   addDays,
@@ -17,8 +30,8 @@ const {
   dateFromIso,
   displayDatesForRange,
   isIsoDate,
-  isSupportedFiveTradingDayRange,
-  isoFromDate
+  isoFromDate,
+  isSupportedFiveTradingDayRange
 } = require('./calendar_contract');
 
 const REQUEST_TIMEOUT_MS = 20000;
@@ -34,11 +47,51 @@ const DEFAULT_EARNINGSAPI_MONTHLY_LIMIT = 1000;
 const DEFAULT_EARNINGSAPI_RESERVE = 150;
 const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
-const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
-const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 28;
+const SECONDARY_RECOVERY_MIN_MARKET_CAP = 1000000000;
 const REACTION_LOOKBACK_DAYS = 5;
 const REACTION_LOOKAHEAD_DAYS = 5;
-const SECONDARY_RECOVERY_MIN_MARKET_CAP = 1000000000;
+
+function yahooPeriodSeconds(isoDate) {
+  return Math.floor(dateFromIso(isoDate).getTime() / 1000);
+}
+
+async function fetchYahooBars(symbol, from, to, args, fetchJson) {
+  if (typeof fetchJson !== 'function') throw new TypeError('fetchYahooBars requires a fetchJson function.');
+  const start = addDays(from, -REACTION_LOOKBACK_DAYS);
+  const endExclusive = addDays(to, REACTION_LOOKAHEAD_DAYS + 1);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${yahooPeriodSeconds(start)}&period2=${yahooPeriodSeconds(endExclusive)}&interval=1d&events=history`;
+  const result = await fetchJson(url, args, { Accept: 'application/json,text/plain,*/*' });
+  const chart = result.data?.chart;
+  const item = chart?.result?.[0];
+  const timestamps = Array.isArray(item?.timestamp) ? item.timestamp : [];
+  const quote = item?.indicators?.quote?.[0] || {};
+  const bars = timestamps.map((timestamp, index) => ({
+    date: isoFromDate(new Date(timestamp * 1000)),
+    open: numberOrNull(quote.open?.[index]),
+    high: numberOrNull(quote.high?.[index]),
+    low: numberOrNull(quote.low?.[index]),
+    close: numberOrNull(quote.close?.[index]),
+    volume: numberOrNull(quote.volume?.[index])
+  })).filter((bar) => bar.close !== null);
+  return {
+    symbol,
+    ok: result.ok && bars.length > 0,
+    status: result.status,
+    responseMs: result.ms,
+    bars,
+    error: result.ok
+      ? ''
+      : result.error || result.parseError || result.bodyPreview || chart?.error?.description || `HTTP ${result.status}`
+  };
+}
+
+async function fetchYahooBarsForRows(rows, args, fetchJson) {
+  const output = [];
+  for (const row of rows) {
+    output.push(await fetchYahooBars(row.symbol, args.from, args.to, args, fetchJson));
+  }
+  return output;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -156,6 +209,7 @@ function parseArgs(argv) {
       printHelp();
       process.exit(0);
     }
+    throw new Error(`Unknown argument: ${arg}`);
   }
 
   if (!isIsoDate(args.from) || !isIsoDate(args.to)) {
@@ -195,7 +249,7 @@ Options:
   --earningsapi-monthly-limit  Monthly EarningsAPI call cap (default: 1000)
   --earningsapi-reserve 150    Calls reserved for other dashboard runs
   --schedule-confirmations PATH
-                               Official IR date confirmations for uncorroborated/in-week-conflict rows
+                               Event-scoped official IR dates for conflicts, complete-response omissions, outages, and recovery rows
   --schedule-review PATH       Generated review queue for rows requiring an official date confirmation
   --skip-earningsapi           Disable secondary-source recovery
   --compact                    Print compact coverage report
@@ -208,6 +262,7 @@ Environment:
 }
 
 function loadEnv(file = path.resolve(process.cwd(), '.env')) {
+  if (process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1') return;
   if (!fs.existsSync(file)) return;
   const text = fs.readFileSync(file, 'utf8');
   for (const line of text.split(/\r?\n/)) {
@@ -300,28 +355,9 @@ function marketCapNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-function pctChange(from, to) {
-  const left = numberOrNull(from);
-  const right = numberOrNull(to);
-  if (!Number.isFinite(left) || !Number.isFinite(right) || left === 0) return null;
-  return (right / left - 1) * 100;
-}
-
 function normalizeFinnhubCalendarRow(row) {
   return {
-    symbol: String(row?.symbol || '').trim().toUpperCase(),
-    reportDate: String(row?.date || '').trim(),
-    reportTiming: normalizeEarningsTiming(row?.hour),
-    fiscalQuarter: numberOrNull(row?.quarter),
-    fiscalYear: numberOrNull(row?.year),
-    eps: {
-      estimate: numberOrNull(row?.epsEstimate),
-      actual: numberOrNull(row?.epsActual)
-    },
-    revenue: {
-      estimate: numberOrNull(row?.revenueEstimate),
-      actual: numberOrNull(row?.revenueActual)
-    },
+    ...normalizeFinnhubCalendarFields(row),
     source: {
       provider: 'finnhub',
       row
@@ -375,19 +411,15 @@ async function fetchFinnhubCalendar(args, token) {
   };
 }
 
-function earningsApiUsageMonth(date = new Date()) {
-  return date.toISOString().slice(0, 7);
-}
-
 function readEarningsApiUsage(file) {
-  if (!fs.existsSync(file)) return { schemaVersion: 1, months: {} };
+  if (!fs.existsSync(file)) return emptyEarningsApiUsage();
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (data && data.schemaVersion === 1 && data.months && typeof data.months === 'object') return data;
+    if (isEarningsApiUsage(data)) return data;
   } catch {
     // Ignore a corrupt local ledger and start a fresh one for this run.
   }
-  return { schemaVersion: 1, months: {} };
+  return emptyEarningsApiUsage();
 }
 
 function writeEarningsApiUsage(file, usage) {
@@ -395,18 +427,10 @@ function writeEarningsApiUsage(file, usage) {
   fs.writeFileSync(file, `${JSON.stringify(usage, null, 2)}\n`);
 }
 
-function earningsApiMonthEntry(usage) {
-  const month = earningsApiUsageMonth();
-  if (!usage.months[month]) usage.months[month] = { calls: 0, requests: [] };
-  if (!Array.isArray(usage.months[month].requests)) usage.months[month].requests = [];
-  return usage.months[month];
-}
-
 function canUseEarningsApi(args, usage, token) {
   if (args.skipEarningsApi) return false;
   if (!token) return false;
-  const entry = earningsApiMonthEntry(usage);
-  return entry.calls < Math.max(0, args.earningsApiMonthlyLimit - args.earningsApiReserve);
+  return hasEarningsApiBudget(usage, args.earningsApiMonthlyLimit, args.earningsApiReserve);
 }
 
 async function fetchEarningsApiJson(pathname, args, token, usage, requestType) {
@@ -423,15 +447,11 @@ async function fetchEarningsApiJson(pathname, args, token, usage, requestType) {
   }
   const url = new URL(pathname, 'https://api.earningsapi.com');
   url.searchParams.set('apikey', token);
-  const entry = earningsApiMonthEntry(usage);
-  entry.calls += 1;
-  entry.requests.push({
-    at: new Date().toISOString(),
+  recordEarningsApiRequest(usage, {
     type: requestType,
     path: url.pathname,
-    query: [...url.searchParams.keys()].filter((key) => key !== 'apikey').sort().join(',')
+    queryKeys: url.searchParams.keys()
   });
-  if (entry.requests.length > 200) entry.requests = entry.requests.slice(-200);
   writeEarningsApiUsage(args.earningsApiUsage, usage);
   return fetchJson(url.toString(), args);
 }
@@ -515,17 +535,19 @@ async function fetchEarningsApiCalendarDay(date, args, token, usage) {
 }
 
 function calendarVerificationDates(args) {
-  const dates = [];
-  const first = addDays(args.from, -CALENDAR_VERIFICATION_LOOKBACK_DAYS);
-  const last = addDays(args.to, CALENDAR_VERIFICATION_LOOKAHEAD_DAYS);
-  for (let date = first; compareIsoDate(date, last) <= 0; date = addDays(date, 1)) dates.push(date);
-  return dates;
+  return Array.isArray(args.displayDates)
+    ? [...args.displayDates]
+    : displayDatesForRange(args.from, args.to);
 }
 
-async function fetchEarningsApiCalendar(args, token, usage, dates = args.displayDates) {
+async function fetchEarningsApiCalendar(args, token, usage, dates = args.displayDates, fetchDay = fetchEarningsApiCalendarDay) {
   const days = [];
   for (const date of dates) {
-    days.push(await fetchEarningsApiCalendarDay(date, args, token, usage));
+    const day = await fetchDay(date, args, token, usage);
+    days.push(day);
+    // A quota response applies to the account, not one date. Do not spend the
+    // remaining daily allowance proving that every other date is also blocked.
+    if (day.status === 429) break;
   }
   return days;
 }
@@ -744,21 +766,25 @@ function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays, nasd
 function readScheduleConfirmations(file) {
   if (!fs.existsSync(file)) return [];
   const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.rows)) {
-    throw new Error('earnings_schedule_confirmations.json must contain schemaVersion 1 and rows[].');
+  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.rows)) {
+    throw new Error('earnings_schedule_confirmations.json must contain schemaVersion 2 and event-scoped rows[].');
   }
   const seen = new Set();
   return payload.rows.map((row, index) => {
     const symbol = String(row?.symbol || '').trim().toUpperCase();
+    const primaryDate = String(row?.primaryDate || '').trim();
     const reportDate = String(row?.reportDate || '').trim();
     const sourceUrl = String(row?.sourceUrl || '').trim();
     const sourceName = String(row?.sourceName || '').trim();
-    if (!/^[A-Z0-9.-]+$/.test(symbol) || !isIsoDate(reportDate) || !/^https:\/\//.test(sourceUrl) || !sourceName) {
-      throw new Error(`earnings_schedule_confirmations.rows[${index}] must provide symbol, ISO reportDate, sourceName, and HTTPS sourceUrl.`);
+    if (!/^[A-Z0-9.-]+$/.test(symbol) || !isIsoDate(primaryDate) || !isIsoDate(reportDate) || !/^https:\/\//.test(sourceUrl) || !sourceName) {
+      throw new Error(`earnings_schedule_confirmations.rows[${index}] must provide symbol, ISO primaryDate, ISO reportDate, sourceName, and HTTPS sourceUrl.`);
     }
-    if (seen.has(symbol)) throw new Error(`earnings_schedule_confirmations contains duplicate ${symbol}.`);
-    seen.add(symbol);
-    return { symbol, reportDate, sourceUrl, sourceName };
+    // The provider's original date identifies one earnings event. Symbol-only
+    // confirmations would let an old quarter silently affect a later slate.
+    const key = `${symbol}:${primaryDate}`;
+    if (seen.has(key)) throw new Error(`earnings_schedule_confirmations contains duplicate ${key}.`);
+    seen.add(key);
+    return { symbol, primaryDate, reportDate, sourceUrl, sourceName };
   });
 }
 
@@ -773,12 +799,15 @@ function scheduleAudit(status, row, secondaryDates, official = null) {
 
 function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirmations = []) {
   const activeDates = new Set(displayDatesForRange(range.from, range.to));
+  const secondaryCalendarComplete = [...activeDates].every((date) =>
+    earningsApiCalendarDays.some((day) => day.date === date && day.ok)
+  );
   const secondaryDatesBySymbol = new Map();
   for (const candidate of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
     if (!secondaryDatesBySymbol.has(candidate.symbol)) secondaryDatesBySymbol.set(candidate.symbol, new Set());
     secondaryDatesBySymbol.get(candidate.symbol).add(candidate.reportDate);
   }
-  const confirmationsBySymbol = new Map(confirmations.map((row) => [row.symbol, row]));
+  const confirmationsByEvent = new Map(confirmations.map((row) => [`${row.symbol}:${row.primaryDate}`, row]));
   const review = [];
   const verifiedRows = [];
 
@@ -788,11 +817,13 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       continue;
     }
     const secondaryDates = [...(secondaryDatesBySymbol.get(row.symbol) || new Set())].sort();
-    const confirmation = confirmationsBySymbol.get(row.symbol) || null;
+    const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     const datesAgree = secondaryDates.length === 1 && secondaryDates[0] === row.reportDate;
     const hasCrossWeekConflict = secondaryDates.some((date) => !activeDates.has(date));
     const hasInWeekConflict = secondaryDates.length > 0 && !datesAgree && !hasCrossWeekConflict;
 
+    // Provider agreement is sufficient corroboration; IR evidence is a fallback
+    // for this event, not a standing ticker-level override.
     if (datesAgree) {
       verifiedRows.push({
         ...row,
@@ -803,6 +834,9 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       });
       continue;
     }
+    // Consult event-scoped IR only after the secondary attempt did not produce
+    // agreement. This covers real conflicts, complete-response omissions, and
+    // optional promotion during an outage without making IR a primary source.
     if (confirmation && activeDates.has(confirmation.reportDate)) {
       verifiedRows.push({
         ...row,
@@ -815,6 +849,19 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
       continue;
     }
     if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
+    // A secondary outage is not evidence that Finnhub is wrong. Without current-
+    // event IR evidence, preserve the row and expose the degraded provenance.
+    if (!secondaryCalendarComplete && secondaryDates.length === 0) {
+      verifiedRows.push({
+        ...row,
+        sourceStatus: 'partial',
+        sourceAudit: {
+          ...row.sourceAudit,
+          scheduleVerification: scheduleAudit('primary_only', row, secondaryDates)
+        }
+      });
+      continue;
+    }
     const reason = hasCrossWeekConflict
       ? 'cross_week_calendar_date_conflict'
       : hasInWeekConflict
@@ -834,7 +881,7 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
 
 function verifyEarningsApiRecoveryRows(rows, range, confirmations = []) {
   const activeDates = new Set(displayDatesForRange(range.from, range.to));
-  const confirmationsBySymbol = new Map(confirmations.map((row) => [row.symbol, row]));
+  const confirmationsByEvent = new Map(confirmations.map((row) => [`${row.symbol}:${row.primaryDate}`, row]));
   const verifiedRows = [];
   const review = [];
   for (const row of rows) {
@@ -842,7 +889,9 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = []) {
       verifiedRows.push(row);
       continue;
     }
-    const confirmation = confirmationsBySymbol.get(row.symbol) || null;
+    // Unlike a Finnhub row, a secondary-only discovery has no independent date
+    // corroboration, so only matching event-scoped IR evidence can publish it.
+    const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     if (confirmation && activeDates.has(confirmation.reportDate)) {
       verifiedRows.push({
         ...row,
@@ -955,123 +1004,6 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
     if (capCompare) return capCompare;
     return left.symbol.localeCompare(right.symbol);
   });
-}
-
-function companyReleaseReason(row) {
-  if (!row) return 'missing_recovered_row';
-  if (row.reportTiming === 'unknown') return 'missing_report_timing';
-  if (!Number.isFinite(row.eps?.actual)) return 'missing_eps_actual';
-  if (!Number.isFinite(row.revenue?.actual)) return 'missing_revenue_actual';
-  return '';
-}
-
-function companyReleaseTaskFromRecovery(task, row, reason) {
-  return {
-    id: `${task.reportDate}:${task.symbol}:company-release`,
-    recoveryId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    trigger: 'secondary_recovery_requires_company_release',
-    reason,
-    priority: task.priority,
-    marketCap: task.marketCap,
-    marketCapDisplay: task.marketCapDisplay,
-    fiscalQuarterEnding: task.fiscalQuarterEnding || '',
-    neededFields: [
-      'reportTiming',
-      'fiscalPeriod',
-      'eps.actual',
-      'revenue.actual',
-      'companyReleaseUrl',
-      'secFilingUrl'
-    ],
-    preferredSources: [
-      'SEC 8-K Exhibit 99.1',
-      'Company investor relations earnings release'
-    ],
-    doNotUseForOverrides: ['finnhub_calendar_row'],
-    permittedUses: [
-      'official_actuals_resolution',
-      'timing_resolution',
-      'fiscal_period_resolution',
-      'eps_basis_resolution'
-    ],
-    instructions: 'Use SEC/company release only when a recovered EarningsAPI row is missing official timing or actuals. Do not override Finnhub rows.',
-    sourceAudit: {
-      ...task.sourceAudit,
-      recoveredRow: {
-        reportDate: row?.reportDate || task.reportDate,
-        reportTiming: row?.reportTiming || 'unknown',
-        eps: {
-          estimate: row?.eps?.estimate ?? null,
-          actual: row?.eps?.actual ?? null
-        },
-        revenue: {
-          estimate: row?.revenue?.estimate ?? null,
-          actual: row?.revenue?.actual ?? null
-        },
-        sourceStatus: row?.sourceStatus || 'missing'
-      }
-    }
-  };
-}
-
-const DATE_CONFLICT_RELEASE_MIN_MARKET_CAP = 250000000;
-
-function companyReleaseTaskFromDateConflict(row, reason) {
-  return {
-    id: `${row.reportDate}:${row.symbol}:company-release`,
-    recoveryId: '',
-    symbol: row.symbol,
-    company: row.company,
-    reportDate: row.reportDate,
-    trigger: 'provider_date_conflict_requires_company_release',
-    reason,
-    priority: Number(row.marketCap) >= 10000000000 ? 'high' : 'normal',
-    marketCap: row.marketCap,
-    marketCapDisplay: row.marketCapDisplay,
-    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
-    neededFields: [
-      'reportTiming',
-      'fiscalPeriod',
-      'eps.actual',
-      'revenue.actual',
-      'companyReleaseUrl',
-      'secFilingUrl'
-    ],
-    preferredSources: [
-      'SEC 8-K Exhibit 99.1',
-      'Company investor relations earnings release'
-    ],
-    doNotUseForOverrides: ['finnhub_calendar_row'],
-    permittedUses: [
-      'official_actuals_resolution',
-      'timing_resolution',
-      'fiscal_period_resolution',
-      'eps_basis_resolution'
-    ],
-    instructions: 'Use SEC/company release only to resolve actuals and timing after a verified provider-date conflict. Keep Finnhub estimates for comparison.',
-    sourceAudit: row.sourceAudit
-  };
-}
-
-function buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows, options = {}) {
-  const rowsByKey = new Map(rows.map((row) => [`${row.reportDate}:${row.symbol}`, row]));
-  const recoveryTasks = secondaryRecoveryCandidates.flatMap((task) => {
-    const row = rowsByKey.get(`${task.reportDate}:${task.symbol}`);
-    const reason = companyReleaseReason(row);
-    return reason ? [companyReleaseTaskFromRecovery(task, row, reason)] : [];
-  });
-  const conflictTasks = rows.flatMap((row) => {
-    const conflict = row.sourceAudit?.providerDateConflict;
-    if (!conflict || conflict.status !== 'resolved' || conflict.selectedProvider === 'finnhub') return [];
-    if (!Number.isFinite(row.marketCap) || row.marketCap < DATE_CONFLICT_RELEASE_MIN_MARKET_CAP) return [];
-    if (!options.shouldEscalateDateConflict?.(row)) return [];
-    const reason = companyReleaseReason(row);
-    return reason ? [companyReleaseTaskFromDateConflict(row, reason)] : [];
-  });
-  return [...recoveryTasks, ...conflictTasks];
 }
 
 function normalizeProfile(symbol, result) {
@@ -1360,32 +1292,6 @@ async function fetchFinnhubMetrics(rows, profiles, earningsApiCalendarDays, args
   }
   if (cacheChanged) writeFinnhubMetricCache(args.finnhubMetricCache, cache);
   return metrics;
-}
-
-function valueOutcome(actual, estimate) {
-  if (!Number.isFinite(actual) || !Number.isFinite(estimate)) return 'unknown';
-  if (actual > estimate) return 'beat';
-  if (actual < estimate) return 'miss';
-  return 'met';
-}
-
-function metricResult(actual, estimate) {
-  if (!Number.isFinite(actual)) return 'pending';
-  if (!Number.isFinite(estimate)) return 'not_compared';
-  return valueOutcome(actual, estimate);
-}
-
-function combinedOutcome(epsResult, revenueResult) {
-  const comparable = [epsResult, revenueResult].filter((item) => ['beat', 'miss', 'met'].includes(item));
-  if (comparable.length === 0) return 'pending';
-  if (comparable.length === 1) {
-    if (epsResult === 'beat' && revenueResult === 'not_compared') return 'eps_only_beat';
-    if (epsResult === 'miss' && revenueResult === 'not_compared') return 'eps_only_miss';
-    return comparable[0];
-  }
-  if (comparable.every((item) => item === 'beat' || item === 'met')) return 'beat';
-  if (comparable.every((item) => item === 'miss' || item === 'met')) return 'miss';
-  return 'mixed';
 }
 
 function metricPayload(estimate, actual, options = {}) {
@@ -1709,116 +1615,6 @@ function buildEarningsApiRows(tasks, companyFetches) {
   }).filter(Boolean);
 }
 
-function yahooPeriodSeconds(isoDate) {
-  return Math.floor(dateFromIso(isoDate).getTime() / 1000);
-}
-
-async function fetchYahooBars(symbol, from, to, args) {
-  const start = addDays(from, -REACTION_LOOKBACK_DAYS);
-  const endExclusive = addDays(to, REACTION_LOOKAHEAD_DAYS + 1);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${yahooPeriodSeconds(start)}&period2=${yahooPeriodSeconds(endExclusive)}&interval=1d&events=history`;
-  const result = await fetchJson(url, args);
-  const chart = result.data?.chart;
-  const item = chart?.result?.[0];
-  const timestamps = Array.isArray(item?.timestamp) ? item.timestamp : [];
-  const quote = item?.indicators?.quote?.[0] || {};
-  const bars = timestamps.map((timestamp, index) => ({
-    date: isoFromDate(new Date(timestamp * 1000)),
-    open: numberOrNull(quote.open?.[index]),
-    high: numberOrNull(quote.high?.[index]),
-    low: numberOrNull(quote.low?.[index]),
-    close: numberOrNull(quote.close?.[index]),
-    volume: numberOrNull(quote.volume?.[index])
-  })).filter((bar) => bar.close !== null);
-  return {
-    symbol,
-    ok: result.ok && bars.length > 0,
-    status: result.status,
-    responseMs: result.ms,
-    bars,
-    error: result.ok ? '' : result.parseError || result.bodyPreview || chart?.error?.description || `HTTP ${result.status}`
-  };
-}
-
-async function fetchYahooBarsForRows(rows, args) {
-  const output = [];
-  for (const row of rows) {
-    output.push(await fetchYahooBars(row.symbol, args.from, args.to, args));
-  }
-  return output;
-}
-
-function previousBar(bars, date) {
-  return [...bars].filter((bar) => compareIsoDate(bar.date, date) < 0).pop() || null;
-}
-
-function barOnOrAfter(bars, date) {
-  return bars.find((bar) => compareIsoDate(bar.date, date) >= 0) || null;
-}
-
-function barAfter(bars, date) {
-  return bars.find((bar) => compareIsoDate(bar.date, date) > 0) || null;
-}
-
-function attachReactions(rows, yahooFetches) {
-  const yahooBySymbol = new Map(yahooFetches.map((item) => [item.symbol, item]));
-  return rows.map((row) => {
-    const yahoo = yahooBySymbol.get(row.symbol);
-    const bars = yahoo?.bars || [];
-    let basis = 'unavailable';
-    let fromBar = null;
-    let toBar = null;
-
-    if (row.reportTiming === 'bmo' || row.reportTiming === 'dmh') {
-      basis = row.reportTiming === 'bmo' ? 'same_day_close' : 'during_market_close';
-      fromBar = previousBar(bars, row.reportDate);
-      toBar = barOnOrAfter(bars, row.reportDate);
-    } else if (row.reportTiming === 'amc') {
-      basis = 'next_session_close';
-      fromBar = barOnOrAfter(bars, row.reportDate);
-      toBar = barAfter(bars, row.reportDate);
-    }
-
-    const reactionPct = fromBar && toBar ? pctChange(fromBar.close, toBar.close) : null;
-    const hasReportedActual = Number.isFinite(row.eps.actual) || Number.isFinite(row.revenue.actual);
-    const reactionStatus = reactionPct !== null ? 'computed' : hasReportedActual ? 'unavailable' : 'pending';
-    const output = {
-      ...row,
-      sourceSummary: {
-        ...row.sourceSummary,
-        reaction: reactionPct === null ? 'none' : 'yahoo'
-      },
-      reaction: {
-        basis: reactionPct === null ? 'unavailable' : basis,
-        percent: reactionPct,
-        fromDate: fromBar?.date || '',
-        fromClose: fromBar?.close ?? null,
-        toDate: toBar?.date || '',
-        toClose: toBar?.close ?? null,
-        status: reactionStatus,
-        note: '',
-        source: 'Yahoo Finance Chart API'
-      },
-      sourceAudit: {
-        ...row.sourceAudit,
-        selectedSources: {
-          ...row.sourceAudit.selectedSources,
-          reaction: reactionPct === null ? 'none' : 'yahoo'
-        },
-        yahoo: {
-          status: yahoo?.status ?? null,
-          rowCount: bars.length,
-          error: yahoo?.error || ''
-        }
-      }
-    };
-    return {
-      ...output,
-      sourceStatus: computeEarningsSourceStatus(output)
-    };
-  });
-}
-
 function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTasks) {
   const counts = computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks);
   return {
@@ -1946,9 +1742,9 @@ function formatSignedPct(value) {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 }
 
-async function main() {
+async function runBuild(argv = process.argv.slice(2)) {
   loadEnv();
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(argv);
   const token = process.env.FINNHUB_API_KEY;
   const earningsApiToken = process.env.EARNINGSAPI_API_KEY;
   if (!token) {
@@ -1959,8 +1755,8 @@ async function main() {
   const finnhubCalendar = await fetchFinnhubCalendar(args, token);
   ensureFinnhubPrimaryUsable(finnhubCalendar, args);
 
-  // The secondary scan intentionally reaches beyond the visible week. This
-  // catches a primary-date error that otherwise looks like a missing backup row.
+  // Calendar rebuilds own only the five displayed trading dates. Tests exercise
+  // the reconciliation policy with fixtures; they never widen this live scan.
   const earningsApiCalendarDays = await fetchEarningsApiCalendar(
     args,
     earningsApiToken,
@@ -2014,14 +1810,15 @@ async function main() {
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
   });
-  const yahooFetches = await fetchYahooBarsForRows(mergedRows, args);
-  const rows = attachReactions(mergedRows, yahooFetches);
+  const generatedAt = new Date();
+  const yahooFetches = await fetchYahooBarsForRows(mergedRows, args, fetchJson);
+  const rows = attachReactions(mergedRows, yahooFetches, { asOf: generatedAt });
   const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows);
   const earningsApiEntry = earningsApiMonthEntry(earningsApiUsage);
 
   const payload = {
-    schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+    generatedAt: generatedAt.toISOString(),
     range: {
       from: args.from,
       to: args.to
@@ -2034,7 +1831,7 @@ async function main() {
       finnhubCalendar,
       finnhubProfiles,
       finnhubMetrics,
-      earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays,
+      earningsApiCalendarDays,
       nasdaqCalendarDays,
       earningsApiCompanyFetches,
       earningsApiBudget: {
@@ -2057,29 +1854,27 @@ async function main() {
 }
 
 if (require.main === module) {
-  main().catch((error) => {
-    console.error(error.message || error);
-    process.exit(1);
-  });
+  process.stderr.write('earnings_week_build.js is internal; use: node scripts/earnings_week.js build [options]\n');
+  process.exit(1);
 }
 
 module.exports = {
-  attachReactions,
   attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates,
   buildEarningsApiRows,
   buildSecondaryRecoveryCandidates,
   buildRows,
-  buildCompanyReleaseTasks,
   calendarVerificationDates,
-  combinedOutcome,
   ensureFinnhubPrimaryUsable,
   fetchNasdaqCalendarForConflicts,
+  fetchEarningsApiCalendar,
   fetchFinnhubMetrics,
+  fetchYahooBars,
   fetchYahooBarsForRows,
   profileFromCache,
+  readScheduleConfirmations,
   resolveProviderDateConflicts,
+  runBuild,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
-  storeProfileInCache,
-  valueOutcome
+  storeProfileInCache
 };

@@ -2,6 +2,19 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "--help" ]]; then
+  echo "Usage: ./scripts/publish_main.sh [REMOTE [BRANCH]]"
+  exit 0
+fi
+if [[ "$#" -gt 2 ]]; then
+  echo "Unexpected argument: ${3}" >&2
+  exit 1
+fi
+if [[ "${1:-}" == -* || "${2:-}" == -* ]]; then
+  echo "Unknown argument: ${1:-${2:-}}" >&2
+  exit 1
+fi
+
 REMOTE="${1:-origin}"
 BRANCH="${2:-main}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
@@ -329,7 +342,7 @@ fi
 
 maybe_enable_wake_lock "$@"
 
-node scripts/validate_dashboard.js
+node scripts/validate_dashboard.js readiness
 
 preflight_rc=0
 wait_for_network_ready || preflight_rc=$?

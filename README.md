@@ -25,12 +25,12 @@ If these surfaces disagree, treat that as drift to correct. Agent work follows `
 The main dashboard payload lives inside:
 
 ```html
-<!-- ============ DATA START — edit this block to update the dashboard ============ -->
+<!-- ============ DATA START — published dashboard payload ============ -->
 ...
 <!-- ============ DATA END ============ -->
 ```
 
-Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a daily dashboard refresh.
+This block is the published payload location, not the routine editorial workspace. Daily editorial work belongs in `generated/editorial/` and reaches the artifact only through the validated apply command. Do not touch the HTML, CSS, or JavaScript outside generated data blocks for a daily dashboard refresh.
 
 Production is self-contained: the rendered dashboard reads embedded `dashboard-data` and `chart-data` JSON blocks. Helper scripts may generate staging JSON snippets, but no production section should fetch sidecar JSON files at runtime.
 
@@ -42,36 +42,69 @@ There are no WebKit-specific workarounds. The retained availability checks are i
 
 ## Scheduled preflight
 
-- In `America/Chicago`, the morning update window is 6:45–8:00 AM and the afternoon window is 3:45–5:00 PM. Proceed only on a weekday inside one of those windows; otherwise stop before fetching, editing, committing, or publishing.
+- These restrictions apply only to runs finalized with `--scheduled`. Manual/on-demand runs may occur on any day and at any time.
+- In `America/Chicago`, the scheduled morning update window is 6:45–8:00 AM and the scheduled afternoon window is 3:45–5:00 PM. A scheduled run must stop outside its weekday window.
 - Select the active window from that local time and keep the dashboard date and compile date on the local run date.
-- Before editing, run the scheduled preflight for the active window. It refuses a duplicate completed-window marker while allowing a completed morning run and the afternoon run to proceed independently.
+- Before editing, run the scheduled preflight for the active window. Finalization with `--scheduled` repeats the same check before writing, so it refuses both an out-of-window application and a duplicate completed-window marker. A completed morning run does not block the afternoon run.
 
 ## Daily runbook (normal path)
 
-### Command matrix
+### Canonical three-phase workflow
 
-| Run | Deterministic refresh | Editorial patch | Finish | Publish |
-| --- | --- | --- | --- | --- |
-| Scheduled | First run `node scripts/run_daily_update.js --scheduled-preflight --morning` or `--afternoon`, then run the matching deterministic refresh | Apply the completed `dashboard-data` JSON with `node scripts/run_daily_update.js --apply-dashboard-data-json /path/to/dashboard-data.json` | `node scripts/run_daily_update.js --refresh-news-baseline --scheduled --morning` or `--afternoon` | Commit on `main`, then run `./scripts/publish_main.sh` |
-| Manual/on-demand | Run the matching `node scripts/run_daily_update.js --morning` or `node scripts/run_daily_update.js --afternoon` path | Apply the completed `dashboard-data` JSON with `node scripts/run_daily_update.js --apply-dashboard-data-json /path/to/dashboard-data.json` | `node scripts/run_daily_update.js --refresh-news-baseline` | Commit and publish when the manual update is intended to go live |
+| Run | 1. Deterministic preparation | 2. AI editorial work | 3. Deterministic finalization |
+| --- | --- | --- | --- |
+| Scheduled | Run `node scripts/run_daily_update.js --scheduled-preflight --morning` or `--afternoon`, then run `node scripts/run_daily_update.js --morning` or `node scripts/run_daily_update.js --afternoon` to stage `generated/daily_financial_news.candidate.html`, then run `node scripts/run_daily_update.js --prepare-editorial-dir generated/editorial --morning` or `--afternoon` | Edit `generated/editorial/dashboard-data.json`, complete `generated/editorial/editorial-review.json`, and fill any pending rows in `generated/editorial/earnings_narrative.json` | Run `node scripts/run_daily_update.js --apply-dashboard-data-json generated/editorial/dashboard-data.json --editorial-review-json generated/editorial/editorial-review.json --scheduled --morning` or `--afternoon`; this consumes the staged candidate and editorial sidecars and atomically replaces the canonical dashboard, after which commit on `main` and run `./scripts/publish_main.sh` |
+| Manual/on-demand | Run `node scripts/run_daily_update.js --morning` or `node scripts/run_daily_update.js --afternoon`, then run `node scripts/run_daily_update.js --prepare-editorial-dir generated/editorial --morning` or `--afternoon` | Edit the generated editorial handoff files, including any pending Earnings narrative rows | Run the matching apply command without `--scheduled`; commit and publish only when the manual update is intended to go live |
 
-The scheduled preflight is read-only: it enforces the weekday/Chicago-time window and refuses a completed `YYYY-MM-DD:morning|afternoon` marker. Every deterministic refresh updates futures, chart data, Tape quote fields, crypto stat cards, Asset Allocation data, and earnings results. Calendar slates refresh only on Friday afternoon and Monday morning: Friday afternoon shows the current Friday plus next Monday-Thursday, while Monday morning replaces that Friday with the current Monday-Friday slate. For editorial/news work, edit only the `dashboard-data` JSON and use `--apply-dashboard-data-json`; it restamps `editionId` and validates. For an already-generated chart-only payload, use `--apply-chart-data-json`; it embeds the series and rebuilds matching `chart-data.quoteRows` and visible Tape prices. To add or repair only selected chart series without refreshing the rest of the Tape, fetch each with `scripts/fetch_chart_data.js --ticker SYMBOL` and apply the resulting payload with `--merge-chart-data-json`; that preserves every untouched series and quote row. A standalone scheduler must not publish directly because it cannot complete the required editorial judgment.
+The scheduled preflight is read-only: it enforces the weekday/Chicago-time window and refuses a completed `YYYY-MM-DD:morning|afternoon` marker. The final scheduled apply enforces that guard again; manual preparation and application bypass it. Every deterministic refresh assembles and validates `generated/daily_financial_news.candidate.html` with refreshed futures, chart data, Tape quote fields, crypto stat cards, Asset Allocation data, Week Ahead values and lifecycle, earnings results, the Chicago run date, edition/session labels, the compile timestamp, and the session portion of `tape.label`; it does not alter `daily_financial_news.html`. A staging candidate may contain explicitly pending Earnings narrative, just as Week Ahead may still require its editorial outcome; publication validation remains strict. Week Ahead calendar slates rebuild only on Friday afternoon and Monday morning, but release values refresh every run without moving official dates or times. Friday afternoon shows the current Friday plus next Monday-Thursday, while Monday morning replaces that Friday with the current Monday-Friday slate. Validation refuses to complete an active scheduled edition unless both embedded calendar ranges match the exact slate required for that date and window. `--prepare-editorial-dir` copies `dashboard-data` from the staged complete candidate into the editorial workspace, removes any stale receipt and legacy keys, creates `earnings_narrative.json` bound to the staged Earnings facts, and creates a review skeleton bound to the unchanged canonical `baseEditionId`, required sections, and every event date; it deliberately leaves pending Earnings narrative fields and each Market Lens `action` for the AI. The final apply command rebuilds from the deterministic candidate and copies only the documented editorial surfaces from `dashboard-data.json`: Opening copy, News/Futures/Crypto stories, Tape roster and commentary, Week Ahead outcomes, and Tape/footer contextual suffixes. It refuses a stale candidate, applies Earnings narrative only to the deterministic staged Earnings rows, supplies `reviewedAt`, advances the scheduled News baseline when requested, derives final quote views from staged chart data, applies every Market Lens decision, stamps the edition and receipt in a temporary final candidate, validates it, and only then atomically replaces the published artifact.
 
-Manual runs may occur outside the scheduled windows. Choose `--morning` or `--afternoon` for the intended dashboard edition and market session, and keep the dashboard date on that local run date.
+A dashboard update request covers staging and canonical generated data only. If the workflow exposes a defect in scripts, tests, documentation, configuration, or policy, stop and obtain explicit approval before editing those source files.
+
+Week Ahead days and Earnings rows use the same four-stage event lifecycle. Both retain pre-event commentary through `released_awaiting_close` and require post-event editorial replacement only after the deterministic close response arrives.
+
+`scripts/run_daily_update.js` is the sole operational writer for `daily_financial_news.html`. Fetch, earnings, and transform scripts may read the dashboard and write staging JSON, but they must not replace embedded `dashboard-data`, `chart-data`, or other dashboard HTML directly. Use `--apply-earnings-week-json`, `--apply-crypto-stats-json`, `--apply-chart-data-json`, or `--merge-chart-data-json` for focused repairs; use `--sync-chart-quotes` to recompact existing embedded chart data and rebuild its derived quote views. The regression suite statically rejects direct dashboard-write implementations in other production scripts.
+
+The update architecture is staged and transactional. The canonical section-by-section ownership and write-authority matrix lives in `AGENTS.md`; this README owns the corresponding operational runbook and data contracts. Producers write deterministic artifacts under `generated/` and reject source data they cannot reliably normalize. Staging artifacts that persist across runs, anchor sidecars or later decisions, support editorial work, or pass through multiple domain commands receive explicit domain validation before downstream consumption; simple one-hop payloads do not require separate validators. The updater assembles every deterministic change into `generated/daily_financial_news.candidate.html`, validates that complete staging candidate, and leaves the canonical dashboard untouched. Final editorial application verifies that the staged candidate still matches the canonical base edition, validates the finalized candidate with its editorial receipt, and atomically replaces the canonical dashboard. Focused repair modes use the same candidate-validation and atomic-replacement function but are explicit transactions rather than the normal three-phase path. Public workflow CLIs are `run_daily_update.js`, `validate_dashboard.js`, `earnings_week.js`, `local_market_server.js`, and `publish_main.sh`; most `fetch_*.js` commands are public staging producers. `fetch_chart_data.js` is the consolidated public Chart/Futures producer and core: it owns source retrieval, the pure Futures staging-payload contract, and pure chart rounding, compaction, and quote-row projection shared by its callers. The updater invokes that Futures contract but owns only application and cross-section labels; `validate_dashboard.js` independently validates the final embedded Futures section. Files such as `earnings_week_build.js` and `earnings_week_validation.js` are private implementations and must be reached through `earnings_week.js`.
+
+Internal modules have no write authority unless explicitly identified as an implementation module below:
+
+| Module | Status and callers | Inputs and outputs | Write authority |
+| --- | --- | --- | --- |
+| `calendar_contract.js` | Private pure contract used by calendar-aware domains | Calendar values in; normalized dates and range decisions out | None |
+| `earnings_week_contract.js` | Private pure contract used by the Earnings core, build, validator, and updater | Earnings rows, provider values, and narrative state in; normalized policy results out | None |
+| `editorial_review_contract.js` | Private pure contract used by the updater and dashboard validator | Dashboard payload and review manifest in; receipt data or validation errors out | None |
+| `news_contract.js` | Private pure contract used by the updater and dashboard validator | Stories and baseline state in; stable identities and baseline transitions out | None |
+| `week_ahead_contract.js` | Private pure contract used by the Week Ahead producer, updater, and dashboard validator | Schedule, event, lifecycle, chart-close, Market Lens, and outcome data in; normalized payloads, reactions, decisions, or validation errors out | None |
+| `earnings_week_build.js` | Private Earnings build implementation imported by `earnings_week.js` | Provider data and build options in; staged earnings payload and audit artifacts out | Staging/cache files only |
+| `earnings_week_validation.js` | Private Earnings validation implementation imported and re-exported by `earnings_week.js` | Earnings payloads and validation options in; errors or CLI diagnostics out | None |
+
+For an already-generated chart-only payload, use `--apply-chart-data-json`; it embeds the series and rebuilds matching `chart-data.quoteRows` and visible Tape prices. To add or repair only selected chart series without refreshing the rest of the Tape, fetch each with `scripts/fetch_chart_data.js --ticker SYMBOL` and apply the resulting payload with `--merge-chart-data-json`; that preserves every untouched series and quote row. These are repair paths, not substitutes for the canonical three-phase workflow. A standalone scheduler must not publish directly because it cannot complete the required editorial judgment.
+
+Manual runs may occur outside the scheduled windows, on weekends, and more than once per scheduled window. Choose `--morning` or `--afternoon` for the intended dashboard edition and market session, and keep the dashboard date on that local run date. Manual application preserves `newsBaseline` and computes `isNewSinceScheduledUpdate` from its retained comparison set; it never consumes or advances scheduled newness. Scheduled application compares against the last scheduled story set, then rotates the baseline and records the completed window.
+
+### Market Lens editorial decision contract
+
+The normal finalization command consumes the complete generated review manifest. Its `marketLensDecisions[]` must contain one `replace` or `retain-generated` decision for every current event day. The apply command derives the final lens and `marketLensSource` from those decisions rather than trusting lens state already present in the payload.
+
+`scripts/week_ahead_contract.js` owns calendar-payload validation, event release states, comparable actual-versus-forecast surprises, preservation of still-valid pre-close editorial lenses through `released_awaiting_close`, post-close outcome invalidation when facts or closing reactions change, event-day close-reaction derivation, and Market Lens decision coverage and action semantics. `scripts/run_daily_update.js` applies those domain results and verifies cross-section references and chart closes against the assembled dashboard.
+
+A deterministic Friday/Monday calendar rollover may temporarily preserve an existing editorial lens only when its date and every `relatedEventId` still match the refreshed slate. That continuity behavior is not editorial reaffirmation. Before publication, the final editorial pass must reconsider every event day against the current Opening, Tape, and verified news and either retain the newly generated fallback or provide a fresh valid replacement.
+
+Before the close, the visible Market Lens remains forward-looking. Once at least one actual is available and the afternoon chart payload contains completed event-day and previous-trading-day closes for every selected transmission ticker, the day transitions to `close_available`. The renderer then replaces the forward-looking lens with `Outcome & Close Reaction`: editorial copy interprets the released facts and session response, while deterministic ticker buttons show the preselected transmission assets that registered an event-day close move. Do not scan the Tape after the fact for the largest movers or imply that one release caused the entire session when several catalysts were active.
+
+The generated manifest declares review of `opening`, `futures-news`, `tape-commentary`, `stories`, `crypto`, `earnings`, and `market-lens`. The AI fills each generated event-day decision and any verified-claim evidence; the script supplies `reviewedAt`, `baseEditionId`, section names, and dates. Application embeds the reviewed base edition, decision summary, verified-claim evidence, new edition ID, and payload hash. Every later payload rewrite clears or invalidates the receipt, and a manifest cannot be reused after the base edition changes.
 
 ### Daily editorial checklist
 
-1. Confirm dates first.
-   - `masthead.date`: today.
-   - `footer.compiled`: must include today’s compile date.
-   - Never allow stale values such as `January 1`, year `2001`, or a prior-day compile date in `masthead.date` or `footer.compiled`.
-   - Do not forward-date the dashboard on the prior evening, even for full-market holidays or after-close refreshes. If the local run date is `July 2`, keep `masthead.date` and the compile date on `July 2`; use `weekAhead`, stories, and `footer.compiled` to explain the next-day holiday context.
-   - `tape.label`: current session and the key market drivers.
-   - Friday afternoon refreshes both calendars to current Friday plus next Monday-Thursday. Monday morning replaces that bridge with the current Monday-Friday slate. All other updates retain the existing calendar days while refreshing non-calendar dashboard content and arrived earnings results.
+1. Verify the deterministic envelope before editorial work.
+   - The orchestrator owns `masthead.date`, `masthead.edition`, the compile date/time prefix in `footer.compiled`, Futures session labels, and the session prefix in `tape.label`; do not hand-edit them.
+   - The AI owns only the key-driver portion of `tape.label` after the separator and non-derivable source or holiday context after the generated compile prefix.
+   - The run date is always the current Chicago date, including prior-evening holiday context; explain a next-day closure in `weekAhead`, stories, or the editorial footer context rather than forward-dating the envelope.
+   - Friday afternoon refreshes both calendars to current Friday plus next Monday-Thursday. Monday morning replaces that bridge with the current Monday-Friday slate. All other updates retain the existing calendar days while refreshing Week Ahead values and lifecycle, non-calendar dashboard content, and arrived earnings results.
 
 2. Run the normal deterministic refresh before reading news.
-   - Use the matching Command matrix entry. The orchestrator owns futures, chart/quote, crypto-stat, Asset Allocation, Week Ahead, and earnings refreshes; do not hand-patch those deterministic values unless it fails and the Manual fallback reference applies.
-   - Earnings are refreshed and embedded by the orchestrator. If it exits with code `2`, supply the required earnings editorial copy, then rerun the same deterministic command. When reported EPS, revenue, guidance, timing, or market-reaction facts change, the prior narrative is invalidated and must be replaced; do not restore pre-report copy from `earnings_narrative.json`. On a Friday/Monday rollover, Week Ahead remains published because its validated generated lens is an acceptable fallback; the prior embedded Earnings slate remains in place until its required narratives are complete. See Appendix: Earnings operations only when the detailed provider, sidecar, or row-contract rules are needed.
+   - Use the matching canonical three-phase workflow entry. The orchestrator owns futures, chart/quote, crypto-stat, Asset Allocation, Week Ahead, and earnings refreshes; do not hand-patch those deterministic values unless it fails and the Manual fallback reference applies.
+   - Earnings facts are refreshed into the deterministic candidate even when new narrative is required. `--prepare-editorial-dir` places those tasks in `generated/editorial/earnings_narrative.json`; complete them during the same editorial pass as Opening, News, Tape, and Week Ahead. An arrived result moves the row to `released_awaiting_close` without erasing its pre-event commentary. Once the required close response becomes `close_available`, or the reaction window becomes genuinely unresolvable, the prior narrative is invalidated and must be replaced; do not restore pre-report copy. Finalization rejects incomplete or stale Earnings narrative before publication. See Appendix: Earnings operations only when the detailed provider, sidecar, or row-contract rules are needed.
    - Review the orchestrator-patched quote fields and data blocks. If a value is stale, missing, or failed to refresh, use the Manual Fallback Reference rather than editing a deterministic value by hand.
    - In each `tape.rows[].note`, summarize the relevant market commentary or catalyst driving that market. Rewrite every tape note on each dashboard update instead of carrying commentary forward. Do not restate `last`, `delta`, or `pct`.
    - In each `tape.rows[]` crypto ticker row (`group: "Crypto"`), include a `note` for the collapsed Tape Crypto tab. Update these notes daily with ticker-specific context; do not reuse one generic crypto note across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible crypto tickers.
@@ -80,9 +113,9 @@ Manual runs may occur outside the scheduled windows. Choose `--morning` or `--af
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
 
 3. Search news after prices.
-   - This is a required step on every scheduled run, before any story set is finalized.
-   - Start every scheduled run with a fresh news search pass and keep previous links only if they remain among the best available reporting after direct comparison.
-   - Use today and yesterday as explicit dates in every query; during the scheduled Monday morning dashboard window, add Saturday when needed because the freshness rule may still admit relevant Saturday-dated coverage.
+   - This is a required step on every editorial dashboard update, scheduled or manual, before any story set is finalized.
+   - Start every update with a fresh news search pass and keep previous links only if they remain among the best available reporting after direct comparison.
+   - Use today and yesterday as explicit dates in every query; for a Monday morning edition, add Saturday when needed because the freshness rule may still admit relevant Saturday-dated coverage.
    - Start with:
      - `stock market news [today] OR [yesterday]`
      - Morning: `premarket futures [yesterday] [today]`; afternoon: `index futures after the bell [today]`
@@ -91,19 +124,19 @@ Manual runs may occur outside the scheduled windows. Choose `--morning` or `--af
    - Add targeted searches only for gaps: Fed, oil, geopolitics, major earnings, semis/AI, crypto regulation, ETF flows, stablecoins, hacks/security, protocol updates, and market structure.
    - Follow the News-card contract and Story selection policy below for collection counts, required fields, freshness, source choice, carry-forward decisions, and link rules.
 
-4. Rewrite the JSON sections in this order.
-   - `masthead`: set `masthead.edition` to `Morning Edition` or `Afternoon Edition` for the active run and set `masthead.date`.
+4. Editorialize the generated handoff in this order.
+   - `masthead`: leave the generated edition and date unchanged.
    - `opening`: update `headline`, `deck`, and four concise catalyst items.
-   - `futuresModule`: embed four futures rows and the active window’s stories per the News-card contract. Use each story’s descriptive `tag` for its visible badge.
-   - `tape`: refresh all required cross-asset rows and commentary.
+   - `futuresModule`: leave the four generated futures rows and session metadata unchanged; update only the active window’s stories per the News-card contract. Use each story’s descriptive `tag` for its visible badge.
+   - `tape`: leave generated quote fields unchanged; update the editorial roster only when intentionally changing coverage, and rewrite the commentary for every retained row.
    - `assetAllocationPortfolio`: review the orchestrator-patched ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
    - `stories`: update the broad-market news collection per the News-card contract.
-   - `crypto`: update crypto-only stat rows in `crypto.stats[]` plus the crypto news collection per the News-card contract. Crypto ticker quote rows and ticker-level commentary live in `tape.rows[]` with `group: "Crypto"`.
-   - `earnings.week`: canonical five-trading-day earnings monitor payload. Its detailed provider, sidecar, and row-contract rules live in Appendix: Earnings operations.
-   - `weekAhead`: official schedules own covered release dates and Eastern times, while FXMacroData supplies labeled U.S. actuals, prior releases, and forecasts through `scripts/fetch_week_ahead.js`; no API key is required. The fetcher overlays the maintained BLS CPI/PPI, employment, and JOLTS schedule plus EIA/FOMC calendars with the live Census and BEA calendars. Do not hand-edit dates, times, event names, impact levels, or actual/forecast/previous values. A covered official release remains visible with blank values when FXMacroData lacks an exact labeled match; FXMacroData cannot move an official date or time. Market-consensus forecasts are unbadged; central-bank forecasts render with a `Nowcast` pill and FXMacroData blended forecasts with a `Model` pill, each naming its source and clarifying that it is not market consensus. The canonical payload stores U.S. release times in Eastern market time and the renderer converts them to Central time. Full U.S. cash-market closures come from the maintained local calendar contract.
-   - After the deterministic Week Ahead refresh, review each generated `days[].marketLens` against the current Tape, opening, and verified news. Replace it only when the editorial lens adds all three: a current, verified market setup; a specific transmission path between that setup and the scheduled release; and a conditional consequence for relevant instruments or sectors. Set `marketLensSource: "editorial"` for a replacement; otherwise retain the generated lens. Do not alter calendar facts, restate the displayed values, use source/process language, or write tactical-allocation advice. The generated lens is the fallback and an editorial override is preserved only for its matching calendar date.
-   - `footer`: today’s compile date and concise source-family attribution.
-   - Remove legacy sections that are not rendered, such as `lede` and `renesas`.
+   - `crypto`: leave generated `crypto.stats[]` values unchanged and update only the crypto news collection per the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial.
+   - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged; supply requested narrative only in `generated/editorial/earnings_narrative.json`. Finalization binds that sidecar to the staged facts and ignores Earnings changes made through the general dashboard JSON. Detailed provider, sidecar, and row-contract rules live in Appendix: Earnings operations.
+   - `weekAhead`: official schedules own covered release dates and Eastern times, while FXMacroData supplies labeled U.S. actuals, prior releases, and forecasts through `scripts/fetch_week_ahead.js`; no API key is required. The fetcher rebuilds the slate only on Friday/Monday and refreshes values against that staged official slate on every other run. Do not hand-edit dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. A covered official release remains visible with blank values when FXMacroData lacks an exact labeled match; FXMacroData cannot move an official date or time. Market-consensus forecasts are unbadged; central-bank forecasts render with a `Nowcast` pill and FXMacroData blended forecasts with a `Model` pill, each naming its source and clarifying that it is not market consensus. During afternoon editorial work, complete `days[].outcome.title` and `body` for every `close_available` day; describe the combined released facts and event-day close response without overstating causality. The canonical payload stores U.S. release times in Eastern market time and the renderer converts them to Central time. Full U.S. cash-market closures come from the maintained local calendar contract.
+   - After the deterministic Week Ahead refresh, evaluate all releases on each event day against the current Tape, opening, and verified news. Before `close_available`, promote one coherent daily market question only when the structured lens identifies a current evidence-backed setup, every materially related event ID, a specific transmission path, both reinforcing and challenging outcomes, and one to three canonical chartable Tape reactions. The visible copy may synthesize several releases when they inform the same market question; do not force one release to be the editorial lead. Set each generated manifest entry to `retain-generated` or supply a valid `replace` lens. At `close_available`, retain the preselected reaction ticker set and complete the editorial `outcome` instead of selecting new tickers with hindsight. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice. Reaffirm every event day on each editorial run; a temporarily preserved prior lens is not a new decision.
+   - `footer`: preserve the generated compile prefix and maintain only concise non-derivable source-family or holiday context.
+   - Legacy sections such as `lede` and `renesas` are removed during preparation and rejected by validation; do not recreate them.
 
 5. Copy and tone rules.
    - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
@@ -125,10 +158,11 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | `crypto.notes[]` | 4–6 crypto-specific cards | `kicker`, `title`, `body`, HTTPS `url`, `publishedOn` |
 | `futuresModule.stories[]` | Exactly 3 current Futures catalysts | `tag` (24 characters or fewer to preserve the shared label column), `title`, `body`, HTTPS `url`, `publishedOn`, offset-bearing ISO `publishedAt` |
 
-- `publishedOn` is an `America/Chicago` date in `YYYY-MM-DD` format. It must be today or yesterday; scheduled Monday-morning runs may also use Saturday-dated coverage.
+- `publishedOn` is an `America/Chicago` date in `YYYY-MM-DD` format. It must be today or yesterday; Monday-morning editions may also use Saturday-dated coverage. Session-bound Futures stories may retain the active fetched market-session date when a weekend or holiday manual edition has no newer U.S. session.
 - Futures `publishedAt` must be verified and inside the active session window. Morning stories run from the shared fetched `futuresModule.futures[].raw.referenceDate` close (4:00 PM Eastern) through the dashboard run time. Afternoon stories run from 9:30 AM Eastern through the earlier of 4:00 PM Eastern or the dashboard run time.
 - Do not duplicate a promoted Futures story’s URL or title in `stories[]`. Keep crypto-specific headlines, ETF flows, proxy equities, stablecoins, token/regulation, and protocol/security coverage in `crypto.notes[]` unless explicitly requested for the main news flow.
 - `isNewSinceScheduledUpdate` is generated from the scheduled baseline; do not set it by hand.
+- Publication-date freshness is the same for scheduled and manual editions. Their difference is baseline handling: manual runs preserve the baseline and its current New pills, while scheduled runs advance it after successful finalization.
 
 ### Story selection policy
 
@@ -144,10 +178,13 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 
 Use this reference only when the deterministic orchestrator fails and a documented manual fallback is necessary. Do not use it as an alternate daily workflow.
 
+For a pre-close Market Lens-only repair, use the same complete review-manifest shape with `node scripts/run_daily_update.js --apply-market-lens-json /path/to/editorial-review.json` and the applicable window flags. This changes `days[].marketLens` and `days[].marketLensSource`, re-derives any affected deterministic lifecycle view, applies edition metadata, optionally advances the scheduled baseline, restamps `editionId`, and embeds a new hash-bound `editorialReview` receipt. At `close_available`, reaction tickers are frozen; edit `days[].outcome` through the normal dashboard-data editorial apply path instead.
+
 ### One-off fetch commands
 
 - For an ad hoc stock/ETF quote check, use `node scripts/fetch_chart_data.js --input daily_financial_news.html`; quote rows are derived from the canonical chart series used by the dashboard.
-- Individual staging fetchers are `node scripts/fetch_chart_data.js`, `node scripts/fetch_crypto_stats.js`, `node scripts/fetch_asset_allocation.js`, `node scripts/fetch_week_ahead.js`, and `node scripts/fetch_futures_module.js --session` for afternoon Session Futures.
+- Individual staging fetchers are `node scripts/fetch_chart_data.js`, `node scripts/fetch_crypto_stats.js`, `node scripts/fetch_asset_allocation.js`, and `node scripts/fetch_week_ahead.js`; use `node scripts/fetch_chart_data.js futures --session` for afternoon Session Futures.
+- To apply a staged crypto-stat repair, run `node scripts/run_daily_update.js --apply-crypto-stats-json generated/crypto_stats.json`; `fetch_crypto_stats.js` never edits dashboard HTML.
 
 ### Price-source hierarchy
 
@@ -185,18 +222,18 @@ Static dashboard validation does not prove that the already-running local helper
 
 ### Required daily checks
 
-- Run `node scripts/validate_dashboard.js daily_financial_news.html`. It enforces dates, News-card freshness, embedded-data text hygiene, Tape note quality, and the runtime's LAN-only refresh endpoint contract. Treat a Futures News-card contract failure as a hard stop; do not finish a scheduled update with `--skip-validate`.
-- Run `git diff --check`.
-- Confirm that only intended files changed. `./scripts/publish_main.sh` runs dashboard validation again before it pushes.
+- Before committing a content-only update, run `node scripts/validate_dashboard.js readiness --skip-tests --allow daily_financial_news.html`. Repeat `--allow PATH` for every intentionally changed file. This requires a current editorial receipt, validates the dashboard and HTML, checks whitespace, and rejects undeclared changed files.
+- Run `node scripts/validate_dashboard.js daily_financial_news.html` for an ordinary non-publish readiness check. It enforces dates, Week Ahead and Earnings lifecycle/reaction coherence, News-card freshness, embedded-data text hygiene, Tape note quality, superlative verification, and the runtime's LAN-only refresh endpoint contract.
+- `./scripts/publish_main.sh` runs the complete readiness validation, including the full regression suite, before it pushes. A missing or stale editorial receipt is a hard stop.
 
 ### Expanded content and layout checks
 
 Run the applicable checks after content, structural, layout, script, or contract changes:
 
-- Superlative-claim gate: `rg -n "record|all-time|fresh high|new high|record close|record low" daily_financial_news.html`
-- Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. Browser-check the Week Ahead section after changing an editorial `marketLens` for readability and overflow.
+- Superlative claims are rejected deterministically unless the review manifest lists the exact containing text and an HTTPS evidence URL in `verifiedClaims[]`.
+- Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. After changing Market Lens or Outcome copy, reactions, or routing, check narrow mobile and desktop widths for readability and overflow; activate pre-close and post-close reaction controls with pointer and keyboard; verify the correct Tape group, ticker, and chart open; verify focus moves to the chart heading; and verify repeated activation leaves that chart open.
 - After changing the Tape local-refresh indicator, browser-check its hover and keyboard-focus tooltip with the helper live and unavailable at narrow mobile, tablet, and desktop widths. The tooltip must remain inside the viewport and each state must remain legible.
-- Run `./scripts/test_all.sh` after script or data-contract changes. It checks tracked JavaScript and shell syntax, the LaunchAgent plist, all four test routines, the canonical embedded dashboard contracts, HTML structure, and whitespace errors. It is self-contained and does not require ignored `generated/` artifacts or network access.
+- Run `node scripts/validate_dashboard.js test` after script or data-contract changes. It checks tracked JavaScript and shell syntax, the LaunchAgent plist, all four test routines, the canonical embedded dashboard contracts, HTML structure, and whitespace errors. It is self-contained and does not require ignored `generated/` artifacts or network access.
 - The complete command does not replace the browser checks above: test and validation routines cannot prove responsive geometry, focus behavior in a real browser, or visual readability.
 
 ### Commit and publish
@@ -207,11 +244,12 @@ Run the applicable checks after content, structural, layout, script, or contract
 
 ## Appendix: Data contracts
 
-This section is the canonical human-readable contract for dashboard data. Keep `scripts/validate_dashboard.js`, `scripts/validate_chart_data.js`, and fetch-script output in sync with this section whenever a payload shape changes.
+This section is the canonical human-readable contract for dashboard data. Keep `scripts/validate_dashboard.js` and fetch-script output in sync with this section whenever a payload shape changes. Use its `chart-data` mode for standalone generated chart payloads.
 
 ### Embedded `dashboard-data`
 
-- `editionId`: ISO timestamp identifying the exact embedded dashboard edition. Bump it every time helper scripts rewrite `dashboard-data`; local-refresh cache keys must use this field rather than inferring identity from the visible date/ticker shape.
+- `editionId`: ISO timestamp identifying the exact embedded dashboard edition. `run_daily_update.js` bumps it every time it rewrites `dashboard-data`; local-refresh cache keys must use this field rather than inferring identity from the visible date/ticker shape.
+- `editorialReview`: publication receipt with `schemaVersion`, `reviewedAt`, `reviewedBaseEditionId`, matching `reviewedEditionId`, all required `sections[]`, one summarized `marketLensDecisions[]` entry per event day, optional `verifiedClaims[]`, and a SHA-256 `payloadHash`. The hash covers the complete embedded `dashboard-data` payload except the receipt itself plus the complete embedded `chart-data` payload. Any direct or orchestrated data/chart rewrite therefore invalidates the receipt; only an explicit editorial apply command with a matching one-time `baseEditionId` creates it.
 - `masthead`: visible header metadata. `masthead.date` must be the dashboard date. `masthead.edition` must match the Futures session: `Morning Edition` for `Before The Open` / `Pre-Market Futures`, or `Afternoon Edition` for `After The Bell` / `Session Futures`. Use `editionId` for exact build/revision identity rather than a visible serial number.
 - `opening`: market-open summary with `headline`, `deck`, and exactly four `catalysts[]` items.
 - `futuresModule`: the four-card futures module and promoted Futures news. Use `sectionLabel`/`sectionTitle` to distinguish morning `Before The Open` / `Pre-Market Futures` from afternoon `After The Bell` / `Session Futures`; see the News-card contract for story rules.
@@ -219,10 +257,88 @@ This section is the canonical human-readable contract for dashboard data. Keep `
 - `assetAllocationPortfolio`: instrument-level ETF market data and sanitized portfolio-level summary fields only. Do not embed tactical model logic or derived allocation calculations.
 - `stories`: broad-market, non-crypto news cards; see the News-card contract.
 - `newsBaseline`: embedded scheduled-update comparison state for the News Flow and Crypto `New` pills. `currentScheduledStoryIds` stores the most recent scheduled run's `stories[]` and `crypto.notes[]` identities, while `previousScheduledStoryIds` is the comparison set used to keep manual runs from consuming scheduled newness. `lastScheduledWindow` is the completed `YYYY-MM-DD:morning|afternoon` marker checked by the next scheduled preflight.
+- `scripts/news_contract.js` owns the pure story-identity, URL normalization, baseline normalization, and New-pill transition rules. `run_daily_update.js` decides when to apply those rules and remains the sole dashboard writer; `validate_dashboard.js` independently verifies the resulting news contract.
 - `crypto`: crypto section metadata, crypto-only stat rows, and crypto story notes. Crypto ticker quote rows do not live here.
-- `earnings.week`: canonical five-trading-day earnings monitor payload. Its range is Monday-Friday after the Monday-morning refresh, or Friday plus next Monday-Thursday after the Friday-afternoon refresh; see Appendix: Earnings operations.
-- `weekAhead`: a five-trading-day deterministic economic-event ledger. `range.timeZone` is the dashboard display zone (`America/Chicago`) and `range.marketTimeZone` is the stored U.S. release zone (`America/New_York`). Its range is Monday-Friday after Monday morning, or current Friday plus next Monday-Thursday after Friday afternoon. Each event contains a stable ID, Eastern `time`, canonical name, agency, period, local impact classification, nullable FXMacroData `actual`, `forecast`, and `previous` values, plus `forecastType`, `forecastSource`, `scheduleSource`, `valueSource`, and `verification`. FXMacroData predictions match official releases by indicator and exact Eastern date/time; the matched prediction's `announcement_id` then links its forecast to the corresponding FXMacroData actual. `consensus` forecasts display without a badge, `nowcast` forecasts show a `Nowcast` pill, and FXMacroData blended `model` forecasts show a `Model` pill. `officialSchedule.events[]` is the embedded authoritative manifest; validation requires every covered release and variant at its official date and time. `officialSchedule.authorities[]` records the source calendars. The maintained BLS/EIA/FOMC schedules require an annual renewal before their coverage year ends. `days[].marketLens` is present only when the day has covered events; it is a generated fallback from the highest-impact covered event. Replace it only with a current, verified editorial setup that explains the release's transmission path and conditional market consequence; set `days[].marketLensSource` to `editorial` to preserve that override for the matching calendar date. `generated/week_ahead.json` is staging/cache only and is never fetched by the published dashboard.
+- `earnings.week`: canonical `schemaVersion: 2` five-trading-day earnings monitor payload. Its range is Monday-Friday after the Monday-morning refresh, or Friday plus next Monday-Thursday after the Friday-afternoon refresh. Every row uses the shared event lifecycle `scheduled`, `awaiting_actual`, `released_awaiting_close`, or `close_available`; see Appendix: Earnings operations.
+- `weekAhead`: a five-trading-day deterministic economic-event ledger with `schemaVersion: 4`. `range.timeZone` is the dashboard display zone (`America/Chicago`) and `range.marketTimeZone` is the stored U.S. release zone (`America/New_York`). Its range is Monday-Friday after Monday morning, or current Friday plus next Monday-Thursday after Friday afternoon. Each event contains a stable ID, Eastern `time`, canonical name, agency, period, local impact classification, nullable FXMacroData `actual`, `forecast`, and `previous` values, source fields, deterministic `status` (`scheduled`, `awaiting_actual`, or `released`), and a nullable unit-compatible `surprise`. Each event day with releases has lifecycle `scheduled`, `awaiting_actual`, `released_awaiting_close`, or `close_available`. `marketReaction` is present only at `close_available` and stores the event-day close versus previous-trading-day close for the Market Lens transmission tickers. `outcome` is editorial, is allowed only at `close_available`, and must contain `source: "editorial"`, `title`, and `body` before publication. FXMacroData predictions match official releases by indicator and exact Eastern date/time; the matched prediction's `announcement_id` then links its forecast to the corresponding FXMacroData actual. `officialSchedule.events[]` is the embedded authoritative manifest; validation requires every covered release and variant at its official date and time. `days[].marketLens` remains the deterministic transmission map and ticker selector, but the renderer replaces its forward-looking copy with Outcome & Close Reaction after the close. `generated/week_ahead.json` is staging/cache only and is never fetched by the published dashboard.
 - `footer`: compile date and concise source-family attribution.
+
+### `weekAhead.days[].marketLens`
+
+Every lens contains `question`, `relatedEventIds`, `channels`, one to three `reactions[]`, `title`, and `body`. Each reaction contains a canonical Tape `ticker` and a concise `role`; the visible ticker control opens that exact embedded Tape chart. Its parent day must set `marketLensSource` to `generated` or `editorial`; the apply command derives this field from the decision action. Validation requires every channel to be supported by a related release, every reaction ticker to be eligible for a selected channel, and every reaction ticker to exist in both `tape.rows[]` and `chart-data.series[]`. The legacy `watchlist` field and aliases such as `2Y`, `10Y`, `DXY`, `QQQ`, `XLY`, `XLE`, `WTI`, and `Energy` are not accepted.
+
+Generated lenses use only ordinary default transmission and must not claim a current setup or scenario analysis. The canonical default paths are:
+
+| Path | Release families | Transmission | Default reactions |
+| --- | --- | --- | --- |
+| `consumer-inflation` | Consumer Price Index, Core Consumer Price Index, PCE Price Index, Core PCE Price Index | Consumer prices to expected policy path | `UST2Y`, `UUP` |
+| `producer-inflation` | Producer Price Index, Core Producer Price Index | Producer costs to inflation-sensitive rates | `UST2Y`, `UST10Y` |
+| `labor` | Nonfarm Payrolls, Unemployment Rate, Average Hourly Earnings, ADP Employment Change, Initial Jobless Claims, JOLTS Job Openings | Labor demand to policy and growth | `UST2Y`, `SPX` |
+| `consumer-demand` | Retail Sales, Core Retail Sales, Consumer Confidence, University of Michigan Sentiment | Household demand to growth and rates | `VCR`, `UST10Y` |
+| `broad-growth` | Gross Domestic Product | Aggregate growth to earnings and rates | `SPX`, `UST10Y` |
+| `manufacturing` | Durable Goods Orders, Industrial Production, Factory Orders, ISM Manufacturing, Empire State Manufacturing, Philadelphia Fed Manufacturing | Factory activity to cyclicals and materials | `VIS`, `HG` |
+| `services` | ISM Services | Services activity to growth and policy | `SPX`, `UST2Y` |
+| `housing` | Housing Starts, Building Permits, Existing Home Sales, New Home Sales | Financing costs to housing activity | `UST10Y`, `VNQ` |
+| `policy` | FOMC Minutes, Federal Reserve Decision | Fed communication to the Treasury curve | `UST2Y`, `UST10Y` |
+| `energy` | EIA Crude Oil Inventories, OPEC Meeting | Supply conditions to crude and energy equities | `CL`, `VDE` |
+| `external` | Trade Balance | External balance to the dollar | `UUP` |
+| `fiscal` | Federal Budget Balance | Fiscal balance to Treasury financing context | `UST10Y`, `UST30Y` |
+
+Default reactions are the generated lens choices. Editorial reactions may use any canonical symbol eligible for at least one selected channel:
+
+| Channel | Eligible canonical Tape reactions |
+| --- | --- |
+| `policy-path` | `UST2Y`, `UST10Y`, `UUP`, `NDX` |
+| `consumer-inflation` | `UST2Y`, `UST10Y`, `UUP`, `NDX` |
+| `producer-inflation` | `UST2Y`, `UST10Y`, `VDE` |
+| `labor-demand` | `UST2Y`, `SPX`, `HYG`, `UUP` |
+| `consumer-demand` | `VCR`, `SPX`, `UST10Y` |
+| `broad-growth` | `SPX`, `UST10Y`, `HYG` |
+| `industrial-growth` | `VIS`, `HG`, `UST10Y`, `HYG` |
+| `services-activity` | `SPX`, `UST2Y`, `UUP` |
+| `housing` | `UST10Y`, `VNQ`, `HG` |
+| `energy-balance` | `CL`, `VDE`, `UST10Y` |
+| `external-balance` | `UUP`, `VEA` |
+| `fiscal-financing` | `UST10Y`, `UST30Y`, `UUP` |
+
+An editorial lens adds `setup.statement`, one or more typed `setup.evidence[]` references, and `scenarios.reinforces` plus `scenarios.challenges`. Evidence may reference `opening.headline` or `opening.deck`, a canonical Tape ticker, or a story URL already embedded in the dashboard. `relatedEventIds` may cross default paths when all selected releases materially support one coherent daily market question. The reaction symbols must follow from the written transmission path rather than being selected as decoration.
+
+A generated manifest already supplies the wrapper and dates. The AI either sets an entry to `"retain-generated"` or supplies a replacement in this shape:
+
+```json
+{
+  "date": "2026-07-15",
+  "action": "replace",
+  "marketLens": {
+    "question": "Is the oil shock becoming a durable inflation impulse?",
+    "setup": {
+      "statement": "Crude has retreated, but shipping and supply risks remain an active inflation concern.",
+      "evidence": [
+        { "kind": "opening", "field": "deck" },
+        { "kind": "tape", "ticker": "CL" }
+      ]
+    },
+    "relatedEventIds": ["2026-07-15:08:30:ppi-mom", "2026-07-15:10:30:crude-oil-inventories"],
+    "channels": ["producer-inflation", "energy-balance"],
+    "scenarios": {
+      "reinforces": "Firmer producer prices and tighter inventories would reinforce the oil-to-inflation channel.",
+      "challenges": "Softer producer prices or an inventory build would weaken that channel."
+    },
+    "reactions": [
+      { "ticker": "CL", "role": "Underlying crude-balance reaction" },
+      { "ticker": "UST2Y", "role": "Expected-policy-path consequence" }
+    ],
+    "title": "Oil risk reframes producer inflation",
+    "body": "PPI tests whether higher energy costs are reaching the production pipeline while EIA inventories test the underlying crude balance."
+  }
+}
+```
+
+The apply command requires exactly one decision for every current event day and review of every required editorial section. A malformed decision, stale event ID, missing evidence reference, noncanonical reaction ticker, missing chart, incomplete section declaration, or unverified superlative rejects the operation instead of partially altering Week Ahead.
+
+### `weekAhead.days[].outcome`
+
+`outcome` replaces the visible forward-looking Market Lens only when the day reaches `close_available`. It contains editorial `title` and `body` fields plus `source: "editorial"`. The copy should synthesize all released facts on that day, distinguish the actual-versus-forecast result from the session response, and avoid asserting exclusive causality. Deterministic `marketReaction.rows[]` remain derived from the preselected Market Lens tickers and store each ticker's event-day and previous-trading-day closes, delta, percent change, unit, direction, role, and chart date. The renderer omits flat rows and orders visible movers by absolute movement; it does not select unrelated Tape winners after the fact, and post-close decisions cannot replace the preselected ticker set. A changed actual, forecast, previous value, provenance field, or closing bar invalidates the prior outcome and requires a new afternoon editorial pass.
 
 ### `tape.rows[]`
 
@@ -286,13 +402,14 @@ Crypto section data has this contract:
 
 ### `futuresModule`
 
-- `futuresModule.futures[]` must contain exactly four index-futures rows.
+- The staged Futures payload is owned and validated by `fetch_chart_data.js`: it requires an offset-bearing compile timestamp, source, `premarket` or `session` mode, and exactly the ordered `ES=F`, `NQ=F`, `YM=F`, and `RTY=F` rows with chart-ready values. The updater consumes this accepted payload without redefining its domain rules.
+- Embedded `futuresModule.futures[]` must contain exactly four index-futures rows; final dashboard validation enforces this independently of producer validation.
 - Morning `Pre-Market Futures` rows chart the overnight Globex window from the prior futures reopen through the latest morning tick.
 - Afternoon `Session Futures` rows chart the regular market window, normally 9:30 AM to 4:00 PM Eastern, and compare the latest regular-session futures value with the prior trading day's official 4:00 PM Eastern futures close.
 - Dashboard display times should be local, but raw official session labels and fields must be stored in Eastern terms: `marketTimeZone: "America/New_York"`, `sessionStartEastern`, `sessionEndEastern`, `referenceCloseEastern`, and `referenceLabel: "prior 4 PM ET close"`.
 - `raw.referencePrice` is the comparison baseline used for Session Futures chart/reference calculations. Keep `raw.previousClose` as the source's futures prior close when available.
 - Morning update labels are `Before The Open` / `Pre-Market Futures`; its charts cover the overnight Globex session from the prior futures reopen, normally 5:00 PM Central / 6:00 PM Eastern, through the latest morning tick.
-- Afternoon update labels are `After The Bell` / `Session Futures`; its charts cover regular market hours, normally 8:30 AM to 3:00 PM Central / 9:30 AM to 4:00 PM Eastern. Store the official comparison fields in Eastern terms and use `node scripts/fetch_futures_module.js --session` for this session payload.
+- Afternoon update labels are `After The Bell` / `Session Futures`; its charts cover regular market hours, normally 8:30 AM to 3:00 PM Central / 9:30 AM to 4:00 PM Eastern. Store the official comparison fields in Eastern terms and use `node scripts/fetch_chart_data.js futures --session` for this session payload.
 - Futures-story requirements, including the strict publication window, live in the News-card contract. Holiday or unusual-session updates should use the closest accurate window label and explain the shortened or closed cash-market context in `footer.compiled`.
 
 ### Embedded `chart-data`
@@ -312,19 +429,21 @@ The `chart-data` block is generated chart history plus quote-row staging data:
 
 ## Appendix: Earnings operations
 
-The richer earnings monitor uses this contract as the canonical deterministic method. The production dashboard consumes the canonical earnings week payload from embedded `dashboard-data.earnings.week`; provider sidecars are build-time inputs only. The goal is to let providers collect data and let AI write concise interpretation only after the numeric facts are fixed.
+The richer earnings monitor uses this contract as the canonical deterministic method. The production dashboard consumes the canonical earnings week payload from embedded `dashboard-data.earnings.week`; provider sidecars are build-time inputs only. AI commentary must describe the current deterministic stage: preview commentary may accompany scheduled rows and remains through `released_awaiting_close`, while post-event interpretation is required only after the close response is fixed.
 
 ### Source hierarchy
 
 1. Finnhub primary: calendar slate, company profile, market cap, timing, EPS estimate, EPS actual, revenue estimate, and revenue actual when Finnhub has the row.
 2. Finnhub profile recovery: fetch `profile2` with retry/backoff for 429s and cache successful profiles in `generated/finnhub_profile_cache.json`; if live `profile2` still rate-limits or fails transiently, use the cached profile with audit flags. If Finnhub has the earnings row but profile identity is still empty, use Finnhub `stock/metric` only for market cap and EarningsAPI calendar only for company name. Successful Finnhub metric market caps are cached in `generated/finnhub_metric_cache.json` to reduce repeated rate-limit exposure. EPS, revenue, timing, and slate still remain Finnhub.
-3. EarningsAPI secondary: missing ticker/date discovery and row-level specifics only for Finnhub-missing display candidates. Use the EarningsAPI company endpoint for row specifics; treat the EarningsAPI calendar endpoint as discovery only except for the profile-empty company-name recovery above.
+3. EarningsAPI secondary: active-week date corroboration plus missing ticker/date discovery during the Monday, Friday, or explicitly requested manual five-day slate build. Use the EarningsAPI company endpoint for row-level specifics only for Finnhub-missing display candidates; the calendar endpoint may also supply company-name recovery for a Finnhub-covered row whose Finnhub profile is empty.
 4. SEC/company release resolution: official actuals, fiscal-period confirmation, timing when needed, and EPS basis notes for queued company-release tasks.
 5. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
 
-Do not use metered EarningsAPI calls to audit every Finnhub-covered row. EarningsAPI is limited to Finnhub-missing display candidates plus the narrow company-name recovery for Finnhub-covered rows whose Finnhub profile is empty. EarningsAPI must never override a Finnhub-covered row's EPS, revenue, timing, or slate.
+Do not use metered EarningsAPI calls during result refreshes, validation, tests, or source-code audits. A weekly slate build may scan the five displayed dates once to corroborate Finnhub dates and discover Finnhub-missing candidates; company-endpoint calls remain limited to those missing candidates. The narrow calendar-based company-name recovery for a Finnhub-covered row with an empty Finnhub profile does not transfer ownership of its EPS, revenue, timing, or slate to EarningsAPI.
 
 ### Canonical row shape
+
+The earnings-week payload uses `schemaVersion: 2`. Every canonical row carries the same deterministic lifecycle vocabulary as Week Ahead: `scheduled`, `awaiting_actual`, `released_awaiting_close`, or `close_available`.
 
 ```json
 {
@@ -332,6 +451,7 @@ Do not use metered EarningsAPI calls to audit every Finnhub-covered row. Earning
   "company": "General Mills, Inc.",
   "reportDate": "2026-07-01",
   "reportTiming": "bmo",
+  "lifecycle": "close_available",
   "fiscalYear": 2026,
   "fiscalQuarter": 4,
   "marketCap": 21000000000,
@@ -385,15 +505,18 @@ Do not use metered EarningsAPI calls to audit every Finnhub-covered row. Earning
 }
 ```
 
-Allowed `reportTiming` values are `bmo`, `amc`, `dmh`, and `unknown`. Allowed metric `result` values are `beat`, `miss`, `met`, `not_compared`, and `pending`. Allowed `outcome.overall` values are `beat`, `miss`, `mixed`, `met`, `eps_only_beat`, `eps_only_miss`, `pending`, and `unverified`. Allowed `reaction.basis` values are `same_day_close`, `next_session_close`, `during_market_close`, and `unavailable`. Allowed `reaction.status` values are `computed`, `unavailable`, and `pending`. Allowed `sourceSummary.primary` values are `finnhub`, `earningsApiCompany`, and `sec_company_release`. The dashboard consumes this canonical row contract directly and derives display labels, tones, and compact metric text at render time. The source artifact keeps field-level selected sources in `sourceAudit`; dashboard-visible provenance uses compact `sourceSummary` plus `sourceStatus`. Audit snapshots should preserve provider identity by section name, but metric values still use canonical `eps` and `revenue` objects rather than provider field names.
+Allowed `reportTiming` values are `bmo`, `amc`, `dmh`, and `unknown`. Allowed lifecycle values are `scheduled`, `awaiting_actual`, `released_awaiting_close`, and `close_available`. Allowed metric `result` values are `beat`, `miss`, `met`, `not_compared`, and `pending`. Allowed `outcome.overall` values are `beat`, `miss`, `mixed`, `met`, `eps_only_beat`, `eps_only_miss`, `pending`, and `unverified`. Allowed `reaction.basis` values are `same_day_close`, `next_session_close`, `during_market_close`, and `unavailable`. Allowed `reaction.status` values are `pending`, `awaiting_close`, `computed`, and `unavailable`; `unavailable` is reserved for a reported row whose reaction window cannot be resolved, not a close that simply has not happened yet. Allowed `sourceSummary.primary` values are `finnhub`, `earningsApiCompany`, and `sec_company_release`. The dashboard consumes this canonical row contract directly and derives display labels, tones, and compact metric text at render time. The source artifact keeps field-level selected sources in `sourceAudit`; dashboard-visible provenance uses compact `sourceSummary` plus `sourceStatus`. The existing company-row information tooltip appears for exceptional or degraded provenance: `official_confirmed` names the confirming IR source and `primary_only` explains that Finnhub is being used without secondary verification; an ordinary verified `corroborated` row has no tooltip. Audit snapshots should preserve provider identity by section name, but metric values still use canonical `eps` and `revenue` objects rather than provider field names.
 
 ### EarningsAPI budget policy
 
 - Treat the monthly quota as a scarce secondary-recovery budget, not a primary data source.
-- During a weekly build, query EarningsAPI calendar across the active week plus a bounded seven-day lookback and 28-day lookahead for date corroboration. This scan never runs during ordinary result refreshes.
+- During a weekly build, query EarningsAPI calendar only for the five displayed trading dates. This scan never runs during ordinary result refreshes or source-code verification.
 - Query EarningsAPI company rows only for Finnhub-missing display candidates.
 - Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
 - Keep a monthly call counter and stop optional calls before the limit. Preserve reserve capacity for urgent secondary-recovery checks.
+- `scripts/earnings_week_contract.js` owns the shared earnings row policy, narrative-completion and sidecar-building policy, staged-slate rebuild decisions, schedule-review applicability and confirmation-error policy, Finnhub calendar-field normalization, EarningsAPI month-bucket and request-audit mechanics, Yahoo reaction rules, and company-release task construction. Build retains optional skip/fallback policy, while result refresh retains required-call and unreadable-ledger failure policy. `run_daily_update.js` only coordinates reading and writing the narrative sidecar.
+- `scripts/earnings_week.js` is the only public Earnings CLI and module owner. It owns refresh, resolution, and apply commands and coordinates the staging files used by the contract decisions imported by the updater. `scripts/earnings_week_build.js` is its private build implementation and must not be invoked directly.
+- `scripts/earnings_week_validation.js` is the private validation implementation. Use `node scripts/earnings_week.js validate` or `validate-release`; do not invoke the implementation file directly.
 
 ### Update methodology
 
@@ -405,41 +528,44 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
 2. Fetch Finnhub earnings calendar for the selected five trading days.
 3. Fetch Finnhub profiles for Finnhub rows and filter display eligibility by market cap, country/exchange/profile quality, and watchlist rules.
 4. If Finnhub fails, returns zero usable rows, or returns fewer than the configured minimum usable rows, fail closed instead of promoting a secondary source into the whole slate. The default minimum is `max(1, weekdays * 2)`, so the normal Monday-Friday strip requires at least 10 Finnhub rows before any EarningsAPI secondary-recovery calls. Use `--min-finnhub-rows 1` only for intentional holiday-week or diagnostic runs.
-5. Fetch EarningsAPI calendar across the active week plus a bounded seven-day lookback and 28-day lookahead. Use only active-week rows for secondary recovery; use the wider scan solely to corroborate report dates.
-6. Every displayed calendar row needs date verification. A Finnhub row passes with one matching EarningsAPI date; any provider-date disagreement—whether within or outside the active five-trading-day range—or a missing secondary match queues the row in `generated/earnings_schedule_review.json`. An EarningsAPI-only recovery row also queues there because it has no independent calendar corroboration. The dashboard update stops until an official IR confirmation is supplied. Nasdaq is audit-only in this flow; it does not choose a date over the official company source.
-7. An official confirmation row must contain `symbol`, `reportDate`, `sourceName`, and an HTTPS `sourceUrl`. If its date is in the active week, the canonical row moves to that date; if it is outside the active week, the row is excluded. After adding or changing a confirmation, rebuild the active week with `node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD`, then rerun the deterministic orchestrator.
+5. Fetch EarningsAPI calendar only for the five displayed trading dates and stop the scan after a quota-related HTTP 429. Production calendar builds belong only to the Monday-morning or Friday-afternoon rollover, including an explicitly requested manual rollover; regression and source-code verification use fixtures and must never run this metered build for evidence.
+6. Reconcile providers before consulting IR. A Finnhub row with one matching EarningsAPI date passes as `corroborated` even if an older confirmation exists. An in-week disagreement or a symbol missing from a complete five-date response requires official IR resolution through `generated/earnings_schedule_review.json`. If the secondary calendar is unavailable or incomplete, a matching event-scoped IR record may promote the row to `official_confirmed`; without one, retain the Finnhub row with `scheduleVerification.status: "primary_only"` and `sourceStatus: "partial"` instead of blocking or publishing an empty section. An EarningsAPI-only recovery row always requires official IR confirmation because it has no independent calendar corroboration. Nasdaq is audit-only in this flow; it does not choose a date over the official company source. If the primary Finnhub slate fails its minimum-coverage gate, do not replace the last valid Earnings section.
+7. An official confirmation row must contain `symbol`, `primaryDate`, `reportDate`, `sourceName`, and an HTTPS `sourceUrl`. `primaryDate` binds the evidence to the specific provider event that triggered review, so an old confirmation for the same ticker cannot affect a later quarter. If the official `reportDate` is in the active week, the matching event moves to that date; if it is outside the active week, only that matching event is excluded. After adding or changing a confirmation, rebuild the active week with `node scripts/earnings_week.js build --from YYYY-MM-DD --to YYYY-MM-DD`, then rerun the deterministic orchestrator.
 8. For Finnhub rows, fetch `profile2` with 429 retry/backoff and use `generated/finnhub_profile_cache.json` only after live profile fetches fail or rate-limit. For rows with empty Finnhub profile data after that, read cached Finnhub `stock/metric` market cap first, then fetch the metric endpoint with conservative retry/backoff if uncached; use the matching EarningsAPI calendar row for company name only. This may make a Finnhub-covered row display-eligible, but it must not change Finnhub EPS, revenue, timing, or outcome.
 9. Compare active-week EarningsAPI-discovered symbols against the corroborated Finnhub slate. Queue only symbols absent from Finnhub as `secondaryRecoveryCandidates`; same-symbol date conflicts must collapse to one audited canonical row, not duplicate recovery rows.
 10. For each queued candidate, fetch the EarningsAPI company endpoint and select the row matching the report date. Use that row for EPS/revenue estimates and actuals only after the date is consistent.
 11. Persist the staged `generated/earnings_week.json` with the verified slate, estimates, timing, profile fields, recovery candidates, and source audit. This artifact becomes the input for later result refreshes and must be validated before embedding.
 
-`earnings_schedule_confirmations.json` uses this local generated-artifact shape:
+`earnings_schedule_confirmations.json` uses this local generated-artifact shape (illustrative values):
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "rows": [{
-    "symbol": "H",
+    "symbol": "EXM",
+    "primaryDate": "2026-07-29",
     "reportDate": "2026-07-30",
-    "sourceName": "Hyatt investor relations",
-    "sourceUrl": "https://investors.hyatt.com/"
+    "sourceName": "Example Corp Q2 earnings-date announcement",
+    "sourceUrl": "https://investors.example.com/news/2026-q2-earnings-date"
   }]
 }
 ```
+
+`sourceUrl` is an audit pointer captured when the event-scoped confirmation is recorded, not a published-dashboard dependency or a requirement that the page remain available indefinitely. Prefer a durable SEC/EDGAR filing when it contains the announcement; otherwise use the relevant official company IR announcement or event page. Offline validation proves the record's structure and its binding to the current symbol and `primaryDate`; it does not fetch, authenticate, or preserve the remote source contents, and a later broken link does not invalidate an already recorded confirmation.
 
 #### Post-report result refresh
 
 1. Run `node scripts/earnings_week.js refresh` against the existing staged `generated/earnings_week.json`; outside the Friday-afternoon and Monday-morning rollover windows, do not rebuild the slate.
 2. Select only rows whose report timing has arrived or passed, plus unresolved rows with `companyReleaseTasks`.
 3. Refresh actual EPS/revenue from the row's primary deterministic source: Finnhub for Finnhub-covered rows, EarningsAPI company endpoint for previously recovered EarningsAPI rows, and SEC/company release only for official resolution tasks. Do not call EarningsAPI calendar in this phase.
-4. Create `companyReleaseTasks` only for recovered rows with missing actuals or missing timing, or for an arrived Nasdaq-resolved provider-date conflict whose actuals remain unavailable. Do not use company-release resolution to recover analyst estimates.
-5. Resolve `companyReleaseTasks` against SEC/company release into `earnings_company_release_resolutions.json` with `node scripts/earnings_week.js resolve`. Besides secondary-recovery rows, a row with a Nasdaq-resolved provider-date conflict escalates here once its report window has arrived and provider actuals remain unavailable; retain its Finnhub estimates for comparison.
+4. Create `companyReleaseTasks` only for recovered rows with missing actuals or missing timing, or for an arrived provider-date conflict or official IR-confirmed redate whose actuals remain unavailable. Do not use company-release resolution to recover analyst estimates.
+5. Resolve `companyReleaseTasks` against SEC/company release into `earnings_company_release_resolutions.json` with `node scripts/earnings_week.js resolve`. Besides secondary-recovery rows, an arrived provider-date conflict or official IR-confirmed redate escalates here when provider actuals remain unavailable; retain Finnhub estimates for comparison.
 6. Apply resolved company-release facts back into the staged `generated/earnings_week.json` rows with `node scripts/earnings_week.js apply-release`. The dashboard should not merge the sidecar at render time.
 7. Compute EPS and revenue beat/miss mechanically from numeric estimate and actual values. If revenue estimate is unavailable, produce an EPS-only outcome and mark revenue `not_compared`.
-8. Compute market reaction from Yahoo using timing-aware rules once the needed close is available: BMO/DMH = report-date close vs previous trading-day close; AMC = next trading-day close vs report-date close; unknown = unavailable.
-9. Let AI write only narrative fields such as `outcome.interpretation`, `outcome.guide`, `reaction.note`, `eps.note`, and `revenue.note` into `earnings_narrative.json`, using the verified numeric row plus any official-release guidance text. AI must not invent data, dates, estimates, actuals, or reaction values. If the deterministic refresh stages a newly display-eligible row without complete narrative, it writes the row into the sidecar and defers earnings apply/embed; enrich that sidecar before continuing with steps 10 and 11. A deterministic change to a reported row invalidates its old sidecar copy: the next sidecar sync clears it, requires fresh post-report text, and will not accept a carried-forward preview. For every displayed reported row, `outcome.interpretation` must be one terse, decision-relevant business takeaway (120 characters or fewer)—such as guidance, margins, demand, pricing, segment trends, inventory, costs, or valuation tension—not a restatement of EPS/revenue beats or misses. `outcome.guide` must, in 130 characters or fewer, name a verified quarterly or full-year horizon, or clearly state that no updated/formal guidance was provided; a generic reference to a year is not guidance. Do not repeat the column title as an inline prefix. When management provides both, lead with the next-quarter outlook; add the full-year outlook only when it confirms, qualifies, or contradicts that nearer-term message. For a computed reaction, `reaction.note` must be one terse, driver-focused sentence (100 characters or fewer) that explains what investors are weighing—not repeat the displayed share-price move or close-to-close calculation. When a specific driver cannot be verified, summarize the result detail investors are weighing without asserting unsupported causation.
-10. Apply narrative back into the staged `generated/earnings_week.json` rows with `node scripts/earnings_week.js apply-narrative`. The dashboard should not carry ticker-specific commentary maps.
-11. Embed the validated staging payload into `daily_financial_news.html` with `node scripts/earnings_week.js embed`. The embedded `dashboard-data.earnings.week` then becomes the published payload; the dashboard must not fetch `generated/earnings_week.json` at runtime.
+8. Compute market reaction from Yahoo using timing-aware rules once the needed close is available: BMO/DMH = report-date close vs previous trading-day close; AMC = next trading-day close vs report-date close; unknown = unavailable. Before that close, use `reaction.status: "awaiting_close"`; reserve `unavailable` for a reaction window that cannot be resolved.
+9. During the common editorial phase, let AI write only narrative fields such as `outcome.interpretation`, `outcome.guide`, `reaction.note`, `eps.note`, and `revenue.note` into `generated/editorial/earnings_narrative.json`, using the verified numeric row plus any official-release guidance text. AI must not invent data, dates, estimates, actuals, or reaction values. Preserve pre-event commentary while a reported row is `released_awaiting_close`; the intermediate actual does not invalidate that preview. When the required close response moves the row to `close_available`, or the reaction becomes genuinely unresolvable, editorial preparation clears the preview, requires fresh post-event text, and will not accept the carried-forward copy. For every displayed reported row after that transition, `outcome.interpretation` must be one terse, decision-relevant business takeaway (120 characters or fewer)—such as guidance, margins, demand, pricing, segment trends, inventory, costs, or valuation tension—not a restatement of EPS/revenue beats or misses. `outcome.guide` must, in 130 characters or fewer, name a verified quarterly or full-year horizon, or clearly state that no updated/formal guidance was provided; a generic reference to a year is not guidance. Do not repeat the column title as an inline prefix. When management provides both, lead with the next-quarter outlook; add the full-year outlook only when it confirms, qualifies, or contradicts that nearer-term message. For a computed reaction, `reaction.note` must be one terse, driver-focused sentence (100 characters or fewer) that explains what investors are weighing—not repeat the displayed share-price move or close-to-close calculation. When a specific driver cannot be verified, summarize the result detail investors are weighing without asserting unsupported causation.
+10. Let the normal final apply command merge the bound editorial sidecar into the deterministic Earnings rows in memory. It validates narrative completeness, ignores Earnings mutations in the general dashboard JSON, commits the complete dashboard candidate, and then refreshes the Earnings staging cache. Every deterministic refresh or apply rebuilds the complete embedded `policy` from `buildEarningsWeekPolicy()`; validation rejects any staged or embedded policy that differs from that canonical object.
+11. For an explicit earnings-only repair outside the normal three-phase workflow, first use `node scripts/earnings_week.js apply-narrative`, then run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`. This focused path still requires a fully complete Earnings payload, enforces the matching schedule-review gate, and rebuilds policy from the same canonical owner. `earnings_week.js` never edits dashboard HTML, and the published dashboard must not fetch staging files at runtime.
 
 ### Company-release resolution sidecar
 
@@ -460,13 +586,13 @@ Treat weekly slate construction and post-report result refresh as separate jobs.
     "needsReview": 0,
     "unresolved": 0
   },
-  "outputPath": "/Users/Scott/Projects/Daily Financial Dashboard/generated/earnings_company_release_resolutions.json"
+  "outputPath": "generated/earnings_company_release_resolutions.json"
 }
 ```
 
 The company-release sidecar is not a dashboard runtime input. It must identify the exact staged earnings-week artifact it was derived from with `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`; `node scripts/earnings_week.js validate-release` verifies those fields against the week file before any apply step uses the sidecar. When the current week has no `companyReleaseTasks[]`, refresh removes a stale sidecar and `validate-release` succeeds as not applicable. Every active task must have exactly one matching `companyReleaseResolutions[]` entry. A dashboard-ready `earnings_week.json` with company-release tasks must also include `companyReleaseApply`, every task must be applied with no skipped tasks, and the matching row must contain the applied `sourceAudit.companyReleaseResolution`. SEC/company-release resolution may carry estimates forward only from the EarningsAPI company endpoint for recovered rows, or from Finnhub for a resolved provider-date conflict; never use the EarningsAPI calendar discovery row.
 
-The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`. `node scripts/earnings_week.js apply-narrative` rejects narrative generated from a different staged earnings-week artifact before writing any rows.
+The narrative sidecar uses the same source anchor fields: `sourceArtifact`, `sourceGeneratedAt`, and `sourceRange`. Normal dashboard finalization verifies those anchors against the staged candidate before merging `generated/editorial/earnings_narrative.json`; the focused `node scripts/earnings_week.js apply-narrative` command enforces the same binding before writing staging rows.
 
 ## Appendix: Local refresh server
 
