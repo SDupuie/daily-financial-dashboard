@@ -14,6 +14,7 @@ const {
   computeEarningsWeekCounts,
   earningsRowKey,
   emptyEarningsApiUsage,
+  mergeUnchangedEarningsNarrative,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
 const {
@@ -1461,6 +1462,44 @@ function testNewEarningsNarrativeRowsStagePendingEditorialCompletion() {
   assert.equal(refreshed.payload.rows[0].outcome.interpretation, 'Margins and the forward outlook became the post-report focus.');
 }
 
+function testEarningsNarrativeCarryForwardIsRowScoped() {
+  const row = (symbol) => ({
+    symbol,
+    reportDate: '2026-07-14',
+    reportTiming: 'bmo',
+    lifecycle: 'scheduled',
+    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted', note: `${symbol} preview` },
+    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+    outcome: {
+      overall: 'pending',
+      guide: '',
+      interpretation: `${symbol} demand setup`,
+      interpretationDisposition: { status: 'verified' }
+    },
+    reaction: { status: 'pending', note: '' }
+  });
+  const previous = { rows: [row('AAA'), row('BBB')] };
+  const next = structuredClone(previous);
+  next.rows.push(row('NEW'));
+  for (const item of next.rows) {
+    item.eps.note = '';
+    item.outcome.interpretation = '';
+    delete item.outcome.interpretationDisposition;
+  }
+  next.rows[0].eps.estimate = 1.1;
+  next.rows[0].outcome.interpretation = 'Stale carried preview';
+  next.rows[0].outcome.interpretationDisposition = { status: 'verified' };
+  next.rows[2].outcome.interpretation = 'Unreviewed staging copy';
+  next.rows[2].outcome.interpretationDisposition = { status: 'verified' };
+
+  const merged = mergeUnchangedEarningsNarrative(previous, next);
+  assert.equal(merged.rows[0].outcome.interpretation, '', 'Changed deterministic facts must invalidate only that row.');
+  assert.equal(merged.rows[1].outcome.interpretation, 'BBB demand setup', 'Unchanged neighboring rows must retain reviewed narrative.');
+  assert.equal(merged.rows[1].outcome.interpretationDisposition.status, 'verified');
+  assert.equal(merged.rows[2].outcome.interpretation, '', 'A new row cannot import verified narrative from deterministic staging.');
+  assert.equal(merged.rows[2].outcome.interpretationDisposition, undefined);
+}
+
 
 async function main() {
   testFinnhubPrimaryAcceptance();
@@ -1478,6 +1517,7 @@ async function main() {
   await testResultRefreshFailuresAreRowScoped();
   await testMixedResultRefreshAppliesSuccessfulRows();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
+  testEarningsNarrativeCarryForwardIsRowScoped();
   console.log('Earnings week tests passed.');
 }
 

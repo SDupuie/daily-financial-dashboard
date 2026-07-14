@@ -1097,8 +1097,8 @@ function validateNarrativeApply(errors, data, options = {}) {
 
   const apply = data.narrativeApply;
   if (!isIsoDateTime(apply.generatedAt)) errors.push('narrativeApply.generatedAt must be an ISO timestamp.');
-  if (typeof apply.narrativeArtifact !== 'string' || !/earnings_narrative\.json$/.test(apply.narrativeArtifact)) {
-    errors.push('narrativeApply.narrativeArtifact must identify earnings_narrative.json.');
+  if (typeof apply.narrativeArtifact !== 'string' || !/(?:earnings_narrative|dashboard-data)\.json$/.test(apply.narrativeArtifact)) {
+    errors.push('narrativeApply.narrativeArtifact must identify the editorial dashboard-data or Earnings narrative handoff.');
   }
   if (!Array.isArray(apply.applied) || apply.applied.length === 0) {
     errors.push('narrativeApply.applied must be a non-empty array.');

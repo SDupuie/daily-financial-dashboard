@@ -244,28 +244,24 @@ function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
     currentScheduledStoryIds: []
   };
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
-  try {
-    assert.equal(
-      validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
-      '2026-07-09:morning'
-    );
-    assert.throws(
-      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T14:00:00.000Z')),
-      /outside its America\/Chicago update window/
-    );
-    assert.throws(
-      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-11T12:00:00.000Z')),
-      /only permits weekday runs/
-    );
-    baseline.lastScheduledWindow = '2026-07-09:morning';
-    fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
-    assert.throws(
-      () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
-      /already completed/
-    );
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  assert.equal(
+    validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+    '2026-07-09:morning'
+  );
+  assert.throws(
+    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T14:00:00.000Z')),
+    /outside its America\/Chicago update window/
+  );
+  assert.throws(
+    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-11T12:00:00.000Z')),
+    /only permits weekday runs/
+  );
+  baseline.lastScheduledWindow = '2026-07-09:morning';
+  fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
+  assert.throws(
+    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+    /already completed.*manual\/on-demand/
+  );
 }
 
 

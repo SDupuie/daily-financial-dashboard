@@ -1,6 +1,7 @@
 const {
   compareIsoDate,
-  isIsoDate
+  isIsoDate,
+  isIsoDateTime
 } = require('./calendar_contract');
 
 const EARNINGS_WEEK_SCHEMA_VERSION = 2;
@@ -93,7 +94,127 @@ function narrativeEditorialAttempted(row) {
     row.outcome?.guidanceDisposition?.status,
     row.reaction?.commentaryDisposition?.status
   ].some((status) => status === 'verified');
-  return copy || verified;
+  const unavailable = [
+    row.outcome?.interpretationDisposition,
+    row.outcome?.guidanceDisposition,
+    row.reaction?.commentaryDisposition
+  ].some((disposition) => ['commentary_unavailable', 'unverified'].includes(disposition?.status)
+    && isIsoDateTime(disposition?.attemptedAt)
+    && typeof disposition?.reason === 'string'
+    && disposition.reason.trim());
+  return copy || verified || unavailable;
+}
+
+function completedUnavailableDisposition(disposition, statuses) {
+  return statuses.includes(disposition?.status)
+    && isIsoDateTime(disposition?.attemptedAt)
+    && typeof disposition?.reason === 'string'
+    && disposition.reason.trim();
+}
+
+function narrativeEditorialComplete(row, narrative) {
+  if (!isDisplayEligibleEarningsRow(row)) return true;
+  const interpretation = String(narrative?.outcome?.interpretation || '').trim();
+  const interpretationDisposition = narrative?.outcome?.interpretationDisposition;
+  if (!((interpretationDisposition?.status === 'verified' && interpretation)
+    || completedUnavailableDisposition(interpretationDisposition, ['commentary_unavailable']))) return false;
+
+  const responseAvailable = row?.lifecycle === 'close_available' || row?.reaction?.status === 'unavailable';
+  if (responseAvailable && row?.outcome?.overall !== 'pending') {
+    const guide = String(narrative?.outcome?.guide || '').trim();
+    const guidanceDisposition = narrative?.outcome?.guidanceDisposition;
+    const guidanceComplete = (guidanceDisposition?.status === 'verified' && guide)
+      || guidanceDisposition?.status === 'not_provided'
+      || completedUnavailableDisposition(guidanceDisposition, ['unverified']);
+    if (!guidanceComplete) return false;
+  }
+
+  if (row?.lifecycle === 'close_available') {
+    const reaction = String(narrative?.reaction?.note || '').trim();
+    const reactionDisposition = narrative?.reaction?.commentaryDisposition;
+    if (!((reactionDisposition?.status === 'verified' && reaction)
+      || completedUnavailableDisposition(reactionDisposition, ['commentary_unavailable']))) return false;
+  }
+  return true;
+}
+
+function earningsNarrativeFingerprint(row) {
+  return JSON.stringify({
+    reportDate: row?.reportDate,
+    reportTiming: row?.reportTiming,
+    lifecycle: row?.lifecycle,
+    eps: {
+      estimate: row?.eps?.estimate,
+      actual: row?.eps?.actual,
+      surprisePercent: row?.eps?.surprisePercent,
+      result: row?.eps?.result,
+      basis: row?.eps?.basis
+    },
+    revenue: {
+      estimate: row?.revenue?.estimate,
+      actual: row?.revenue?.actual,
+      surprisePercent: row?.revenue?.surprisePercent,
+      result: row?.revenue?.result
+    },
+    overall: row?.outcome?.overall,
+    reaction: {
+      status: row?.reaction?.status,
+      sessionDate: row?.reaction?.sessionDate,
+      closeDate: row?.reaction?.closeDate,
+      preClose: row?.reaction?.preClose,
+      postClose: row?.reaction?.postClose,
+      percentChange: row?.reaction?.percentChange
+    }
+  });
+}
+
+function preserveEarningsNarrative(row, prior) {
+  const output = structuredClone(row);
+  output.eps = { ...output.eps, note: String(prior?.eps?.note || '') };
+  output.revenue = { ...output.revenue, note: String(prior?.revenue?.note || '') };
+  output.outcome = {
+    ...output.outcome,
+    guide: String(prior?.outcome?.guide || ''),
+    interpretation: String(prior?.outcome?.interpretation || '')
+  };
+  output.reaction = { ...output.reaction, note: String(prior?.reaction?.note || '') };
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (prior?.outcome?.[field] !== undefined) output.outcome[field] = structuredClone(prior.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (prior?.reaction?.commentaryDisposition !== undefined) {
+    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
+  return output;
+}
+
+function clearEarningsNarrative(row) {
+  const output = structuredClone(row);
+  output.eps = { ...output.eps, note: '' };
+  output.revenue = { ...output.revenue, note: '' };
+  output.outcome = { ...output.outcome, guide: '', interpretation: '' };
+  output.reaction = { ...output.reaction, note: '' };
+  delete output.outcome.guidanceDisposition;
+  delete output.outcome.interpretationDisposition;
+  delete output.reaction.commentaryDisposition;
+  return output;
+}
+
+function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
+  const previousByKey = new Map((Array.isArray(previousWeek?.rows) ? previousWeek.rows : [])
+    .map((row) => [earningsRowKey(row), row]));
+  return {
+    ...nextWeek,
+    rows: (Array.isArray(nextWeek?.rows) ? nextWeek.rows : []).map((row) => {
+      const prior = previousByKey.get(earningsRowKey(row));
+      if (!prior) return clearEarningsNarrative(row);
+      return earningsNarrativeFingerprint(prior) === earningsNarrativeFingerprint(row)
+        ? preserveEarningsNarrative(row, prior)
+        : clearEarningsNarrative(row);
+    })
+  };
 }
 
 function buildEarningsNarrativeSidecar(week, existing = { rows: [] }, { outputPath = 'generated/earnings_narrative.json' } = {}) {
@@ -757,13 +878,16 @@ module.exports = {
   earningsReactionBasis,
   earningsScheduleReviewRows,
   earningsNarrativeDispositions,
+  earningsNarrativeFingerprint,
   narrativeEditorialAttempted,
+  narrativeEditorialComplete,
   emptyEarningsApiUsage,
   hasEarningsApiBudget,
   isDisplayEligibleEarningsRow,
   isEarningsApiUsage,
   migrateEarningsApiUsage,
   metricResult,
+  mergeUnchangedEarningsNarrative,
   narrativeNeedsEditorialCopy,
   normalizeFinnhubCalendarFields,
   normalizeEarningsTiming,

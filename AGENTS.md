@@ -31,18 +31,18 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 
 - Fetchers and domain commands write only staging/cache files or explicit temporary diagnostic outputs. They never edit dashboard HTML.
 - Preparation assembles `generated/daily_financial_news.candidate.html` and leaves the canonical dashboard byte-for-byte unchanged.
-- One preparation owns the generated run lock at a time. Persistent staging and canonical writes are atomic.
+- Persistent staging and canonical writes are atomic. The updater has no run lock. The embedded completion marker suppresses a second scheduler-driven run in the same local date/window; intentional same-window reruns use the manual/on-demand path and remain allowed.
 - Producers reject values they cannot reliably normalize and isolate failures at the narrowest useful row, ticker, provider, or section boundary.
 - Deterministic display values are rebuilt from their canonical data on every apply path. Embedded `chart-data.series` owns chart history and per-ticker `quoteRevision`; quote rows and visible Tape values are derived.
 - Focused repair modes use the same complete-candidate validation and atomic replacement path as a normal update.
 
 ### 2. Commentary and editorial review
 
-- Deterministic facts are not hand-edited in the dashboard. Editorial work happens only through the generated editorial handoff.
+- Deterministic facts are not hand-edited in the dashboard. Editorial work happens only through the single generated `dashboard-data.json` handoff.
 - Every successfully downloaded quote invalidates that ticker's prior commentary. Finalization must bind either newly reviewed commentary or the visible retryable `commentary_unavailable` fallback to the exact series `quoteRevision`.
 - A failed quote download retains that ticker's last validated series, quote revision, quote fields, and bound commentary together.
-- Missing or unusable Earnings and Week Ahead commentary becomes an explicit retryable unavailable disposition. It must not hide deterministic facts or block the rest of the dashboard.
-- Malformed optional editorial input is quarantined. Preserve validated candidate copy, use a generated domain default, omit the unsupported item, or record an unavailable disposition as appropriate.
+- Missing editorial work remains `pending_review` and cannot finalize. Fail-open behavior never ends, skips, or substitutes for editorial research or review. After a real section- or row-specific attempt is exhausted, an explicit retryable unavailable disposition may be selected during finalization without hiding deterministic facts or blocking successful neighbors.
+- Malformed optional editorial input is quarantined during finalization only after the enclosing editorial section has an explicit current-run completion or attempted-unavailable decision. Preserve validated candidate copy, use a generated domain default, omit the unsupported item, or record an unavailable disposition as appropriate; none of those system actions counts as completing editorial work.
 - Final editorial application stamps a receipt bound to the base edition and the finalized dashboard/chart payload. System-applied fallbacks are recorded separately from human review.
 
 ### 3. Validated publication
@@ -54,11 +54,11 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 
 ### 4. Fail-open behavior
 
-- A recoverable source, producer artifact, staging input, evidence, or optional editorial failure must be converted to a documented fallback while assembling or finalizing a valid complete candidate.
+- Fail-open is a final-publication policy after all required editorial work has been reviewed or explicitly attempted to exhaustion; it is never a reason to stop editorial work. Deterministic preparation may stage documented source fallbacks so editorial work can continue, but those source fallbacks do not satisfy any editorial completion gate. During finalization, a recoverable evidence or optional editorial failure may use only the explicit fallback selected after that completed attempt. Unattempted required editorial work is incomplete work, not a failure disposition.
 - A missing, malformed, or stale complete candidate is not a finalization fallback. Leave the canonical dashboard unchanged and retry deterministic preparation.
 - Preserve successful neighboring rows and sections. Carry prior data only when it remains valid for the displayed period; otherwise use a correctly dated unavailable row or shell.
 - Never fabricate facts, silently reuse stale dates, or show a refreshed quote beside commentary from an older quote revision.
-- Partial News coverage may publish with valid stories. Week Ahead and Earnings may publish accepted facts plus generated or unavailable commentary. Missing whole-section data may use a same-range validated carry or correctly dated unavailable shell.
+- Partial News coverage may publish with valid stories only after a current-run search is explicitly exhausted. Week Ahead and Earnings may publish accepted facts plus row/event-scoped attempted-unavailable commentary. Missing whole-section source data may use a same-range validated carry or correctly dated unavailable shell.
 - Every degraded state remains retryable and clears when fresh valid input succeeds.
 - Final validation stays strict about the fallback that was selected. If no valid replacement can be assembled, keep the existing canonical dashboard available; never replace it with an invalid candidate.
 

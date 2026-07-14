@@ -1,7 +1,19 @@
 const fs = require('fs');
 const path = require('path');
 
+const ROOT = path.resolve(__dirname, '..');
+const PUBLISHED_ARTIFACTS = ['daily_financial_news.html', 'index.html'];
+
+function assertStagingWritePath(file, projectRoot = ROOT) {
+  const resolved = path.resolve(file);
+  const root = path.resolve(projectRoot);
+  if (PUBLISHED_ARTIFACTS.some((name) => resolved === path.join(root, name))) {
+    throw new Error(`staging_writer cannot write protected published artifact ${resolved}.`);
+  }
+}
+
 function atomicWriteFile(file, contents, options = {}, dependencies = {}) {
+  assertStagingWritePath(file, dependencies.projectRoot);
   const fileSystem = dependencies.fs || fs;
   const directory = path.dirname(file);
   fileSystem.mkdirSync(directory, { recursive: true });

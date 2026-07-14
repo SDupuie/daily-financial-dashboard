@@ -29164,7 +29164,6 @@
       function normalizeEarningsRow(row) {
         const interpretationStatus = row.outcome?.interpretationDisposition?.status || '';
         const guidanceStatus = row.outcome?.guidanceDisposition?.status || '';
-        const reactionCommentaryStatus = row.reaction?.commentaryDisposition?.status || '';
         return {
           company: row.company,
           ticker: row.symbol,
@@ -29185,13 +29184,7 @@
           lifecycle: row.lifecycle,
           sourceStatus: row.sourceStatus,
           companyReleaseStatus: row.sourceAudit?.companyReleaseResolution?.status || '',
-          companyReleaseHasOfficialActual: ['eps', 'revenue'].some((metric) => String(row.sourceAudit?.selectedSources?.[metric]?.actual || '').startsWith('sec_company_release')),
-          resultRefreshProviders: (row.sourceAudit?.resultRefresh?.failures || []).map((failure) => failure.provider),
-          editorialNarrativeUnavailable: interpretationStatus === 'commentary_unavailable'
-            || guidanceStatus === 'unverified'
-            || reactionCommentaryStatus === 'commentary_unavailable',
-          scheduleVerificationStatus: row.sourceAudit?.scheduleVerification?.status || '',
-          scheduleVerificationSourceName: row.sourceAudit?.scheduleVerification?.official?.sourceName || ''
+          scheduleVerificationStatus: row.sourceAudit?.scheduleVerification?.status || ''
         };
       }
 
@@ -29367,37 +29360,11 @@
 
       /* TEST BLOCK START: earnings-provenance */
       function earningsRowNoticeHtml(row) {
-        const refreshProviderNames = {
-          finnhub: 'Finnhub',
-          earningsApiCompany: 'EarningsAPI',
-          yahoo: 'Yahoo Finance'
-        };
-        const refreshProviders = (row.resultRefreshProviders || []).map((provider) => refreshProviderNames[provider] || provider);
-        const refreshLabel = refreshProviders.length
-          ? `Latest row refresh was incomplete for ${refreshProviders.join(' and ')}; prior validated values were retained for failed fields. Retrying on the next update.`
-          : '';
-        const releaseLabel = row.companyReleaseStatus === 'needs_review'
-          ? row.companyReleaseHasOfficialActual
-            ? 'Company release supplied one official actual; the other metric uses provider data or remains unavailable pending review.'
-            : 'Company release facts need review; provider facts are shown and missing results remain unavailable.'
-          : row.companyReleaseStatus === 'unresolved'
-          ? 'Company release could not be independently resolved; provider facts are shown and missing results remain unavailable.'
-          : '';
-        const scheduleConfirmed = row.scheduleVerificationStatus === 'official_confirmed';
-        const scheduleLabel = row.scheduleVerificationStatus === 'primary_only'
+        const label = row.scheduleVerificationStatus === 'primary_only'
           ? 'Report date is unconfirmed; using Finnhub.'
           : row.scheduleVerificationStatus === 'secondary_only'
           ? 'Report date is unconfirmed; using EarningsAPI.'
           : '';
-        const fallbackLabel = (refreshLabel || releaseLabel || scheduleLabel || scheduleConfirmed || row.sourceStatus !== 'partial')
-          ? ''
-          : row.lifecycle === 'released_awaiting_close'
-          ? 'Reaction pending'
-          : row.lifecycle === 'awaiting_actual' ? 'Results pending' : 'Incomplete data';
-        const editorialLabel = row.editorialNarrativeUnavailable
-          ? 'Editorial verification is incomplete; deterministic results and market reaction remain visible.'
-          : '';
-        const label = [refreshLabel, releaseLabel, scheduleLabel, fallbackLabel, editorialLabel].filter(Boolean).join(' ');
         if (!label) return '';
         return `<span class="earnings-row-notice" role="img" aria-label="${esc(label)}" title="${esc(label)}">i</span>`;
       }
