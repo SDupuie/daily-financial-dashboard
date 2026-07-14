@@ -10,7 +10,8 @@ const {
   earningsRowKey: rowKey,
   earningsRowLifecycle,
   earningsReactionBasis,
-  isDisplayEligibleEarningsRow
+  isDisplayEligibleEarningsRow,
+  metricResult
 } = require('./earnings_week_contract');
 const {
   compareIsoDate,
@@ -228,19 +229,6 @@ function pctChange(from, to) {
   return (to / from - 1) * 100;
 }
 
-function valueOutcome(actual, estimate) {
-  if (!isFiniteNumber(actual) || !isFiniteNumber(estimate)) return 'unknown';
-  if (actual > estimate) return 'beat';
-  if (actual < estimate) return 'miss';
-  return 'met';
-}
-
-function expectedMetricResult(actual, estimate) {
-  if (!isFiniteNumber(actual)) return 'pending';
-  if (!isFiniteNumber(estimate)) return 'not_compared';
-  return valueOutcome(actual, estimate);
-}
-
 function expectedCombinedOutcome(epsResult, revenueResult) {
   const comparable = [epsResult, revenueResult].filter((item) => ['beat', 'miss', 'met'].includes(item));
   if (comparable.length === 0) return 'pending';
@@ -249,6 +237,7 @@ function expectedCombinedOutcome(epsResult, revenueResult) {
     if (epsResult === 'miss' && revenueResult === 'not_compared') return 'eps_only_miss';
     return comparable[0];
   }
+  if (comparable.every((item) => item === 'met')) return 'met';
   if (comparable.every((item) => item === 'beat' || item === 'met')) return 'beat';
   if (comparable.every((item) => item === 'miss' || item === 'met')) return 'miss';
   return 'mixed';
@@ -422,7 +411,7 @@ function validateMetric(errors, metric, label, options = {}) {
   } else if (!nearlyEqual(metric.surprisePercent, expectedSurprise, PCT_TOLERANCE)) {
     errors.push(`${label}.surprisePercent must match actual/estimate.`);
   }
-  const expectedResult = expectedMetricResult(metric.actual, metric.estimate);
+  const expectedResult = metricResult(metric.actual, metric.estimate, options.metric);
   if (metric.result !== expectedResult) errors.push(`${label}.result must be ${expectedResult}.`);
   if (options.requireBasis && typeof metric.basis !== 'string') errors.push(`${label}.basis must be a string.`);
   if (typeof metric.note !== 'string') errors.push(`${label}.note must be a string.`);
@@ -918,8 +907,8 @@ function validateRow(errors, rowRaw, index, range, now) {
   if (row.lifecycle !== expectedLifecycle) errors.push(`${label}.lifecycle must be ${expectedLifecycle}.`);
   if (!nullableNumber(row.fiscalQuarter)) errors.push(`${label}.fiscalQuarter must be numeric or null.`);
   if (!nullableNumber(row.fiscalYear)) errors.push(`${label}.fiscalYear must be numeric or null.`);
-  validateMetric(errors, row.eps, `${label}.eps`, { requireBasis: true });
-  validateMetric(errors, row.revenue, `${label}.revenue`);
+  validateMetric(errors, row.eps, `${label}.eps`, { metric: 'eps', requireBasis: true });
+  validateMetric(errors, row.revenue, `${label}.revenue`, { metric: 'revenue' });
   if (!isObject(row.outcome)) {
     errors.push(`${label}.outcome must be an object.`);
   } else {
@@ -1139,7 +1128,7 @@ function validateNarrativeApply(errors, data, options = {}) {
       row.outcome?.interpretation,
       COMMENTARY_UNAVAILABLE_STATUSES
     );
-    if (!interpretationStatus) {
+    if (interpretationStatus !== 'verified') {
       errors.push(`${row.symbol}.outcome.interpretation must be populated after narrative enrichment.`);
     } else if (interpretationStatus === 'verified' && row.outcome.interpretation.trim().length > OUTCOME_INTERPRETATION_MAX_LENGTH) {
       errors.push(`${row.symbol}.outcome.interpretation must stay within ${OUTCOME_INTERPRETATION_MAX_LENGTH} characters for the compact earnings monitor.`);
@@ -1148,7 +1137,7 @@ function validateNarrativeApply(errors, data, options = {}) {
     } else if (interpretationStatus === 'verified' && reportedRow && (!REACTION_DRIVER_PATTERN.test(row.outcome.interpretation) || !REACTION_INTERPRETATION_PATTERN.test(row.outcome.interpretation))) {
       errors.push(`${row.symbol}.outcome.interpretation must identify a concrete business driver and explain its relevance.`);
     }
-    const guidanceRequired = reportedRow && (row.lifecycle === 'close_available' || row.reaction?.status === 'unavailable');
+    const guidanceRequired = reportedRow;
     const guide = String(row.outcome?.guide || '').trim();
     const guidanceStatus = guidanceRequired || row.outcome?.guidanceDisposition !== undefined
       ? validateEditorialDisposition(
@@ -1161,7 +1150,7 @@ function validateNarrativeApply(errors, data, options = {}) {
         )
       : '';
     if (guidanceRequired) {
-      if (!guidanceStatus) {
+      if (!['verified', 'not_provided'].includes(guidanceStatus)) {
         errors.push(`${row.symbol}.outcome.guide must summarize next-quarter or full-year guidance after a reported result.`);
       } else if (guidanceStatus === 'verified' && OUTCOME_NO_GUIDANCE_PATTERN.test(guide)) {
         errors.push(`${row.symbol}.outcome.guidanceDisposition must use not_provided with official company evidence for a no-guidance claim.`);
@@ -1185,7 +1174,7 @@ function validateNarrativeApply(errors, data, options = {}) {
         )
       : '';
     if (row.reaction?.status === 'computed') {
-      if (!reactionStatus) {
+      if (reactionStatus !== 'verified') {
         errors.push(`${row.symbol}.reaction.note must be populated after narrative enrichment.`);
       } else if (reactionStatus === 'verified' && note.length > REACTION_NOTE_MAX_LENGTH) {
         errors.push(`${row.symbol}.reaction.note must stay within ${REACTION_NOTE_MAX_LENGTH} characters for the compact earnings monitor.`);

@@ -51,18 +51,40 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
+function earningsApiCalendarAttemptFailed(week) {
+  const attempt = week?.summary?.fetches?.earningsApiCalendar;
+  if (!attempt || typeof attempt !== 'object') return false;
+  const requests = Number(attempt.requests) || 0;
+  const ok = Number(attempt.ok) || 0;
+  const skipped = Number(attempt.skipped) || 0;
+  const rows = Number(attempt.rows) || 0;
+  const errors = Array.isArray(attempt.errors) ? attempt.errors : [];
+  return requests > 0 && (ok < requests || skipped > 0 || errors.length > 0 || rows === 0);
+}
+
 function earningsCalendarNeedsBuild(range, earningsWeekPath = DEFAULT_EARNINGS_WEEK, now = new Date()) {
   if (!fs.existsSync(earningsWeekPath)) return earningsCalendarRangeNeedsBuild(range, null);
   try {
     const week = readJson(earningsWeekPath);
     if (earningsCalendarRangeNeedsBuild(range, week.range)) return true;
-    const primaryOnly = (week.rows || []).some((row) => isDisplayEligibleEarningsRow(row)
-      && row.sourceAudit?.scheduleVerification?.status === 'primary_only');
-    // Retry a degraded schedule once on the next Central-time day, never by
-    // re-running the metered 26-date scan throughout a development session.
-    return primaryOnly && earningsApiUsageDay(week.generatedAt) !== earningsApiUsageDay(now);
+    return earningsCalendarFailedAttemptNeedsRetry(range, earningsWeekPath, now);
   } catch (_error) {
     return Boolean(range);
+  }
+}
+
+function earningsCalendarFailedAttemptNeedsRetry(range, earningsWeekPath = DEFAULT_EARNINGS_WEEK, now = new Date()) {
+  if (!fs.existsSync(earningsWeekPath)) return false;
+  try {
+    const week = readJson(earningsWeekPath);
+    if (earningsCalendarRangeNeedsBuild(range, week.range)) return false;
+    const primaryOnly = (week.rows || []).some((row) => isDisplayEligibleEarningsRow(row)
+      && row.sourceAudit?.scheduleVerification?.status === 'primary_only');
+    return primaryOnly
+      && earningsApiCalendarAttemptFailed(week)
+      && earningsApiUsageDay(week.generatedAt) !== earningsApiUsageDay(now);
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -188,14 +210,14 @@ Options:
   return args;
 }
 
-function metricPayload(fields, options = {}) {
+function metricPayload(fields, metric, options = {}) {
   const estimate = numberOrNull(fields?.estimate);
   const actual = numberOrNull(fields?.actual);
   return {
     estimate,
     actual,
     surprisePercent: pctChange(estimate, actual),
-    result: metricResult(actual, estimate),
+    result: metricResult(actual, estimate, metric),
     ...options
   };
 }
@@ -307,11 +329,11 @@ function applyResolution(row, task, resolution) {
     note: '',
     source: ''
   };
-  const eps = metricPayload(epsFields, {
+  const eps = metricPayload(epsFields, 'eps', {
     basis: epsFields.basis || '',
     note: epsFields.adjustment?.note || ''
   });
-  const revenue = metricPayload(revenueFields, {
+  const revenue = metricPayload(revenueFields, 'revenue', {
     note: ''
   });
   const selectedSources = {
@@ -393,7 +415,7 @@ function applyPartialResolutionMetrics(row, resolution) {
   const eps = promoteEps
     ? {
         ...row.eps,
-        ...metricPayload({ estimate: row.eps?.estimate, actual: epsFields.actual }, {
+        ...metricPayload({ estimate: row.eps?.estimate, actual: epsFields.actual }, 'eps', {
           basis: epsFields.basis || row.eps?.basis || '',
           note: epsFields.adjustment?.note || row.eps?.note || ''
         })
@@ -402,7 +424,7 @@ function applyPartialResolutionMetrics(row, resolution) {
   const revenue = promoteRevenue
     ? {
         ...row.revenue,
-        ...metricPayload({ estimate: row.revenue?.estimate, actual: revenueFields.actual }, {
+        ...metricPayload({ estimate: row.revenue?.estimate, actual: revenueFields.actual }, 'revenue', {
           note: row.revenue?.note || ''
         })
       }
@@ -829,7 +851,7 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function metricPayload(current, incoming, options = {}) {
+function metricPayload(current, incoming, metric, options = {}) {
   const estimate = numberOrNull(incoming?.estimate);
   const actual = numberOrNull(incoming?.actual);
   return {
@@ -837,7 +859,7 @@ function metricPayload(current, incoming, options = {}) {
     estimate,
     actual,
     surprisePercent: pctChange(estimate, actual),
-    result: metricResult(actual, estimate),
+    result: metricResult(actual, estimate, metric),
     ...options
   };
 }
@@ -1103,11 +1125,11 @@ function finalizeRow(row) {
 
 function applyFinnhubRefresh(row, providerRow) {
   if (!providerRow) return row;
-  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), {
+  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), 'eps', {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), {
+  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), 'revenue', {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -1188,11 +1210,11 @@ function mergeFinnhubConflictCandidates(candidates, providerRow) {
 
 function applyEarningsApiCompanyRefresh(row, providerRow) {
   if (!providerRow || row.sourceAudit?.companyReleaseResolution?.status === 'resolved') return row;
-  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), {
+  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), 'eps', {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), {
+  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), 'revenue', {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -1290,19 +1312,9 @@ function selectFinnhubRefreshRow(rows, target) {
     })[0] || null;
 }
 
-function unresolvedCompanyReleaseTaskKeys(source) {
-  const appliedIds = new Set((source.companyReleaseApply?.applied || [])
-    .map((item) => item?.taskId)
-    .filter(Boolean));
-  return new Set((source.companyReleaseTasks || [])
-    .filter((task) => task?.id && !appliedIds.has(task.id))
-    .map(rowKey));
-}
-
 function refreshTargetRows(source, asOf) {
-  const taskKeys = unresolvedCompanyReleaseTaskKeys(source);
   return (Array.isArray(source.rows) ? source.rows : [])
-    .filter((row) => reportWindowArrived(row, asOf) || taskKeys.has(rowKey(row)));
+    .filter((row) => reportWindowArrived(row, asOf));
 }
 
 function applyResultRefreshDiagnostics(row, failures, checkedAt) {
@@ -1355,7 +1367,6 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
       .map((row) => {
         const key = rowKey(row);
         return deterministicSnapshot(row) === reactionSnapshots.get(key)
-          || (row.lifecycle === 'released_awaiting_close' && row.reaction?.status === 'awaiting_close')
           ? preserveNarrative(row, reactionRowsByKey.get(key))
           : row;
       });
@@ -1370,7 +1381,6 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
 
   if (changedKeys.size) {
     output.rows = output.rows.map((row) => changedKeys.has(rowKey(row))
-      && !(row.lifecycle === 'released_awaiting_close' && row.reaction?.status === 'awaiting_close')
       ? clearNarrative(row)
       : row);
     delete output.narrativeApply;
@@ -2201,6 +2211,7 @@ module.exports = {
   applyEarningsApiCompanyRefresh: refreshCommand.applyEarningsApiCompanyRefresh,
   applyFinnhubRefresh: refreshCommand.applyFinnhubRefresh,
   collectRefreshData: refreshCommand.collectRefreshData,
+  earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
   mergeFinnhubConflictCandidates: refreshCommand.mergeFinnhubConflictCandidates,
   pendingEarningsScheduleReviews,

@@ -1246,12 +1246,12 @@ async function fetchFinnhubMetrics(rows, profiles, earningsApiCalendarDays, args
   return metrics;
 }
 
-function metricPayload(estimate, actual, options = {}) {
+function metricPayload(metric, estimate, actual, options = {}) {
   return {
     estimate,
     actual,
     surprisePercent: pctChange(estimate, actual),
-    result: metricResult(actual, estimate),
+    result: metricResult(actual, estimate, metric),
     ...options
   };
 }
@@ -1311,11 +1311,11 @@ function buildRows(calendarRows, profiles, options = {}) {
     const company = profile?.name || profileRecovery?.company || calendarRow.symbol;
     const marketCap = profile?.marketCap ?? profileRecovery?.marketCap ?? null;
     const fallbacks = profileRecovery ? ['earningsApiCalendar', 'finnhubMetric'] : [];
-    const eps = metricPayload(calendarRow.eps.estimate, calendarRow.eps.actual, {
+    const eps = metricPayload('eps', calendarRow.eps.estimate, calendarRow.eps.actual, {
       basis: '',
       note: ''
     });
-    const revenue = metricPayload(calendarRow.revenue.estimate, calendarRow.revenue.actual, {
+    const revenue = metricPayload('revenue', calendarRow.revenue.estimate, calendarRow.revenue.actual, {
       note: ''
     });
 
@@ -1477,11 +1477,11 @@ function buildEarningsApiRows(tasks, companyFetches) {
     const companyRow = selectEarningsApiCompanyRow(fetch, task);
     if (!companyRow) return null;
     const profile = task.sourceAudit.finnhubProfile;
-    const eps = metricPayload(companyRow.eps.estimate, companyRow.eps.actual, {
+    const eps = metricPayload('eps', companyRow.eps.estimate, companyRow.eps.actual, {
       basis: '',
       note: ''
     });
-    const revenue = metricPayload(companyRow.revenue.estimate, companyRow.revenue.actual, {
+    const revenue = metricPayload('revenue', companyRow.revenue.estimate, companyRow.revenue.actual, {
       note: ''
     });
     const sourceRow = {

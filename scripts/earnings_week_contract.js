@@ -26,8 +26,7 @@ function earningsNarrativeDispositions(row, narrative, attemptedAt = '') {
   const interpretation = String(narrative?.outcome?.interpretation || '').trim();
   const guide = String(narrative?.outcome?.guide || '').trim();
   const reactionNote = String(narrative?.reaction?.note || '').trim();
-  const responseAvailable = row?.lifecycle === 'close_available' || row?.reaction?.status === 'unavailable';
-  const guidanceRequired = responseAvailable && row?.outcome?.overall !== 'pending';
+  const guidanceRequired = row?.outcome?.overall !== 'pending';
   const reactionRequired = row?.lifecycle === 'close_available';
   const interpretationDisposition = suppliedDisposition(
     narrative?.outcome?.interpretationDisposition,
@@ -61,8 +60,7 @@ function narrativeNeedsEditorialCopy(row, narrative) {
   if (!isDisplayEligibleEarningsRow(row)) return false;
   const dispositions = earningsNarrativeDispositions(row, narrative);
   if (dispositions.interpretation?.status !== 'verified' || !String(narrative?.outcome?.interpretation || '').trim()) return true;
-  const responseAvailable = row?.lifecycle === 'close_available' || row?.reaction?.status === 'unavailable';
-  if (responseAvailable && row?.outcome?.overall !== 'pending') {
+  if (row?.outcome?.overall !== 'pending') {
     const guidanceComplete = dispositions.guidance?.status === 'not_provided'
       || (dispositions.guidance?.status === 'verified' && String(narrative?.outcome?.guide || '').trim());
     if (!guidanceComplete) return true;
@@ -105,35 +103,24 @@ function narrativeEditorialAttempted(row) {
   return copy || verified || unavailable;
 }
 
-function completedUnavailableDisposition(disposition, statuses) {
-  return statuses.includes(disposition?.status)
-    && isIsoDateTime(disposition?.attemptedAt)
-    && typeof disposition?.reason === 'string'
-    && disposition.reason.trim();
-}
-
 function narrativeEditorialComplete(row, narrative) {
   if (!isDisplayEligibleEarningsRow(row)) return true;
   const interpretation = String(narrative?.outcome?.interpretation || '').trim();
   const interpretationDisposition = narrative?.outcome?.interpretationDisposition;
-  if (!((interpretationDisposition?.status === 'verified' && interpretation)
-    || completedUnavailableDisposition(interpretationDisposition, ['commentary_unavailable']))) return false;
+  if (!(interpretationDisposition?.status === 'verified' && interpretation)) return false;
 
-  const responseAvailable = row?.lifecycle === 'close_available' || row?.reaction?.status === 'unavailable';
-  if (responseAvailable && row?.outcome?.overall !== 'pending') {
+  if (row?.outcome?.overall !== 'pending') {
     const guide = String(narrative?.outcome?.guide || '').trim();
     const guidanceDisposition = narrative?.outcome?.guidanceDisposition;
     const guidanceComplete = (guidanceDisposition?.status === 'verified' && guide)
-      || guidanceDisposition?.status === 'not_provided'
-      || completedUnavailableDisposition(guidanceDisposition, ['unverified']);
+      || guidanceDisposition?.status === 'not_provided';
     if (!guidanceComplete) return false;
   }
 
   if (row?.lifecycle === 'close_available') {
     const reaction = String(narrative?.reaction?.note || '').trim();
     const reactionDisposition = narrative?.reaction?.commentaryDisposition;
-    if (!((reactionDisposition?.status === 'verified' && reaction)
-      || completedUnavailableDisposition(reactionDisposition, ['commentary_unavailable']))) return false;
+    if (!(reactionDisposition?.status === 'verified' && reaction)) return false;
   }
   return true;
 }
@@ -210,7 +197,10 @@ function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
     rows: (Array.isArray(nextWeek?.rows) ? nextWeek.rows : []).map((row) => {
       const prior = previousByKey.get(earningsRowKey(row));
       if (!prior) return clearEarningsNarrative(row);
-      return earningsNarrativeFingerprint(prior) === earningsNarrativeFingerprint(row)
+      const sameUnreportedFacts = prior.outcome?.overall === 'pending'
+        && row.outcome?.overall === 'pending'
+        && earningsNarrativeFingerprint({ ...prior, lifecycle: '' }) === earningsNarrativeFingerprint({ ...row, lifecycle: '' });
+      return earningsNarrativeFingerprint(prior) === earningsNarrativeFingerprint(row) || sameUnreportedFacts
         ? preserveEarningsNarrative(row, prior)
         : clearEarningsNarrative(row);
     })
@@ -382,9 +372,21 @@ function valueOutcome(actual, estimate) {
   return 'met';
 }
 
-function metricResult(actual, estimate) {
+function metricDisplayKey(value, metric) {
+  const sign = value < 0 ? '-' : '';
+  const absolute = Math.abs(value);
+  if (metric === 'eps') return `${sign}${absolute.toFixed(2)}`;
+  if (metric !== 'revenue') return '';
+  if (absolute >= 1000000000) return `${sign}${(absolute / 1000000000).toFixed(2)}B`;
+  if (absolute >= 1000000) return `${sign}${(absolute / 1000000).toFixed(1)}M`;
+  return `${sign}${absolute.toFixed(0)}`;
+}
+
+function metricResult(actual, estimate, metric = '') {
   if (!Number.isFinite(actual)) return 'pending';
   if (!Number.isFinite(estimate)) return 'not_compared';
+  const actualDisplay = metricDisplayKey(actual, metric);
+  if (actualDisplay && actualDisplay === metricDisplayKey(estimate, metric)) return 'met';
   return valueOutcome(actual, estimate);
 }
 
@@ -396,6 +398,7 @@ function combinedOutcome(epsResult, revenueResult) {
     if (epsResult === 'miss' && revenueResult === 'not_compared') return 'eps_only_miss';
     return comparable[0];
   }
+  if (comparable.every((item) => item === 'met')) return 'met';
   if (comparable.every((item) => item === 'beat' || item === 'met')) return 'beat';
   if (comparable.every((item) => item === 'miss' || item === 'met')) return 'miss';
   return 'mixed';

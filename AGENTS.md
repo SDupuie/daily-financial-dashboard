@@ -31,7 +31,8 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 
 - Fetchers and domain commands write only staging/cache files or explicit temporary diagnostic outputs. They never edit dashboard HTML.
 - Preparation assembles `generated/daily_financial_news.candidate.html` and leaves the canonical dashboard byte-for-byte unchanged.
-- Persistent staging and canonical writes are atomic. The updater has no run lock. The embedded completion marker suppresses a second scheduler-driven run in the same local date/window; intentional same-window reruns use the manual/on-demand path and remain allowed.
+- Persistent staging and canonical writes are atomic. The updater has no run lock. Scheduler-driven preparation is explicitly marked `--scheduled`; it enforces the Chicago start window before fetching, and the embedded completion marker suppresses a second successful scheduler-driven run in the same local date/window. Manual/on-demand preparation and finalization omit `--scheduled`, remain time-unrestricted, and may rerun the same edition or window intentionally.
+- EarningsAPI calendar discovery is authorized only for scheduled Monday-morning and Friday-afternoon rollovers, an audited failed-rollover or unavailable-shell retry on a later scheduled run, or an explicit manual calendar rebuild. Ordinary manual, development, validation, and repair runs never infer permission from the weekday or edition name.
 - Producers reject values they cannot reliably normalize and isolate failures at the narrowest useful row, ticker, provider, or section boundary.
 - Deterministic display values are rebuilt from their canonical data on every apply path. Embedded `chart-data.series` owns chart history and per-ticker `quoteRevision`; quote rows and visible Tape values are derived.
 - Focused repair modes use the same complete-candidate validation and atomic replacement path as a normal update.
@@ -39,10 +40,11 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 ### 2. Commentary and editorial review
 
 - Deterministic facts are not hand-edited in the dashboard. Editorial work happens only through the single generated `dashboard-data.json` handoff.
-- Every successfully downloaded quote invalidates that ticker's prior commentary. Finalization must bind either newly reviewed commentary or the visible retryable `commentary_unavailable` fallback to the exact series `quoteRevision`.
+- Preparing that handoff first runs the deterministic News downloader. The downloader owns only acquisition, freshness normalization, URL normalization, deduplication, and attempt diagnostics; the AI owns relevance review, comparison, selection, and story copy.
+- Every successfully downloaded quote invalidates that ticker's prior commentary. Finalization must bind newly reviewed commentary to the exact series `quoteRevision`.
 - A failed quote download retains that ticker's last validated series, quote revision, quote fields, and bound commentary together.
-- Missing editorial work remains `pending_review` and cannot finalize. Fail-open behavior never ends, skips, or substitutes for editorial research or review. After a real section- or row-specific attempt is exhausted, an explicit retryable unavailable disposition may be selected during finalization without hiding deterministic facts or blocking successful neighbors.
-- Malformed optional editorial input is quarantined during finalization only after the enclosing editorial section has an explicit current-run completion or attempted-unavailable decision. Preserve validated candidate copy, use a generated domain default, omit the unsupported item, or record an unavailable disposition as appropriate; none of those system actions counts as completing editorial work.
+- Missing required non-News editorial work remains `pending_review` and cannot finalize. News is the explicit fail-open exception: the updater publishes whatever valid selected cards survive, including empty News collections, and derives the coverage state itself.
+- Malformed optional editorial input may be omitted only when the enclosing required editorial work is complete; a system action never completes editorial work.
 - Final editorial application stamps a receipt bound to the base edition and the finalized dashboard/chart payload. System-applied fallbacks are recorded separately from human review.
 
 ### 3. Validated publication
@@ -54,11 +56,11 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 
 ### 4. Fail-open behavior
 
-- Fail-open is a final-publication policy after all required editorial work has been reviewed or explicitly attempted to exhaustion; it is never a reason to stop editorial work. Deterministic preparation may stage documented source fallbacks so editorial work can continue, but those source fallbacks do not satisfy any editorial completion gate. During finalization, a recoverable evidence or optional editorial failure may use only the explicit fallback selected after that completed attempt. Unattempted required editorial work is incomplete work, not a failure disposition.
+- Fail-open applies to deterministic source failures and News coverage shortages, not required non-News editorial completion. Deterministic preparation may stage documented source fallbacks so editorial work can continue, but those source fallbacks do not satisfy a non-News editorial gate.
 - A missing, malformed, or stale complete candidate is not a finalization fallback. Leave the canonical dashboard unchanged and retry deterministic preparation.
 - Preserve successful neighboring rows and sections. Carry prior data only when it remains valid for the displayed period; otherwise use a correctly dated unavailable row or shell.
 - Never fabricate facts, silently reuse stale dates, or show a refreshed quote beside commentary from an older quote revision.
-- Partial News coverage may publish with valid stories only after a current-run search is explicitly exhausted. Week Ahead and Earnings may publish accepted facts plus row/event-scoped attempted-unavailable commentary. Missing whole-section source data may use a same-range validated carry or correctly dated unavailable shell.
+- The deterministic News downloader attempts every fixed dated GDELT base and fallback query in `scripts/news_sources.js`, filters through its checked-in approved-source catalog, attempts article-page acquisition, adds still-fresh prior cards, and records every query result before the handoff is written. JavaScript does not rank or select stories. The acquisition goals are 36 fresh general-market candidates and 12 fresh Crypto candidates; the display targets are nine general stories, three Futures stories, and four to six Crypto stories. Neither candidate shortages nor selected-card shortages block finalization. Every published card still must satisfy the strict field, freshness, HTTPS, duplication, and Futures-session rules. Released Week Ahead and Earnings facts require current editorial interpretation; an Earnings row whose release window has passed but whose actuals are not reliably available remains deterministically pending without invented commentary. Missing whole-section source data may use a same-range validated carry or correctly dated unavailable shell.
 - Every degraded state remains retryable and clears when fresh valid input succeeds.
 - Final validation stays strict about the fallback that was selected. If no valid replacement can be assembled, keep the existing canonical dashboard available; never replace it with an invalid candidate.
 
@@ -67,7 +69,7 @@ Treat the current working files as authoritative when the worktree is dirty. Pre
 The README owns exact commands and payload fields. The normal sequence is:
 
 1. Run deterministic preparation and create the editorial handoff.
-2. Review commentary and evidence; unavailable commentary is an allowed retryable result.
+2. Review the downloaded News pool, complete the required commentary, select the strongest available stories, and finish evidence review.
 3. Apply the editorial handoff, validate the complete candidate, atomically replace the dashboard, then publish.
 
 A request to refresh or publish dashboard data authorizes changes only to staging and canonical generated data through this workflow. Source code, tests, documentation, configuration, and policy require explicit user authorization.

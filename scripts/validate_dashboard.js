@@ -704,7 +704,7 @@ function isOffsetBearingIsoDateTime(value) {
   return isIsoDateTime(value);
 }
 
-function validateSectionAvailability(errors, availability, label, allowedStatuses) {
+function validateSectionAvailability(errors, availability, label, allowedStatuses, allowedReasons = ['source_refresh_failed']) {
   if (availability === undefined) return '';
   if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
     errors.push(`${label}.availability must be an object.`);
@@ -713,8 +713,8 @@ function validateSectionAvailability(errors, availability, label, allowedStatuse
   if (!allowedStatuses.includes(availability.status)) {
     errors.push(`${label}.availability.status must be ${allowedStatuses.join(' or ')}.`);
   }
-  if (availability.reason !== 'source_refresh_failed') {
-    errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+  if (!allowedReasons.includes(availability.reason)) {
+    errors.push(`${label}.availability.reason must be ${allowedReasons.join(' or ')}.`);
   }
   if (!isOffsetBearingIsoDateTime(availability.checkedAt)) {
     errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
@@ -878,7 +878,13 @@ if (!dashboardMatch) {
     // README Data Contracts split chartable crypto tickers from crypto-only section stats.
     const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
     const cryptoStatRows = data.crypto?.stats ?? [];
-    const cryptoAvailability = validateSectionAvailability(errors, data.crypto?.availability, 'crypto', ['carried_forward', 'partial', 'unavailable']);
+    const cryptoAvailability = validateSectionAvailability(
+      errors,
+      data.crypto?.availability,
+      'crypto',
+      ['carried_forward', 'partial', 'unavailable'],
+      ['source_refresh_failed', 'source_refresh_skipped']
+    );
     if (cryptoAvailability === 'unavailable' && cryptoStatRows.length) {
       errors.push('Unavailable crypto.stats must be empty.');
     }
@@ -1340,7 +1346,8 @@ if (!dashboardMatch) {
     errors.push(...validateNewsCoverageState(
       futuresModule.storiesCoverage,
       futuresModuleStories.length,
-      NEWS_COVERAGE_POLICIES.futuresStories
+      NEWS_COVERAGE_POLICIES.futuresStories,
+      { allowIncomplete: stagingCandidate }
     ));
     const futuresStoryUrls = new Map();
     for (const [index, storyRaw] of futuresModuleStories.entries()) {
@@ -1493,7 +1500,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !cryptoTotal) {
       errors.push('crypto.stats is missing the Crypto Market Cap stat row.');
     } else if (cryptoTotal) {
-      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable']);
+      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
       requireString(cryptoTotal.price, 'Crypto Market Cap price');
       requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
     }
@@ -1501,7 +1508,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !fng) {
       errors.push('crypto.stats is missing the F&G row.');
     } else if (fng) {
-      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable']);
+      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
       const fngPrice = String(fng.price ?? '').trim();
       const fngChange = String(fng.chg ?? '').trim();
 
@@ -1524,7 +1531,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !altcoinSeason) {
       errors.push('crypto.stats is missing the Altcoin Season Index stat row.');
     } else if (altcoinSeason) {
-      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable']);
+      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
       const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
       const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
 
@@ -1559,7 +1566,12 @@ if (!dashboardMatch) {
 
     const stories = Array.isArray(data.stories) ? data.stories : [];
     if (!Array.isArray(data.stories)) errors.push('stories must be an array.');
-    errors.push(...validateNewsCoverageState(data.storiesCoverage, stories.length, NEWS_COVERAGE_POLICIES.stories));
+    errors.push(...validateNewsCoverageState(
+      data.storiesCoverage,
+      stories.length,
+      NEWS_COVERAGE_POLICIES.stories,
+      { allowIncomplete: stagingCandidate }
+    ));
     const trackedNewsItems = dashboardNewsItems(data);
     const storyIds = trackedNewsItems.map(storyIdentity).filter(Boolean);
     if (storyIds.length !== trackedNewsItems.length) {
@@ -1642,7 +1654,8 @@ if (!dashboardMatch) {
     errors.push(...validateNewsCoverageState(
       data.crypto?.notesCoverage,
       Array.isArray(cryptoNotes) ? cryptoNotes.length : 0,
-      NEWS_COVERAGE_POLICIES.cryptoNotes
+      NEWS_COVERAGE_POLICIES.cryptoNotes,
+      { allowIncomplete: stagingCandidate }
     ));
     for (const noteRaw of cryptoNotes) {
       const note = noteRaw && typeof noteRaw === 'object' ? noteRaw : {};

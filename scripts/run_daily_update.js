@@ -31,6 +31,7 @@ const {
 } = require('./earnings_week_contract');
 const {
   applyEarningsNarrative,
+  earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
   pendingEarningsScheduleReviews,
   validateEarningsWeekPayload
@@ -61,11 +62,11 @@ const {
   applyScheduledNewsBaseline,
   canonicalStoryUrl,
   futuresStoryPublicationWindow,
-  NEWS_COVERAGE_POLICIES,
-  NEWS_COVERAGE_REASON,
   sharedFuturesSessionDate,
   storyIdentity
 } = require('./news_contract');
+const { priorNewsCandidates } = require('./fetch_news_candidates');
+const { APPROVED_NEWS_SOURCES } = require('./news_sources');
 const { atomicWriteFile, atomicWriteJson } = require('./staging_writer');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -76,8 +77,9 @@ const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
+const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SCHEDULED_WINDOWS = {
-  morning: { startMinutes: 6 * 60 + 45, endMinutes: 8 * 60 },
+  morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
   afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
 };
 const WINDOW_LABELS = {
@@ -156,22 +158,38 @@ function completedScheduledWindow(baseline) {
   return window ? `${parts.isoDate}:${window[0]}` : '';
 }
 
-function validateScheduledPreflight(dashboard, windowMode, now = scheduledNow()) {
+function scheduledWindowId(windowMode, now = scheduledNow()) {
   const range = SCHEDULED_WINDOWS[windowMode];
-  if (!range) throw new Error('Scheduled preflight requires --morning or --afternoon.');
+  if (!range) throw new Error('Scheduled runs require --morning or --afternoon.');
   const parts = chicagoDateParts(now);
   if (!['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(parts.weekday)) {
-    throw new Error('Scheduled preflight only permits weekday runs in America/Chicago.');
+    throw new Error('Scheduled runs only permit weekday starts in America/Chicago.');
   }
   if (parts.clockMinutes === null || parts.clockMinutes < range.startMinutes || parts.clockMinutes > range.endMinutes) {
-    throw new Error(`Scheduled ${windowMode} preflight is outside its America/Chicago update window.`);
+    throw new Error(`Scheduled ${windowMode} start is outside its America/Chicago update window.`);
   }
+  return `${parts.isoDate}:${windowMode}`;
+}
+
+function assertScheduledWindowAvailable(dashboard, windowId) {
   const dashboardData = readJsonBlock(fs.readFileSync(dashboard, 'utf8'), 'dashboard-data');
-  const windowId = `${parts.isoDate}:${windowMode}`;
   if (completedScheduledWindow(dashboardData.newsBaseline) === windowId) {
-    throw new Error(`Scheduled ${windowMode} preflight refused: ${windowId} already completed. Use the manual/on-demand workflow for an intentional same-window rerun.`);
+    throw new Error(`Scheduled run refused: ${windowId} already completed. Use the manual/on-demand workflow for an intentional same-window rerun.`);
   }
   return windowId;
+}
+
+function validateScheduledStart(dashboard, windowMode, now = scheduledNow()) {
+  return assertScheduledWindowAvailable(dashboard, scheduledWindowId(windowMode, now));
+}
+
+function validateScheduledFinalization(dashboard, windowMode, now = scheduledNow()) {
+  if (!SCHEDULED_WINDOWS[windowMode]) throw new Error('Scheduled runs require --morning or --afternoon.');
+  const parts = chicagoDateParts(now);
+  if (!['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(parts.weekday)) {
+    throw new Error('Scheduled runs only permit weekday finalization in America/Chicago.');
+  }
+  return assertScheduledWindowAvailable(dashboard, `${parts.isoDate}:${windowMode}`);
 }
 
 function stampDashboardEdition(data) {
@@ -234,7 +252,7 @@ function parseArgs(argv) {
     applyChartDataJson: '',
     mergeChartDataJson: '',
     syncChartQuotes: false,
-    scheduledPreflight: false,
+    rebuildEarningsCalendar: false,
     skipEarnings: false,
     skipFutures: false,
     skipChartData: false,
@@ -294,10 +312,6 @@ function parseArgs(argv) {
       args.syncChartQuotes = true;
       continue;
     }
-    if (arg === '--scheduled-preflight') {
-      args.scheduledPreflight = true;
-      continue;
-    }
     if (arg === '--morning') {
       args.windowMode = 'morning';
       continue;
@@ -308,6 +322,10 @@ function parseArgs(argv) {
     }
     if (arg === '--scheduled') {
       args.scheduled = true;
+      continue;
+    }
+    if (arg === '--rebuild-earnings-calendar') {
+      args.rebuildEarningsCalendar = true;
       continue;
     }
     if (arg === '--skip-earnings') {
@@ -355,12 +373,6 @@ function parseArgs(argv) {
   }
 
   const contentModeCount = [args.applyDashboardDataJson, args.applyEarningsWeekJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.syncChartQuotes].filter(Boolean).length;
-  if (args.scheduledPreflight) {
-    if (!args.windowMode || contentModeCount) {
-      throw new Error('Use --scheduled-preflight with exactly one of --morning or --afternoon.');
-    }
-    return args;
-  }
   if (!args.windowMode && contentModeCount === 0) {
     throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
@@ -368,9 +380,12 @@ function parseArgs(argv) {
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !windowAwareContentMode)) {
     throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
-  const scheduledContentMode = args.applyDashboardDataJson;
-  if (args.scheduled && (!scheduledContentMode || !args.windowMode)) {
-    throw new Error('--scheduled requires --morning or --afternoon and is valid only with editorial application.');
+  const deterministicPreparation = Boolean(args.windowMode && contentModeCount === 0);
+  if (args.scheduled && (!args.windowMode || (!deterministicPreparation && !args.applyDashboardDataJson))) {
+    throw new Error('--scheduled is valid only with deterministic preparation or final editorial application using --morning or --afternoon.');
+  }
+  if (args.rebuildEarningsCalendar && (!deterministicPreparation || args.skipEarnings)) {
+    throw new Error('--rebuild-earnings-calendar is valid only with deterministic preparation when Earnings is enabled.');
   }
   if (path.resolve(args.candidate) === path.resolve(args.dashboard)) {
     throw new Error('--candidate must not target the canonical dashboard.');
@@ -388,21 +403,20 @@ function printHelp() {
   node scripts/run_daily_update.js --apply-chart-data-json PATH [options]
   node scripts/run_daily_update.js --merge-chart-data-json PATH [options]
   node scripts/run_daily_update.js --sync-chart-quotes [options]
-  node scripts/run_daily_update.js --scheduled-preflight (--morning | --afternoon) [options]
 
 Options:
   --dashboard PATH                     Canonical dashboard HTML (default: daily_financial_news.html)
   --candidate PATH                     Staged complete candidate (default: generated/daily_financial_news.candidate.html)
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
-  --prepare-editorial-dir PATH        Write the single dashboard-data editorial handoff
+  --prepare-editorial-dir PATH        Download News candidates and write the single dashboard-data editorial handoff
   --apply-earnings-week-json PATH     Stage a validated earnings-week payload in the complete candidate
   --apply-chart-data-json PATH        Stage chart history and derive matching Tape prices from JSON
   --merge-chart-data-json PATH        Stage selected chart series while preserving all other series
   --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
-  --scheduled-preflight               Verify the Chicago-time window and scheduled completion marker without writing files
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
-  --scheduled                         Atomically advance the News "New" baseline during final editorial application
+  --scheduled                         Mark scheduler-driven preparation/finalization; enforce its start window and completion marker
+  --rebuild-earnings-calendar         Explicitly authorize a metered Earnings calendar rebuild during a manual preparation
   --skip-earnings                     Skip earnings week refresh + orchestrated embed
   --skip-futures                      Skip node scripts/fetch_chart_data.js futures and futuresModule patching
   --skip-chart-data                   Skip node scripts/fetch_chart_data.js and chart/quote-row patching
@@ -413,12 +427,12 @@ Options:
   --skip-week-ahead                   Skip Week Ahead slate/value refresh and patching
   --help                              Show this help
 
-Scheduled finalization rechecks the weekday/time window and scheduled completion marker before writing.
+Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
 Manual finalization is time-unrestricted and preserves the scheduled News baseline.
 
 This orchestrator standardizes the three-phase daily workflow:
   1. refresh deterministic data and edition metadata
-  2. prepare one dashboard-data handoff for editorial work
+  2. download News candidates and prepare one dashboard-data handoff for editorial work
   3. merge editorial work, advance the scheduled baseline, stamp, receipt, validate, and atomically apply
 
 Publish remains a separate explicit step via ./scripts/publish_main.sh.
@@ -476,6 +490,30 @@ function earningsStagingNeedsRebuild(filePath = EARNINGS_WEEK_PATH, now = schedu
   }
 }
 
+function earningsTargetRange(args, canonicalWeek) {
+  const rolloverRange = args.scheduled || args.rebuildEarningsCalendar
+    ? args.calendarRolloverRange
+    : null;
+  return rolloverRange || canonicalWeek?.range;
+}
+
+function earningsCalendarBuildDecision(args, {
+  canonicalWeek,
+  invalidPersistedArtifact,
+  calendarNeedsBuild,
+  failedAttemptNeedsRetry
+}) {
+  const unavailableRetry = requiresUnavailableRolloverRetry(canonicalWeek);
+  const buildNeeded = unavailableRetry || invalidPersistedArtifact || calendarNeedsBuild;
+  if (!buildNeeded) return { build: false, blocked: false, reason: '' };
+  if (args.rebuildEarningsCalendar) return { build: true, blocked: false, reason: 'explicit_manual_rebuild' };
+  if (!args.scheduled) return { build: false, blocked: true, reason: 'manual_build_not_authorized' };
+  if (args.calendarRolloverRange) return { build: true, blocked: false, reason: 'scheduled_rollover' };
+  if (unavailableRetry) return { build: true, blocked: false, reason: 'scheduled_unavailable_retry' };
+  if (failedAttemptNeedsRetry) return { build: true, blocked: false, reason: 'scheduled_failed_attempt_retry' };
+  return { build: false, blocked: true, reason: 'scheduled_build_not_authorized' };
+}
+
 function weekAheadStagingNeedsRebuild(filePath = WEEK_AHEAD_PATH) {
   if (!fs.existsSync(filePath)) return false;
   try {
@@ -515,11 +553,6 @@ function assertCandidateMatchesCanonical(args, candidateData) {
   return canonicalData;
 }
 
-function pendingCoverageForEditorial(coverage) {
-  void coverage;
-  return { status: 'pending_review' };
-}
-
 function prepareTapeCommentaryForEditorial(tape, previousTape) {
   const previousByTicker = new Map((Array.isArray(previousTape?.rows) ? previousTape.rows : [])
     .map((row) => [String(row?.ticker || '').trim().toUpperCase(), row]));
@@ -550,12 +583,12 @@ function prepareEarningsForEditorial(earnings) {
   week.rows = (Array.isArray(week.rows) ? week.rows : []).map((row) => {
     if (!isDisplayEligibleEarningsRow(row)) return row;
     const next = structuredClone(row);
+    const resultsAvailable = next.outcome?.overall !== 'pending';
     next.outcome.interpretationDisposition = pendingNarrativeDisposition(
       next.outcome?.interpretationDisposition,
       next.outcome?.interpretation
     );
-    const responseAvailable = next.lifecycle === 'close_available' || next.reaction?.status === 'unavailable';
-    if (responseAvailable && next.outcome?.overall !== 'pending') {
+    if (resultsAvailable) {
       const guidance = next.outcome?.guidanceDisposition;
       const guidanceComplete = (guidance?.status === 'verified' && String(next.outcome?.guide || '').trim())
         || guidance?.status === 'not_provided';
@@ -563,7 +596,7 @@ function prepareEarningsForEditorial(earnings) {
         ? structuredClone(guidance)
         : { status: 'pending_review' };
     }
-    if (next.lifecycle === 'close_available') {
+    if (next.lifecycle === 'close_available' && resultsAvailable) {
       next.reaction.commentaryDisposition = pendingNarrativeDisposition(
         next.reaction?.commentaryDisposition,
         next.reaction?.note
@@ -584,6 +617,54 @@ function prepareWeekAheadForEditorial(weekAhead) {
   };
 }
 
+function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
+  const eligibleDates = allowedNewsDates(asOf);
+  const prior = priorNewsCandidates(dashboardData, eligibleDates);
+  return {
+    schemaVersion: 1,
+    generatedAt: asOf.toISOString(),
+    finishedAt: asOf.toISOString(),
+    eligibleDates: [...eligibleDates].sort(),
+    sourceCatalog: APPROVED_NEWS_SOURCES,
+    attempts: [{
+      id: 'news-worker',
+      provider: 'gdelt-doc',
+      phase: 'worker',
+      pool: 'all',
+      attemptedAt: asOf.toISOString(),
+      resultCount: 0,
+      acceptedCount: 0,
+      error: String(error?.message || error || 'News worker failed.')
+    }],
+    generalCandidates: prior.generalCandidates,
+    cryptoCandidates: prior.cryptoCandidates
+  };
+}
+
+function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
+  try {
+    runCommand('node', [
+      'scripts/fetch_news_candidates.js',
+      '--as-of', asOf.toISOString(),
+      '--input', args.candidate,
+      '--output', NEWS_CANDIDATES_PATH,
+      ...(args.windowMode ? [`--${args.windowMode}`] : [])
+    ]);
+    const artifact = readJson(NEWS_CANDIDATES_PATH);
+    if (!Array.isArray(artifact?.attempts)
+      || !Array.isArray(artifact?.generalCandidates)
+      || !Array.isArray(artifact?.cryptoCandidates)) {
+      throw new Error('News candidate artifact is malformed.');
+    }
+    return artifact;
+  } catch (error) {
+    process.stderr.write(`News candidate acquisition failed; continuing with still-fresh prior cards: ${error.message}\n`);
+    const artifact = emptyNewsCandidateArtifact(asOf, error, dashboardData);
+    writeJson(NEWS_CANDIDATES_PATH, artifact);
+    return artifact;
+  }
+}
+
 function prepareEditorialWorkspace(args) {
   const html = fs.readFileSync(args.candidate, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
@@ -596,25 +677,22 @@ function prepareEditorialWorkspace(args) {
   const marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
     .map((day) => ({ date: day.date, action: null }));
+  const preparedAt = scheduledNow();
+  const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
     schemaVersion: 1,
-    preparedAt: scheduledNow().toISOString(),
+    preparedAt: preparedAt.toISOString(),
     reviewedAt: null,
     baseEditionId,
     verifiedClaims: [],
+    newsSearch,
     openingDecision: { action: null },
     marketLensDecisions
   };
   dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
-  dashboardData.storiesCoverage = pendingCoverageForEditorial(dashboardData.storiesCoverage);
-  dashboardData.crypto = {
-    ...dashboardData.crypto,
-    notesCoverage: pendingCoverageForEditorial(dashboardData.crypto?.notesCoverage)
-  };
-  dashboardData.futuresModule = {
-    ...dashboardData.futuresModule,
-    storiesCoverage: pendingCoverageForEditorial(dashboardData.futuresModule?.storiesCoverage)
-  };
+  delete dashboardData.storiesCoverage;
+  if (dashboardData.crypto) delete dashboardData.crypto.notesCoverage;
+  if (dashboardData.futuresModule) delete dashboardData.futuresModule.storiesCoverage;
   dashboardData.earnings = prepareEarningsForEditorial(dashboardData.earnings);
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
   dashboardData.editorialReview = reviewManifest;
@@ -831,6 +909,7 @@ function applyEarningsWeek(data, earningsWeek, { requireNarrative = true } = {})
   const canonicalEarningsWeek = mergeUnchangedEarningsNarrative(data.earnings?.week, earningsWeek);
   delete canonicalEarningsWeek.policy;
   delete canonicalEarningsWeek.outputPath;
+  if (!requireNarrative) delete canonicalEarningsWeek.narrativeApply;
   const errors = validateEarningsWeekPayload(canonicalEarningsWeek, { requireNarrative });
   if (errors.length) {
     throw new Error(`Generated earnings week payload is invalid: ${errors.join(' ')}`);
@@ -873,8 +952,7 @@ function prepareCandidateNews(data, now = scheduledNow()) {
   const cryptoBefore = Array.isArray(data.crypto?.notes) ? data.crypto.notes.length : 0;
   const futuresBefore = Array.isArray(data.futuresModule?.stories) ? data.futuresModule.stories.length : 0;
 
-  // Candidate preparation keeps only usable current-session content. The
-  // single editorial handoff resets coverage to pending_review before publication.
+  // Candidate preparation keeps only usable current-session content.
   const futuresStories = retainFresh(data.futuresModule?.stories, {
     futures: true,
     additionalAllowedDates: retainedFuturesDates,
@@ -889,7 +967,9 @@ function prepareCandidateNews(data, now = scheduledNow()) {
     ...data.futuresModule,
     stories: futuresStories
   };
-  applyNewsCoverageState(data, { now });
+  delete data.storiesCoverage;
+  if (data.crypto) delete data.crypto.notesCoverage;
+  if (data.futuresModule) delete data.futuresModule.storiesCoverage;
 
   return {
     storiesRemoved: storiesBefore - data.stories.length,
@@ -1042,6 +1122,8 @@ function patchDashboard(args) {
   if (!args.skipCryptoStats) {
     const cryptoPayload = args.cryptoStatsPayload || args.cryptoStatsFallbackPayload || readJson(path.join(GENERATED_DIR, 'crypto_stats.json'));
     applyCryptoStats(dashboardData, cryptoPayload);
+  } else if (args.windowMode) {
+    applyCryptoStats(dashboardData, buildCryptoStatsFallback(dashboardData.crypto, scheduledNow(), 'source_refresh_skipped'));
   }
 
   if (!args.skipAssetAllocationPortfolio) {
@@ -1067,7 +1149,9 @@ function patchDashboard(args) {
 
   applyEditionMetadata(dashboardData, args.windowMode);
   prepareCandidateNews(dashboardData);
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode, now: scheduledNow() });
+  // Preparation never advances scheduled News state. Only a successful final
+  // editorial application records completion and rotates the comparison set.
+  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: false, scheduledWindow: args.windowMode, now: scheduledNow() });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, null, null, { stampEdition: false });
   return nextHtml;
 }
@@ -1101,9 +1185,7 @@ function applyMarketLensDecisionsData(data, chartData, payload) {
 }
 
 function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview = null, systemFallbacks = null) {
-  const attemptThreshold = isIsoDateTime(reviewManifest.preparedAt)
-    ? reviewManifest.preparedAt
-    : reviewManifest.baseEditionId;
+  void systemFallbacks;
   const verifiedTexts = new Set([
     ...(Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : []),
     ...(Array.isArray(priorReview?.verifiedClaims) ? priorReview.verifiedClaims : [])
@@ -1121,30 +1203,11 @@ function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview 
     const decision = decisionsByDate.get(day.date);
     if (!decision) throw new Error(`Market Lens editorial work is incomplete for ${day.date}.`);
     if (['released_awaiting_close', 'close_available'].includes(day.lifecycle)
-      && !['replace', 'commentary-unavailable'].includes(decision.action)) {
-      throw new Error(`Released event commentary is incomplete for ${day.date}. Supply current commentary or an explicit attempted-unavailable disposition.`);
+      && decision.action !== 'replace') {
+      throw new Error(`Released event commentary is incomplete for ${day.date}. Supply current editorial interpretation.`);
     }
-    if (!['replace', 'retain-generated', 'commentary-unavailable'].includes(decision.action)) {
+    if (!['replace', 'retain-generated'].includes(decision.action)) {
       throw new Error(`Market Lens decision for ${day.date} is incomplete.`);
-    }
-    if (decision.action === 'commentary-unavailable') {
-      if (!['released_awaiting_close', 'close_available'].includes(day.lifecycle)) {
-        throw new Error(`Market Lens commentary-unavailable is allowed only after a release for ${day.date}.`);
-      }
-      if (!isIsoDateTime(decision.attemptedAt)
-        || Date.parse(decision.attemptedAt) < Date.parse(attemptThreshold)
-        || typeof decision.reason !== 'string'
-        || !decision.reason.trim()) {
-        throw new Error(`Market Lens unavailable disposition for ${day.date} must record a current-run attemptedAt and reason.`);
-      }
-      if (Array.isArray(systemFallbacks)) {
-        systemFallbacks.push({
-          section: 'market-lens',
-          path: `weekAhead.days.${day.date}.marketLens`,
-          action: 'unavailable_disposition',
-          reason: decision.reason
-        });
-      }
     }
   }
   if (decisionsByDate.size !== eventDays.length) throw new Error('Market Lens decisions contain stale event days.');
@@ -1226,18 +1289,11 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
   const candidateRowsByKey = new Map((candidateWeek.rows || []).map((row) => [earningsNarrativeRowKey(row), row]));
   const incomplete = rows.filter((item) => {
     const row = candidateRowsByKey.get(earningsNarrativeRowKey(item));
-    if (row && !narrativeEditorialComplete(row, item)) return true;
-    return [
-      item.outcome?.interpretationDisposition,
-      item.outcome?.guidanceDisposition,
-      item.reaction?.commentaryDisposition
-    ].some((disposition) => ['commentary_unavailable', 'unverified'].includes(disposition?.status)
-      && attemptThreshold
-      && Date.parse(disposition.attemptedAt) < Date.parse(attemptThreshold));
+    return Boolean(row && !narrativeEditorialComplete(row, item));
   });
   if (incomplete.length) {
     const identities = incomplete.map((row) => `${row.symbol} ${row.reportDate}`).join(', ');
-    throw new Error(`Earnings editorial work is incomplete for ${incomplete.length} row(s): ${identities}. Supply reviewed copy or an explicit attempted-unavailable disposition.`);
+    throw new Error(`Earnings editorial work is incomplete for ${incomplete.length} visible row(s): ${identities}. Supply reviewed copy before finalization.`);
   }
   const outputPath = 'generated/editorial/dashboard-data.json';
   const narrativePayload = {
@@ -1257,21 +1313,8 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
     : structuredClone(candidateWeek);
   const errors = validateEarningsWeekPayload(finalWeek, { requireNarrative: true });
   if (errors.length) throw new Error(`Editorial Earnings narrative is incomplete or invalid: ${errors.join(' ')}`);
-  if (Array.isArray(systemFallbacks)) {
-    for (const row of finalWeek.rows) {
-      if (![
-        row?.outcome?.interpretationDisposition?.status,
-        row?.outcome?.guidanceDisposition?.status,
-        row?.reaction?.commentaryDisposition?.status
-      ].some((status) => ['commentary_unavailable', 'unverified'].includes(status))) continue;
-      systemFallbacks.push({
-        section: 'earnings',
-        path: `earnings.week.rows.${row.symbol}.${row.reportDate}`,
-        action: 'unavailable_disposition',
-        reason: 'editorial_evidence_unavailable'
-      });
-    }
-  }
+  void systemFallbacks;
+  void attemptThreshold;
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
@@ -1324,43 +1367,17 @@ function sanitizeOpening(candidate, editorial, verifiedClaims, systemFallbacks =
   };
 }
 
-function unavailableOpening() {
-  return {
-    headline: 'Opening commentary unavailable',
-    deck: 'Current market data and verified section-level updates remain available below.',
-    catalysts: [
-      { label: 'Markets', body: 'Use the refreshed Tape and charts for the current session snapshot.' },
-      { label: 'News', body: 'Verified current-session stories remain available in the News sections.' },
-      { label: 'Calendar', body: 'Scheduled releases and available outcomes remain listed in Week Ahead.' },
-      { label: 'Earnings', body: 'Accepted earnings facts and market reactions remain listed in Earnings.' }
-    ]
-  };
-}
-
 function finalizeOpeningEditorial(candidate, editorial, reviewManifest, verifiedClaims) {
   const decision = reviewManifest.openingDecision;
   if (decision?.action === 'reviewed') {
     const fallbacks = [];
     const opening = sanitizeOpening(candidate, editorial, verifiedClaims, fallbacks);
     if (fallbacks.length) {
-      throw new Error('Opening editorial review is incomplete or invalid. Correct the handoff or record an explicit attempted-unavailable decision.');
+      throw new Error('Opening editorial review is incomplete or invalid. Correct the handoff before finalization.');
     }
     return opening;
   }
-  if (decision?.action === 'commentary-unavailable'
-    && isIsoDateTime(decision.attemptedAt)
-    && Date.parse(decision.attemptedAt) >= Date.parse(reviewManifest.preparedAt)
-    && typeof decision.reason === 'string'
-    && decision.reason.trim()) {
-    reviewManifest.systemFallbacks.push({
-      section: 'opening',
-      path: 'opening',
-      action: 'generated_default',
-      reason: decision.reason
-    });
-    return unavailableOpening();
-  }
-  throw new Error('Opening editorial work is incomplete. Record reviewed work or an explicit current-run attempted-unavailable decision.');
+  throw new Error('Opening editorial work is incomplete. Complete and mark the Opening reviewed before finalization.');
 }
 
 function structurallyUsableStory(item, options = {}) {
@@ -1452,73 +1469,23 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedCl
       return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
     }
 
-    if (editorial?.noteDisposition?.status === 'commentary_unavailable') {
-      const attempted = {
-        ...row,
-        note: TAPE_COMMENTARY_UNAVAILABLE_NOTE,
-        noteDisposition: {
-          ...editorial.noteDisposition,
-          quoteRevision
-        }
-      };
-      const dispositionErrors = validateTapeCommentaryDisposition(attempted);
-      if (!dispositionErrors.length
-        && (!attemptThreshold || Date.parse(attempted.noteDisposition.attemptedAt) >= Date.parse(attemptThreshold))) {
-        if (Array.isArray(systemFallbacks)) {
-          systemFallbacks.push({
-            section: 'tape-commentary',
-            path: `tape.rows.${ticker}.note`,
-            action: 'unavailable_disposition',
-            reason: attempted.noteDisposition.reason
-          });
-        }
-        return attempted;
-      }
-    }
-
-    throw new Error(`Tape editorial work is incomplete for ${ticker}. Supply current commentary or an explicit attempted-unavailable disposition.`);
-  });
-}
-
-function requireNewsEditorialDisposition(coverage, count, policy, section, pathName, attemptThreshold, systemFallbacks) {
-  const checkedAt = coverage?.checkedAt;
-  if (count >= policy.minimum) {
-    if (coverage?.status !== 'complete'
-      || !isIsoDateTime(checkedAt)
-      || Date.parse(checkedAt) < Date.parse(attemptThreshold)) {
-      throw new Error(`${policy.label} editorial review is incomplete. Record current-run complete coverage after the search-and-winnow pass.`);
-    }
-    return;
-  }
-  const currentAttempt = coverage?.status === 'partial'
-    && coverage.reason === NEWS_COVERAGE_REASON
-    && isIsoDateTime(checkedAt)
-    && Date.parse(checkedAt) >= Date.parse(attemptThreshold);
-  if (!currentAttempt) {
-    throw new Error(`${policy.label} editorial research is incomplete. Reach the target or record a current-run partial disposition after the search is exhausted.`);
-  }
-  systemFallbacks.push({
-    section,
-    path: pathName,
-    action: 'unavailable_disposition',
-    reason: NEWS_COVERAGE_REASON
+    throw new Error(`Tape editorial work is incomplete for ${ticker}. Supply current commentary before finalization.`);
   });
 }
 
 function usableWeekAheadOutcome(outcome, attemptThreshold) {
   if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
-  if (outcome.status === 'verified') return Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
-  return outcome.status === 'commentary_unavailable'
+  void attemptThreshold;
+  return outcome.status === 'verified'
     && outcome.source === 'editorial'
-    && Boolean(String(outcome.reason || '').trim())
-    && isIsoDateTime(outcome.attemptedAt)
-    && Date.parse(outcome.attemptedAt) >= Date.parse(attemptThreshold);
+    && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
 }
 
 function applyDashboardDataJson(args) {
   const canonicalHtml = loadDashboardBase(args.dashboard).html;
   const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
   const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
+  if (args.scheduled) validateScheduledFinalization(args.dashboard, args.windowMode);
   const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
   assertChartSeriesRevisions(
     roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data')),
@@ -1601,34 +1568,7 @@ function applyDashboardDataJson(args) {
       return !duplicate;
     })
   };
-  requireNewsEditorialDisposition(
-    editorialDashboardData.futuresModule?.storiesCoverage,
-    dashboardData.futuresModule.stories.length,
-    NEWS_COVERAGE_POLICIES.futuresStories,
-    'futures-news',
-    'futuresModule.stories',
-    reviewManifest.preparedAt,
-    reviewManifest.systemFallbacks
-  );
-  requireNewsEditorialDisposition(
-    editorialDashboardData.storiesCoverage,
-    dashboardData.stories.length,
-    NEWS_COVERAGE_POLICIES.stories,
-    'stories',
-    'stories',
-    reviewManifest.preparedAt,
-    reviewManifest.systemFallbacks
-  );
-  requireNewsEditorialDisposition(
-    editorialDashboardData.crypto?.notesCoverage,
-    dashboardData.crypto.notes.length,
-    NEWS_COVERAGE_POLICIES.cryptoNotes,
-    'crypto',
-    'crypto.notes',
-    reviewManifest.preparedAt,
-    reviewManifest.systemFallbacks
-  );
-  applyNewsCoverageState(dashboardData, { now: scheduledNow() });
+  applyNewsCoverageState(dashboardData, { now: editorialNow });
   const candidateTapeLabel = String(candidateDashboardData.tape?.label || '');
   const editorialTapeLabel = String(editorialDashboardData.tape?.label || '');
   const candidateTapeContextIndex = candidateTapeLabel.indexOf(' · ');
@@ -1684,16 +1624,8 @@ function applyDashboardDataJson(args) {
       const next = { ...day };
       if (usableWeekAheadOutcome(editorialDay.outcome, reviewManifest.preparedAt)) {
         next.outcome = editorialDay.outcome;
-        if (editorialDay.outcome.status === 'commentary_unavailable') {
-          reviewManifest.systemFallbacks.push({
-            section: 'market-lens',
-            path: `weekAhead.days.${day.date}.outcome`,
-            action: 'unavailable_disposition',
-            reason: editorialDay.outcome.reason
-          });
-        }
       } else if (day.lifecycle === 'close_available') {
-        throw new Error(`Week Ahead editorial work is incomplete for ${day.date}. Supply current commentary or an explicit attempted-unavailable disposition.`);
+        throw new Error(`Week Ahead editorial work is incomplete for ${day.date}. Supply current editorial interpretation.`);
       }
       return next;
     });
@@ -1905,19 +1837,13 @@ function main() {
     throw new Error(`Staged dashboard candidate not found: ${args.candidate}. Run deterministic preparation first.`);
   }
 
-  // Scheduled publication owns the time guard. Manual runs use the same edition
-  // paths without inheriting scheduler-only restrictions.
-  if (args.scheduled) validateScheduledPreflight(args.dashboard, args.windowMode);
+  // Only scheduler-driven preparation owns the wall-clock guard. Finalization
+  // rechecks completion without turning the start window into a deadline.
+  if (args.scheduled && !args.applyDashboardDataJson) validateScheduledStart(args.dashboard, args.windowMode);
 
   if (args.prepareEditorialDir) {
     const workspace = prepareEditorialWorkspace(args);
     process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
-    return;
-  }
-
-  if (args.scheduledPreflight) {
-    const windowId = validateScheduledPreflight(args.dashboard, args.windowMode);
-    process.stdout.write(`Scheduled preflight OK: ${windowId}\n`);
     return;
   }
 
@@ -2084,14 +2010,24 @@ function main() {
 
   if (!args.skipEarnings) {
     const canonicalWeek = canonicalDashboardData.earnings?.week || null;
-    const targetRange = args.calendarRolloverRange || canonicalWeek?.range;
-    const retryUnavailableRollover = requiresUnavailableRolloverRetry(canonicalWeek);
+    const targetRange = earningsTargetRange(args, canonicalWeek);
     const preparation = runWithSectionFallback(() => {
       const invalidPersistedArtifact = earningsStagingNeedsRebuild(EARNINGS_WEEK_PATH, checkedAt);
       if (invalidPersistedArtifact) {
-        process.stderr.write('Earnings staging artifact is invalid under the current contract; rebuilding the active range before refresh.\n');
+        process.stderr.write('Earnings staging artifact is invalid under the current contract; evaluating an authorized rebuild or active-range fallback.\n');
       }
-      if (retryUnavailableRollover || invalidPersistedArtifact || earningsCalendarNeedsBuild(targetRange, EARNINGS_WEEK_PATH, checkedAt)) {
+      const calendarNeedsBuild = earningsCalendarNeedsBuild(targetRange, EARNINGS_WEEK_PATH, checkedAt);
+      const failedAttemptNeedsRetry = earningsCalendarFailedAttemptNeedsRetry(targetRange, EARNINGS_WEEK_PATH, checkedAt);
+      const buildDecision = earningsCalendarBuildDecision(args, {
+        canonicalWeek,
+        invalidPersistedArtifact,
+        calendarNeedsBuild,
+        failedAttemptNeedsRetry
+      });
+      if (buildDecision.blocked) {
+        throw new Error('Earnings calendar rebuild is not authorized for this run; retaining the validated active-range section. Use --rebuild-earnings-calendar only for an intentional manual rebuild.');
+      }
+      if (buildDecision.build) {
         runCommand('node', [
           'scripts/earnings_week.js',
           'build',
@@ -2166,10 +2102,13 @@ module.exports = {
   replaceJsonBlock,
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
+  earningsTargetRange,
+  earningsCalendarBuildDecision,
   weekAheadStagingNeedsRebuild,
   runWithSectionFallback,
   reportPreparationStatus,
   stampDashboardEdition,
   stageDashboardCandidate,
-  validateScheduledPreflight
+  validateScheduledFinalization,
+  validateScheduledStart
 };

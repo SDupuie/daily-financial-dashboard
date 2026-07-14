@@ -7,6 +7,7 @@ const path = require('path');
 const {
   NEWS_COVERAGE_POLICIES,
   NEWS_COVERAGE_REASON,
+  allowedNewsDates,
   applyNewsCoverageState,
   applyScheduledNewsBaseline,
   canonicalStoryUrl,
@@ -18,7 +19,9 @@ const {
   storyIdentity,
   validateNewsCoverageState
 } = require('./news_contract');
-const { validateScheduledPreflight } = require('./run_daily_update');
+const { collectNewsCandidates, extractArticleMetadata } = require('./fetch_news_candidates');
+const { newsSearchPaths } = require('./news_sources');
+const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
 const temporaryDirectories = new Set();
 
 function makeTemporaryDirectory(parent, prefix) {
@@ -72,55 +75,134 @@ function testDashboardNewsCollections() {
 }
 
 function testNewsCoverageState() {
-  const checkedAt = new Date('2026-07-06T12:00:00.000Z');
-  const data = {
-    stories: Array.from({ length: 8 }, (_item, index) => story(`Market ${index}`, `https://example.com/market/${index}`)),
-    crypto: { notes: [] },
-    futuresModule: { stories: Array.from({ length: 3 }, (_item, index) => story(`Futures ${index}`, `https://example.com/futures/${index}`)) }
-  };
-  applyNewsCoverageState(data, { now: checkedAt });
-
+  assert.deepEqual(validateNewsCoverageState(undefined, 9, NEWS_COVERAGE_POLICIES.stories), []);
+  assert.deepEqual(validateNewsCoverageState(undefined, 4, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
+  assert.deepEqual(validateNewsCoverageState(undefined, 3, NEWS_COVERAGE_POLICIES.futuresStories), []);
+  assert.deepEqual(
+    validateNewsCoverageState(undefined, 0, NEWS_COVERAGE_POLICIES.futuresStories, { allowIncomplete: true }),
+    [],
+    'Deterministic staging may remain editorially incomplete; final publication may not.'
+  );
+  const data = { stories: [], crypto: { notes: [] }, futuresModule: { stories: [] } };
+  applyNewsCoverageState(data, { now: new Date('2026-07-10T21:00:00.000Z') });
   assert.deepEqual(data.storiesCoverage, {
     status: 'partial',
     reason: NEWS_COVERAGE_REASON,
-    checkedAt: checkedAt.toISOString()
+    checkedAt: '2026-07-10T21:00:00.000Z'
   });
-  assert.deepEqual(data.crypto.notesCoverage, {
-    status: 'partial',
-    reason: NEWS_COVERAGE_REASON,
-    checkedAt: checkedAt.toISOString()
-  });
-  assert.deepEqual(data.futuresModule.storiesCoverage, { status: 'complete' });
-  assert.deepEqual(
-    validateNewsCoverageState(data.storiesCoverage, data.stories.length, NEWS_COVERAGE_POLICIES.stories),
-    []
-  );
-  assert.deepEqual(
-    validateNewsCoverageState(data.crypto.notesCoverage, data.crypto.notes.length, NEWS_COVERAGE_POLICIES.cryptoNotes),
-    []
-  );
+  assert.deepEqual(validateNewsCoverageState(data.storiesCoverage, 0, NEWS_COVERAGE_POLICIES.stories), []);
   assert.match(
     validateNewsCoverageState({ status: 'complete' }, 8, NEWS_COVERAGE_POLICIES.stories).join(' '),
-    /status can be complete only/
+    /storiesCoverage\.status can be complete/
   );
   assert.match(
-    validateNewsCoverageState({ status: 'partial', reason: NEWS_COVERAGE_REASON, checkedAt: checkedAt.toISOString() }, 9, NEWS_COVERAGE_POLICIES.stories).join(' '),
-    /status must be complete once/
+    validateNewsCoverageState({ status: 'partial' }, 9, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /must be complete.*reason.*checkedAt/
   );
   assert.match(
-    validateNewsCoverageState({ status: 'partial', reason: 'unknown', checkedAt: 'not-a-time' }, 2, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
-    /reason must be insufficient_qualifying_fresh_coverage.*checkedAt must be an offset-bearing ISO timestamp/
+    validateNewsCoverageState(undefined, 2, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
+    /crypto\.notesCoverage must record updater-derived partial coverage/
   );
   assert.match(
-    validateNewsCoverageState({ status: 'complete' }, 10, NEWS_COVERAGE_POLICIES.stories).join(' '),
-    /no more than 9 qualifying fresh items/
+    validateNewsCoverageState(undefined, 10, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /no more than 9/
   );
+}
 
-  data.stories.push(story('Market 8', 'https://example.com/market/8'));
-  data.crypto.notes = Array.from({ length: 4 }, (_item, index) => story(`Crypto ${index}`, `https://example.com/crypto/${index}`));
-  applyNewsCoverageState(data, { now: new Date('2026-07-06T12:05:00.000Z') });
-  assert.deepEqual(data.storiesCoverage, { status: 'complete' });
-  assert.deepEqual(data.crypto.notesCoverage, { status: 'complete' });
+function testMondayMorningFreshnessWindow() {
+  const saturday = '2026-07-11';
+  assert.equal(allowedNewsDates(new Date('2026-07-13T12:44:00.000Z')).has(saturday), false);
+  assert.equal(allowedNewsDates(new Date('2026-07-13T12:45:00.000Z')).has(saturday), true);
+  assert.equal(allowedNewsDates(new Date('2026-07-13T14:00:00.000Z')).has(saturday), true);
+  assert.equal(allowedNewsDates(new Date('2026-07-13T14:01:00.000Z')).has(saturday), false);
+}
+
+async function testDeterministicNewsCandidateAcquisition() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const calls = [];
+  const searchPaths = newsSearchPaths('afternoon');
+  const dashboardData = {
+    stories: [{
+      title: 'Still-fresh prior market card',
+      url: 'https://example.com/prior-market',
+      publishedOn: '2026-07-10',
+      tag: 'Prior',
+      body: 'Previously reviewed market copy.'
+    }],
+    futuresModule: { stories: [] },
+    crypto: { notes: [{
+      title: 'Still-fresh prior crypto card',
+      url: 'https://example.com/prior-crypto',
+      publishedOn: '2026-07-10',
+      kicker: 'Prior',
+      body: 'Previously reviewed crypto copy.'
+    }] }
+  };
+  const artifact = await collectNewsCandidates({
+    asOf,
+    windowMode: 'afternoon',
+    dashboardData,
+    searchPaths,
+    clock: () => asOf,
+    fetchSearch: async (searchPath) => {
+      calls.push(searchPath.id);
+      if (searchPath.id === 'general-market-structure') throw new Error('fixture provider failure');
+      if (searchPath.id === 'general-market') return { articles: [{
+        seendate: '20260710T200000Z',
+        title: 'General market fixture',
+        url: 'https://www.reuters.com/markets/general?utm_source=fixture',
+        language: 'English'
+      }] };
+      if (searchPath.id === 'general-futures') return { articles: [{
+        seendate: '20260710T190000Z',
+        title: 'Duplicate market fixture',
+        url: 'https://www.reuters.com/markets/general',
+        language: 'English'
+      }, {
+        seendate: '20260701T190000Z',
+        title: 'Stale market fixture',
+        url: 'https://www.reuters.com/markets/stale',
+        language: 'English'
+      }] };
+      if (searchPath.id === 'crypto-market') return { articles: [{
+        seendate: '20260710T180000Z',
+        title: 'Crypto fixture',
+        url: 'https://www.coindesk.com/markets/crypto-fixture',
+        language: 'English'
+      }] };
+      return { articles: [] };
+    },
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      description: 'Fixture description.',
+      excerpt: 'Fixture article content.',
+      publishedAt: new Date(candidate.publishedAt)
+    })
+  });
+
+  assert.deepEqual(calls, searchPaths.map((searchPath) => searchPath.id), 'Every configured base and fallback path must be attempted.');
+  assert.equal(artifact.generalCandidates.length, 2, 'The downloaded duplicate must collapse while the fresh prior card remains available.');
+  assert.equal(artifact.cryptoCandidates.length, 2, 'Downloaded and prior Crypto candidates must both reach editorial review.');
+  const downloaded = artifact.generalCandidates.find((candidate) => candidate.origin === 'downloaded');
+  assert.equal(downloaded.url, 'https://www.reuters.com/markets/general');
+  assert.deepEqual(downloaded.searchPathIds, ['general-market', 'general-futures']);
+  assert.equal(downloaded.article.accessible, true);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.priorCard).priorCopy.tag, 'Prior');
+  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'general-market-structure').error, 'fixture provider failure');
+  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'crypto-market').acceptedCount, 1);
+}
+
+function testArticleMetadataExtraction() {
+  const metadata = extractArticleMetadata(`<!doctype html>
+    <meta property="og:title" content="Fixture &amp; Markets">
+    <meta name="description" content="A useful fixture description.">
+    <script type="application/ld+json">{"datePublished":"2026-07-10T12:30:00-04:00"}</script>
+    <p>This fixture paragraph contains enough article text to be retained by the mechanical page extractor.</p>`);
+  assert.equal(metadata.pageTitle, 'Fixture & Markets');
+  assert.equal(metadata.description, 'A useful fixture description.');
+  assert.equal(metadata.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
+  assert.match(metadata.excerpt, /mechanical page extractor/);
 }
 
 function testBaselineSanitization() {
@@ -234,8 +316,8 @@ function testScheduledBaselineTransition() {
   );
 }
 
-function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-scheduled-preflight-');
+function testScheduledStartAndFinalizationGuards() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-scheduled-guard-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const baseline = {
     lastScheduledUpdateAt: '2026-07-08T21:00:00.000Z',
@@ -244,37 +326,60 @@ function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
     currentScheduledStoryIds: []
   };
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
+  assert.throws(
+    () => validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T12:44:00.000Z')),
+    /outside its America\/Chicago update window/
+  );
   assert.equal(
-    validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+    validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T12:45:00.000Z')),
+    '2026-07-09:morning'
+  );
+  assert.equal(
+    validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T14:00:00.000Z')),
     '2026-07-09:morning'
   );
   assert.throws(
-    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T14:00:00.000Z')),
+    () => validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T14:01:00.000Z')),
     /outside its America\/Chicago update window/
   );
   assert.throws(
-    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-11T12:00:00.000Z')),
-    /only permits weekday runs/
+    () => validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-11T12:45:00.000Z')),
+    /only permit weekday starts/
+  );
+  assert.equal(
+    validateScheduledFinalization(dashboardFile, 'morning', new Date('2026-07-09T14:30:00.000Z')),
+    '2026-07-09:morning',
+    'A scheduled run that started correctly may finalize after the wall-clock window closes.'
   );
   baseline.lastScheduledWindow = '2026-07-09:morning';
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
   assert.throws(
-    () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-09T12:00:00.000Z')),
+    () => validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T13:00:00.000Z')),
+    /already completed.*manual\/on-demand/
+  );
+  assert.throws(
+    () => validateScheduledFinalization(dashboardFile, 'morning', new Date('2026-07-09T14:30:00.000Z')),
     /already completed.*manual\/on-demand/
   );
 }
 
 
-function main() {
+async function main() {
   testStoryIdentityContract();
   testDashboardNewsCollections();
   testNewsCoverageState();
+  testMondayMorningFreshnessWindow();
+  testArticleMetadataExtraction();
+  await testDeterministicNewsCandidateAcquisition();
   testBaselineSanitization();
   testNewMarkerAssignment();
   testManualBaselineTransition();
   testScheduledBaselineTransition();
-  testScheduledPreflightEnforcesWindowAndDuplicateMarker();
+  testScheduledStartAndFinalizationGuards();
   process.stdout.write('News tests passed.\n');
 }
 
-main();
+main().catch((error) => {
+  process.stderr.write(`${error.stack || error.message}\n`);
+  process.exit(1);
+});

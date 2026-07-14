@@ -7,8 +7,8 @@ const NEWS_COVERAGE_POLICIES = Object.freeze({
   cryptoNotes: Object.freeze({ label: 'crypto.notes', minimum: 4, maximum: 6 }),
   futuresStories: Object.freeze({ label: 'futuresModule.stories', minimum: 3, maximum: 3 })
 });
-const MONDAY_MORNING_NEWS_START_MINUTES = 6 * 60 + 45;
-const MONDAY_MORNING_NEWS_END_MINUTES = 7 * 60 + 30;
+const MONDAY_MORNING_NEWS_START_MINUTES = 7 * 60 + 45;
+const MONDAY_MORNING_NEWS_END_MINUTES = 9 * 60;
 
 function chicagoDateParts(date) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -120,11 +120,17 @@ function applyNewsCoverageState(data, { now = new Date() } = {}) {
   }
 }
 
-function validateNewsCoverageState(coverage, count, policy) {
+function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = false } = {}) {
   const errors = [];
   const coverageLabel = policy.label === 'stories' ? 'storiesCoverage' : `${policy.label}Coverage`;
   if (count > policy.maximum) {
     errors.push(`${policy.label} must contain no more than ${policy.maximum} qualifying fresh ${policy.maximum === 1 ? 'item' : 'items'}.`);
+  }
+  if (coverage === undefined) {
+    if (!allowIncomplete && count < policy.minimum) {
+      errors.push(`${coverageLabel} must record updater-derived partial coverage when ${policy.label} is below its target.`);
+    }
+    return errors;
   }
   if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) {
     errors.push(`${coverageLabel} must record complete or partial coverage.`);
@@ -144,7 +150,7 @@ function validateNewsCoverageState(coverage, count, policy) {
     return errors;
   }
   if (count >= policy.minimum) {
-    errors.push(`${coverageLabel}.status must be complete once ${policy.label} reaches its normal minimum of ${policy.minimum}.`);
+    errors.push(`${coverageLabel}.status must be complete once ${policy.label} reaches its target minimum of ${policy.minimum}.`);
   }
   if (coverage.reason !== NEWS_COVERAGE_REASON) {
     errors.push(`${coverageLabel}.reason must be ${NEWS_COVERAGE_REASON} when coverage is partial.`);
@@ -255,17 +261,6 @@ function markStoriesNewSinceBaseline(data, comparisonIds) {
       notes: markNewsItemsNewSinceBaseline(data.crypto.notes, comparisonIds)
     };
   }
-}
-
-function chicagoIsoDate(date) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(date);
-  const value = (type) => parts.find((part) => part.type === type)?.value || '';
-  return `${value('year')}-${value('month')}-${value('day')}`;
 }
 
 function applyScheduledNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {

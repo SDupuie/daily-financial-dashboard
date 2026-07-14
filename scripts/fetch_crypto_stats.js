@@ -494,15 +494,26 @@ async function fetchCryptoStats(options = {}) {
   return normalized;
 }
 
-function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date()) {
+function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reason = 'source_refresh_failed') {
   const timestamp = new Date(checkedAt).toISOString();
-  const stats = Array.isArray(canonicalCrypto?.stats) ? structuredClone(canonicalCrypto.stats) : [];
+  const stats = Array.isArray(canonicalCrypto?.stats)
+    ? structuredClone(canonicalCrypto.stats).map((row) => row?.availability?.status === 'unavailable'
+      ? row
+      : {
+        ...row,
+        availability: {
+          status: 'carried_forward',
+          reason,
+          checkedAt: timestamp
+        }
+      })
+    : [];
   return {
     fetchedAt: timestamp,
     stats,
     availability: {
       status: stats.length ? 'carried_forward' : 'unavailable',
-      reason: 'source_refresh_failed',
+      reason,
       checkedAt: timestamp
     }
   };

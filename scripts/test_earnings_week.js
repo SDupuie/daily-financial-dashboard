@@ -14,7 +14,9 @@ const {
   computeEarningsWeekCounts,
   earningsRowKey,
   emptyEarningsApiUsage,
+  metricResult,
   mergeUnchangedEarningsNarrative,
+  narrativeEditorialComplete,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
 const {
@@ -33,9 +35,11 @@ const {
 const {
   applyCompanyReleaseResolutions,
   applyEarningsNarrative,
+  earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
   pendingEarningsScheduleReviews,
   refreshEarningsResults,
+  refreshTargetRows,
   validateEarningsWeekPayload
 } = require('./earnings_week');
 const { validateEarningsWeekReleasePayload } = require('./earnings_week_validation');
@@ -224,6 +228,23 @@ function testFinnhubPrimaryAcceptance() {
   }, args);
   assert.equal(missingCalendar.ok, false);
   assert.match(missingCalendar.error, /missing earningsCalendar/);
+}
+
+function testMetricComparisonsUseDisplayedPrecision() {
+  assert.equal(metricResult(0.33, 0.3329, 'eps'), 'met');
+  assert.equal(metricResult(0.34, 0.3329, 'eps'), 'beat');
+  assert.equal(metricResult(0.32, 0.3329, 'eps'), 'miss');
+  assert.equal(metricResult(2384900000, 2384545147, 'revenue'), 'met');
+  assert.equal(metricResult(2390000000, 2384545147, 'revenue'), 'beat');
+  assert.equal(metricResult(2370000000, 2384545147, 'revenue'), 'miss');
+
+  const [row] = buildRows([finnhubRow('ROUND', {
+    eps: { estimate: 0.3329, actual: 0.33 },
+    revenue: { estimate: 2384545147, actual: 2384900000 }
+  })], [profile('ROUND')]);
+  assert.equal(row.eps.result, 'met');
+  assert.equal(row.revenue.result, 'met');
+  assert.equal(row.outcome.overall, 'met');
 }
 
 function testPrimaryScheduleVerification() {
@@ -490,12 +511,37 @@ function testScheduleReviewAndPreparationFallbacks() {
     secondaryDates: [],
     official: null
   };
+  retryWeek.summary.fetches = {
+    earningsApiCalendar: {
+      requests: 26,
+      ok: 26,
+      skipped: 0,
+      rows: 400,
+      errors: []
+    }
+  };
   const retryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-schedule-retry-'));
   try {
     const retryPath = path.join(retryDir, 'retry-week.json');
     fs.writeFileSync(retryPath, JSON.stringify(retryWeek));
-    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-05T23:00:00.000Z')), false, 'Do not repeat the metered scan during the same Central-time day.');
-    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true, 'Primary-only rows must retry corroboration on the next Central-time day.');
+    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), false, 'A successful rollover scan must not repeat solely because primary-only rows remain.');
+
+    retryWeek.summary.fetches.earningsApiCalendar.rows = 0;
+    fs.writeFileSync(retryPath, JSON.stringify(retryWeek));
+    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true, 'A rollover scan that returned no rows may retry on the next Central-time day.');
+    assert.equal(earningsCalendarFailedAttemptNeedsRetry(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true);
+
+    retryWeek.summary.fetches.earningsApiCalendar = {
+      requests: 1,
+      ok: 0,
+      skipped: 0,
+      rows: 0,
+      errors: [{ date: '2026-01-05', status: 429, error: 'HTTP 429' }]
+    };
+    fs.writeFileSync(retryPath, JSON.stringify(retryWeek));
+    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-05T23:00:00.000Z')), false, 'Do not repeat a failed metered scan during the same Central-time day.');
+    assert.equal(earningsCalendarFailedAttemptNeedsRetry(retryWeek.range, retryPath, new Date('2026-01-05T23:00:00.000Z')), false);
+    assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true, 'A failed rollover scan may retry on the next Central-time day.');
   } finally {
     fs.rmSync(retryDir, { recursive: true, force: true });
   }
@@ -837,7 +883,11 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     narrativeArtifact: 'generated/editorial/earnings_narrative.json',
     appliedAt: '2026-01-08T22:05:00.000Z'
   });
-  assert.deepEqual(validateEarningsWeekPayload(unavailable, { requireNarrative: true }), [], 'Explicit unavailable dispositions must not block publication.');
+  assert.match(
+    validateEarningsWeekPayload(unavailable, { requireNarrative: true }).join('\n'),
+    /outcome\.interpretation must be populated|must be verified/,
+    'Unavailable dispositions cannot complete editorial work for released results.'
+  );
   assert.equal(unavailable.rows[0].outcome.interpretationDisposition.status, 'commentary_unavailable');
   assert.equal(unavailable.rows[0].outcome.guidanceDisposition.status, 'unverified');
   assert.equal(unavailable.rows[0].reaction.commentaryDisposition.status, 'commentary_unavailable');
@@ -854,6 +904,61 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
   });
 
   assert.deepEqual(validateEarningsWeekPayload(finalized, { requireNarrative: true }), []);
+
+  const pending = structuredClone(source.rows[0]);
+  pending.outcome.overall = 'pending';
+  pending.lifecycle = 'awaiting_actual';
+  pending.reaction = { status: 'pending', note: '' };
+  assert.equal(
+    narrativeEditorialComplete(pending, { outcome: {}, reaction: {} }),
+    false,
+    'A visible row awaiting actuals still requires its reviewed pre-release thesis.'
+  );
+  assert.equal(
+    narrativeEditorialComplete(pending, {
+      outcome: {
+        interpretation: 'Demand and margins remain the key pre-release watch items.',
+        interpretationDisposition: { status: 'verified' }
+      },
+      reaction: {}
+    }),
+    true,
+    'A reviewed pre-release thesis completes the editorial requirement while actuals remain unavailable.'
+  );
+
+  const releasedAwaitingClose = {
+    ...pending,
+    lifecycle: 'released_awaiting_close',
+    outcome: { overall: 'mixed' },
+    reaction: { status: 'awaiting_close', note: '' }
+  };
+  assert.equal(
+    narrativeEditorialComplete(releasedAwaitingClose, {
+      outcome: {
+        interpretation: 'Revenue conversion and costs are the key post-release issues.',
+        interpretationDisposition: { status: 'verified' }
+      },
+      reaction: {}
+    }),
+    false,
+    'A released row must not finalize before its earnings-release guidance has been reviewed.'
+  );
+  assert.equal(
+    narrativeEditorialComplete(releasedAwaitingClose, {
+      outcome: {
+        interpretation: 'Revenue conversion and costs are the key post-release issues.',
+        interpretationDisposition: { status: 'verified' },
+        guidanceDisposition: {
+          status: 'not_provided',
+          evidenceSource: 'official_company',
+          evidenceUrl: 'https://example.com/earnings-release'
+        }
+      },
+      reaction: {}
+    }),
+    true,
+    'A release-time no-guidance conclusion must be explicitly evidenced before finalization.'
+  );
 }
 
 async function testResultRefreshDoesNotRebuildSlate() {
@@ -960,8 +1065,8 @@ async function testResultRefreshDoesNotRebuildSlate() {
   const awaitingRow = awaitingResult.payload.rows[0];
   assert.equal(awaitingRow.reaction.status, 'awaiting_close');
   assert.equal(awaitingRow.lifecycle, 'released_awaiting_close');
-  assert.equal(awaitingRow.outcome.interpretation, 'Stale interpretation.', 'Pre-event commentary must remain until the close response is available.');
-  assert.equal(awaitingRow.reaction.note, 'Stale reaction.', 'Awaiting-close lifecycle must not erase the existing commentary.');
+  assert.equal(awaitingRow.outcome.interpretation, '', 'Reported actuals must invalidate pre-release commentary before the close response is available.');
+  assert.equal(awaitingRow.reaction.note, '', 'Reported actuals must invalidate the prior reaction commentary before the close response is available.');
 
   const result = await refreshEarningsResults(awaitingResult.payload, refreshData, {
     asOf: '2026-01-06T22:00:00.000Z',
@@ -1038,6 +1143,27 @@ async function testResultRefreshFailuresAreRowScoped() {
   assert.equal(recovered.payload.rows[0].sourceStatus, 'verified');
 }
 
+function testResultRefreshWaitsForReportWindow() {
+  const source = deterministicVerifiedWeekFixture();
+  const row = source.rows[0];
+  source.companyReleaseTasks = [{
+    id: `${row.reportDate}:${row.symbol}:company-release`,
+    symbol: row.symbol,
+    reportDate: row.reportDate
+  }];
+
+  assert.deepEqual(
+    refreshTargetRows(source, '2026-01-05T12:00:00.000Z'),
+    [],
+    'An unresolved company-release task must not make a future row eligible for provider result refresh.'
+  );
+  assert.deepEqual(
+    refreshTargetRows(source, '2026-01-07T12:00:00.000Z').map((item) => item.symbol),
+    [row.symbol],
+    'The row becomes eligible after its report window arrives.'
+  );
+}
+
 async function testMixedResultRefreshAppliesSuccessfulRows() {
   const source = deterministicVerifiedWeekFixture();
   const retained = structuredClone(source.rows[0]);
@@ -1081,6 +1207,8 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
   const carried = result.payload.rows.find((row) => row.symbol === 'RETAIN');
   assert.equal(refreshed.eps.actual, 2, 'A neighboring row failure must not discard a successful EPS refresh.');
   assert.equal(refreshed.revenue.actual, 1300000000);
+  assert.equal(refreshed.outcome.interpretation, '', 'New actual results must invalidate pre-release commentary while the row awaits its reaction close.');
+  assert.equal(refreshed.outcome.interpretationDisposition, undefined);
   assert.deepEqual(carried.eps, retainedBefore.eps, 'Only the failed row must retain its prior provider facts.');
   assert.equal(carried.sourceAudit.resultRefresh.failures[0].provider, 'finnhub');
   assert.equal(result.failedRows, 1);
@@ -1418,7 +1546,7 @@ function testNewEarningsNarrativeRowsStagePendingEditorialCompletion() {
       reaction: { note: '' }
     }]
   });
-  assert.deepEqual(awaitingClose.missingRows, [], 'Awaiting-close rows must retain complete pre-event commentary until the response is available.');
+  assert.deepEqual(awaitingClose.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }], 'Awaiting-close rows must require release-time guidance review after actuals arrive.');
 
   const staleNarrative = {
     rows: [{
@@ -1487,14 +1615,18 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
     delete item.outcome.interpretationDisposition;
   }
   next.rows[0].eps.estimate = 1.1;
+  next.rows[0].eps.actual = 1.2;
+  next.rows[0].eps.result = 'beat';
+  next.rows[0].outcome.overall = 'beat';
   next.rows[0].outcome.interpretation = 'Stale carried preview';
   next.rows[0].outcome.interpretationDisposition = { status: 'verified' };
+  next.rows[1].lifecycle = 'awaiting_actual';
   next.rows[2].outcome.interpretation = 'Unreviewed staging copy';
   next.rows[2].outcome.interpretationDisposition = { status: 'verified' };
 
   const merged = mergeUnchangedEarningsNarrative(previous, next);
   assert.equal(merged.rows[0].outcome.interpretation, '', 'Changed deterministic facts must invalidate only that row.');
-  assert.equal(merged.rows[1].outcome.interpretation, 'BBB demand setup', 'Unchanged neighboring rows must retain reviewed narrative.');
+  assert.equal(merged.rows[1].outcome.interpretation, 'BBB demand setup', 'A row awaiting actuals must retain its reviewed pre-release thesis.');
   assert.equal(merged.rows[1].outcome.interpretationDisposition.status, 'verified');
   assert.equal(merged.rows[2].outcome.interpretation, '', 'A new row cannot import verified narrative from deterministic staging.');
   assert.equal(merged.rows[2].outcome.interpretationDisposition, undefined);
@@ -1503,6 +1635,7 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
 
 async function main() {
   testFinnhubPrimaryAcceptance();
+  testMetricComparisonsUseDisplayedPrecision();
   testPrimaryScheduleVerification();
   testScheduleReviewAndPreparationFallbacks();
   await testEarningsApiCalendarStopsAfterQuotaResponse();
@@ -1513,6 +1646,7 @@ async function main() {
   await testNeedsReviewPromotesOfficialMetricsIndependently();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
   testCompanyReleaseValidatorRejectsCalendarEstimates();
+  testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();
   await testMixedResultRefreshAppliesSuccessfulRows();
