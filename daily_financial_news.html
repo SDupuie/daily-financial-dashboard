@@ -26117,14 +26117,13 @@
           : row.companyReleaseStatus === 'unresolved'
           ? 'Company release could not be independently resolved; provider facts are shown and missing results remain unavailable.'
           : '';
-        const scheduleLabel = row.scheduleVerificationStatus === 'official_confirmed'
-          ? `Report date confirmed by ${row.scheduleVerificationSourceName || 'official company IR'}.`
-          : row.scheduleVerificationStatus === 'primary_only'
+        const scheduleConfirmed = row.scheduleVerificationStatus === 'official_confirmed';
+        const scheduleLabel = row.scheduleVerificationStatus === 'primary_only'
           ? 'Report date is unconfirmed; using Finnhub.'
           : row.scheduleVerificationStatus === 'secondary_only'
           ? 'Report date is unconfirmed; using EarningsAPI.'
           : '';
-        const fallbackLabel = (refreshLabel || releaseLabel || scheduleLabel || row.sourceStatus !== 'partial')
+        const fallbackLabel = (refreshLabel || releaseLabel || scheduleLabel || scheduleConfirmed || row.sourceStatus !== 'partial')
           ? ''
           : row.lifecycle === 'released_awaiting_close'
           ? 'Reaction pending'
