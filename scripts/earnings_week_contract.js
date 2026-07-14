@@ -192,6 +192,8 @@ function earningsScheduleReviewRows(review, week) {
 
 function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = {}) {
   const checkedAt = new Date(options.checkedAt || Date.now()).toISOString();
+  const canonical = { ...canonicalWeek };
+  delete canonical.policy;
   const sameRange = canonicalWeek?.range?.from === targetRange?.from
     && canonicalWeek?.range?.to === targetRange?.to;
   if (sameRange) {
@@ -201,8 +203,7 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
     return {
       mode: 'carried_forward',
       week: {
-        ...canonicalWeek,
-        policy: buildEarningsWeekPolicy(),
+        ...canonical,
         availability: {
           status: 'carried_forward',
           reason: 'earnings_preparation_failed',
@@ -225,7 +226,6 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
         from: targetRange.from,
         to: targetRange.to
       },
-      policy: buildEarningsWeekPolicy(),
       availability: {
         status: 'unavailable',
         reason: 'earnings_preparation_failed',
@@ -338,65 +338,6 @@ function earningsCloseAvailable(bar, asOf = new Date()) {
   if (!clock || !isIsoDate(bar?.date)) return false;
   const dateOrder = compareIsoDate(bar.date, clock.date);
   return dateOrder < 0 || (dateOrder === 0 && clock.minutes >= 16 * 60);
-}
-
-function buildEarningsWeekPolicy() {
-  return {
-    baseSlate: 'Finnhub earnings calendar by date range',
-    enrichment: 'A semantically valid Finnhub calendar response is accepted regardless of row count; Finnhub company profiles supply identity and market capitalization; EarningsAPI uses the surrounding corroboration range while discovery remains limited to the five displayed dates; event-scoped official company IR evidence may confirm, move, or exclude an event, while unresolved rows retain degraded provenance; Finnhub metric plus EarningsAPI calendar support identity-only recovery when Finnhub profile is empty; EarningsAPI company endpoint covers display-scale rows missing from Finnhub',
-    reaction: 'Yahoo Finance Chart API close-to-close policy',
-    sourceHierarchy: [
-      'Finnhub primary for every valid calendar row returned by an HTTP-, JSON-, and schema-valid response; row count is diagnostic only.',
-      'Finnhub metric endpoint may recover market capitalization when Finnhub profile is empty for a Finnhub-present row.',
-      'EarningsAPI secondary corroborates display-eligible Finnhub dates within the active five-day slate and supplies display-scale events missing from Finnhub. After that attempt, current-event official IR evidence may confirm, move, or exclude an event. Without official resolution, retain Finnhub rows as primary-only and admit EarningsAPI-only rows as secondary-only only when the calendar and company endpoints match; both remain partial and under nonblocking review.',
-      'SEC/company release resolution for actual revenue, EPS context, fiscal period, report timing, and source verification. Every task records a resolved, needs-review, or unresolved disposition; needs-review independently promotes each official actual it can verify while retaining provider data for the other metric, and all non-resolved dispositions remain partial and nonblocking.',
-      'Yahoo Finance Chart API for close-to-close market reaction.'
-    ],
-    fieldPrimaries: {
-      slate: 'Finnhub earnings calendar after active-week date corroboration, explicit primary-only secondary-outage fallback, or official company IR confirmation',
-      company: 'Finnhub company profile name, falling back to EarningsAPI calendar company name for profile-empty Finnhub rows, then ticker symbol',
-      marketCap: 'Finnhub company profile marketCapitalization converted from millions to dollars, falling back to Finnhub stock metric marketCapitalization for profile-empty Finnhub rows',
-      timing: 'Finnhub earnings calendar hour',
-      eps: {
-        estimate: 'Finnhub earnings calendar EPS estimate',
-        actual: 'Finnhub earnings calendar EPS actual'
-      },
-      revenue: {
-        estimate: 'Finnhub earnings calendar revenue estimate',
-        actual: 'Finnhub earnings calendar revenue actual'
-      }
-    },
-    reactionRules: {
-      bmo: 'report-date close vs previous trading-day close',
-      amc: 'next trading-day close vs report-date close',
-      dmh: 'report-date close vs previous trading-day close',
-      unknown: 'unavailable'
-    },
-    lifecycleRules: {
-      scheduled: 'report window has not arrived and no actual is available',
-      awaiting_actual: 'report window has arrived but no actual is available',
-      released_awaiting_close: 'an actual is available but the required close reaction is not complete',
-      close_available: 'an actual and the required close reaction are both available'
-    },
-    availabilityRules: {
-      carriedForward: 'When same-range Earnings preparation fails, retain the last validated embedded week and continue the dashboard update.',
-      unavailable: 'When rollover Earnings preparation fails, publish the active five-date range with no rows and an unavailable source warning.'
-    },
-    resultRefreshRules: 'Collect Finnhub, each EarningsAPI company symbol, and each Yahoo symbol independently. Apply successful fields and reactions; retain prior validated values only for failed rows, record provider-specific partial diagnostics, and retry those rows on later runs.',
-    editorialContinuity: 'Preserve pre-event commentary through released_awaiting_close; invalidate it when close_available is first reached or the reaction window is genuinely unavailable.',
-    editorialDispositionRules: 'Publish deterministic facts with verified editorial copy when available; otherwise record retryable commentary_unavailable or unverified dispositions. A not_provided guidance disposition requires official company evidence.',
-    secondaryRecoveryFieldPolicy: {
-      slate: 'EarningsAPI calendar may queue display-scale events missing from Finnhub. For Finnhub-present display rows, a matching date corroborates the row without consulting IR. Event-scoped official company IR evidence can confirm, move, or exclude a reviewed event. Without official resolution, retain a Finnhub conflict or complete-response omission as primary-only with degraded provenance. Admit an EarningsAPI-only event as secondary-only with degraded provenance only when its calendar and company endpoints match; otherwise omit it from canonical rows and retain it in nonblocking review. An official date outside the active week excludes only the matching event from that week.',
-      profileRecovery: 'For Finnhub-present rows with empty Finnhub profile, EarningsAPI calendar may supply company name and Finnhub metric may supply market capitalization; EPS/revenue/timing remain Finnhub.',
-      eps: 'EarningsAPI company endpoint may supply EPS estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
-      revenue: 'EarningsAPI company endpoint may supply revenue estimates and actuals for recovered rows; SEC/company release resolves missing official actuals.',
-      timing: 'Finnhub calendar for primary rows; EarningsAPI company endpoint for recovered rows; SEC/company release when still missing.',
-      reaction: 'Yahoo Finance Chart API.'
-    },
-    conflictResolution: {
-      officialCompanyIr: 'An event-scoped official company investor-relations schedule record resolves conflicts, complete-response omissions, and secondary outages only after the EarningsAPI attempt. A confirmation outside the active five-trading-day range excludes only its matching primary event from that week.'
-    }
-  };
 }
 
 // These counts are embedded in the canonical earnings-week artifact and must
@@ -803,7 +744,6 @@ module.exports = {
   attachReactions,
   buildEarningsNarrativeSidecar,
   buildEarningsPreparationFallback,
-  buildEarningsWeekPolicy,
   buildCompanyReleaseTasks,
   combinedOutcome,
   computeEarningsSourceStatus,

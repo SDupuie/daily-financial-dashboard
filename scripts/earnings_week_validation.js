@@ -2,10 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { isDeepStrictEqual } = require('util');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
-  buildEarningsWeekPolicy,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
   earningsCloseAvailable,
@@ -81,6 +79,7 @@ const TOP_LEVEL_FIELDS = new Set([
   'schemaVersion',
   'generatedAt',
   'range',
+  // Accepted only while the current canonical artifact transitions; every updater-owned Earnings write removes it.
   'policy',
   'availability',
   'rows',
@@ -267,50 +266,6 @@ function validateRange(errors, range) {
   }
   if (isIsoDate(range.from) && isIsoDate(range.to) && !isSupportedFiveTradingDayRange(range.from, range.to)) {
     errors.push('range must be Monday-Friday or Friday plus next Monday-Thursday.');
-  }
-}
-
-function validatePolicy(errors, policy) {
-  if (!isObject(policy)) {
-    errors.push('policy must be an object documenting merge rules.');
-    return;
-  }
-  for (const field of ['baseSlate', 'enrichment', 'reaction']) {
-    if (typeof policy[field] !== 'string' || !policy[field].trim()) {
-      errors.push(`policy.${field} must be populated.`);
-    }
-  }
-  if (!/Finnhub/i.test(policy.baseSlate)) errors.push('policy.baseSlate must identify Finnhub as the primary slate.');
-  if (!Array.isArray(policy.sourceHierarchy) || policy.sourceHierarchy.length !== 5) {
-    errors.push('policy.sourceHierarchy must list the five canonical source layers.');
-  } else {
-    const expectedOrder = [/Finnhub/i, /Finnhub metric|profile/i, /EarningsAPI/i, /SEC|company release/i, /Yahoo/i];
-    policy.sourceHierarchy.forEach((item, index) => {
-      if (typeof item !== 'string' || !expectedOrder[index].test(item)) {
-        errors.push(`policy.sourceHierarchy[${index}] must describe the canonical source order.`);
-      }
-    });
-  }
-  if (!isObject(policy.fieldPrimaries)) errors.push('policy.fieldPrimaries must be populated.');
-  if (!isObject(policy.reactionRules)) errors.push('policy.reactionRules must be populated.');
-  if (!isObject(policy.lifecycleRules) || [...LIFECYCLES].some((state) => typeof policy.lifecycleRules[state] !== 'string' || !policy.lifecycleRules[state].trim())) {
-    errors.push('policy.lifecycleRules must document every canonical lifecycle state.');
-  }
-  if (typeof policy.editorialContinuity !== 'string' || !/released_awaiting_close/.test(policy.editorialContinuity) || !/close_available/.test(policy.editorialContinuity)) {
-    errors.push('policy.editorialContinuity must preserve preview copy until the close response is available.');
-  }
-  if (!isObject(policy.secondaryRecoveryFieldPolicy)) {
-    errors.push('policy.secondaryRecoveryFieldPolicy must be populated.');
-  } else {
-    if (!/EarningsAPI/i.test(policy.secondaryRecoveryFieldPolicy.eps || '')) {
-      errors.push('policy.secondaryRecoveryFieldPolicy.eps must identify EarningsAPI as secondary recovery.');
-    }
-    if (!/EarningsAPI/i.test(policy.secondaryRecoveryFieldPolicy.revenue || '')) {
-      errors.push('policy.secondaryRecoveryFieldPolicy.revenue must identify EarningsAPI as secondary recovery.');
-    }
-  }
-  if (!isDeepStrictEqual(policy, buildEarningsWeekPolicy())) {
-    errors.push('policy must exactly match buildEarningsWeekPolicy().');
   }
 }
 
@@ -1486,7 +1441,6 @@ function validateEarningsWeekPayload(data, options = {}) {
   if (data.schemaVersion !== EARNINGS_WEEK_SCHEMA_VERSION) errors.push(`schemaVersion must be ${EARNINGS_WEEK_SCHEMA_VERSION}.`);
   if (!isIsoDateTime(data.generatedAt)) errors.push('generatedAt must be an ISO timestamp.');
   validateRange(errors, data.range);
-  validatePolicy(errors, data.policy);
   validateAvailability(errors, data);
 
   if (!Array.isArray(data.rows)) {

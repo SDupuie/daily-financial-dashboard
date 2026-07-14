@@ -40,7 +40,7 @@ function parseArgs(argv) {
     }
 
     if (arg === '--dashboard') {
-      throw new Error('Direct dashboard writes are not supported; apply the staged payload with run_daily_update.js --apply-crypto-stats-json.');
+      throw new Error('Direct dashboard writes are not supported; deterministic preparation consumes the staged Crypto payload.');
     }
 
     if (arg === '--timeout-ms') {

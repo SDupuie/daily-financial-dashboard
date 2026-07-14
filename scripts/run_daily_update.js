@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
+  acceptedFreshChartTickers,
   buildChartDataFallback,
   buildUnavailableFuturesPayload,
   compactChartPayload,
@@ -22,7 +23,6 @@ const {
 } = require('./fetch_asset_allocation');
 const {
   buildEarningsPreparationFallback,
-  buildEarningsWeekPolicy,
   buildEarningsNarrativeSidecar,
   narrativeEditorialAttempted,
   narrativeNeedsEditorialCopy,
@@ -44,7 +44,16 @@ const {
   validateWeekAheadPayload
 } = require('./week_ahead_contract');
 const { addDays } = require('./calendar_contract');
-const { REQUIRED_EDITORIAL_SECTIONS, buildEditorialReview, editorialTextEntries, validateReviewManifest } = require('./editorial_review_contract');
+const {
+  TAPE_COMMENTARY_UNAVAILABLE_NOTE,
+  buildEditorialReview,
+  containsTapeCitationSyntax,
+  editorialTextEntries,
+  reviewedTapeCommentary,
+  unavailableTapeCommentary,
+  validateReviewManifest,
+  validateTapeCommentaryDisposition
+} = require('./editorial_review_contract');
 const {
   allowedNewsDates,
   applyNewsCoverageState,
@@ -218,10 +227,8 @@ function parseArgs(argv) {
     prepareEditorialDir: '',
     applyMarketLensJson: '',
     applyEarningsWeekJson: '',
-    applyCryptoStatsJson: '',
     applyChartDataJson: '',
     mergeChartDataJson: '',
-    refreshNewsBaseline: false,
     syncChartQuotes: false,
     scheduledPreflight: false,
     skipEarnings: false,
@@ -279,12 +286,6 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
-    if (arg === '--apply-crypto-stats-json') {
-      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--apply-crypto-stats-json requires a path.');
-      args.applyCryptoStatsJson = path.resolve(process.cwd(), argv[i + 1]);
-      i += 1;
-      continue;
-    }
     if (arg === '--apply-chart-data-json') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--apply-chart-data-json requires a path.');
       args.applyChartDataJson = path.resolve(process.cwd(), argv[i + 1]);
@@ -295,10 +296,6 @@ function parseArgs(argv) {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--merge-chart-data-json requires a path.');
       args.mergeChartDataJson = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
-      continue;
-    }
-    if (arg === '--refresh-news-baseline') {
-      args.refreshNewsBaseline = true;
       continue;
     }
     if (arg === '--sync-chart-quotes') {
@@ -365,7 +362,7 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  const contentModeCount = [args.applyDashboardDataJson, args.applyMarketLensJson, args.applyEarningsWeekJson, args.applyCryptoStatsJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.refreshNewsBaseline, args.syncChartQuotes].filter(Boolean).length;
+  const contentModeCount = [args.applyDashboardDataJson, args.applyMarketLensJson, args.applyEarningsWeekJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.syncChartQuotes].filter(Boolean).length;
   if (args.scheduledPreflight) {
     if (!args.windowMode || contentModeCount) {
       throw new Error('Use --scheduled-preflight with exactly one of --morning or --afternoon.');
@@ -373,15 +370,15 @@ function parseArgs(argv) {
     return args;
   }
   if (!args.windowMode && contentModeCount === 0) {
-    throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-market-lens-json, --apply-earnings-week-json, --apply-crypto-stats-json, --apply-chart-data-json, --merge-chart-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
+    throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-market-lens-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
-  const windowAwareContentMode = args.applyDashboardDataJson || args.applyMarketLensJson || args.prepareEditorialDir || args.refreshNewsBaseline;
+  const windowAwareContentMode = args.applyDashboardDataJson || args.applyMarketLensJson || args.prepareEditorialDir;
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !windowAwareContentMode)) {
-    throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-market-lens-json, --apply-earnings-week-json, --apply-crypto-stats-json, --apply-chart-data-json, --merge-chart-data-json, --refresh-news-baseline, or --sync-chart-quotes.');
+    throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-market-lens-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
-  const scheduledContentMode = args.refreshNewsBaseline || args.applyDashboardDataJson || args.applyMarketLensJson;
+  const scheduledContentMode = args.applyDashboardDataJson || args.applyMarketLensJson;
   if (args.scheduled && (!scheduledContentMode || !args.windowMode)) {
-    throw new Error('--scheduled requires --morning or --afternoon and is valid only with baseline refresh or editorial application.');
+    throw new Error('--scheduled requires --morning or --afternoon and is valid only with editorial application.');
   }
   if (args.applyDashboardDataJson && !args.editorialReviewJson) {
     throw new Error('--apply-dashboard-data-json requires --editorial-review-json so every editorial section and Market Lens day is explicitly reviewed.');
@@ -403,10 +400,8 @@ function printHelp() {
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH --editorial-review-json PATH [--scheduled --morning|--afternoon] [options]
   node scripts/run_daily_update.js --apply-market-lens-json PATH [options]
   node scripts/run_daily_update.js --apply-earnings-week-json PATH [options]
-  node scripts/run_daily_update.js --apply-crypto-stats-json PATH [options]
   node scripts/run_daily_update.js --apply-chart-data-json PATH [options]
   node scripts/run_daily_update.js --merge-chart-data-json PATH [options]
-  node scripts/run_daily_update.js --refresh-news-baseline [--scheduled --morning|--afternoon] [options]
   node scripts/run_daily_update.js --sync-chart-quotes [options]
   node scripts/run_daily_update.js --scheduled-preflight (--morning | --afternoon) [options]
 
@@ -418,10 +413,8 @@ Options:
   --prepare-editorial-dir PATH        Write dashboard-data, Earnings narrative tasks, and review-manifest handoff files
   --apply-market-lens-json PATH       Apply a full review manifest containing one decision for every event day
   --apply-earnings-week-json PATH     Validate and embed a staged earnings-week payload
-  --apply-crypto-stats-json PATH      Embed staged crypto stat-card data
   --apply-chart-data-json PATH        Safely replace embedded chart history and derive matching Tape prices from JSON
   --merge-chart-data-json PATH        Merge generated chart series into embedded history and preserve all other series
-  --refresh-news-baseline             Recompute only story New-pill flags and newsBaseline
   --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
   --scheduled-preflight               Verify the Chicago-time window and duplicate marker without writing files
   --morning                           Run the pre-open deterministic refresh path
@@ -551,7 +544,6 @@ function prepareEditorialWorkspace(args) {
     schemaVersion: 1,
     reviewedAt: null,
     baseEditionId,
-    sections: [...REQUIRED_EDITORIAL_SECTIONS],
     verifiedClaims: [],
     marketLensDecisions
   };
@@ -774,6 +766,30 @@ function applyCryptoQuoteRows(data, quoteRows) {
   });
 }
 
+function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null, systemFallbacks = null } = {}) {
+  const targetedTickers = tickers === null
+    ? null
+    : new Set([...tickers].map((ticker) => String(ticker || '').trim().toUpperCase()).filter(Boolean));
+  let resetCount = 0;
+  data.tape.rows = data.tape.rows.map((row) => {
+    const ticker = String(row?.ticker || '').trim().toUpperCase();
+    if (targetedTickers && !targetedTickers.has(ticker)) return row;
+    const quoteRevision = quoteRevisionByTicker.get(ticker);
+    if (!quoteRevision) throw new Error(`Chart series ${ticker} is missing the canonical quoteRevision required to reset Tape commentary.`);
+    resetCount += 1;
+    if (Array.isArray(systemFallbacks)) {
+      systemFallbacks.push({
+        section: 'tape-commentary',
+        path: `tape.rows.${ticker}.note`,
+        action: 'unavailable_disposition',
+        reason: 'editorial_commentary_unavailable'
+      });
+    }
+    return unavailableTapeCommentary(row, quoteRevision);
+  });
+  return resetCount;
+}
+
 function applyCryptoStats(data, payload) {
   if (!data.crypto || typeof data.crypto !== 'object') {
     throw new Error('dashboard-data crypto payload is missing.');
@@ -789,10 +805,8 @@ function applyCryptoStats(data, payload) {
 }
 
 function applyEarningsWeek(data, earningsWeek, { requireNarrative = true } = {}) {
-  const canonicalEarningsWeek = {
-    ...earningsWeek,
-    policy: buildEarningsWeekPolicy()
-  };
+  const canonicalEarningsWeek = { ...earningsWeek };
+  delete canonicalEarningsWeek.policy;
   delete canonicalEarningsWeek.outputPath;
   const errors = validateEarningsWeekPayload(canonicalEarningsWeek, { requireNarrative });
   if (errors.length) {
@@ -862,14 +876,40 @@ function applyFocusedNewsFallback(data, now = scheduledNow()) {
   };
 }
 
+function appendFocusedNewsFallbacks(systemFallbacks, newsFallback) {
+  if (newsFallback.storiesRemoved) {
+    systemFallbacks.push({ section: 'stories', path: 'stories', action: 'omitted', reason: 'stale_editorial_items' });
+  }
+  if (newsFallback.cryptoNotesRemoved) {
+    systemFallbacks.push({ section: 'crypto', path: 'crypto.notes', action: 'omitted', reason: 'stale_editorial_items' });
+  }
+  if (newsFallback.futuresStoriesRemoved) {
+    systemFallbacks.push({ section: 'futures-news', path: 'futuresModule.stories', action: 'omitted', reason: 'stale_editorial_items' });
+  }
+}
+
 function buildFocusedReviewManifest(data, priorReview, systemFallbacks, now = scheduledNow()) {
+  const recordedFallbacks = Array.isArray(systemFallbacks) ? [...systemFallbacks] : [];
+  const recordedPaths = new Set(recordedFallbacks.map((fallback) => `${fallback?.path}:${fallback?.action}`));
+  for (const row of data.tape?.rows || []) {
+    if (row?.noteDisposition?.status !== 'commentary_unavailable') continue;
+    const pathName = `tape.rows.${String(row?.ticker || '').trim().toUpperCase()}.note`;
+    const identity = `${pathName}:unavailable_disposition`;
+    if (recordedPaths.has(identity)) continue;
+    recordedFallbacks.push({
+      section: 'tape-commentary',
+      path: pathName,
+      action: 'unavailable_disposition',
+      reason: row.noteDisposition.reason || 'editorial_commentary_unavailable'
+    });
+    recordedPaths.add(identity);
+  }
   const manifest = {
     schemaVersion: 1,
     reviewedAt: new Date(now).toISOString(),
     baseEditionId: data.editionId,
-    sections: [...REQUIRED_EDITORIAL_SECTIONS],
     verifiedClaims: [],
-    systemFallbacks,
+    systemFallbacks: recordedFallbacks,
     marketLensDecisions: (data.weekAhead?.days || [])
       .filter((day) => Array.isArray(day?.events) && day.events.length)
       .map((day) => ({
@@ -926,14 +966,76 @@ function applyWeekAhead(data, weekAheadPayload) {
   data.weekAhead = mergeWeekAheadPayload(data.weekAhead, weekAheadPayload);
 }
 
-function syncDashboardPricesFromChartData(data, chartData, { windowMode = '', now = scheduledNow() } = {}) {
+function syncDashboardPricesFromChartData(data, chartData, {
+  windowMode = '',
+  now = scheduledNow(),
+  resetCommentary = false,
+  commentaryTickers = null,
+  systemFallbacks = null
+} = {}) {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
   const derivedQuoteRows = deriveQuoteRowsFromSeries(Array.isArray(chartData?.series) ? chartData.series : []);
   chartData.quoteRows = derivedQuoteRows;
   applyTapeQuoteRows(data, derivedQuoteRows.tape);
   applyCryptoQuoteRows(data, derivedQuoteRows.crypto);
+  let commentaryResetCount = 0;
+  if (resetCommentary) {
+    const quoteRevisionByTicker = new Map(
+      (Array.isArray(chartData?.series) ? chartData.series : []).map((series) => [
+        String(series?.ticker || '').trim().toUpperCase(),
+        series?.quoteRevision
+      ])
+    );
+    commentaryResetCount = resetTapeCommentary(data, quoteRevisionByTicker, { tickers: commentaryTickers, systemFallbacks });
+  }
   if (data.weekAhead) data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { windowMode, now });
+  return { commentaryResetCount };
+}
+
+function mergedChartAvailability(existingChartData, incomingChartData, series) {
+  if (incomingChartData.availability?.status === 'carried_forward') {
+    return incomingChartData.availability;
+  }
+
+  const incomingTickers = new Set(
+    incomingChartData.series.map((item) => String(item?.ticker || '').trim().toUpperCase()).filter(Boolean)
+  );
+  if (existingChartData.availability?.status === 'carried_forward') {
+    const existingTickers = existingChartData.series
+      .map((item) => String(item?.ticker || '').trim().toUpperCase())
+      .filter(Boolean);
+    if (!existingTickers.every((ticker) => incomingTickers.has(ticker))) {
+      return existingChartData.availability;
+    }
+  }
+
+  const messages = new Map();
+  for (const payload of [existingChartData, incomingChartData]) {
+    for (const failure of payload.availability?.failures || []) {
+      const ticker = String(failure?.ticker || '').trim().toUpperCase();
+      if (ticker) messages.set(ticker, failure.message);
+    }
+  }
+  const carriedSeries = series.filter((item) => item?.availability?.status === 'carried_forward');
+  if (!carriedSeries.length) return null;
+
+  const failures = carriedSeries.map((item) => {
+    const ticker = String(item?.ticker || '').trim().toUpperCase();
+    const message = messages.get(ticker);
+    if (!message) throw new Error(`Merged chart series ${ticker} is carried forward without source failure diagnostics.`);
+    return { ticker, message };
+  });
+  const checkedAt = carriedSeries
+    .map((item) => item.availability.checkedAt)
+    .filter(Boolean)
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+  return {
+    status: 'partial',
+    reason: 'source_refresh_failed',
+    checkedAt,
+    failures
+  };
 }
 
 function patchDashboard(args) {
@@ -947,9 +1049,11 @@ function patchDashboard(args) {
   if (!args.skipChartData) {
     chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
     // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
-    syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-    if (chartData.availability) dashboardData.tape.availability = chartData.availability;
-    else delete dashboardData.tape.availability;
+    syncDashboardPricesFromChartData(dashboardData, chartData, {
+      windowMode: args.windowMode,
+      resetCommentary: true,
+      commentaryTickers: acceptedFreshChartTickers(chartData)
+    });
     nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
   }
 
@@ -1235,21 +1339,64 @@ function sanitizeStoryList(editorial, candidate, options = {}) {
   });
 }
 
-function sanitizeTapeRows(candidateRows, editorialRows, verifiedClaims, systemFallbacks = null) {
+function usableTapeCommentary(row, note) {
+  const text = String(note || '').trim();
+  return text !== TAPE_COMMENTARY_UNAVAILABLE_NOTE
+    && Boolean(text)
+    && !containsTapeCitationSyntax(text)
+    && ![row.last, row.delta, row.pct].some((value) => value && text.includes(String(value)));
+}
+
+function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedClaims, systemFallbacks = null, now = scheduledNow()) {
   const editorialByTicker = new Map((Array.isArray(editorialRows) ? editorialRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+  const previousByTicker = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+  const reviewedAt = new Date(now).toISOString();
   return (Array.isArray(candidateRows) ? candidateRows : []).map((row) => {
-    const editorial = editorialByTicker.get(String(row?.ticker || '').toUpperCase());
+    const ticker = String(row?.ticker || '').toUpperCase();
+    const editorial = editorialByTicker.get(ticker);
+    const previous = previousByTicker.get(ticker);
     const note = safeEditorialText(editorial?.note, row.note, verifiedClaims);
     const text = String(note || '').trim();
-    const invalid = text.split(/\s+/).length < 12
-      || /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i.test(text)
-      || /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains|quote recap|price recap|latest quote|latest close)/i.test(text)
-      || [row.last, row.delta, row.pct].some((value) => value && text.includes(String(value)));
-    if (invalid || !editorial) {
-      if (Array.isArray(systemFallbacks)) systemFallbacks.push({ section: 'tape-commentary', path: `tape.rows.${row.ticker}.note`, action: 'retained_candidate', reason: editorial ? 'invalid_editorial_commentary' : 'editorial_content_unavailable' });
+    const candidateDispositionValid = validateTapeCommentaryDisposition(row).length === 0;
+    const quoteRevision = candidateDispositionValid
+      ? row.noteDisposition.quoteRevision
+      : previous?.noteDisposition?.quoteRevision || reviewedAt;
+    const quoteWasRefreshed = !previous
+      || !candidateDispositionValid
+      || quoteRevision !== previous?.noteDisposition?.quoteRevision;
+    const repeatsPriorCommentary = quoteWasRefreshed && text === String(previous?.note || '').trim();
+
+    if (editorial && usableTapeCommentary(row, text) && !repeatsPriorCommentary) {
+      return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
+    }
+
+    if (!quoteWasRefreshed && candidateDispositionValid && row.noteDisposition.status === 'reviewed') {
+      if (Array.isArray(systemFallbacks)) {
+        systemFallbacks.push({
+          section: 'tape-commentary',
+          path: `tape.rows.${ticker}.note`,
+          action: 'retained_candidate',
+          reason: editorial ? 'invalid_editorial_commentary' : 'editorial_content_unavailable'
+        });
+      }
       return row;
     }
-    return { ...row, note };
+
+    const reason = repeatsPriorCommentary
+      ? 'stale_editorial_commentary'
+      : editorial && text !== TAPE_COMMENTARY_UNAVAILABLE_NOTE
+        ? 'invalid_editorial_commentary'
+        : 'editorial_commentary_unavailable';
+    if (Array.isArray(systemFallbacks)) {
+      systemFallbacks.push({
+        section: 'tape-commentary',
+        path: `tape.rows.${ticker}.note`,
+        action: 'unavailable_disposition',
+        reason
+      });
+    }
+    if (candidateDispositionValid && row.noteDisposition.status === 'commentary_unavailable' && row.noteDisposition.reason === reason) return row;
+    return unavailableTapeCommentary(row, quoteRevision, reason);
   });
 }
 
@@ -1263,19 +1410,9 @@ function usableWeekAheadOutcome(outcome) {
 
 function applyDashboardDataJson(args) {
   const canonicalHtml = loadDashboardBase(args.dashboard).html;
-  let candidateHtml = canonicalHtml;
-  let candidateDashboardData = readJsonBlock(canonicalHtml, 'dashboard-data');
-  let previousDashboardData = structuredClone(candidateDashboardData);
-  try {
-    candidateHtml = fs.readFileSync(args.candidate, 'utf8');
-    candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
-    previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
-  } catch (error) {
-    process.stderr.write(`Staged candidate was unavailable or stale; retaining the validated dashboard while retrying preparation: ${error.message}\n`);
-    candidateHtml = canonicalHtml;
-    candidateDashboardData = readJsonBlock(canonicalHtml, 'dashboard-data');
-    previousDashboardData = structuredClone(candidateDashboardData);
-  }
+  const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
+  const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
+  const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
   let editorialDashboardData = readOptionalJson(args.applyDashboardDataJson, structuredClone(candidateDashboardData), 'Editorial dashboard data');
   let reviewManifest = { ...readOptionalJson(args.editorialReviewJson, {}, 'Editorial review'), reviewedAt: scheduledNow().toISOString() };
   reviewManifest.systemFallbacks = [];
@@ -1356,7 +1493,14 @@ function applyDashboardDataJson(args) {
   dashboardData.tape = {
     ...dashboardData.tape,
     label: `${candidateTapeContextIndex >= 0 ? candidateTapeLabel.slice(0, candidateTapeContextIndex) : candidateTapeLabel}${tapeContext}`,
-    rows: sanitizeTapeRows(candidateDashboardData.tape?.rows, editorialDashboardData.tape?.rows, verifiedClaims, reviewManifest.systemFallbacks)
+    rows: sanitizeTapeRows(
+      candidateDashboardData.tape?.rows,
+      editorialDashboardData.tape?.rows,
+      previousDashboardData.tape?.rows,
+      verifiedClaims,
+      reviewManifest.systemFallbacks,
+      editorialNow
+    )
   };
   const candidateCompiled = String(candidateDashboardData.footer?.compiled || '');
   const editorialCompiled = String(editorialDashboardData.footer?.compiled || '');
@@ -1442,22 +1586,41 @@ function applyDashboardDataJson(args) {
   }
 }
 
+function assertValidChartStagingPayload(payload, expectedRows, label, { requireSeries = false } = {}) {
+  const errors = validateChartStagingPayload(payload, expectedRows);
+  if (requireSeries && (!Array.isArray(payload?.series) || !payload.series.length)) {
+    errors.unshift(`${label} must contain at least one series.`);
+  }
+  if (errors.length) throw new Error(`${label} is invalid: ${errors.join(' ')}`);
+  return payload;
+}
+
 function applyChartDataJson(args) {
   const html = fs.readFileSync(args.dashboard, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
+  const priorReview = dashboardData.editorialReview;
   const currentChartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
   let chartData;
   try {
     chartData = roundChartPayload(readJson(args.applyChartDataJson));
+    assertValidChartStagingPayload(chartData, dashboardData.tape?.rows || [], 'Chart focused apply input', { requireSeries: true });
   } catch (error) {
     process.stderr.write(`Chart focused apply input was unusable; carrying validated chart data: ${error.message}\n`);
     chartData = buildChartDataFallback(currentChartData, scheduledNow());
   }
-  syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-  applyFocusedNewsFallback(dashboardData);
-  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
-  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
-  commitDashboardCandidate(args, nextHtml);
+  const systemFallbacks = [];
+  syncDashboardPricesFromChartData(dashboardData, chartData, {
+    windowMode: args.windowMode,
+    resetCommentary: true,
+    commentaryTickers: acceptedFreshChartTickers(chartData),
+    systemFallbacks
+  });
+  appendFocusedNewsFallbacks(systemFallbacks, applyFocusedNewsFallback(dashboardData));
+  const embeddedChartData = compactChartPayload(chartData);
+  const reviewManifest = buildFocusedReviewManifest(dashboardData, priorReview, systemFallbacks);
+  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, embeddedChartData);
+  commitEditorialCandidate(args, nextHtml);
 }
 
 function applyEarningsWeekJson(args) {
@@ -1487,15 +1650,7 @@ function applyEarningsWeekJson(args) {
   }
   const newsFallback = applyFocusedNewsFallback(dashboardData);
   const systemFallbacks = [];
-  if (newsFallback.storiesRemoved) {
-    systemFallbacks.push({ section: 'stories', path: 'stories', action: 'omitted', reason: 'stale_editorial_items' });
-  }
-  if (newsFallback.cryptoNotesRemoved) {
-    systemFallbacks.push({ section: 'crypto', path: 'crypto.notes', action: 'omitted', reason: 'stale_editorial_items' });
-  }
-  if (newsFallback.futuresStoriesRemoved) {
-    systemFallbacks.push({ section: 'futures-news', path: 'futuresModule.stories', action: 'omitted', reason: 'stale_editorial_items' });
-  }
+  appendFocusedNewsFallbacks(systemFallbacks, newsFallback);
   if (newsFallback.storiesRemoved || newsFallback.cryptoNotesRemoved || newsFallback.futuresStoriesRemoved) {
     process.stderr.write(`Focused Earnings apply removed ${newsFallback.storiesRemoved} stale News item(s), ${newsFallback.cryptoNotesRemoved} stale Crypto note(s), and ${newsFallback.futuresStoriesRemoved} stale Futures item(s); coverage will retry on the next editorial apply.\n`);
   }
@@ -1521,85 +1676,69 @@ function reportPendingEarningsScheduleReviews(result) {
   process.stderr.write(`Earnings schedule review remains pending; retain Finnhub primary-only rows and research company investor relations before SEC: ${labels}\n`);
 }
 
-function applyCryptoStatsJson(args) {
-  const html = fs.readFileSync(args.dashboard, 'utf8');
-  const dashboardData = readJsonBlock(html, 'dashboard-data');
-  let payload;
-  try {
-    payload = readJson(args.applyCryptoStatsJson);
-  } catch (error) {
-    process.stderr.write(`Crypto focused apply input was unusable; carrying validated Crypto cards: ${error.message}\n`);
-    payload = buildCryptoStatsFallback(dashboardData.crypto, scheduledNow());
-  }
-  try {
-    applyCryptoStats(dashboardData, payload);
-  } catch (error) {
-    process.stderr.write(`Crypto focused apply input was invalid; carrying validated Crypto cards: ${error.message}\n`);
-    applyCryptoStats(dashboardData, buildCryptoStatsFallback(dashboardData.crypto, scheduledNow()));
-  }
-  applyFocusedNewsFallback(dashboardData);
-  commitDashboardCandidate(args, patchDashboardDataBlock(html, dashboardData));
-}
-
 function mergeChartDataJson(args) {
   const html = fs.readFileSync(args.dashboard, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
+  const priorReview = dashboardData.editorialReview;
   const existingChartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
   let incomingChartData;
+  let chartData;
   try {
     incomingChartData = roundChartPayload(readJson(args.mergeChartDataJson));
+    assertValidChartStagingPayload(incomingChartData, [], 'Chart merge input', { requireSeries: true });
+    const incomingByTicker = new Map(incomingChartData.series.map((series) => [String(series?.ticker || '').toUpperCase(), series]));
+    const existingTickers = new Set();
+    const series = existingChartData.series.map((series) => {
+      const ticker = String(series?.ticker || '').toUpperCase();
+      existingTickers.add(ticker);
+      return incomingByTicker.get(ticker) || series;
+    });
+    for (const [ticker, item] of incomingByTicker.entries()) {
+      if (!existingTickers.has(ticker)) series.push(item);
+    }
+    chartData = {
+      ...existingChartData,
+      generatedAt: incomingChartData.generatedAt || scheduledNow().toISOString(),
+      sourceFamilies: Array.from(new Set(series.map((item) => item?.source).filter(Boolean))),
+      series
+    };
+    const availability = mergedChartAvailability(existingChartData, incomingChartData, series);
+    if (availability) chartData.availability = availability;
+    else delete chartData.availability;
+    assertValidChartStagingPayload(chartData, dashboardData.tape?.rows || [], 'Completed Chart merge');
   } catch (error) {
     process.stderr.write(`Chart merge input was unusable; retaining validated chart data: ${error.message}\n`);
     incomingChartData = buildChartDataFallback(existingChartData, scheduledNow());
+    chartData = incomingChartData;
   }
-  const incomingByTicker = new Map(incomingChartData.series.map((series) => [String(series?.ticker || '').toUpperCase(), series]));
-  const existingTickers = new Set();
-  const series = existingChartData.series.map((series) => {
-    const ticker = String(series?.ticker || '').toUpperCase();
-    existingTickers.add(ticker);
-    return incomingByTicker.get(ticker) || series;
+  const systemFallbacks = [];
+  syncDashboardPricesFromChartData(dashboardData, chartData, {
+    windowMode: args.windowMode,
+    resetCommentary: true,
+    commentaryTickers: acceptedFreshChartTickers(incomingChartData),
+    systemFallbacks
   });
-  for (const [ticker, item] of incomingByTicker.entries()) {
-    if (!existingTickers.has(ticker)) series.push(item);
-  }
-  const chartData = {
-    ...existingChartData,
-    sourceFamilies: Array.from(new Set(series.map((item) => item?.source).filter(Boolean))),
-    series
-  };
-  syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-  applyFocusedNewsFallback(dashboardData);
-  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
-  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
-  commitDashboardCandidate(args, nextHtml);
-}
-
-function refreshNewsBaseline(args) {
-  const html = fs.readFileSync(args.dashboard, 'utf8');
-  const dashboardData = readJsonBlock(html, 'dashboard-data');
-  let nextHtml = html;
-  try {
-    const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
-    syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
-  } catch (_error) {
-    // Baseline-only fixtures may omit chart-data.
-  }
-  applyFocusedNewsFallback(dashboardData);
-  applyScheduledNewsBaseline(dashboardData, dashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode, now: scheduledNow() });
-  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
-  commitDashboardCandidate(args, nextHtml);
+  appendFocusedNewsFallbacks(systemFallbacks, applyFocusedNewsFallback(dashboardData));
+  const embeddedChartData = compactChartPayload(chartData);
+  const reviewManifest = buildFocusedReviewManifest(dashboardData, priorReview, systemFallbacks);
+  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, embeddedChartData);
+  commitEditorialCandidate(args, nextHtml);
 }
 
 function syncChartQuotes(args) {
   const html = fs.readFileSync(args.dashboard, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
+  const priorReview = dashboardData.editorialReview;
   const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
+  const systemFallbacks = [];
   syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-  applyFocusedNewsFallback(dashboardData);
-  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
-  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData);
-  commitDashboardCandidate(args, nextHtml);
+  appendFocusedNewsFallbacks(systemFallbacks, applyFocusedNewsFallback(dashboardData));
+  const embeddedChartData = compactChartPayload(chartData);
+  const reviewManifest = buildFocusedReviewManifest(dashboardData, priorReview, systemFallbacks);
+  let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, embeddedChartData);
+  commitEditorialCandidate(args, nextHtml);
 }
 
 function main() {
@@ -1628,11 +1767,6 @@ function main() {
     return;
   }
 
-  if (args.refreshNewsBaseline) {
-    refreshNewsBaseline(args);
-    return;
-  }
-
   if (args.syncChartQuotes) {
     syncChartQuotes(args);
     return;
@@ -1640,11 +1774,6 @@ function main() {
 
   if (args.applyEarningsWeekJson) {
     applyEarningsWeekJson(args);
-    return;
-  }
-
-  if (args.applyCryptoStatsJson) {
-    applyCryptoStatsJson(args);
     return;
   }
 
@@ -1873,6 +2002,7 @@ module.exports = {
   applyMarketLensJson,
   applyChartDataJson,
   mergeChartDataJson,
+  mergedChartAvailability,
   applyCryptoQuoteRows,
   applyCryptoStats,
   applyEarningsWeek,
@@ -1893,7 +2023,6 @@ module.exports = {
   readJsonBlock,
   releaseRunLock,
   replaceJsonBlock,
-  refreshNewsBaseline,
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
   weekAheadStagingNeedsRebuild,

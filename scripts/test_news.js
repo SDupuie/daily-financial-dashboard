@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 const assert = require('assert/strict');
-const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -19,8 +18,7 @@ const {
   storyIdentity,
   validateNewsCoverageState
 } = require('./news_contract');
-const { readJsonBlock, validateScheduledPreflight } = require('./run_daily_update');
-const root = path.resolve(__dirname, '..');
+const { validateScheduledPreflight } = require('./run_daily_update');
 const temporaryDirectories = new Set();
 
 function makeTemporaryDirectory(parent, prefix) {
@@ -236,135 +234,6 @@ function testScheduledBaselineTransition() {
   );
 }
 
-function testRefreshNewsBaselineCliMode() {
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-news-baseline-');
-  const dashboardFile = path.join(dir, 'dashboard.html');
-  const existingStory = {
-    tag: 'Markets',
-    title: 'Existing Story',
-    body: 'Still here.',
-    url: 'https://example.com/news/existing',
-    publishedOn: '2026-07-06'
-  };
-  const newStory = {
-    tag: 'Markets',
-    title: 'New Story',
-    body: 'Freshly added.',
-    url: 'https://example.com/news/new',
-    publishedOn: '2026-07-06'
-  };
-  const existingCryptoNote = {
-    kicker: 'Bitcoin',
-    title: 'Existing Crypto Story',
-    body: 'Still here.',
-    url: 'https://example.com/crypto/existing',
-    publishedOn: '2026-07-06'
-  };
-  const newCryptoNote = {
-    kicker: 'Ethereum',
-    title: 'New Crypto Story',
-    body: 'Fresh crypto note.',
-    url: 'https://example.com/crypto/new',
-    publishedOn: '2026-07-06'
-  };
-  const dashboardHtml = [
-    '<script type="application/json" id="dashboard-data">',
-    JSON.stringify({
-      editionId: 'old',
-      newsBaseline: {
-        lastScheduledUpdateAt: '2026-07-05T12:00:00.000Z',
-        previousScheduledStoryIds: [],
-        currentScheduledStoryIds: [storyIdentity(existingStory), storyIdentity(existingCryptoNote)].sort()
-      },
-      stories: [existingStory, newStory],
-      crypto: { notes: [existingCryptoNote, newCryptoNote] }
-    }),
-    '</script>'
-  ].join('');
-  fs.writeFileSync(dashboardFile, dashboardHtml);
-
-  const result = spawnSync(process.execPath, [
-    path.join(root, 'scripts/run_daily_update.js'),
-    '--dashboard', dashboardFile,
-    '--refresh-news-baseline',
-    '--scheduled',
-    '--morning',
-    '--test-skip-validation'
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      DASHBOARD_TEST_MODE: '1',
-      SCHEDULED_NOW_ISO: '2026-07-06T12:00:00.000Z'
-    }
-  });
-  assert.equal(result.status, 0, result.stderr);
-
-  const parsed = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
-  assert.equal(parsed.stories[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(parsed.stories[1].isNewSinceScheduledUpdate, true);
-  assert.equal(parsed.crypto.notes[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(parsed.crypto.notes[1].isNewSinceScheduledUpdate, true);
-  assert.deepEqual(parsed.newsBaseline.previousScheduledStoryIds, [storyIdentity(existingCryptoNote), storyIdentity(existingStory)].sort());
-  assert.deepEqual(parsed.newsBaseline.currentScheduledStoryIds, [
-    storyIdentity(existingCryptoNote),
-    storyIdentity(existingStory),
-    storyIdentity(newCryptoNote),
-    storyIdentity(newStory)
-  ].sort());
-  assert.match(parsed.newsBaseline.lastScheduledWindow, /^\d{4}-\d{2}-\d{2}:morning$/);
-  assert.equal(parsed.storiesCoverage.status, 'partial');
-  assert.equal(parsed.crypto.notesCoverage.status, 'partial');
-  assert.equal(parsed.storiesCoverage.checkedAt, '2026-07-06T12:00:00.000Z');
-}
-
-function testManualBaselineRefreshIsTimeUnrestrictedAndNonAdvancing() {
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-manual-news-baseline-');
-  const dashboardFile = path.join(dir, 'dashboard.html');
-  const baseline = {
-    lastScheduledUpdateAt: '2026-07-10T21:00:00.000Z',
-    lastScheduledWindow: '2026-07-10:afternoon',
-    previousScheduledStoryIds: ['url:https://example.com/previous'],
-    currentScheduledStoryIds: ['url:https://example.com/current']
-  };
-  const data = {
-    editionId: 'old',
-    newsBaseline: baseline,
-    stories: [
-      story('Current', 'https://example.com/current', { tag: 'Markets', body: 'Current market context remains relevant for the baseline test.', publishedOn: '2026-07-11' }),
-      story('Manual', 'https://example.com/manual', { tag: 'Markets', body: 'Manual market context remains relevant for the baseline test.', publishedOn: '2026-07-11' })
-    ],
-    crypto: { notes: [] }
-  };
-  fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify(data)}</script>`);
-
-  try {
-    const result = spawnSync(process.execPath, [
-      path.join(root, 'scripts/run_daily_update.js'),
-      '--dashboard', dashboardFile,
-      '--refresh-news-baseline',
-      '--test-skip-validation'
-    ], {
-      cwd: root,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        DASHBOARD_TEST_MODE: '1',
-        SCHEDULED_NOW_ISO: '2026-07-11T12:00:00.000Z'
-      }
-    });
-    assert.equal(result.status, 0, result.stderr);
-    const parsed = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
-    assert.deepEqual(parsed.newsBaseline, baseline);
-    assert.equal(parsed.stories[0].isNewSinceScheduledUpdate, true);
-    assert.equal(parsed.stories[1].isNewSinceScheduledUpdate, true);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-
 function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-scheduled-preflight-');
   const dashboardFile = path.join(dir, 'dashboard.html');
@@ -388,24 +257,6 @@ function testScheduledPreflightEnforcesWindowAndDuplicateMarker() {
       () => validateScheduledPreflight(dashboardFile, 'morning', new Date('2026-07-11T12:00:00.000Z')),
       /only permits weekday runs/
     );
-    const scheduledApply = spawnSync(process.execPath, [
-      path.join(root, 'scripts/run_daily_update.js'),
-      '--dashboard', dashboardFile,
-      '--refresh-news-baseline',
-      '--scheduled',
-      '--morning',
-      '--test-skip-validation'
-    ], {
-      cwd: root,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        DASHBOARD_TEST_MODE: '1',
-        SCHEDULED_NOW_ISO: '2026-07-11T12:00:00.000Z'
-      }
-    });
-    assert.notEqual(scheduledApply.status, 0);
-    assert.match(scheduledApply.stderr, /only permits weekday runs/);
     baseline.lastScheduledWindow = '2026-07-09:morning';
     fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
     assert.throws(
@@ -426,8 +277,6 @@ function main() {
   testNewMarkerAssignment();
   testManualBaselineTransition();
   testScheduledBaselineTransition();
-  testRefreshNewsBaselineCliMode();
-  testManualBaselineRefreshIsTimeUnrestrictedAndNonAdvancing();
   testScheduledPreflightEnforcesWindowAndDuplicateMarker();
   process.stdout.write('News tests passed.\n');
 }

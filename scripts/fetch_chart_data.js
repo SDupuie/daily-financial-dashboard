@@ -957,6 +957,20 @@ function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
   };
 }
 
+function acceptedFreshChartTickers(payload) {
+  if (payload?.availability?.status === 'carried_forward') return [];
+  return (Array.isArray(payload?.series) ? payload.series : [])
+    .filter((series) => !['carried_forward', 'unavailable'].includes(series?.availability?.status))
+    .map((series) => String(series?.ticker || '').trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function isChartQuoteRevision(value) {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && !Number.isNaN(Date.parse(value));
+}
+
 function validateChartStagingPayload(payload, expectedRows = []) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
@@ -968,11 +982,58 @@ function validateChartStagingPayload(payload, expectedRows = []) {
     if (!ticker) errors.push(`Chart staging series[${index}].ticker must be populated.`);
     else if (byTicker.has(ticker)) errors.push(`Chart staging series contains duplicate ticker ${ticker}.`);
     else byTicker.set(ticker, item);
+    if (!isChartQuoteRevision(item?.quoteRevision)) errors.push(`Chart staging ${ticker || `series[${index}]`}.quoteRevision must be an offset-bearing ISO timestamp.`);
+    if (item?.availability !== undefined) {
+      if (!item.availability || typeof item.availability !== 'object' || Array.isArray(item.availability)) {
+        errors.push(`Chart staging ${ticker || `series[${index}]`}.availability must be an object.`);
+      } else {
+        if (item.availability.status !== 'carried_forward') errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.status must be carried_forward.`);
+        if (item.availability.reason !== 'source_refresh_failed') errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.reason must be source_refresh_failed.`);
+        if (!isChartQuoteRevision(item.availability.checkedAt)) errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+        if (item.availability.failures !== undefined) errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.failures is not allowed.`);
+      }
+    }
     if (!Array.isArray(item?.bars) || item.bars.length < 2) errors.push(`Chart staging ${ticker || `series[${index}]`} must contain at least two bars.`);
   }
   for (const row of expectedRows) {
     const ticker = String(row?.ticker || '').trim().toUpperCase();
     if (ticker && !byTicker.has(ticker)) errors.push(`Chart staging series is missing ${ticker}.`);
+  }
+  const availability = payload.availability;
+  const carriedTickers = new Set(
+    [...byTicker.entries()]
+      .filter(([, item]) => item?.availability?.status === 'carried_forward')
+      .map(([ticker]) => ticker)
+  );
+  if (availability === undefined) {
+    for (const ticker of carriedTickers) errors.push(`Chart staging carried-forward series ${ticker} requires partial availability diagnostics.`);
+  } else if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
+    errors.push('Chart staging availability must be an object.');
+  } else {
+    if (!['partial', 'carried_forward'].includes(availability.status)) errors.push('Chart staging availability.status must be partial or carried_forward.');
+    if (availability.reason !== 'source_refresh_failed') errors.push('Chart staging availability.reason must be source_refresh_failed.');
+    if (!isChartQuoteRevision(availability.checkedAt)) errors.push('Chart staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+    if (availability.status === 'partial') {
+      if (!Array.isArray(availability.failures) || !availability.failures.length) {
+        errors.push('Chart staging partial availability.failures must be a non-empty array.');
+      } else {
+        const failureTickers = new Set();
+        availability.failures.forEach((failure, index) => {
+          const ticker = String(failure?.ticker || '').trim().toUpperCase();
+          if (!ticker) errors.push(`Chart staging availability.failures[${index}].ticker must be populated.`);
+          else if (failureTickers.has(ticker)) errors.push(`Chart staging availability.failures contains duplicate ticker ${ticker}.`);
+          else failureTickers.add(ticker);
+          if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`Chart staging availability.failures[${index}].message must be populated.`);
+          if (ticker && !byTicker.has(ticker)) errors.push(`Chart staging availability failure names unknown ticker ${ticker}.`);
+          else if (ticker && !carriedTickers.has(ticker)) errors.push(`Chart staging availability failure ${ticker} must identify a carried_forward series.`);
+        });
+        for (const ticker of carriedTickers) {
+          if (!failureTickers.has(ticker)) errors.push(`Chart staging carried_forward series ${ticker} must have a matching availability failure.`);
+        }
+      }
+    } else if (availability.failures !== undefined) {
+      errors.push('Chart staging carried_forward availability.failures is not allowed.');
+    }
   }
   try {
     deriveQuoteRowsFromSeries(payload.series);
@@ -1483,6 +1544,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
   if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
   const endDate = dependencies.now instanceof Date ? dependencies.now : new Date();
+  const quoteRevision = endDate.toISOString();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
   const series = [];
@@ -1495,7 +1557,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   for (const row of inputRows) {
     try {
       const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
-      series.push(item);
+      series.push({ ...item, quoteRevision });
     } catch (error) {
       const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
       failures.push({ ticker: row.ticker, message: error.message });
@@ -1505,7 +1567,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
         availability: {
           status: 'carried_forward',
           reason: 'source_refresh_failed',
-          checkedAt: endDate.toISOString()
+          checkedAt: quoteRevision
         }
       });
     }
@@ -1515,7 +1577,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   const quoteRows = deriveQuoteRowsFromSeries(series);
   const output = {
     schemaVersion: 1,
-    generatedAt: endDate.toISOString(),
+    generatedAt: quoteRevision,
     dashboardSource: path.relative(process.cwd(), args.input) || path.basename(args.input),
     range: {
       days: args.days,
@@ -1527,7 +1589,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
       availability: {
         status: 'partial',
         reason: 'source_refresh_failed',
-        checkedAt: endDate.toISOString(),
+        checkedAt: quoteRevision,
         failures
       }
     } : {}),
@@ -1535,6 +1597,9 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     quoteRows,
     series
   };
+
+  const validationErrors = validateChartStagingPayload(output, inputRows);
+  if (validationErrors.length) throw new Error(`Chart staging payload is invalid: ${validationErrors.join(' ')}`);
 
   (dependencies.writeJson || atomicWriteJson)(args.output, output);
 
@@ -1550,6 +1615,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
 module.exports = {
   DEFAULT_DAYS,
   REQUEST_TIMEOUT_MS,
+  acceptedFreshChartTickers,
   buildChartDataFallback,
   buildUnavailableFuturesPayload: futuresModule.buildUnavailableFuturesPayload,
     easternCashOpen: futuresModule.easternCashOpen,

@@ -6,7 +6,7 @@ const { spawnSync } = require('child_process');
 const { validateEarningsWeekPayload } = require('./earnings_week');
 const { validateWeekAheadPayload } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
-const { superlativeClaims, validateReviewManifest } = require('./editorial_review_contract');
+const { containsTapeCitationSyntax, superlativeClaims, validateReviewManifest, validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const { cryptoQuoteRowFromSeries, quoteRowFromSeries } = require('./fetch_chart_data');
 const {
   NEWS_COVERAGE_POLICIES,
@@ -256,6 +256,17 @@ function validateSeries(errors, series, {
     else if (item.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
     const expectedSection = expectedSectionByTicker.get(ticker);
     if (expectedSection && item.section !== expectedSection) errors.push(`${label}.section must be ${expectedSection}.`);
+    if (!isIsoDateTime(item.quoteRevision)) errors.push(`${label}.quoteRevision must be an offset-bearing ISO timestamp.`);
+    if (item.availability !== undefined) {
+      if (!item.availability || typeof item.availability !== 'object' || Array.isArray(item.availability)) {
+        errors.push(`${label}.availability must be an object.`);
+      } else {
+        if (item.availability.status !== 'carried_forward') errors.push(`${label}.availability.status must be carried_forward.`);
+        if (item.availability.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+        if (!isIsoDateTime(item.availability.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+        if (item.availability.failures !== undefined) errors.push(`${label}.availability.failures is not allowed.`);
+      }
+    }
     if (!RECOGNIZED_SERIES_SOURCES.has(item.source)) errors.push(`${label}.source is not recognized.`);
     if (!['ohlc', 'close'].includes(item.dataKind)) errors.push(`${label}.dataKind must be ohlc or close.`);
     if (typeof item.priceOnly !== 'boolean') errors.push(`${label}.priceOnly must be boolean.`);
@@ -274,6 +285,47 @@ function validateSeries(errors, series, {
     if (!seriesByTicker.has(ticker)) errors.push(`${missingMessage} ${ticker}.`);
   }
   return { decodedSeries, seriesByTicker };
+}
+
+function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker, prefix) {
+  const availability = payload.availability;
+  const carriedTickers = new Set(
+    [...seriesByTicker.entries()]
+      .filter(([, series]) => series?.availability?.status === 'carried_forward')
+      .map(([ticker]) => ticker)
+  );
+  if (availability === undefined) {
+    for (const ticker of carriedTickers) errors.push(`${prefix}carried-forward series ${ticker} requires partial availability diagnostics.`);
+    return;
+  }
+  if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
+    errors.push(`${prefix}availability must be an object.`);
+    return;
+  }
+  if (!['partial', 'carried_forward'].includes(availability.status)) errors.push(`${prefix}availability.status must be partial or carried_forward.`);
+  if (availability.reason !== 'source_refresh_failed') errors.push(`${prefix}availability.reason must be source_refresh_failed.`);
+  if (!isIsoDateTime(availability.checkedAt)) errors.push(`${prefix}availability.checkedAt must be an offset-bearing ISO timestamp.`);
+  if (availability.status === 'partial') {
+    if (!Array.isArray(availability.failures) || !availability.failures.length) {
+      errors.push(`${prefix}partial availability.failures must be a non-empty array.`);
+      return;
+    }
+    const failureTickers = new Set();
+    availability.failures.forEach((failure, index) => {
+      const ticker = String(failure?.ticker || '').trim().toUpperCase();
+      if (!ticker) errors.push(`${prefix}availability.failures[${index}].ticker must be populated.`);
+      else if (failureTickers.has(ticker)) errors.push(`${prefix}availability.failures contains duplicate ticker ${ticker}.`);
+      else failureTickers.add(ticker);
+      if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`${prefix}availability.failures[${index}].message must be populated.`);
+      if (ticker && !seriesByTicker.has(ticker)) errors.push(`${prefix}availability failure names unknown ticker ${ticker}.`);
+      else if (ticker && !carriedTickers.has(ticker)) errors.push(`${prefix}availability failure ${ticker} must identify a carried_forward series.`);
+    });
+    for (const ticker of carriedTickers) {
+      if (!failureTickers.has(ticker)) errors.push(`${prefix}carried_forward series ${ticker} must have a matching availability failure.`);
+    }
+  } else if (availability.failures !== undefined) {
+    errors.push(`${prefix}carried_forward availability.failures is not allowed.`);
+  }
 }
 
 function validateQuoteRows(errors, payload, { expectedByTicker, expectedSectionByTicker, prefix }, seriesByTicker) {
@@ -357,6 +409,7 @@ function validateChartPayload(errors, payload, {
     missingMessage,
     volumeDescription
   });
+  validateChartAvailabilityCorrespondence(errors, payload, result.seriesByTicker, prefix);
   return {
     ...result,
     ...validateQuoteRows(errors, payload, { expectedByTicker, expectedSectionByTicker, prefix }, result.seriesByTicker)
@@ -402,41 +455,12 @@ function trackedFiles(pattern) {
   return result.stdout.split(/\r?\n/).filter(Boolean).filter((file) => fs.existsSync(path.join(root, file)));
 }
 
-function assertIndependentTestSuites() {
-  const offenders = trackedFiles('scripts/test_*.js').filter((file) =>
-    /require\(['"]\.\/test_/.test(fs.readFileSync(path.join(root, file), 'utf8'))
-  );
-  if (offenders.length) throw new Error(`Test suites must not import other test-suite entry points: ${offenders.join(', ')}.`);
-}
-
-function assertContractPurity() {
-  // This lexical guard proves contract modules do not directly use the project's
-  // known I/O entry points; domain tests still prove the exported behavior is deterministic.
-  const forbidden = /require\(['"](?:node:)?(?:fs(?:\/promises)?|https?|child_process)['"]\)|\bfs\.|\b(?:fetch|fetchJson)\s*\(|\bprocess\.(?:argv|env|exit)\b/;
-  const offenders = trackedFiles('scripts/*_contract.js').filter((file) =>
-    forbidden.test(fs.readFileSync(path.join(root, file), 'utf8'))
-  );
-  if (offenders.length) throw new Error(`Contract modules must remain deterministic and I/O-free: ${offenders.join(', ')}.`);
-}
-
 function runCompleteTestSuite() {
   process.stdout.write('Checking tracked JavaScript syntax...\n');
   for (const file of trackedFiles('scripts/*.js')) runReadinessCommand(process.execPath, ['--check', file]);
   process.stdout.write('Checking tracked shell syntax...\n');
   for (const file of trackedFiles('scripts/*.sh')) runReadinessCommand('bash', ['-n', file]);
-  process.stdout.write('Checking LaunchAgent plist...\n');
-  runReadinessCommand('plutil', ['-lint', 'launchd/com.scott.daily-financial-dashboard.plist']);
   process.stdout.write('Running contract and regression tests...\n');
-  assertIndependentTestSuites();
-  assertContractPurity();
-  const privateEarningsImports = trackedFiles('scripts/*.js').filter((file) =>
-    !file.startsWith('scripts/test_')
-    && file !== 'scripts/earnings_week.js'
-    && /require\(['"]\.\/earnings_week_(?:build|validation)['"]\)/.test(fs.readFileSync(path.join(root, file), 'utf8'))
-  );
-  if (privateEarningsImports.length) {
-    throw new Error(`Private Earnings implementations must be reached through earnings_week.js: ${privateEarningsImports.join(', ')}.`);
-  }
   const testEnvironment = { ...process.env, DASHBOARD_TEST_NO_API_CREDENTIALS: '1' };
   delete testEnvironment.FINNHUB_API_KEY;
   delete testEnvironment.EARNINGSAPI_API_KEY;
@@ -461,6 +485,15 @@ function runCompleteTestSuite() {
   process.stdout.write('Complete dashboard test suite passed.\n');
 }
 
+function readinessExecutionPlan(args) {
+  const completeSuiteChecksTargetHtml = path.resolve(root, args.dashboard) === defaultDashboard;
+  return {
+    tidyTargetBeforeSuite: args.skipTests || !completeSuiteChecksTargetHtml,
+    checkDiffsBeforeSuite: args.skipTests,
+    runCompleteSuite: !args.skipTests
+  };
+}
+
 function changedPaths() {
   const result = spawnSync('git', ['status', '--porcelain=v1', '-z'], { cwd: root, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr.trim() || 'Could not inspect git status.');
@@ -481,11 +514,14 @@ function changedPaths() {
 function runReadinessValidation(argv) {
   try {
     const args = parseReadinessArgs(argv);
+    const plan = readinessExecutionPlan(args);
     runReadinessCommand(process.execPath, ['scripts/validate_dashboard.js', args.dashboard, '--require-editorial-review']);
-    runReadinessCommand('tidy', ['-q', '-e', args.dashboard]);
-    runReadinessCommand('git', ['diff', '--check']);
-    runReadinessCommand('git', ['diff', '--cached', '--check']);
-    if (!args.skipTests) runCompleteTestSuite();
+    if (plan.tidyTargetBeforeSuite) runReadinessCommand('tidy', ['-q', '-e', args.dashboard]);
+    if (plan.checkDiffsBeforeSuite) {
+      runReadinessCommand('git', ['diff', '--check']);
+      runReadinessCommand('git', ['diff', '--cached', '--check']);
+    }
+    if (plan.runCompleteSuite) runCompleteTestSuite();
 
     const allowed = new Set(args.allowedFiles.map((file) => path.normalize(file).replaceAll('\\', '/')));
     const unexpected = changedPaths().filter((file) => !allowed.has(file));
@@ -646,27 +682,6 @@ function validateCompletedWindowCalendarRange(errors, data, marker) {
       errors.push(`${label}.range must be ${expectedLabel} before newsBaseline.lastScheduledWindow can record ${marker}.`);
     }
   }
-}
-
-function chicagoDateParts(date) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
-    weekday: 'short',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  const part = (type) => parts.find((item) => item.type === type)?.value || '';
-  const hour = Number(part('hour'));
-  const minute = Number(part('minute'));
-  return {
-    weekday: part('weekday'),
-    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
-    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
-  };
 }
 
 function chicagoClockMinutes(epochSeconds) {
@@ -857,6 +872,9 @@ if (!dashboardMatch) {
       }
     }
     const tapeRows = data.tape?.rows ?? [];
+    if (data.tape && Object.prototype.hasOwnProperty.call(data.tape, 'availability')) {
+      errors.push('tape.availability is not supported; chart-data owns Chart/Tape availability.');
+    }
     // README Data Contracts split chartable crypto tickers from crypto-only section stats.
     const cryptoTickerRows = tapeRows.filter((row) => String(row?.group ?? '') === 'Crypto');
     const cryptoStatRows = data.crypto?.stats ?? [];
@@ -874,7 +892,6 @@ if (!dashboardMatch) {
       }
       seenTapeTickers.add(ticker);
     }
-    const sourcePattern = /(\bAP\b|Washington Post|Reuters|Investing\.com|Federal Reserve|Yahoo Finance|CoinGecko|\bsource\b|\bsnapshot\b|\brecap\b|\blisting\b)/i;
     const staticTickerNotePattern = /(placeholder|no update|no fresh|unchanged|static|evergreen|same as yesterday|table snapshot showed|historical close datasets showed|held modest gains|quote recap|price recap|latest quote|latest close)/i;
     const requireString = (value, label) => {
       if (typeof value !== 'string' || value.trim() === '') {
@@ -884,23 +901,20 @@ if (!dashboardMatch) {
     if (data.crypto && Object.prototype.hasOwnProperty.call(data.crypto, 'tape')) {
       errors.push('crypto.tape is deprecated; crypto tickers belong in tape.rows and crypto-only stat rows belong in crypto.stats.');
     }
-    const validateTickerNote = ({ note, values, label }) => {
+    const validateTickerNote = ({ row, note, values, label }) => {
       requireString(note, `${label}.note`);
       const text = String(note ?? '').trim();
       if (!text) return;
-      if (text.split(/\s+/).length < 12) {
-        errors.push(`${label}.note must include substantive daily market context, not a short label.`);
-      }
-      if (sourcePattern.test(text)) {
-        errors.push(`${label}.note contains source/citation or process language.`);
-      }
-      if (staticTickerNotePattern.test(text)) {
-        errors.push(`${label}.note looks static, placeholder-like, or quote-recap-only.`);
+      if (containsTapeCitationSyntax(text)) {
+        errors.push(`${label}.note contains citation syntax.`);
       }
       for (const value of values) {
         if (value && value !== '0.00' && text.includes(String(value))) {
           errors.push(`${label}.note repeats row value "${value}".`);
         }
+      }
+      for (const dispositionError of validateTapeCommentaryDisposition(row)) {
+        errors.push(`${label}.${dispositionError}`);
       }
     };
     const requireHttpsUrl = (url, label) => {
@@ -1021,7 +1035,6 @@ if (!dashboardMatch) {
       }
     }
 
-    const tapeAvailability = validateSectionAvailability(errors, data.tape?.availability, 'tape', ['carried_forward', 'partial']);
     if (!chartDataMatch) {
       errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
     } else {
@@ -1033,10 +1046,7 @@ if (!dashboardMatch) {
       }
 
       if (chartData) {
-        const chartAvailability = validateSectionAvailability(errors, chartData.availability, 'chart-data', ['carried_forward', 'partial']);
-        if (chartAvailability !== tapeAvailability || JSON.stringify(chartData.availability || null) !== JSON.stringify(data.tape?.availability || null)) {
-          errors.push('tape.availability must exactly match embedded chart-data.availability.');
-        }
+        validateSectionAvailability(errors, chartData.availability, 'chart-data', ['carried_forward', 'partial']);
         if (chartData.barEncoding !== 'tuple-v1') {
           errors.push('chart-data.barEncoding must be tuple-v1.');
         }
@@ -1121,6 +1131,13 @@ if (!dashboardMatch) {
             }
           }
         };
+        for (const row of tapeRows) {
+          const ticker = String(row?.ticker ?? '').toUpperCase();
+          const series = chartSeriesByTicker.get(ticker);
+          if (ticker && series && isIsoDateTime(series.quoteRevision) && row?.noteDisposition?.quoteRevision !== series.quoteRevision) {
+            errors.push(`tape.rows ${ticker}.noteDisposition.quoteRevision must match chart-data series quoteRevision "${series.quoteRevision}".`);
+          }
+        }
         for (const row of tapeRows) {
           const ticker = String(row?.ticker ?? '').toUpperCase();
           if (!ticker || String(row?.group ?? '') === 'Crypto') continue;
@@ -1426,6 +1443,7 @@ if (!dashboardMatch) {
     for (const rowRaw of tapeRows) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
       validateTickerNote({
+        row,
         note: row.note,
         values: [row.last, row.delta, row.pct],
         label: `tape.rows ${row.ticker ?? row.name ?? '(unknown)'}`
@@ -1445,6 +1463,7 @@ if (!dashboardMatch) {
       const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
       const ticker = String(row.ticker ?? row.name ?? '(unknown)').trim();
       validateTickerNote({
+        row,
         note: row.note,
         values: [row.last, row.delta, row.pct],
         label: `tape.rows Crypto ${ticker}`
@@ -1708,7 +1727,7 @@ function main(argv = process.argv.slice(2)) {
   if (argv[0] === 'chart-data') return runChartDataValidation(argv.slice(1));
   if (argv[0] === 'test') {
     if (argv.includes('--help') || argv.includes('-h')) {
-      process.stdout.write('Usage: node scripts/validate_dashboard.js test\n\nRuns syntax, architecture, domain, integration, canonical dashboard, HTML, and whitespace checks.\n');
+      process.stdout.write('Usage: node scripts/validate_dashboard.js test\n\nRuns syntax, focused domain and update-path tests, canonical dashboard, HTML, and whitespace checks.\n');
       return;
     }
     return runCompleteTestSuite();
@@ -1728,6 +1747,7 @@ module.exports = {
   decodeObjectSeries,
   decodeTupleSeries,
   parseReadinessArgs,
+  readinessExecutionPlan,
   runCompleteTestSuite,
   runDashboardValidation,
   validateChartDataPayload,

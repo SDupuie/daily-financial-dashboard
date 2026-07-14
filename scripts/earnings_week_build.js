@@ -7,7 +7,6 @@ const { atomicWriteJson } = require('./staging_writer');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
-  buildEarningsWeekPolicy,
   buildCompanyReleaseTasks,
   combinedOutcome,
   computeEarningsSourceStatus,
@@ -1742,7 +1741,6 @@ async function runBuild(argv = process.argv.slice(2)) {
       from: args.from,
       to: args.to
     },
-    policy: buildEarningsWeekPolicy(),
     rows,
     secondaryRecoveryCandidates,
     companyReleaseTasks,

@@ -280,7 +280,7 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false, sch
 
   if (scheduled) {
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
-      throw new Error('Scheduled baseline refresh requires --morning or --afternoon to record the completed window.');
+      throw new Error('Scheduled finalization requires --morning or --afternoon to record the completed window.');
     }
     data.newsBaseline = {
       lastScheduledUpdateAt: now.toISOString(),

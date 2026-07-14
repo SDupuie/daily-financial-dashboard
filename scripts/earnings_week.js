@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./staging_writer');
 const {
-  buildEarningsWeekPolicy,
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
@@ -458,7 +457,7 @@ function updateSummary(source) {
 
 function applyCompanyReleaseResolutions(source, resolutionPayload) {
   const output = JSON.parse(JSON.stringify(source));
-  output.policy = buildEarningsWeekPolicy();
+  delete output.policy;
   const taskMap = new Map((output.companyReleaseTasks || []).map((task) => [task.id, task]));
   const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
   const applied = [];
@@ -571,7 +570,7 @@ function applyMetricNote(metric, narrativeMetric) {
 function applyEarningsNarrative(source, narrativePayload, options = {}) {
   validateNarrativePayload(source, narrativePayload, options);
   const output = JSON.parse(JSON.stringify(source));
-  output.policy = buildEarningsWeekPolicy();
+  delete output.policy;
   const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
   const applied = [];
   const appliedAt = new Date(options.appliedAt || Date.now()).toISOString();
@@ -1324,7 +1323,7 @@ function applyResultRefreshDiagnostics(row, failures, checkedAt) {
 
 async function refreshEarningsResults(source, refreshData, options = {}) {
   const output = JSON.parse(JSON.stringify(source));
-  output.policy = buildEarningsWeekPolicy();
+  delete output.policy;
   const asOf = options.asOf || new Date().toISOString();
   const targetKeys = new Set(refreshTargetRows(output, asOf).map(rowKey));
   const changedKeys = new Set();

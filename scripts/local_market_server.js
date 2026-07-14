@@ -285,7 +285,8 @@ async function fetchChartPayload(args, startDate, endDate) {
   const errors = [];
   const results = await mapLimit(rows, args.concurrency, async (row) => {
     try {
-      return await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache);
+      const series = await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache);
+      return { ...series, quoteRevision: endDate.toISOString() };
     } catch (error) {
       errors.push({ section: row.section || 'chart', ticker: row.ticker, message: error.message });
       return null;
@@ -355,7 +356,7 @@ async function buildMarketRefresh(args) {
   const errors = [...chart.errors, ...sectionErrors];
   return {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt: endDate.toISOString(),
     server: 'scripts/local_market_server.js',
     range: {
       mode: range.mode,

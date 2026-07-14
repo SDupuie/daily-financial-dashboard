@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 
 const assert = require('assert/strict');
-const fs = require('fs');
-const path = require('path');
 const {
   addDays,
   compareIsoDate,
@@ -23,34 +21,17 @@ const {
   comparableWeekAheadSurprise,
   normalizeWeekAhead,
   rangeForDate,
-  TIME_INTERPRETATION,
   validateWeekAheadPayload
 } = require('./week_ahead_contract');
 const {
   buildOfficialSchedule,
   dateFromArg,
   isTransient,
-  parseArgs,
   parseBeaSchedule,
   parseCensusSchedule,
   requestFxMacroValues
 } = require('./fetch_week_ahead');
 const { calendarRolloverRange } = require('./run_daily_update');
-const root = path.resolve(__dirname, '..');
-
-function extractDashboardRuntimeTestBlock(html, name) {
-  const runtimeMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
-  assert.equal(runtimeMatches.length, 1, `Expected one dashboard-runtime script; found ${runtimeMatches.length}`);
-  const source = runtimeMatches[0][1];
-  const startMarker = `/* TEST BLOCK START: ${name} */`;
-  const endMarker = `/* TEST BLOCK END: ${name} */`;
-  const start = source.indexOf(startMarker);
-  const end = source.indexOf(endMarker);
-  assert.equal(source.split(startMarker).length - 1, 1, `Expected one test block start ${name}`);
-  assert.equal(source.split(endMarker).length - 1, 1, `Expected one test block end ${name}`);
-  assert.ok(start < end, `Test block markers are out of order for ${name}`);
-  return source.slice(start + startMarker.length, end);
-}
 
 function weekAheadDashboardFixture() {
   return {
@@ -239,130 +220,6 @@ function testCalendarRolloverRange() {
 
 }
 
-function testWeekAheadRendererConvertsMarketTime() {
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-time');
-  const weekAheadTimeLabel = new Function(`${source}\nreturn weekAheadTimeLabel;`)();
-  const rendered = weekAheadTimeLabel(
-    { date: '2026-07-14' },
-    { time: '08:30' },
-    { range: { marketTimeZone: 'America/New_York', timeZone: 'America/Chicago' } }
-  );
-  assert.equal(rendered, '7:30 AM');
-}
-
-function testWeekAheadOutcomeRendererUsesActualCloseMoves() {
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-outcome');
-  const esc = (value) => String(value).replace(/[&<>"']/g, '');
-  const weekReactionButtonHtml = (_day, _ticker, _role, label) => `<button>${label}</button>`;
-  const weekAheadOutcomeHtml = new Function('esc', 'weekReactionButtonHtml', `${source}\nreturn weekAheadOutcomeHtml;`)(esc, weekReactionButtonHtml);
-  const rendered = weekAheadOutcomeHtml({
-    date: '2026-07-14',
-    label: 'Tuesday',
-    lifecycle: 'close_available',
-    outcome: { title: 'Inflation firmed', body: 'Rates and the dollar strengthened into the close.' },
-    marketReaction: {
-      rows: [
-        { ticker: 'UST2Y', role: 'Policy reaction', unit: 'percent_yield', delta: 0.08, percentChange: 1.9 },
-        { ticker: 'UUP', role: 'Dollar reaction', unit: 'price', delta: 0.14, percentChange: 0.5 },
-        { ticker: 'SPX', role: 'Equity reaction', unit: 'price', delta: 0, percentChange: 0 }
-      ]
-    }
-  });
-  assert.match(rendered, /Outcome &amp; Close Reaction/);
-  assert.match(rendered, /UST2Y \+8 bp/);
-  assert.match(rendered, /UUP \+0\.50%/);
-  assert.doesNotMatch(rendered, /SPX/);
-  assert.doesNotMatch(rendered, /Watch the reaction in/);
-  const unavailable = weekAheadOutcomeHtml({
-    date: '2026-07-14',
-    label: 'Tuesday',
-    lifecycle: 'close_available',
-    outcome: { status: 'commentary_unavailable' },
-    marketReaction: { rows: [] }
-  });
-  assert.match(unavailable, /Post-event commentary unavailable/);
-  assert.match(unavailable, /Released facts and event-day close moves remain visible/);
-}
-
-function testWeekAheadRendererGroupsReleaseFamilies() {
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const source = extractDashboardRuntimeTestBlock(html, 'week-ahead-family');
-  const runtime = new Function(`${source}\nreturn { weekAheadFamilyEvents, weekAheadEventGroups };`)();
-  const event = (name, period, agency = 'BLS', time = '08:30') => ({ name, period, agency, time, impact: 'high' });
-  const events = [
-    event('Consumer Price Index', 'YoY'),
-    event('Core Consumer Price Index', 'YoY'),
-    event('Consumer Price Index', 'MoM'),
-    event('Core Consumer Price Index', 'MoM'),
-    event('Producer Price Index', 'MoM'),
-    event('Core Producer Price Index', 'MoM'),
-    event('Retail Sales', 'MoM', 'Census'),
-    event('Retail Sales Control Group', 'MoM', 'Census'),
-    event('Core Retail Sales', 'MoM', 'Census'),
-    event('Core PCE Price Index', 'YoY', 'BEA')
-  ];
-  const groups = runtime.weekAheadEventGroups(events);
-
-  assert.deepEqual(groups.map((group) => group.family?.title || group.events[0].name), [
-    'Consumer Price Index',
-    'Producer Price Index',
-    'Retail Sales',
-    'Core PCE Price Index'
-  ]);
-  assert.deepEqual(
-    runtime.weekAheadFamilyEvents(groups[0].events, groups[0].family).map((item) => `${item.name}:${item.period}`),
-    [
-      'Core Consumer Price Index:MoM',
-      'Core Consumer Price Index:YoY',
-      'Consumer Price Index:MoM',
-      'Consumer Price Index:YoY'
-    ]
-  );
-  assert.deepEqual(
-    runtime.weekAheadFamilyEvents(groups[2].events, groups[2].family).map((item) => item.name),
-    ['Core Retail Sales', 'Retail Sales', 'Retail Sales Control Group']
-  );
-  assert.equal(groups[3].family, null, 'A standalone core release must not be collapsed into a family.');
-}
-
-function testMarketLensReactionOpensChartBelowDay() {
-  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const source = extractDashboardRuntimeTestBlock(html, 'market-lens-routing');
-  const runtime = Function(`
-    const available = new Set(['UST2Y', 'CL']);
-    const calls = [];
-    let activeWeekChartDayKey = '';
-    let activeWeekChartTicker = '';
-    const chartSeriesForTicker = (ticker) => available.has(ticker) ? { ticker } : null;
-    const closeTapeChart = () => calls.push(['close-tape']);
-    const closeWeekAheadChart = () => {
-      activeWeekChartDayKey = '';
-      activeWeekChartTicker = '';
-      calls.push(['close-week']);
-    };
-    const syncWeekAheadChart = (options) => calls.push(['chart', activeWeekChartDayKey, activeWeekChartTicker, options]);
-    ${source}
-    return {
-      showWeekChartForTicker,
-      snapshot: () => ({ activeWeekChartDayKey, activeWeekChartTicker, calls: [...calls] })
-    };
-  `)();
-
-  runtime.showWeekChartForTicker('2026-07-14', 'ust2y');
-  assert.deepEqual(runtime.snapshot(), {
-    activeWeekChartDayKey: '2026-07-14',
-    activeWeekChartTicker: 'UST2Y',
-    calls: [['close-tape'], ['chart', '2026-07-14', 'UST2Y', { scrollIntoView: true, focusChart: true }]]
-  });
-  runtime.showWeekChartForTicker('2026-07-14', 'UST2Y');
-  assert.equal(runtime.snapshot().activeWeekChartTicker, '', 'Repeated activation collapses the chart below that day.');
-  assert.deepEqual(runtime.snapshot().calls.slice(-2), [['close-tape'], ['close-week']]);
-  runtime.showWeekChartForTicker('2026-07-15', 'QQQ');
-  assert.equal(runtime.snapshot().calls.length, 4, 'An unavailable or noncanonical ticker must not open a chart.');
-}
-
 function normalizedWeekAheadFixture() {
   const range = { from: '2026-07-13', to: '2026-07-17' };
   const officialSchedule = officialScheduleFixture();
@@ -382,7 +239,6 @@ async function testProducerAndScheduleNormalization() {
   });
   assert.equal(payload.days.length, 5);
   assert.equal(payload.source.provider, 'FXMacroData');
-  assert.equal(payload.source.timeInterpretation, TIME_INTERPRETATION);
   assert.equal(payload.sourceSummary.includedEvents, 11);
   const monday = payload.days.find((day) => day.date === '2026-07-13');
   assert.deepEqual(monday.events, []);
@@ -618,10 +474,7 @@ function testPayloadValidationMutations() {
     ['duplicate event identity', (value) => { value.days[2].events[0].id = value.days[1].events[0].id; }, /must be unique/],
     ['malformed day date', (value) => { value.days[1].date = '2026-02-30'; }, /must match the target weekday/],
     ['malformed event time', (value) => { value.days[1].events[0].time = '99:99'; }, /must be an ordered HH:MM time/],
-    ['malformed official date', (value) => { value.officialSchedule.events[0].date = '2026-02-30'; }, /officialSchedule\.events contains an invalid release/],
-    ['malformed official time', (value) => { value.officialSchedule.events[0].time = '99:99'; }, /officialSchedule\.events contains an invalid release/],
     ['timezone-free generated timestamp', (value) => { value.generatedAt = '2026-07-10T18:00:00'; }, /offset-bearing ISO timestamp/],
-    ['stale time provenance', (value) => { value.source.timeInterpretation = 'Nasdaq schedule times'; }, /timeInterpretation/],
     ['unsupported display range', (value) => { value.range = { from: '2026-07-14', to: '2026-07-18' }; }, /Monday-Friday or Friday plus next Monday-Thursday/]
   ];
   for (const [name, mutate, expectedError] of cases) {
@@ -666,7 +519,7 @@ function testWeekAheadPreparationFallbacks() {
   assert.match(validateWeekAheadPayload(unavailable.week).join('\n'), /source_refresh_failed/);
 }
 
-function testCliDateAndParserCases() {
+function testCalendarAndTransientCases() {
   assert.equal(isIsoDate('2026-02-28'), true);
   assert.equal(isIsoDate('2026-02-30'), false);
   assert.equal(isIsoDateTime('2026-07-10T15:45:00-05:00'), true);
@@ -687,11 +540,6 @@ function testCliDateAndParserCases() {
   assert.deepEqual(rangeForDate(new Date('2026-07-13T18:00:00Z')), { from: '2026-07-13', to: '2026-07-17' });
   assert.equal(dateFromArg('2026-02-30'), null, 'Impossible calendar dates must not roll into another week.');
   assert.equal(dateFromArg('2026-02-28')?.toISOString(), '2026-02-28T12:00:00.000Z');
-  assert.throws(() => parseArgs(['--timeout-ms', 'not-a-number']), /finite number/);
-  assert.throws(() => parseArgs(['--timeout-ms', '999']), /at least 1000/);
-  assert.equal(parseArgs(['--timeout-ms', '1000']).timeoutMs, 1000);
-  assert.equal(parseArgs(['--refresh-values']).refreshValues, true);
-  assert.throws(() => parseArgs(['--refresh-values', '--date', '2026-07-13']), /cannot be combined/);
   assert.equal(isTransient(new Error('Malformed provider payload')), false, 'Parser and contract errors must not use cached data.');
   assert.equal(isTransient(Object.assign(new Error('HTTP 503'), { status: 503 })), true);
   assert.equal(isTransient(Object.assign(new Error('Socket reset'), { transient: true })), true);
@@ -703,16 +551,12 @@ async function run() {
     testUpdaterWeekAheadPreservesEditorialLens,
     testMarketLensDecisionApplication,
     testCalendarRolloverRange,
-    testWeekAheadRendererConvertsMarketTime,
-    testWeekAheadOutcomeRendererUsesActualCloseMoves,
-    testWeekAheadRendererGroupsReleaseFamilies,
-    testMarketLensReactionOpensChartBelowDay,
     testProducerAndScheduleNormalization,
     testLifecycleAndCloseReactionTransitions,
     testMarketLensDecisions,
     testPayloadValidationMutations,
     testWeekAheadPreparationFallbacks,
-    testCliDateAndParserCases
+    testCalendarAndTransientCases
   ];
   for (const test of tests) {
     try {

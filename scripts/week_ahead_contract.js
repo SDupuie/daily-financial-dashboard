@@ -6,7 +6,6 @@ const SCHEMA_VERSION = 4;
 // constants rather than display copy that a fetcher or cache may freely alter.
 const FX_MACRO_PROVIDER = 'FXMacroData';
 const FX_MACRO_ENDPOINT = '/v1/announcements/{currency}/{indicator} + /v1/predictions/{currency}/{indicator}';
-const TIME_INTERPRETATION = 'Official U.S. release schedule times are stored as America/New_York and converted by the dashboard renderer.';
 const WEEK_AHEAD_OUTCOME_STATUSES = new Set(['verified', 'commentary_unavailable']);
 const {
   addDays,
@@ -368,6 +367,7 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
     && canonicalWeek.days.length === 5;
   if (sameRange) {
     const week = applyWeekAheadLifecycle(structuredClone(canonicalWeek), null, { now: new Date(timestamp) });
+    if (week.source) delete week.source.timeInterpretation;
     week.availability = {
       status: 'carried_forward',
       reason: 'source_refresh_failed',
@@ -383,8 +383,7 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
       provider: FX_MACRO_PROVIDER,
       endpoint: FX_MACRO_ENDPOINT,
       status: 'unavailable',
-      fetchedAt: timestamp,
-      timeInterpretation: TIME_INTERPRETATION
+      fetchedAt: timestamp
     },
     officialSchedule: { events: [], authorities: [] },
     days: targetDates.map((date) => {
@@ -826,8 +825,7 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
       provider: FX_MACRO_PROVIDER,
       endpoint: FX_MACRO_ENDPOINT,
       status: failures.length ? 'partial' : 'fresh',
-      fetchedAt: now.toISOString(),
-      timeInterpretation: TIME_INTERPRETATION
+      fetchedAt: now.toISOString()
     },
     officialSchedule: {
       events: officialEvents,
@@ -956,7 +954,6 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
   if (!isPlainObject(payload.source) || !['fresh', 'partial', 'cached', 'unavailable'].includes(payload.source.status)) errors.push('weekAhead.source.status must be fresh, partial, cached, or unavailable.');
   if (payload.source?.provider !== FX_MACRO_PROVIDER) errors.push(`weekAhead.source.provider must be ${FX_MACRO_PROVIDER}.`);
   if (payload.source?.endpoint !== FX_MACRO_ENDPOINT) errors.push('weekAhead.source.endpoint must identify the FXMacroData announcement and prediction endpoints.');
-  if (payload.source?.timeInterpretation !== TIME_INTERPRETATION) errors.push('weekAhead.source.timeInterpretation must describe official U.S. release schedules stored in Eastern time.');
   if (!isIsoDateTime(payload.source?.fetchedAt)) errors.push('weekAhead.source.fetchedAt must be an offset-bearing ISO timestamp.');
   if (payload.availability !== undefined) {
     if (!isPlainObject(payload.availability)) {
@@ -1279,7 +1276,6 @@ module.exports = {
   MARKET_LENS_REACTIONS_BY_CHANNEL,
   SCHEMA_VERSION,
   SOURCE_TIME_ZONE,
-  TIME_INTERPRETATION,
   TIME_ZONE,
   addDays,
   applyWeekAheadLifecycle,
