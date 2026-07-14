@@ -3254,7 +3254,23 @@ const architectureContractTests = Object.freeze([
   testArchitectureFinalizationValidatesBeforeReplace
 ]);
 
+const localRefreshIntegrationTests = Object.freeze([
+  testLocalRefreshIndicatorBehavior,
+  testLocalRefreshIndicatorLifecycle,
+  testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,
+  testLocalRefreshIgnoresIdenticalCryptoStats,
+  testLocalMarketServerAutoRefreshWindow,
+  testLocalMarketServerSkipsYieldCurveRefresh,
+  testLocalMarketServerExplicitAndFallbackWindows,
+  testLocalMarketServerPartialStatusIncludesRowErrors,
+  testLocalMarketServerOriginPolicyAndTlsOptions
+]);
+
 async function main() {
+  const testArguments = new Set(process.argv.slice(2));
+  for (const argument of testArguments) {
+    if (argument !== '--local-refresh') throw new Error(`Unknown test_dashboard.js option: ${argument}`);
+  }
   const tests = [
     testUpdaterQuoteAndCryptoPatches,
     testUpdaterModulePatches,
@@ -3291,24 +3307,16 @@ async function main() {
     testDashboardValidatorRequiresCryptoNoteDisplayFields,
     testDashboardValidatorAllowsPartialNewsCoverageWithoutRelaxingStoryQuality,
     testEditionStampChangesIdentity,
-    testLocalRefreshIndicatorBehavior,
     testTouchTooltipControls,
     testEmbeddedPayloadLoadErrorsAreDistinct,
-    testLocalRefreshIndicatorLifecycle,
-    testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,
-    testLocalRefreshIgnoresIdenticalCryptoStats,
     testAssetValidationRejectsImpossibleDate,
     testChartDataValidationMutations,
     testDashboardValidatorRejectsInvalidYieldCurveComparisons,
     testChartPayloadMetadataContract,
     testSharedChartPayloadContractAcrossEncodings,
     testDashboardValidatorRejectsInvalidChartPayloadMetadata,
-    testLocalMarketServerAutoRefreshWindow,
-    testLocalMarketServerSkipsYieldCurveRefresh,
-    testLocalMarketServerExplicitAndFallbackWindows,
-    testLocalMarketServerPartialStatusIncludesRowErrors,
     testExpandedChartScrollsFullyIntoViewport,
-    testLocalMarketServerOriginPolicyAndTlsOptions
+    ...(testArguments.has('--local-refresh') ? localRefreshIntegrationTests : [])
   ];
 
   try {
@@ -3320,6 +3328,7 @@ async function main() {
       await runDashboardTest(test);
     }
     console.log('Dashboard fixture tests passed.');
+    if (testArguments.has('--local-refresh')) console.log('Local refresh integration tests passed.');
   } finally {
     cleanupTemporaryDirectories();
   }
