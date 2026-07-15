@@ -19,8 +19,8 @@ const {
   storyIdentity,
   validateNewsCoverageState
 } = require('./news_contract');
-const { collectNewsCandidates, extractArticleMetadata } = require('./fetch_news_candidates');
-const { newsSearchPaths } = require('./news_sources');
+const { collectNewsCandidates, extractArticleMetadata, parseNewsFeed } = require('./fetch_news_candidates');
+const { newsAcquisitionPaths } = require('./news_sources');
 const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
 const temporaryDirectories = new Set();
 
@@ -47,6 +47,10 @@ function testStoryIdentityContract() {
   assert.equal(
     canonicalStoryUrl('https://example.com/?fbclid=tracking'),
     'https://example.com/'
+  );
+  assert.equal(
+    canonicalStoryUrl('https://example.com/story?mod=mw_rss_topstories&.tsrc=rss&keep=yes'),
+    'https://example.com/story?keep=yes'
   );
   assert.equal(canonicalStoryUrl('not a URL'), '');
   assert.equal(normalizeStoryTitle('  ＭＡＲＫＥＴＳ — Rally!  '), 'markets rally');
@@ -120,7 +124,8 @@ function testMondayMorningFreshnessWindow() {
 async function testDeterministicNewsCandidateAcquisition() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const calls = [];
-  const searchPaths = newsSearchPaths('afternoon');
+  const pauses = [];
+  const acquisitionPaths = newsAcquisitionPaths();
   const dashboardData = {
     stories: [{
       title: 'Still-fresh prior market card',
@@ -142,55 +147,165 @@ async function testDeterministicNewsCandidateAcquisition() {
     asOf,
     windowMode: 'afternoon',
     dashboardData,
-    searchPaths,
+    acquisitionPaths,
     clock: () => asOf,
-    fetchSearch: async (searchPath) => {
-      calls.push(searchPath.id);
-      if (searchPath.id === 'general-market-structure') throw new Error('fixture provider failure');
-      if (searchPath.id === 'general-market') return { articles: [{
-        seendate: '20260710T200000Z',
-        title: 'General market fixture',
-        url: 'https://www.reuters.com/markets/general?utm_source=fixture',
-        language: 'English'
-      }] };
-      if (searchPath.id === 'general-futures') return { articles: [{
-        seendate: '20260710T190000Z',
-        title: 'Duplicate market fixture',
-        url: 'https://www.reuters.com/markets/general',
-        language: 'English'
+    pause: async (milliseconds) => pauses.push(milliseconds),
+    fetchPath: async (acquisitionPath) => {
+      calls.push(acquisitionPath.id);
+      if (acquisitionPath.id === 'axios') throw new Error('fixture provider failure');
+      if (acquisitionPath.id === 'alpha-financial-markets') return { items: [{
+        publishedAt: '2026-07-10T20:00:00.000Z',
+        title: 'CNBC direct duplicate fixture',
+        url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html?utm_source=alpha'
       }, {
-        seendate: '20260701T190000Z',
-        title: 'Stale market fixture',
-        url: 'https://www.reuters.com/markets/stale',
-        language: 'English'
+        publishedAt: '2026-07-01T20:00:00.000Z',
+        title: 'Stale provider fixture',
+        url: 'https://www.cnbc.com/2026/07/01/stale-provider-fixture.html'
       }] };
-      if (searchPath.id === 'crypto-market') return { articles: [{
-        seendate: '20260710T180000Z',
-        title: 'Crypto fixture',
-        url: 'https://www.coindesk.com/markets/crypto-fixture',
-        language: 'English'
+      if (acquisitionPath.id === 'alpha-blockchain') return { items: [{
+        publishedAt: '2026-07-10T18:00:00.000Z',
+        title: 'Crypto direct duplicate fixture',
+        url: 'https://www.coindesk.com/markets/2026/07/10/crypto-fixture'
       }] };
-      return { articles: [] };
+      if (acquisitionPath.id === 'stockfit-market') return { items: [{
+        publishedAt: '2026-07-10T19:00:00.000Z',
+        title: 'MarketWatch direct duplicate fixture',
+        url: 'https://www.marketwatch.com/story/direct-fixture?mod=stockfit'
+      }, {
+        publishedAt: '2026-07-10T19:30:00.000Z',
+        title: 'Yahoo validated syndication fixture',
+        url: 'https://finance.yahoo.com/news/validated-fixture.html?.tsrc=stockfit',
+        providerSourceName: 'Yahoo Finance'
+      }, {
+        publishedAt: '2026-07-10T19:15:00.000Z',
+        title: 'Yahoo unresolved syndication fixture',
+        url: 'https://finance.yahoo.com/news/unresolved-fixture.html',
+        providerSourceName: 'Yahoo Finance'
+      }] };
+      if (acquisitionPath.id === 'cnbc') return { items: [{
+        publishedAt: '2026-07-10T20:00:00.000Z',
+        title: 'CNBC direct duplicate fixture',
+        url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html'
+      }] };
+      if (acquisitionPath.id === 'marketwatch') return { items: [{
+        publishedAt: '2026-07-10T19:00:00.000Z',
+        title: 'MarketWatch direct duplicate fixture',
+        url: 'https://www.marketwatch.com/story/direct-fixture?mod=mw_rss_topstories'
+      }] };
+      if (acquisitionPath.id === 'coindesk') return { items: [{
+        publishedAt: '2026-07-10T18:00:00.000Z',
+        title: 'Crypto direct duplicate fixture',
+        url: 'https://www.coindesk.com/markets/2026/07/10/crypto-fixture'
+      }] };
+      return { items: [] };
     },
-    fetchArticle: async (candidate) => ({
-      finalUrl: candidate.url,
-      pageTitle: candidate.title,
-      description: 'Fixture description.',
-      excerpt: 'Fixture article content.',
-      publishedAt: new Date(candidate.publishedAt)
-    })
+    fetchArticle: async (candidate) => {
+      const isOriginalPublisher = candidate.url.startsWith('https://www.reuters.com/');
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: isOriginalPublisher
+          ? new Date('2026-07-10T18:45:00.000Z')
+          : new Date(candidate.publishedAt),
+        publisherName: candidate.url.includes('validated-fixture.html') ? 'Reuters' : 'Yahoo Finance',
+        explicitPublisherUrls: candidate.url.includes('validated-fixture')
+          ? ['https://www.reuters.com/markets/validated-fixture']
+          : []
+      };
+    }
   });
 
-  assert.deepEqual(calls, searchPaths.map((searchPath) => searchPath.id), 'Every configured base and fallback path must be attempted.');
-  assert.equal(artifact.generalCandidates.length, 2, 'The downloaded duplicate must collapse while the fresh prior card remains available.');
-  assert.equal(artifact.cryptoCandidates.length, 2, 'Downloaded and prior Crypto candidates must both reach editorial review.');
-  const downloaded = artifact.generalCandidates.find((candidate) => candidate.origin === 'downloaded');
-  assert.equal(downloaded.url, 'https://www.reuters.com/markets/general');
-  assert.deepEqual(downloaded.searchPathIds, ['general-market', 'general-futures']);
-  assert.equal(downloaded.article.accessible, true);
+  assert.deepEqual(calls, acquisitionPaths.map((entry) => entry.id), 'Every configured API and direct-feed path must be attempted.');
+  assert.deepEqual(pauses, [1250], 'The two Alpha Vantage calls must be paced.');
+  assert.equal(artifact.generalCandidates.length, 5, 'Direct duplicates, two Yahoo stories, and the prior card must remain available once each.');
+  assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
+  const cnbc = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc');
+  assert.equal(cnbc.provider, 'rss', 'A direct feed must win deterministic provenance deduplication over an aggregator copy.');
+  assert.deepEqual(cnbc.searchPathIds, ['cnbc', 'alpha-financial-markets']);
+  const marketwatch = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'marketwatch');
+  assert.equal(marketwatch.provider, 'rss');
+  assert.deepEqual(marketwatch.searchPathIds, ['marketwatch', 'stockfit-market']);
+  const resolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'original_validated');
+  assert.equal(resolvedYahoo.url, 'https://www.reuters.com/markets/validated-fixture');
+  assert.equal(resolvedYahoo.syndication.hostedUrl, 'https://finance.yahoo.com/news/validated-fixture.html');
+  assert.equal(resolvedYahoo.syndication.publisherName, 'Reuters');
+  assert.equal(resolvedYahoo.publishedAt, '2026-07-10T18:45:00.000Z', 'A promoted story must use the original page publication time.');
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale provider fixture'), false);
+  const unresolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'yahoo_hosted');
+  assert.equal(unresolvedYahoo.url, 'https://finance.yahoo.com/news/unresolved-fixture.html');
+  assert.equal(unresolvedYahoo.syndication.publisherName, undefined, 'StockFit Yahoo Finance attribution is the host, not a syndicated publisher.');
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.priorCard).priorCopy.tag, 'Prior');
-  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'general-market-structure').error, 'fixture provider failure');
-  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'crypto-market').acceptedCount, 1);
+  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
+  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'coindesk').acceptedCount, 1);
+}
+
+async function testYahooOriginalPromotionValidation() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const cases = [
+    ['missing-title', 'Missing title promotion fixture'],
+    ['missing-date', 'Missing date promotion fixture'],
+    ['stale-date', 'Stale date promotion fixture'],
+    ['title-mismatch', 'Title mismatch promotion fixture'],
+    ['inaccessible', 'Inaccessible promotion fixture'],
+    ['unapproved-domain', 'Unapproved domain promotion fixture'],
+    ['unapproved-redirect', 'Unapproved redirect promotion fixture']
+  ];
+  const originalFetches = [];
+  const artifact = await collectNewsCandidates({
+    asOf,
+    acquisitionPaths: [{ id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({
+      items: cases.map(([slug, title]) => ({
+        title,
+        url: `https://finance.yahoo.com/news/${slug}.html`,
+        publishedAt: '2026-07-10T19:00:00.000Z',
+        providerSourceName: 'Yahoo Finance'
+      }))
+    }),
+    fetchArticle: async (candidate) => {
+      const url = new URL(candidate.url);
+      const slug = url.pathname.split('/').at(-1).replace(/\.html$/, '');
+      if (url.hostname === 'finance.yahoo.com') {
+        return {
+          finalUrl: candidate.url,
+          pageTitle: candidate.title,
+          publishedAt: new Date('2026-07-10T19:00:00.000Z'),
+          publisherName: 'Yahoo Finance',
+          explicitPublisherUrls: [slug === 'unapproved-domain'
+            ? `https://unapproved.example/${slug}`
+            : `https://www.reuters.com/markets/${slug}`]
+        };
+      }
+      originalFetches.push(candidate.url);
+      if (slug === 'inaccessible') throw new Error('fixture article unavailable');
+      return {
+        finalUrl: slug === 'unapproved-redirect'
+          ? `https://unapproved.example/${slug}`
+          : candidate.url,
+        pageTitle: slug === 'missing-title' ? '' : slug === 'title-mismatch' ? 'Completely unrelated fixture headline' : candidate.title,
+        publishedAt: slug === 'missing-date'
+          ? null
+          : slug === 'stale-date'
+            ? new Date('2026-07-01T19:00:00.000Z')
+            : new Date('2026-07-10T19:00:00.000Z')
+      };
+    }
+  });
+
+  assert.equal(artifact.generalCandidates.length, cases.length);
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceId === 'yahoo-finance'));
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.syndication?.status === 'yahoo_hosted'));
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.url.startsWith('https://finance.yahoo.com/news/')));
+  assert.equal(
+    artifact.generalCandidates.find((candidate) => candidate.url.includes('/stale-date.html')).publishedAt,
+    '2026-07-10T19:00:00.000Z',
+    'A rejected stale original must not replace the Yahoo-hosted timestamp.'
+  );
+  assert.ok(!originalFetches.some((url) => url.includes('unapproved.example')), 'Unapproved original domains must not be fetched or promoted.');
+  assert.ok(originalFetches.some((url) => url.endsWith('/unapproved-redirect')), 'An approved original URL must be fetched before its unapproved redirect is rejected.');
 }
 
 function testArticleMetadataExtraction() {
@@ -203,6 +318,18 @@ function testArticleMetadataExtraction() {
   assert.equal(metadata.description, 'A useful fixture description.');
   assert.equal(metadata.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
   assert.match(metadata.excerpt, /mechanical page extractor/);
+}
+
+function testRssParsing() {
+  const [item] = parseNewsFeed(`<?xml version="1.0"?><rss><channel><item>
+    <title><![CDATA[Markets &amp; fixture]]></title>
+    <link>https://www.cnbc.com/2026/07/10/rss-fixture.html?utm_source=rss</link>
+    <pubDate>Fri, 10 Jul 2026 20:00:00 GMT</pubDate>
+    <description><![CDATA[<p>Fixture summary.</p>]]></description>
+  </item></channel></rss>`);
+  assert.equal(item.title, 'Markets & fixture');
+  assert.equal(item.url, 'https://www.cnbc.com/2026/07/10/rss-fixture.html?utm_source=rss');
+  assert.equal(item.summary, 'Fixture summary.');
 }
 
 function testBaselineSanitization() {
@@ -370,7 +497,9 @@ async function main() {
   testNewsCoverageState();
   testMondayMorningFreshnessWindow();
   testArticleMetadataExtraction();
+  testRssParsing();
   await testDeterministicNewsCandidateAcquisition();
+  await testYahooOriginalPromotionValidation();
   testBaselineSanitization();
   testNewMarkerAssignment();
   testManualBaselineTransition();

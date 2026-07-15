@@ -2,17 +2,19 @@
 
 const fs = require('fs');
 const path = require('path');
-const { allowedNewsDates, canonicalStoryUrl } = require('./news_contract');
-const { APPROVED_NEWS_SOURCES, newsSearchPaths } = require('./news_sources');
+const { allowedNewsDates, canonicalStoryUrl, normalizeStoryTitle } = require('./news_contract');
+const { APPROVED_NEWS_SOURCES, newsAcquisitionPaths } = require('./news_sources');
 const { atomicWriteJson } = require('./staging_writer');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'news_candidates.json');
-const GDELT_DOC_URL = 'https://api.gdeltproject.org/api/v2/doc/doc';
-const SEARCH_RESULT_LIMIT = 75;
+const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
+const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_CONCURRENCY = 8;
+const ALPHA_VANTAGE_PACING_MS = 1250;
+const PROVENANCE_PRIORITY = Object.freeze({ rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 
 function parseArgs(argv) {
   const args = {
@@ -48,12 +50,25 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--help' || arg === '-h') {
-      process.stdout.write(`Usage: node scripts/fetch_news_candidates.js [options]\n\nOptions:\n  --input PATH                 Dashboard or candidate HTML used for still-fresh prior cards\n  --output PATH                Staging output (default: generated/news_candidates.json)\n  --as-of TIMESTAMP            Fixed run timestamp used for News freshness\n  --morning|--afternoon        Select the configured window-specific Futures query\n  --search-timeout-ms N        Per-search timeout (default: 20000)\n  --article-timeout-ms N       Per-article timeout (default: 10000)\n`);
+      process.stdout.write(`Usage: node scripts/fetch_news_candidates.js [options]\n\nOptions:\n  --input PATH                 Dashboard or candidate HTML used for still-fresh prior cards\n  --output PATH                Staging output (default: generated/news_candidates.json)\n  --as-of TIMESTAMP            Fixed run timestamp used for News freshness\n  --morning|--afternoon        Match the active dashboard workflow window\n  --search-timeout-ms N        Per-feed/API timeout (default: 20000)\n  --article-timeout-ms N       Per-article timeout (default: 10000)\n`);
       process.exit(0);
     }
     throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
+}
+
+function loadEnv(file = path.join(ROOT, '.env')) {
+  if (process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1' || !fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || match[2] === '') continue;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[match[1]] === undefined) process.env[match[1]] = value;
+  }
 }
 
 function chicagoIsoDate(date) {
@@ -64,21 +79,26 @@ function chicagoIsoDate(date) {
   return `${value('year')}-${value('month')}-${value('day')}`;
 }
 
-function compactDate(isoDate, endOfDay = false) {
-  return `${isoDate.replaceAll('-', '')}${endOfDay ? '235959' : '000000'}`;
+function zonedDateParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  }).formatToParts(date);
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  return { year: value('year'), month: value('month'), day: value('day'), hour: value('hour') % 24, minute: value('minute'), second: value('second') };
 }
 
-function gdeltSearchUrl(searchPath, eligibleDates) {
-  const dates = [...eligibleDates].sort();
-  const url = new URL(GDELT_DOC_URL);
-  url.searchParams.set('query', searchPath.query);
-  url.searchParams.set('mode', 'artlist');
-  url.searchParams.set('maxrecords', String(SEARCH_RESULT_LIMIT));
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('sort', 'datedesc');
-  url.searchParams.set('startdatetime', compactDate(dates[0]));
-  url.searchParams.set('enddatetime', compactDate(dates.at(-1), true));
-  return url;
+function chicagoMidnight(isoDate) {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  const guess = Date.UTC(year, month - 1, day);
+  const observed = zonedDateParts(new Date(guess), 'America/Chicago');
+  const observedAsUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
+  return new Date(guess - (observedAsUtc - guess));
+}
+
+function alphaTimeFrom(eligibleDates) {
+  const date = chicagoMidnight([...eligibleDates].sort()[0]);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}`;
 }
 
 async function fetchResponse(url, { timeoutMs, headers = {} }) {
@@ -93,54 +113,77 @@ async function fetchResponse(url, { timeoutMs, headers = {} }) {
   }
 }
 
-async function fetchGdeltSearch(searchPath, { eligibleDates, timeoutMs }) {
-  const response = await fetchResponse(gdeltSearchUrl(searchPath, eligibleDates), {
-    timeoutMs,
-    headers: { Accept: 'application/json' }
-  });
-  return response.json();
-}
-
-function sourceForUrl(value) {
-  let hostname;
-  try {
-    hostname = new URL(value).hostname.toLowerCase().replace(/^www\./, '');
-  } catch (_error) {
-    return null;
+async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, env = process.env }) {
+  const apiKey = String(env.ALPHA_VANTAGE_API_KEY || '').trim();
+  if (!apiKey) throw new Error('ALPHA_VANTAGE_API_KEY is not configured.');
+  const url = new URL(ALPHA_VANTAGE_URL);
+  url.searchParams.set('function', 'NEWS_SENTIMENT');
+  url.searchParams.set('topics', acquisitionPath.topic);
+  url.searchParams.set('time_from', alphaTimeFrom(eligibleDates));
+  url.searchParams.set('sort', 'LATEST');
+  url.searchParams.set('limit', '1000');
+  url.searchParams.set('apikey', apiKey);
+  const response = await fetchResponse(url, { timeoutMs, headers: { Accept: 'application/json' } });
+  const payload = await response.json();
+  if (payload?.Information || payload?.Note || payload?.['Error Message']) {
+    throw new Error(payload.Information || payload.Note || payload['Error Message']);
   }
-  return APPROVED_NEWS_SOURCES.find((source) => source.domains.some(
-    (domain) => hostname === domain || hostname.endsWith(`.${domain}`)
-  )) || null;
+  if (!Array.isArray(payload?.feed)) throw new Error('Alpha Vantage response must contain feed[].');
+  return { items: payload.feed.map((item) => ({
+    title: item.title,
+    url: item.url,
+    publishedAt: parseAlphaPublishedAt(item.time_published),
+    summary: item.summary,
+    providerSourceName: item.source
+  })) };
 }
 
-function parseGdeltSeenDate(value) {
-  const match = String(value || '').match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
-  if (!match) return null;
-  const date = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
+async function fetchStockfit(acquisitionPath, { timeoutMs, env = process.env }) {
+  const apiKey = String(env.STOCKFIT_API_KEY || '').trim();
+  if (!apiKey) throw new Error('STOCKFIT_API_KEY is not configured.');
+  const url = new URL(STOCKFIT_URL);
+  url.searchParams.set('limit', String(acquisitionPath.limit || 50));
+  const response = await fetchResponse(url, {
+    timeoutMs,
+    headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` }
+  });
+  const payload = await response.json();
+  if (!Array.isArray(payload?.news)) throw new Error('StockFit response must contain news[].');
+  return { items: payload.news.map((item) => ({
+    title: item.title,
+    url: item.link,
+    publishedAt: item.publishedAt,
+    summary: item.summary,
+    providerSourceName: item.source
+  })) };
 }
 
-function normalizeGdeltCandidate(item, eligibleDates) {
-  if (item?.language && String(item.language).toLowerCase() !== 'english') return null;
-  const url = canonicalStoryUrl(item?.url);
-  const source = sourceForUrl(url);
-  const seenAt = parseGdeltSeenDate(item?.seendate);
-  const title = String(item?.title || '').replace(/\s+/g, ' ').trim();
-  if (!url || !source || !seenAt || !title || new URL(url).protocol !== 'https:') return null;
-  const publishedOn = chicagoIsoDate(seenAt);
-  if (!eligibleDates.has(publishedOn)) return null;
-  return {
-    title,
-    url,
-    publishedOn,
-    publishedAt: seenAt.toISOString(),
-    dateSource: 'provider_seen',
-    sourceId: source.id,
-    sourceDomain: new URL(url).hostname.toLowerCase(),
-    provider: 'gdelt-doc',
-    origin: 'downloaded',
-    searchPathIds: []
-  };
+async function fetchRss(acquisitionPath, { timeoutMs }) {
+  const response = await fetchResponse(acquisitionPath.feedUrl, {
+    timeoutMs,
+    headers: {
+      Accept: 'application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.5',
+      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+    }
+  });
+  const xml = await response.text();
+  if (!/<(?:rss|feed)\b/i.test(xml)) throw new Error('RSS response is not a feed document.');
+  const items = parseNewsFeed(xml);
+  if (!items.length) throw new Error('RSS response contains no items.');
+  return { items };
+}
+
+async function fetchAcquisitionPath(acquisitionPath, options) {
+  if (acquisitionPath.provider === 'alpha-vantage') return fetchAlphaVantage(acquisitionPath, options);
+  if (acquisitionPath.provider === 'stockfit') return fetchStockfit(acquisitionPath, options);
+  if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
+  throw new Error(`Unsupported News provider ${acquisitionPath.provider}.`);
+}
+
+function parseAlphaPublishedAt(value) {
+  const match = String(value || '').match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/);
+  if (!match) return value;
+  return `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
 }
 
 function decodeHtml(value) {
@@ -157,7 +200,65 @@ function decodeHtml(value) {
 }
 
 function plainText(value) {
-  return decodeHtml(String(value || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  return decodeHtml(String(value || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gi, '$1').replace(/<[^>]*>/g, ' '))
+    .replace(/\s+/g, ' ').trim();
+}
+
+function xmlValue(block, tag) {
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return plainText(block.match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, 'i'))?.[1]);
+}
+
+function parseNewsFeed(xml) {
+  const rssItems = [...String(xml).matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].map((match) => match[1]);
+  const atomItems = [...String(xml).matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)].map((match) => match[1]);
+  return [...rssItems, ...atomItems].map((block) => {
+    const atomLink = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i)?.[1];
+    return {
+      title: xmlValue(block, 'title'),
+      url: xmlValue(block, 'link') || decodeHtml(atomLink || ''),
+      publishedAt: xmlValue(block, 'pubDate') || xmlValue(block, 'dc:date') || xmlValue(block, 'published') || xmlValue(block, 'updated'),
+      summary: xmlValue(block, 'description') || xmlValue(block, 'summary') || xmlValue(block, 'content:encoded')
+    };
+  });
+}
+
+function sourceForUrl(value) {
+  let hostname;
+  try {
+    hostname = new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_error) {
+    return null;
+  }
+  return APPROVED_NEWS_SOURCES.find((source) => source.domains.some(
+    (domain) => hostname === domain || hostname.endsWith(`.${domain}`)
+  )) || null;
+}
+
+function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
+  const url = canonicalStoryUrl(item?.url);
+  const source = sourceForUrl(url);
+  const publishedAt = new Date(String(item?.publishedAt || '').trim());
+  const title = plainText(item?.title);
+  if (!url || !source || Number.isNaN(publishedAt.getTime()) || !title) return null;
+  if (new URL(url).protocol !== 'https:') return null;
+  const publishedOn = chicagoIsoDate(publishedAt);
+  if (!eligibleDates.has(publishedOn)) return null;
+  return {
+    title,
+    url,
+    publishedOn,
+    publishedAt: publishedAt.toISOString(),
+    dateSource: 'provider_published',
+    sourceId: source.id,
+    sourceDomain: new URL(url).hostname.toLowerCase(),
+    provider: acquisitionPath.provider,
+    ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
+    ...(plainText(item.providerSourceName) ? { providerSourceName: plainText(item.providerSourceName) } : {}),
+    origin: 'downloaded',
+    pool: acquisitionPath.pool,
+    searchPathIds: [acquisitionPath.id]
+  };
 }
 
 function metaContent(html, key) {
@@ -181,6 +282,22 @@ function firstValidDate(values) {
   return null;
 }
 
+function canonicalLink(html) {
+  const links = [...String(html).matchAll(/<link\b[^>]*>/gi)].map((match) => match[0]);
+  const canonical = links.find((tag) => /\brel=["'][^"']*canonical[^"']*["']/i.test(tag));
+  return decodeHtml(canonical?.match(/\bhref=["']([^"']+)["']/i)?.[1] || '');
+}
+
+function explicitPublisherUrls(html) {
+  const urls = [];
+  for (const match of String(html).matchAll(/["'](?:isBasedOn(?:Url)?|originalUrl|sourceUrl)["']\s*:\s*["'](https:\/\/[^"']+)["']/gi)) {
+    urls.push(decodeHtml(match[1].replaceAll('\\/', '/')));
+  }
+  const sourceMeta = metaContent(html, 'source');
+  if (/^https:\/\//i.test(sourceMeta)) urls.push(sourceMeta);
+  return [...new Set(urls.map(canonicalStoryUrl).filter(Boolean))];
+}
+
 function extractArticleMetadata(html) {
   const jsonDates = [...String(html).matchAll(/["']datePublished["']\s*:\s*["']([^"']+)["']/gi)].map((match) => match[1]);
   const timeDates = [...String(html).matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)].map((match) => match[1]);
@@ -193,11 +310,16 @@ function extractArticleMetadata(html) {
   const paragraphs = [...String(html).matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
     .map((match) => plainText(match[1]))
     .filter((value) => value.length >= 40);
+  const publisherName = plainText(String(html).match(/["']publisher["']\s*:\s*\{[\s\S]{0,500}?["']name["']\s*:\s*["']([^"']+)["']/i)?.[1]);
   return {
     pageTitle: metaContent(html, 'og:title') || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),
     description: metaContent(html, 'description') || metaContent(html, 'og:description'),
     excerpt: paragraphs.slice(0, 3).join(' ').slice(0, 1800),
-    publishedAt
+    publishedAt,
+    canonicalUrl: canonicalStoryUrl(canonicalLink(html)),
+    ogUrl: canonicalStoryUrl(metaContent(html, 'og:url')),
+    explicitPublisherUrls: explicitPublisherUrls(html),
+    publisherName
   };
 }
 
@@ -206,7 +328,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
     timeoutMs,
     headers: {
       Accept: 'text/html,application/xhtml+xml',
-      'User-Agent': 'DailyFinancialDashboard/1.0 (personal news acquisition)'
+      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
     }
   });
   const contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -214,8 +336,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
     throw new Error(`Unsupported content type ${contentType || 'unknown'}`);
   }
   const html = (await response.text()).slice(0, ARTICLE_BYTE_LIMIT);
-  const metadata = extractArticleMetadata(html);
-  return { ...metadata, finalUrl: canonicalStoryUrl(response.url || candidate.url) || candidate.url };
+  return { ...extractArticleMetadata(html), finalUrl: canonicalStoryUrl(response.url || candidate.url) || candidate.url };
 }
 
 function readDashboardData(input) {
@@ -245,6 +366,7 @@ function priorCandidate(item, pool, eligibleDates) {
     origin: 'prior_card',
     priorCard: true,
     priorCollection: pool,
+    pool,
     priorCopy: {
       ...(item.tag ? { tag: item.tag } : {}),
       ...(item.kicker ? { kicker: item.kicker } : {}),
@@ -264,21 +386,36 @@ function priorNewsCandidates(data, eligibleDates) {
   return { generalCandidates: general, cryptoCandidates: crypto };
 }
 
-function mergeCandidate(pool, candidate) {
-  const existing = pool.get(candidate.url);
-  if (!existing) {
-    pool.set(candidate.url, candidate);
-    return true;
+function candidateProvenancePriority(candidate) {
+  return candidate.origin === 'downloaded' ? PROVENANCE_PRIORITY[candidate.provider] || 0 : -1;
+}
+
+function combineCandidate(preferred, other) {
+  const searchPathIds = [...new Set([...(preferred.searchPathIds || []), ...(other.searchPathIds || [])])];
+  return {
+    ...other,
+    ...preferred,
+    ...(preferred.pool === 'cryptoCandidates' || other.pool === 'cryptoCandidates' ? { pool: 'cryptoCandidates' } : {}),
+    ...(preferred.priorCard || other.priorCard ? { priorCard: true } : {}),
+    ...(preferred.priorCopy || other.priorCopy ? { priorCopy: preferred.priorCopy || other.priorCopy } : {}),
+    searchPathIds
+  };
+}
+
+function deduplicateCandidates(candidates) {
+  const selected = [];
+  for (const candidate of candidates) {
+    const titleKey = normalizeStoryTitle(candidate.title);
+    const index = selected.findIndex((item) => item.url === candidate.url || (titleKey && normalizeStoryTitle(item.title) === titleKey));
+    if (index < 0) {
+      selected.push(candidate);
+      continue;
+    }
+    const existing = selected[index];
+    const preferred = candidateProvenancePriority(candidate) > candidateProvenancePriority(existing) ? candidate : existing;
+    selected[index] = combineCandidate(preferred, preferred === candidate ? existing : candidate);
   }
-  const paths = new Set([...(existing.searchPathIds || []), ...(candidate.searchPathIds || [])]);
-  pool.set(candidate.url, {
-    ...existing,
-    ...(candidate.origin === 'downloaded' ? candidate : {}),
-    ...(existing.priorCard || candidate.priorCard ? { priorCard: true } : {}),
-    ...(existing.priorCopy || candidate.priorCopy ? { priorCopy: existing.priorCopy || candidate.priorCopy } : {}),
-    searchPathIds: [...paths]
-  });
-  return false;
+  return selected;
 }
 
 function candidateOrder(left, right) {
@@ -290,59 +427,148 @@ function candidateOrder(left, right) {
 async function mapConcurrent(items, concurrency, worker) {
   let next = 0;
   async function run() {
-    while (next < items.length) {
-      const index = next++;
-      await worker(items[index], index);
-    }
+    while (next < items.length) await worker(items[next++]);
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
 }
 
+function articlePathUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.pathname.split('/').filter(Boolean).length > 0;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function titleEquivalent(left, right) {
+  const leftWords = new Set(normalizeStoryTitle(left).split(' ').filter((word) => word.length > 2));
+  const rightWords = new Set(normalizeStoryTitle(right).split(' ').filter((word) => word.length > 2));
+  if (!leftWords.size || !rightWords.size) return false;
+  let shared = 0;
+  for (const word of leftWords) if (rightWords.has(word)) shared += 1;
+  return shared / Math.min(leftWords.size, rightWords.size) >= 0.6;
+}
+
+function articleRecord(page) {
+  return {
+    accessible: true,
+    finalUrl: page.finalUrl || '',
+    pageTitle: page.pageTitle || '',
+    description: page.description || '',
+    excerpt: page.excerpt || ''
+  };
+}
+
+async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTimeoutMs, clock }) {
+  let hostedPage;
+  try {
+    hostedPage = await fetchArticle(candidate, { timeoutMs: articleTimeoutMs });
+    candidate.article = articleRecord(hostedPage);
+    if (hostedPage.publishedAt) {
+      const publishedOn = chicagoIsoDate(hostedPage.publishedAt);
+      candidate.pagePublishedAt = hostedPage.publishedAt.toISOString();
+      candidate.pagePublishedOn = publishedOn;
+      candidate.pageDateFresh = eligibleDates.has(publishedOn);
+      if (candidate.pageDateFresh) {
+        candidate.publishedAt = candidate.pagePublishedAt;
+        candidate.publishedOn = publishedOn;
+        candidate.dateSource = 'article_page';
+      }
+    }
+  } catch (error) {
+    candidate.article = { accessible: false, error: String(error?.message || error) };
+  }
+  if (candidate.sourceId !== 'yahoo-finance') return;
+
+  const publisherName = plainText(hostedPage?.publisherName);
+  const syndicatedPublisherName = ['yahoo', 'yahoo finance'].includes(normalizeStoryTitle(publisherName))
+    ? ''
+    : publisherName;
+  candidate.syndication = {
+    status: 'yahoo_hosted',
+    hostedUrl: candidate.url,
+    ...(syndicatedPublisherName ? { publisherName: syndicatedPublisherName } : {})
+  };
+  if (!hostedPage) return;
+  const urls = [hostedPage.finalUrl, hostedPage.canonicalUrl, hostedPage.ogUrl, ...(hostedPage.explicitPublisherUrls || [])]
+    .map(canonicalStoryUrl)
+    .filter((url) => url && sourceForUrl(url)?.id !== 'yahoo-finance' && articlePathUrl(url));
+  for (const originalUrl of [...new Set(urls)]) {
+    const source = sourceForUrl(originalUrl);
+    if (!source) continue;
+    try {
+      const originalPage = await fetchArticle({ ...candidate, url: originalUrl }, { timeoutMs: articleTimeoutMs });
+      const originalTitle = plainText(originalPage.pageTitle);
+      if (!originalTitle || !titleEquivalent(candidate.title, originalTitle)) continue;
+      const originalPublishedAt = firstValidDate([originalPage.publishedAt]);
+      if (!originalPublishedAt) continue;
+      const originalPublishedOn = chicagoIsoDate(originalPublishedAt);
+      if (!eligibleDates.has(originalPublishedOn)) continue;
+      const validatedUrl = canonicalStoryUrl(originalPage.finalUrl || originalUrl) || originalUrl;
+      const validatedSource = sourceForUrl(validatedUrl);
+      if (!validatedSource || validatedSource.id === 'yahoo-finance' || !articlePathUrl(validatedUrl)) continue;
+      candidate.url = validatedUrl;
+      candidate.sourceId = validatedSource.id;
+      candidate.sourceDomain = new URL(candidate.url).hostname.toLowerCase();
+      candidate.article = articleRecord(originalPage);
+      candidate.pagePublishedAt = originalPublishedAt.toISOString();
+      candidate.pagePublishedOn = originalPublishedOn;
+      candidate.pageDateFresh = true;
+      candidate.publishedAt = candidate.pagePublishedAt;
+      candidate.publishedOn = originalPublishedOn;
+      candidate.dateSource = 'article_page';
+      candidate.syndication.status = 'original_validated';
+      candidate.syndication.originalUrl = candidate.url;
+      candidate.syndication.validatedAt = clock().toISOString();
+      return;
+    } catch (_error) {
+      // Keep the truthful Yahoo-hosted URL when the explicit publisher URL cannot be validated.
+    }
+  }
+}
+
 async function collectNewsCandidates({
   asOf = new Date(),
-  windowMode = '',
   dashboardData = null,
-  searchPaths = newsSearchPaths(windowMode),
+  acquisitionPaths = newsAcquisitionPaths(),
   searchTimeoutMs = 20000,
   articleTimeoutMs = 10000,
-  fetchSearch = fetchGdeltSearch,
+  fetchPath = fetchAcquisitionPath,
   fetchArticle = fetchArticlePage,
   offline = false,
-  clock = () => new Date()
+  clock = () => new Date(),
+  pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  env = process.env
 } = {}) {
   const eligibleDates = allowedNewsDates(asOf);
-  const pools = { generalCandidates: new Map(), cryptoCandidates: new Map() };
   const attempts = [];
-  const prior = priorNewsCandidates(dashboardData, eligibleDates);
-  for (const poolName of Object.keys(pools)) {
-    for (const candidate of prior[poolName]) mergeCandidate(pools[poolName], candidate);
-  }
+  const downloaded = [];
+  let alphaNetworkCallMade = false;
 
-  for (const searchPath of searchPaths) {
+  for (const acquisitionPath of acquisitionPaths) {
     const attempt = {
-      id: searchPath.id,
-      provider: 'gdelt-doc',
-      phase: searchPath.phase,
-      pool: searchPath.pool,
-      query: searchPath.query,
-      eligibleDates: [...eligibleDates].sort(),
+      id: acquisitionPath.id,
+      provider: acquisitionPath.provider,
+      pool: acquisitionPath.pool,
       attemptedAt: clock().toISOString(),
+      eligibleDates: [...eligibleDates].sort(),
       resultCount: 0,
       acceptedCount: 0,
       error: null
     };
     try {
       if (offline) throw new Error('Network disabled for offline test.');
-      const payload = await fetchSearch(searchPath, { eligibleDates, timeoutMs: searchTimeoutMs });
-      const articles = Array.isArray(payload?.articles) ? payload.articles : [];
-      if (!Array.isArray(payload?.articles)) throw new Error('GDELT DOC response must contain articles[].');
-      attempt.resultCount = articles.length;
-      for (const item of articles) {
-        const candidate = normalizeGdeltCandidate(item, eligibleDates);
+      if (acquisitionPath.provider === 'alpha-vantage' && alphaNetworkCallMade) await pause(ALPHA_VANTAGE_PACING_MS);
+      if (acquisitionPath.provider === 'alpha-vantage') alphaNetworkCallMade = true;
+      const result = await fetchPath(acquisitionPath, { eligibleDates, timeoutMs: searchTimeoutMs, env });
+      if (!Array.isArray(result?.items)) throw new Error(`${acquisitionPath.provider} result must contain items[].`);
+      attempt.resultCount = result.items.length;
+      for (const item of result.items) {
+        const candidate = normalizeProviderCandidate(item, acquisitionPath, eligibleDates);
         if (!candidate) continue;
-        candidate.searchPathIds = [searchPath.id];
+        downloaded.push(candidate);
         attempt.acceptedCount += 1;
-        mergeCandidate(pools[searchPath.pool], candidate);
       }
     } catch (error) {
       attempt.error = String(error?.message || error);
@@ -350,57 +576,34 @@ async function collectNewsCandidates({
     attempts.push(attempt);
   }
 
-  const downloaded = Object.values(pools).flatMap((pool) => [...pool.values()])
-    .filter((candidate) => candidate.origin === 'downloaded');
-  await mapConcurrent(downloaded, ARTICLE_CONCURRENCY, async (candidate) => {
-    try {
-      const page = await fetchArticle(candidate, { timeoutMs: articleTimeoutMs });
-      candidate.article = {
-        accessible: true,
-        finalUrl: page.finalUrl || candidate.url,
-        pageTitle: page.pageTitle || '',
-        description: page.description || '',
-        excerpt: page.excerpt || ''
-      };
-      if (page.publishedAt) {
-        const publishedOn = chicagoIsoDate(page.publishedAt);
-        candidate.pagePublishedAt = page.publishedAt.toISOString();
-        candidate.pagePublishedOn = publishedOn;
-        candidate.pageDateFresh = eligibleDates.has(publishedOn);
-        if (candidate.pageDateFresh) {
-          candidate.publishedAt = candidate.pagePublishedAt;
-          candidate.publishedOn = candidate.pagePublishedOn;
-          candidate.dateSource = 'article_page';
-        }
-      }
-    } catch (error) {
-      candidate.article = { accessible: false, error: String(error?.message || error) };
-    }
-  });
-  for (const pool of Object.values(pools)) {
-    for (const [url, candidate] of pool) {
-      if (candidate.pageDateFresh === false) pool.delete(url);
-    }
-  }
+  await mapConcurrent(downloaded, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
+    eligibleDates, fetchArticle, articleTimeoutMs, clock
+  }));
+  const prior = priorNewsCandidates(dashboardData, eligibleDates);
+  const candidates = deduplicateCandidates([
+    ...downloaded.filter((candidate) => candidate.pageDateFresh !== false),
+    ...prior.generalCandidates,
+    ...prior.cryptoCandidates
+  ]);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: asOf.toISOString(),
     finishedAt: clock().toISOString(),
     eligibleDates: [...eligibleDates].sort(),
     sourceCatalog: APPROVED_NEWS_SOURCES,
     attempts,
-    generalCandidates: [...pools.generalCandidates.values()].sort(candidateOrder),
-    cryptoCandidates: [...pools.cryptoCandidates.values()].sort(candidateOrder)
+    generalCandidates: candidates.filter((candidate) => candidate.pool === 'generalCandidates').sort(candidateOrder),
+    cryptoCandidates: candidates.filter((candidate) => candidate.pool === 'cryptoCandidates').sort(candidateOrder)
   };
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  loadEnv();
   const dashboardData = readDashboardData(args.input);
   const artifact = await collectNewsCandidates({
     asOf: args.asOf,
-    windowMode: args.windowMode,
     dashboardData,
     searchTimeoutMs: args.searchTimeoutMs,
     articleTimeoutMs: args.articleTimeoutMs,
@@ -408,7 +611,7 @@ async function main() {
   });
   atomicWriteJson(args.output, artifact);
   const failures = artifact.attempts.filter((attempt) => attempt.error).length;
-  process.stdout.write(`News candidates staged: ${artifact.generalCandidates.length} general, ${artifact.cryptoCandidates.length} Crypto; ${failures} search failure(s).\n`);
+  process.stdout.write(`News candidates staged: ${artifact.generalCandidates.length} general, ${artifact.cryptoCandidates.length} Crypto; ${failures} acquisition failure(s).\n`);
 }
 
 if (require.main === module) {
@@ -419,13 +622,15 @@ if (require.main === module) {
 }
 
 module.exports = {
+  alphaTimeFrom,
   collectNewsCandidates,
   extractArticleMetadata,
+  fetchAcquisitionPath,
   fetchArticlePage,
-  fetchGdeltSearch,
-  gdeltSearchUrl,
-  normalizeGdeltCandidate,
+  normalizeProviderCandidate,
   parseArgs,
+  parseNewsFeed,
   priorNewsCandidates,
-  sourceForUrl
+  sourceForUrl,
+  titleEquivalent
 };

@@ -883,7 +883,7 @@ if (!dashboardMatch) {
       data.crypto?.availability,
       'crypto',
       ['carried_forward', 'partial', 'unavailable'],
-      ['source_refresh_failed', 'source_refresh_skipped']
+      ['source_refresh_failed']
     );
     if (cryptoAvailability === 'unavailable' && cryptoStatRows.length) {
       errors.push('Unavailable crypto.stats must be empty.');
@@ -1500,7 +1500,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !cryptoTotal) {
       errors.push('crypto.stats is missing the Crypto Market Cap stat row.');
     } else if (cryptoTotal) {
-      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
+      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
       requireString(cryptoTotal.price, 'Crypto Market Cap price');
       requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
     }
@@ -1508,7 +1508,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !fng) {
       errors.push('crypto.stats is missing the F&G row.');
     } else if (fng) {
-      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
+      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
       const fngPrice = String(fng.price ?? '').trim();
       const fngChange = String(fng.chg ?? '').trim();
 
@@ -1531,7 +1531,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !altcoinSeason) {
       errors.push('crypto.stats is missing the Altcoin Season Index stat row.');
     } else if (altcoinSeason) {
-      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable'], ['source_refresh_failed', 'source_refresh_skipped']);
+      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
       const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
       const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
 

@@ -2,6 +2,7 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'ap', domains: ['apnews.com'] },
   { id: 'reuters', domains: ['reuters.com'] },
   { id: 'cnbc', domains: ['cnbc.com'] },
+  { id: 'cnbc-tv18', domains: ['cnbctv18.com'] },
   { id: 'investopedia', domains: ['investopedia.com'] },
   { id: 'kiplinger', domains: ['kiplinger.com'] },
   { id: 'ibd', domains: ['investors.com'] },
@@ -17,16 +18,20 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'abc-news', domains: ['abcnews.go.com'] },
   { id: 'guardian', domains: ['theguardian.com'] },
   { id: 'financial-times', domains: ['ft.com'] },
+  { id: 'economic-times', domains: ['economictimes.indiatimes.com', 'm.economictimes.com'] },
   { id: 'bloomberg', domains: ['bloomberg.com'] },
   { id: 'wall-street-journal', domains: ['wsj.com'] },
   { id: 'barrons', domains: ['barrons.com'] },
   { id: 'investing-com', domains: ['investing.com'] },
+  { id: 'mining-com', domains: ['mining.com'] },
   { id: 'coindesk', domains: ['coindesk.com'] },
+  { id: 'crypto-briefing', domains: ['cryptobriefing.com'] },
   { id: 'decrypt', domains: ['decrypt.co'] },
   { id: 'blockworks', domains: ['blockworks.co'] },
   { id: 'the-block', domains: ['theblock.co'] },
   { id: 'dl-news', domains: ['dlnews.com'] },
   { id: 'crypto-news', domains: ['crypto.news'] },
+  { id: 'fx-news-group', domains: ['fxnewsgroup.com'] },
   { id: 'coingecko', domains: ['coingecko.com'] },
   { id: 'coinmarketcap', domains: ['coinmarketcap.com'] },
   { id: 'alternative-me', domains: ['alternative.me'] },
@@ -50,49 +55,44 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'solana', domains: ['solana.com'] }
 ].map((source) => Object.freeze({ ...source, domains: Object.freeze(source.domains) })));
 
-const GENERAL_SEARCH_PATHS = Object.freeze([
-  { id: 'general-market', phase: 'base', query: '("stock market" OR "Wall Street" OR "S&P 500" OR Nasdaq)' },
-  { id: 'general-futures', phase: 'base', queryByWindow: {
-    morning: '(premarket OR "stock futures" OR "index futures")',
-    afternoon: '("market close" OR "after the bell" OR "index futures")'
-  } },
-  { id: 'general-fed-economy', phase: 'base', query: '("Federal Reserve" OR inflation OR "jobs report" OR "Treasury yields")' },
-  { id: 'general-earnings', phase: 'base', query: '(earnings OR guidance OR revenue)' },
-  { id: 'general-technology', phase: 'base', query: '(semiconductor OR "artificial intelligence" OR "technology stocks")' },
-  { id: 'general-commodities', phase: 'base', query: '("oil prices" OR "crude oil" OR gold OR commodities)' },
-  { id: 'general-international', phase: 'base', query: '("global markets" OR "European stocks" OR "Asian stocks" OR geopolitics)' },
-  { id: 'general-rates-dollar', phase: 'fallback', query: '("bond market" OR "Treasury market" OR "US dollar")' },
-  { id: 'general-financials', phase: 'fallback', query: '(banks OR "financial stocks" OR "credit markets")' },
-  { id: 'general-market-structure', phase: 'fallback', query: '(SEC OR exchange OR "market regulation" OR "market structure")' }
-].map((path) => Object.freeze(path)));
+const ALPHA_VANTAGE_NEWS_PATHS = Object.freeze([
+  { id: 'alpha-financial-markets', provider: 'alpha-vantage', pool: 'generalCandidates', topic: 'financial_markets' },
+  { id: 'alpha-blockchain', provider: 'alpha-vantage', pool: 'cryptoCandidates', topic: 'blockchain' }
+].map((entry) => Object.freeze(entry)));
 
-const CRYPTO_SEARCH_PATHS = Object.freeze([
-  { id: 'crypto-market', phase: 'base', query: '(bitcoin OR ethereum OR ether)' },
-  { id: 'crypto-etf-flows', phase: 'base', query: '("bitcoin ETF" OR "ether ETF" OR "crypto ETF")' },
-  { id: 'crypto-regulation', phase: 'base', query: '("crypto regulation" OR "SEC crypto" OR "stablecoin legislation")' },
-  { id: 'crypto-exchanges', phase: 'base', query: '("crypto exchange" OR stablecoin OR custody)' },
-  { id: 'crypto-security', phase: 'base', query: '("crypto hack" OR exploit OR "security breach")' },
-  { id: 'crypto-protocols', phase: 'base', query: '("blockchain protocol" OR "network upgrade" OR "decentralized finance")' },
-  { id: 'crypto-listed-proxies', phase: 'fallback', query: '("crypto stocks" OR Coinbase OR "Strategy bitcoin")' },
-  { id: 'crypto-altcoins', phase: 'fallback', query: '(Solana OR XRP OR altcoin)' }
-].map((path) => Object.freeze(path)));
+const STOCKFIT_NEWS_PATHS = Object.freeze([
+  { id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates', limit: 50 }
+].map((entry) => Object.freeze(entry)));
 
-function newsSearchPaths(windowMode = '') {
-  const resolve = (path, pool) => Object.freeze({
-    id: path.id,
-    phase: path.phase,
-    pool,
-    query: path.queryByWindow?.[windowMode] || path.queryByWindow?.morning || path.query
-  });
+const DIRECT_NEWS_FEEDS = Object.freeze([
+  { id: 'investing-market', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_25.rss' },
+  { id: 'investing-economy', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_14.rss' },
+  { id: 'investing-indicators', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_95.rss' },
+  { id: 'investing-earnings', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_1062.rss' },
+  { id: 'investing-company', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_356.rss' },
+  { id: 'investing-commodities', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_11.rss' },
+  { id: 'investing-crypto', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.investing.com/rss/news_301.rss' },
+  { id: 'axios', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://api.axios.com/feed/' },
+  { id: 'kiplinger', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.kiplinger.com/feed/all' },
+  { id: 'ibd', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investors.com/feed/' },
+  { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
+  { id: 'decrypt', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://decrypt.co/feed' },
+  { id: 'cnbc', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' },
+  { id: 'marketwatch', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' }
+].map((entry) => Object.freeze(entry)));
+
+function newsAcquisitionPaths() {
   return Object.freeze([
-    ...GENERAL_SEARCH_PATHS.map((path) => resolve(path, 'generalCandidates')),
-    ...CRYPTO_SEARCH_PATHS.map((path) => resolve(path, 'cryptoCandidates'))
+    ...ALPHA_VANTAGE_NEWS_PATHS,
+    ...STOCKFIT_NEWS_PATHS,
+    ...DIRECT_NEWS_FEEDS
   ]);
 }
 
 module.exports = {
   APPROVED_NEWS_SOURCES,
-  CRYPTO_SEARCH_PATHS,
-  GENERAL_SEARCH_PATHS,
-  newsSearchPaths
+  ALPHA_VANTAGE_NEWS_PATHS,
+  DIRECT_NEWS_FEEDS,
+  STOCKFIT_NEWS_PATHS,
+  newsAcquisitionPaths
 };

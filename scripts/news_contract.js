@@ -177,7 +177,7 @@ function canonicalStoryUrl(value) {
     const url = new URL(raw);
     url.hash = '';
     for (const key of [...url.searchParams.keys()]) {
-      if (/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$)/i.test(key)) {
+      if (/^(utm_|fbclid$|gclid$|mc_cid$|mc_eid$|\.tsrc$|tsrc$|mod$)/i.test(key)) {
         url.searchParams.delete(key);
       }
     }

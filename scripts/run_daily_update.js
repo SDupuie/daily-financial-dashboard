@@ -78,6 +78,7 @@ const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
+const SECTION_COMMAND_TIMEOUT_MS = 15 * 60_000;
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
   afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
@@ -253,15 +254,7 @@ function parseArgs(argv) {
     mergeChartDataJson: '',
     syncChartQuotes: false,
     rebuildEarningsCalendar: false,
-    skipEarnings: false,
-    skipFutures: false,
-    skipChartData: false,
-    skipCryptoStats: false,
-    skipAssetAllocationPortfolio: false,
-    skipAssetAllocationSummary: false,
-    skipWeekAhead: false,
-    scheduled: false,
-    testSkipValidation: false
+    scheduled: false
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -328,43 +321,6 @@ function parseArgs(argv) {
       args.rebuildEarningsCalendar = true;
       continue;
     }
-    if (arg === '--skip-earnings') {
-      args.skipEarnings = true;
-      continue;
-    }
-    if (arg === '--skip-futures') {
-      args.skipFutures = true;
-      continue;
-    }
-    if (arg === '--skip-chart-data') {
-      args.skipChartData = true;
-      continue;
-    }
-    if (arg === '--skip-crypto-stats') {
-      args.skipCryptoStats = true;
-      continue;
-    }
-    if (arg === '--skip-asset-allocation-portfolio') {
-      args.skipAssetAllocationPortfolio = true;
-      continue;
-    }
-    if (arg === '--skip-asset-allocation-summary') {
-      args.skipAssetAllocationSummary = true;
-      continue;
-    }
-    if (arg === '--skip-asset-allocation') {
-      args.skipAssetAllocationPortfolio = true;
-      args.skipAssetAllocationSummary = true;
-      continue;
-    }
-    if (arg === '--skip-week-ahead') {
-      args.skipWeekAhead = true;
-      continue;
-    }
-    if (arg === '--test-skip-validation') {
-      args.testSkipValidation = true;
-      continue;
-    }
     if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -384,8 +340,8 @@ function parseArgs(argv) {
   if (args.scheduled && (!args.windowMode || (!deterministicPreparation && !args.applyDashboardDataJson))) {
     throw new Error('--scheduled is valid only with deterministic preparation or final editorial application using --morning or --afternoon.');
   }
-  if (args.rebuildEarningsCalendar && (!deterministicPreparation || args.skipEarnings)) {
-    throw new Error('--rebuild-earnings-calendar is valid only with deterministic preparation when Earnings is enabled.');
+  if (args.rebuildEarningsCalendar && !deterministicPreparation) {
+    throw new Error('--rebuild-earnings-calendar is valid only with deterministic preparation.');
   }
   if (path.resolve(args.candidate) === path.resolve(args.dashboard)) {
     throw new Error('--candidate must not target the canonical dashboard.');
@@ -417,14 +373,6 @@ Options:
   --afternoon                         Run the after-close deterministic refresh path
   --scheduled                         Mark scheduler-driven preparation/finalization; enforce its start window and completion marker
   --rebuild-earnings-calendar         Explicitly authorize a metered Earnings calendar rebuild during a manual preparation
-  --skip-earnings                     Skip earnings week refresh + orchestrated embed
-  --skip-futures                      Skip node scripts/fetch_chart_data.js futures and futuresModule patching
-  --skip-chart-data                   Skip node scripts/fetch_chart_data.js and chart/quote-row patching
-  --skip-crypto-stats                 Skip node scripts/fetch_crypto_stats.js and crypto.stats[] patching
-  --skip-asset-allocation-portfolio   Skip Asset Allocation ETF row fetch and patching
-  --skip-asset-allocation-summary     Skip Asset Allocation summary refresh/import and patching
-  --skip-asset-allocation             Skip both asset-allocation fetchers and patch steps
-  --skip-week-ahead                   Skip Week Ahead slate/value refresh and patching
   --help                              Show this help
 
 Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
@@ -439,13 +387,20 @@ Publish remains a separate explicit step via ./scripts/publish_main.sh.
 `);
 }
 
-function runCommand(command, args) {
+function runCommand(command, args, { timeoutMs = SECTION_COMMAND_TIMEOUT_MS } = {}) {
   const result = spawnSync(command, args, {
     cwd: ROOT,
-    encoding: 'utf8'
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL'
   });
-  if (result.status !== 0) {
-    const detail = [result.stdout, result.stderr]
+  if (result.error?.code === 'ETIMEDOUT') {
+    const error = new Error(`Command timed out after ${timeoutMs}ms: ${command} ${args.join(' ')}`);
+    error.exitCode = 1;
+    throw error;
+  }
+  if (result.error || result.status !== 0) {
+    const detail = [result.stdout, result.stderr, result.error?.message]
       .map((value) => String(value || '').trim())
       .filter(Boolean)
       .join(' ');
@@ -621,14 +576,14 @@ function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
   const eligibleDates = allowedNewsDates(asOf);
   const prior = priorNewsCandidates(dashboardData, eligibleDates);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: asOf.toISOString(),
     finishedAt: asOf.toISOString(),
     eligibleDates: [...eligibleDates].sort(),
     sourceCatalog: APPROVED_NEWS_SOURCES,
     attempts: [{
       id: 'news-worker',
-      provider: 'gdelt-doc',
+      provider: 'news-acquisition',
       phase: 'worker',
       pool: 'all',
       attemptedAt: asOf.toISOString(),
@@ -765,25 +720,17 @@ function commitDashboardCandidate(args, nextHtml, {
   lastGoodPath = LAST_GOOD_DASHBOARD,
   snapshotWriter = atomicWriteFile
 } = {}) {
-  if (args.testSkipValidation && process.env.DASHBOARD_TEST_MODE !== '1') {
-    throw new Error('--test-skip-validation requires DASHBOARD_TEST_MODE=1.');
-  }
-  if (args.testSkipValidation && path.resolve(args.dashboard) === DEFAULT_DASHBOARD) {
-    throw new Error('--test-skip-validation cannot target the canonical dashboard.');
-  }
   const directory = path.dirname(args.dashboard);
   const candidate = path.join(directory, `.${path.basename(args.dashboard)}.${process.pid}.${Date.now()}.tmp`);
   try {
     fs.writeFileSync(candidate, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    if (!args.testSkipValidation) {
-      const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), candidate];
-      if (requireEditorialReview) validationArgs.push('--require-editorial-review');
-      const result = spawnSync(process.execPath, validationArgs, {
-        cwd: ROOT,
-        stdio: 'inherit'
-      });
-      if (result.status !== 0) throw new Error('Editorial candidate failed validation; the published dashboard was not changed.');
-    }
+    const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), candidate];
+    if (requireEditorialReview) validationArgs.push('--require-editorial-review');
+    const result = spawnSync(process.execPath, validationArgs, {
+      cwd: ROOT,
+      stdio: 'inherit'
+    });
+    if (result.status !== 0) throw new Error('Editorial candidate failed validation; the published dashboard was not changed.');
     fs.renameSync(candidate, args.dashboard);
     if (refreshLastGood) {
       try {
@@ -802,23 +749,15 @@ function commitEditorialCandidate(args, nextHtml) {
 }
 
 function stageDashboardCandidate(args, nextHtml) {
-  if (args.testSkipValidation && process.env.DASHBOARD_TEST_MODE !== '1') {
-    throw new Error('--test-skip-validation requires DASHBOARD_TEST_MODE=1.');
-  }
-  if (args.testSkipValidation && path.resolve(args.dashboard) === DEFAULT_DASHBOARD) {
-    throw new Error('--test-skip-validation cannot target the canonical dashboard.');
-  }
   fs.mkdirSync(path.dirname(args.candidate), { recursive: true });
   const temporary = `${args.candidate}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.writeFileSync(temporary, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    if (!args.testSkipValidation) {
-      const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), temporary, '--staging-candidate'], {
-        cwd: ROOT,
-        stdio: 'inherit'
-      });
-      if (result.status !== 0) throw new Error('Deterministic candidate failed validation; the canonical dashboard was not changed.');
-    }
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), temporary, '--staging-candidate'], {
+      cwd: ROOT,
+      stdio: 'inherit'
+    });
+    if (result.status !== 0) throw new Error('Deterministic candidate failed validation; the canonical dashboard was not changed.');
     fs.renameSync(temporary, args.candidate);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
@@ -1103,47 +1042,33 @@ function patchDashboard(args) {
   let chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
   let nextHtml = html;
 
-  if (!args.skipChartData) {
-    chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
-    // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
-    syncDashboardPricesFromChartData(dashboardData, chartData, {
-      windowMode: args.windowMode,
-      resetCommentary: true,
-      commentaryTickers: acceptedFreshChartTickers(chartData)
-    });
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
-  }
+  chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
+  // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
+  syncDashboardPricesFromChartData(dashboardData, chartData, {
+    windowMode: args.windowMode,
+    resetCommentary: true,
+    commentaryTickers: acceptedFreshChartTickers(chartData)
+  });
+  nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
 
-  if (!args.skipFutures) {
-    const futuresPayload = args.futuresPayload || args.futuresFallbackPayload || readJson(path.join(GENERATED_DIR, 'futures_module.json'));
-    applyFuturesModule(dashboardData, futuresPayload, args.windowMode);
-  }
+  const futuresPayload = args.futuresPayload || args.futuresFallbackPayload || readJson(path.join(GENERATED_DIR, 'futures_module.json'));
+  applyFuturesModule(dashboardData, futuresPayload, args.windowMode);
 
-  if (!args.skipCryptoStats) {
-    const cryptoPayload = args.cryptoStatsPayload || args.cryptoStatsFallbackPayload || readJson(path.join(GENERATED_DIR, 'crypto_stats.json'));
-    applyCryptoStats(dashboardData, cryptoPayload);
-  } else if (args.windowMode) {
-    applyCryptoStats(dashboardData, buildCryptoStatsFallback(dashboardData.crypto, scheduledNow(), 'source_refresh_skipped'));
-  }
+  const cryptoPayload = args.cryptoStatsPayload || args.cryptoStatsFallbackPayload || readJson(path.join(GENERATED_DIR, 'crypto_stats.json'));
+  applyCryptoStats(dashboardData, cryptoPayload);
 
-  if (!args.skipAssetAllocationPortfolio) {
-    const portfolioPayload = args.assetAllocationPortfolioPayload || readJson(path.join(GENERATED_DIR, 'asset_allocation_portfolio.json'));
-    applyAssetAllocationPortfolio(dashboardData, portfolioPayload);
-  }
+  const portfolioPayload = args.assetAllocationPortfolioPayload || readJson(path.join(GENERATED_DIR, 'asset_allocation_portfolio.json'));
+  applyAssetAllocationPortfolio(dashboardData, portfolioPayload);
 
-  if (!args.skipAssetAllocationSummary) {
-    const summaryPayload = args.assetAllocationSummaryPayload || readJson(path.join(GENERATED_DIR, 'asset_allocation_summary.json'));
-    applyAssetAllocationSummary(dashboardData, summaryPayload);
-  }
+  const summaryPayload = args.assetAllocationSummaryPayload || readJson(path.join(GENERATED_DIR, 'asset_allocation_summary.json'));
+  applyAssetAllocationSummary(dashboardData, summaryPayload);
 
-  if (!args.skipWeekAhead) {
-    applyWeekAhead(dashboardData, args.weekAheadPayload || args.weekAheadFallbackPayload || readJson(WEEK_AHEAD_PATH));
-    dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { windowMode: args.windowMode, now: scheduledNow() });
-  }
+  applyWeekAhead(dashboardData, args.weekAheadPayload || args.weekAheadFallbackPayload || readJson(WEEK_AHEAD_PATH));
+  dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { windowMode: args.windowMode, now: scheduledNow() });
 
   if (args.earningsFallbackWeek) {
     applyEarningsWeek(dashboardData, args.earningsFallbackWeek, { requireNarrative: false });
-  } else if (!args.skipEarnings) {
+  } else {
     applyEarningsWeek(dashboardData, args.earningsWeekPayload || readJson(EARNINGS_WEEK_PATH), { requireNarrative: false });
   }
 
@@ -1884,176 +1809,162 @@ function main() {
   const checkedAt = scheduledNow();
   const localDate = chicagoDateParts(checkedAt).isoDate;
 
-  if (!args.skipFutures) {
-    const futuresArgs = ['scripts/fetch_chart_data.js', 'futures'];
-    if (args.windowMode === 'afternoon') futuresArgs.push('--session');
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', futuresArgs),
-      () => buildUnavailableFuturesPayload(args.windowMode === 'afternoon' ? 'session' : 'premarket', checkedAt),
-      {
-        label: 'Futures',
-        readFresh: () => readJson(path.join(GENERATED_DIR, 'futures_module.json')),
-        validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' }),
-        validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' })
-      }
-    );
-    args.futuresPayload = preparation.payload;
-    if (preparation.error) {
-      args.futuresFallbackPayload = preparation.fallback;
-      reportSectionFallback('Futures', 'unavailable', preparation.error);
+  const futuresArgs = ['scripts/fetch_chart_data.js', 'futures'];
+  if (args.windowMode === 'afternoon') futuresArgs.push('--session');
+  const futuresPreparation = runWithSectionFallback(
+    () => runCommand('node', futuresArgs),
+    () => buildUnavailableFuturesPayload(args.windowMode === 'afternoon' ? 'session' : 'premarket', checkedAt),
+    {
+      label: 'Futures',
+      readFresh: () => readJson(path.join(GENERATED_DIR, 'futures_module.json')),
+      validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' }),
+      validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' })
     }
+  );
+  args.futuresPayload = futuresPreparation.payload;
+  if (futuresPreparation.error) {
+    args.futuresFallbackPayload = futuresPreparation.fallback;
+    reportSectionFallback('Futures', 'unavailable', futuresPreparation.error);
   }
 
-  if (!args.skipChartData) {
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', ['scripts/fetch_chart_data.js', '--input', args.sourceDashboard]),
-      () => buildChartDataFallback(canonicalChartData, checkedAt),
-      {
-        label: 'Chart and Tape',
-        readFresh: () => readJson(path.join(GENERATED_DIR, 'chart_data.json')),
-        validateFresh: (payload) => [
-          ...validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard)),
-          ...chartSeriesRevisionErrors(canonicalChartData, payload)
-        ],
-        validateFallback: (payload) => validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard))
-      }
-    );
-    args.chartDataPayload = preparation.payload;
-    if (preparation.error) {
-      args.chartDataFallbackPayload = preparation.fallback;
-      reportSectionFallback('Chart and Tape', 'carried_forward', preparation.error);
+  const chartPreparation = runWithSectionFallback(
+    () => runCommand('node', ['scripts/fetch_chart_data.js', '--input', args.sourceDashboard]),
+    () => buildChartDataFallback(canonicalChartData, checkedAt),
+    {
+      label: 'Chart and Tape',
+      readFresh: () => readJson(path.join(GENERATED_DIR, 'chart_data.json')),
+      validateFresh: (payload) => [
+        ...validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard)),
+        ...chartSeriesRevisionErrors(canonicalChartData, payload)
+      ],
+      validateFallback: (payload) => validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard))
     }
+  );
+  args.chartDataPayload = chartPreparation.payload;
+  if (chartPreparation.error) {
+    args.chartDataFallbackPayload = chartPreparation.fallback;
+    reportSectionFallback('Chart and Tape', 'carried_forward', chartPreparation.error);
   }
 
-  if (!args.skipCryptoStats) {
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', ['scripts/fetch_crypto_stats.js', '--input', args.sourceDashboard]),
-      () => buildCryptoStatsFallback(canonicalDashboardData.crypto, checkedAt),
-      {
-        label: 'Crypto stats',
-        readFresh: () => readJson(path.join(GENERATED_DIR, 'crypto_stats.json')),
-        validateFresh: validateCryptoStatsPayload,
-        validateFallback: validateCryptoStatsPayload
-      }
-    );
-    args.cryptoStatsPayload = preparation.payload;
-    if (preparation.error) {
-      args.cryptoStatsFallbackPayload = preparation.fallback;
-      reportSectionFallback('Crypto stats', preparation.fallback.availability.status, preparation.error);
+  const cryptoPreparation = runWithSectionFallback(
+    () => runCommand('node', ['scripts/fetch_crypto_stats.js', '--input', args.sourceDashboard]),
+    () => buildCryptoStatsFallback(canonicalDashboardData.crypto, checkedAt),
+    {
+      label: 'Crypto stats',
+      readFresh: () => readJson(path.join(GENERATED_DIR, 'crypto_stats.json')),
+      validateFresh: validateCryptoStatsPayload,
+      validateFallback: validateCryptoStatsPayload
     }
+  );
+  args.cryptoStatsPayload = cryptoPreparation.payload;
+  if (cryptoPreparation.error) {
+    args.cryptoStatsFallbackPayload = cryptoPreparation.fallback;
+    reportSectionFallback('Crypto stats', cryptoPreparation.fallback.availability.status, cryptoPreparation.error);
   }
 
-  if (!args.skipAssetAllocationPortfolio) {
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', ['scripts/fetch_asset_allocation.js', '--input', args.sourceDashboard, '--skip-summary']),
-      () => buildAssetAllocationFallback(canonicalDashboardData.assetAllocationPortfolio, {
-        month: localDate.slice(0, 7),
-        asOf: localDate,
-        checkedAt
-      }),
-      {
-        label: 'Asset Allocation portfolio',
-        readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_portfolio.json')),
-        validateFresh: validateAssetAllocationPortfolioPayload,
-        validateFallback: validateAssetAllocationPortfolioPayload
-      }
-    );
-    args.assetAllocationPortfolioPayload = preparation.payload;
-    if (preparation.error) {
-      reportSectionFallback('Asset Allocation portfolio', preparation.fallback.availability.status, preparation.error);
+  const portfolioPreparation = runWithSectionFallback(
+    () => runCommand('node', ['scripts/fetch_asset_allocation.js', '--input', args.sourceDashboard, '--skip-summary']),
+    () => buildAssetAllocationFallback(canonicalDashboardData.assetAllocationPortfolio, {
+      month: localDate.slice(0, 7),
+      asOf: localDate,
+      checkedAt
+    }),
+    {
+      label: 'Asset Allocation portfolio',
+      readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_portfolio.json')),
+      validateFresh: validateAssetAllocationPortfolioPayload,
+      validateFallback: validateAssetAllocationPortfolioPayload
     }
+  );
+  args.assetAllocationPortfolioPayload = portfolioPreparation.payload;
+  if (portfolioPreparation.error) {
+    reportSectionFallback('Asset Allocation portfolio', portfolioPreparation.fallback.availability.status, portfolioPreparation.error);
   }
 
-  if (!args.skipAssetAllocationSummary) {
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', ['scripts/fetch_asset_allocation.js', '--input', args.sourceDashboard, '--skip-portfolio']),
-      () => buildAssetAllocationSummaryFallback(canonicalDashboardData.assetAllocationPortfolio, { asOf: localDate }),
-      {
-        label: 'Asset Allocation summary',
-        readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_summary.json')),
-        validateFresh: validateAssetAllocationSummaryPayload,
-        validateFallback: validateAssetAllocationSummaryPayload
-      }
-    );
-    args.assetAllocationSummaryPayload = preparation.payload;
-    if (preparation.error) {
-      reportSectionFallback('Asset Allocation summary', preparation.payload.stale ? 'carried_forward' : 'unavailable', preparation.error);
+  const summaryPreparation = runWithSectionFallback(
+    () => runCommand('node', ['scripts/fetch_asset_allocation.js', '--input', args.sourceDashboard, '--skip-portfolio']),
+    () => buildAssetAllocationSummaryFallback(canonicalDashboardData.assetAllocationPortfolio, { asOf: localDate }),
+    {
+      label: 'Asset Allocation summary',
+      readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_summary.json')),
+      validateFresh: validateAssetAllocationSummaryPayload,
+      validateFallback: validateAssetAllocationSummaryPayload
     }
+  );
+  args.assetAllocationSummaryPayload = summaryPreparation.payload;
+  if (summaryPreparation.error) {
+    reportSectionFallback('Asset Allocation summary', summaryPreparation.payload.stale ? 'carried_forward' : 'unavailable', summaryPreparation.error);
   }
 
-  if (!args.skipWeekAhead) {
-    const canonicalWeekAhead = canonicalDashboardData.weekAhead || null;
-    const targetRange = args.calendarRolloverRange || canonicalWeekAhead?.range;
-    const invalidPersistedArtifact = weekAheadStagingNeedsRebuild(WEEK_AHEAD_PATH);
+  const canonicalWeekAhead = canonicalDashboardData.weekAhead || null;
+  const weekAheadRange = args.calendarRolloverRange || canonicalWeekAhead?.range;
+  const invalidPersistedWeekAhead = weekAheadStagingNeedsRebuild(WEEK_AHEAD_PATH);
+  if (invalidPersistedWeekAhead) {
+    process.stderr.write('Week Ahead staging artifact is invalid under the current contract; rebuilding the active range.\n');
+  }
+  const weekAheadArgs = ['scripts/fetch_week_ahead.js'];
+  if (args.calendarRolloverRange || requiresUnavailableRolloverRetry(canonicalWeekAhead) || invalidPersistedWeekAhead) weekAheadArgs.push('--date', weekAheadRange.from);
+  else weekAheadArgs.push('--refresh-values', '--input', WEEK_AHEAD_PATH);
+  const weekAheadPreparation = runWithSectionFallback(
+    () => runCommand('node', weekAheadArgs),
+    () => buildWeekAheadPreparationFallback(canonicalWeekAhead, weekAheadRange, { checkedAt }),
+    {
+      label: 'Week Ahead',
+      readFresh: () => readJson(WEEK_AHEAD_PATH),
+      validateFresh: validateWeekAheadPayload,
+      validateFallback: (payload) => validateWeekAheadPayload(payload.week)
+    }
+  );
+  args.weekAheadPayload = weekAheadPreparation.error ? weekAheadPreparation.fallback.week : weekAheadPreparation.payload;
+  if (weekAheadPreparation.error) {
+    args.weekAheadFallbackPayload = weekAheadPreparation.fallback.week;
+    reportSectionFallback('Week Ahead', weekAheadPreparation.fallback.mode, weekAheadPreparation.error);
+  }
+
+  const canonicalWeek = canonicalDashboardData.earnings?.week || null;
+  const earningsRange = earningsTargetRange(args, canonicalWeek);
+  const earningsPreparation = runWithSectionFallback(() => {
+    const invalidPersistedArtifact = earningsStagingNeedsRebuild(EARNINGS_WEEK_PATH, checkedAt);
     if (invalidPersistedArtifact) {
-      process.stderr.write('Week Ahead staging artifact is invalid under the current contract; rebuilding the active range.\n');
+      process.stderr.write('Earnings staging artifact is invalid under the current contract; evaluating an authorized rebuild or active-range fallback.\n');
     }
-    const weekAheadArgs = ['scripts/fetch_week_ahead.js'];
-    if (args.calendarRolloverRange || requiresUnavailableRolloverRetry(canonicalWeekAhead) || invalidPersistedArtifact) weekAheadArgs.push('--date', targetRange.from);
-    else weekAheadArgs.push('--refresh-values', '--input', WEEK_AHEAD_PATH);
-    const preparation = runWithSectionFallback(
-      () => runCommand('node', weekAheadArgs),
-      () => buildWeekAheadPreparationFallback(canonicalWeekAhead, targetRange, { checkedAt }),
-      {
-        label: 'Week Ahead',
-        readFresh: () => readJson(WEEK_AHEAD_PATH),
-        validateFresh: validateWeekAheadPayload,
-        validateFallback: (payload) => validateWeekAheadPayload(payload.week)
-      }
-    );
-    args.weekAheadPayload = preparation.error ? preparation.fallback.week : preparation.payload;
-    if (preparation.error) {
-      args.weekAheadFallbackPayload = preparation.fallback.week;
-      reportSectionFallback('Week Ahead', preparation.fallback.mode, preparation.error);
+    const calendarNeedsBuild = earningsCalendarNeedsBuild(earningsRange, EARNINGS_WEEK_PATH, checkedAt);
+    const failedAttemptNeedsRetry = earningsCalendarFailedAttemptNeedsRetry(earningsRange, EARNINGS_WEEK_PATH, checkedAt);
+    const buildDecision = earningsCalendarBuildDecision(args, {
+      canonicalWeek,
+      invalidPersistedArtifact,
+      calendarNeedsBuild,
+      failedAttemptNeedsRetry
+    });
+    if (buildDecision.blocked) {
+      throw new Error('Earnings calendar rebuild is not authorized for this run; retaining the validated active-range section. Use --rebuild-earnings-calendar only for an intentional manual rebuild.');
     }
-  }
-
-  if (!args.skipEarnings) {
-    const canonicalWeek = canonicalDashboardData.earnings?.week || null;
-    const targetRange = earningsTargetRange(args, canonicalWeek);
-    const preparation = runWithSectionFallback(() => {
-      const invalidPersistedArtifact = earningsStagingNeedsRebuild(EARNINGS_WEEK_PATH, checkedAt);
-      if (invalidPersistedArtifact) {
-        process.stderr.write('Earnings staging artifact is invalid under the current contract; evaluating an authorized rebuild or active-range fallback.\n');
-      }
-      const calendarNeedsBuild = earningsCalendarNeedsBuild(targetRange, EARNINGS_WEEK_PATH, checkedAt);
-      const failedAttemptNeedsRetry = earningsCalendarFailedAttemptNeedsRetry(targetRange, EARNINGS_WEEK_PATH, checkedAt);
-      const buildDecision = earningsCalendarBuildDecision(args, {
-        canonicalWeek,
-        invalidPersistedArtifact,
-        calendarNeedsBuild,
-        failedAttemptNeedsRetry
-      });
-      if (buildDecision.blocked) {
-        throw new Error('Earnings calendar rebuild is not authorized for this run; retaining the validated active-range section. Use --rebuild-earnings-calendar only for an intentional manual rebuild.');
-      }
-      if (buildDecision.build) {
-        runCommand('node', [
-          'scripts/earnings_week.js',
-          'build',
-          '--from', targetRange.from,
-          '--to', targetRange.to,
-          '--as-of', checkedAt.toISOString()
-        ]);
-      }
-      reportPendingEarningsScheduleReviews(pendingEarningsScheduleReviews(undefined, targetRange));
+    if (buildDecision.build) {
       runCommand('node', [
         'scripts/earnings_week.js',
-        'refresh',
+        'build',
+        '--from', earningsRange.from,
+        '--to', earningsRange.to,
         '--as-of', checkedAt.toISOString()
       ]);
-    }, () => buildEarningsPreparationFallback(canonicalWeek, targetRange, { checkedAt }), {
-      label: 'Earnings',
-      readFresh: () => readJson(EARNINGS_WEEK_PATH),
-      validateFresh: (payload) => validateEarningsWeekPayload(payload),
-      validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
-    });
-    if (preparation.error) {
-      args.earningsFallbackWeek = preparation.fallback.week;
-      process.stderr.write(`Earnings preparation failed; continuing with ${preparation.fallback.mode} section fallback: ${preparation.error.message}\n`);
-    } else {
-      args.earningsWeekPayload = preparation.payload;
     }
+    reportPendingEarningsScheduleReviews(pendingEarningsScheduleReviews(undefined, earningsRange));
+    runCommand('node', [
+      'scripts/earnings_week.js',
+      'refresh',
+      '--as-of', checkedAt.toISOString()
+    ]);
+  }, () => buildEarningsPreparationFallback(canonicalWeek, earningsRange, { checkedAt }), {
+    label: 'Earnings',
+    readFresh: () => readJson(EARNINGS_WEEK_PATH),
+    validateFresh: (payload) => validateEarningsWeekPayload(payload),
+    validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
+  });
+  if (earningsPreparation.error) {
+    args.earningsFallbackWeek = earningsPreparation.fallback.week;
+    process.stderr.write(`Earnings preparation failed; continuing with ${earningsPreparation.fallback.mode} section fallback: ${earningsPreparation.error.message}\n`);
+  } else {
+    args.earningsWeekPayload = earningsPreparation.payload;
   }
 
   stageDashboardCandidate(args, patchDashboard(args));
@@ -2105,6 +2016,7 @@ module.exports = {
   earningsTargetRange,
   earningsCalendarBuildDecision,
   weekAheadStagingNeedsRebuild,
+  runCommand,
   runWithSectionFallback,
   reportPreparationStatus,
   stampDashboardEdition,

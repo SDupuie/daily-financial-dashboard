@@ -46,14 +46,17 @@ const {
   applyTapeQuoteRows,
   loadDashboardBase,
   mergedChartAvailability,
+  patchDashboard,
   readJsonBlock,
   requiresUnavailableRolloverRetry,
+  runCommand,
   runWithSectionFallback,
+  stageDashboardCandidate,
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
 const { applyWeekAheadLifecycle, buildWeekAheadPreparationFallback, normalizeWeekAhead } = require('./week_ahead_contract');
 const { atomicWriteFile } = require('./staging_writer');
-const { newsSearchPaths } = require('./news_sources');
+const { newsAcquisitionPaths } = require('./news_sources');
 const {
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
@@ -412,6 +415,19 @@ function testDeterministicSectionFallbackContracts() {
   assert.equal(invalidArtifact.payload.status, 'carried_forward');
 }
 
+function testSectionCommandTimeoutFallsOpen() {
+  const result = runWithSectionFallback(
+    () => runCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 100 }),
+    () => ({ status: 'carried_forward' }),
+    {
+      label: 'Fixture command',
+      validateFallback: () => []
+    }
+  );
+  assert.match(result.error.message, /Command timed out after 100ms/);
+  assert.deepEqual(result.payload, { status: 'carried_forward' });
+}
+
 function testEarningsCalendarBuildAuthorization() {
   const canonicalWeek = { range: { from: '2026-07-13', to: '2026-07-17' }, rows: [] };
   const rolloverRange = { from: '2026-07-17', to: '2026-07-23' };
@@ -516,7 +532,7 @@ function testLastGoodDashboardRecovery() {
   const previousValidateNow = process.env.VALIDATE_NOW_ISO;
   process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
   try {
-    commitDashboardCandidate({ dashboard: dashboardFile, testSkipValidation: false }, nextHtml, {
+    commitDashboardCandidate({ dashboard: dashboardFile }, nextHtml, {
       refreshLastGood: true,
       lastGoodPath: lastGoodFile
     });
@@ -550,7 +566,7 @@ function testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails() {
   process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
   try {
     assert.doesNotThrow(() => commitDashboardCandidate(
-      { dashboard: dashboardFile, testSkipValidation: false },
+      { dashboard: dashboardFile },
       committedHtml,
       {
         refreshLastGood: true,
@@ -568,7 +584,7 @@ function testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails() {
   process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
   try {
     commitDashboardCandidate(
-      { dashboard: dashboardFile, testSkipValidation: false },
+      { dashboard: dashboardFile },
       committedHtml,
       { refreshLastGood: true, lastGoodPath: snapshotFile }
     );
@@ -983,58 +999,73 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, originalHtml);
+  const args = {
+    dashboard: dashboardFile,
+    candidate: candidateFile,
+    windowMode: 'afternoon',
+    baseDashboardHtml: originalHtml,
+    chartDataPayload: chartData,
+    futuresPayload: {
+      compiledAt: '2026-07-10T21:05:00.000Z',
+      source: 'Fixture Futures',
+      mode: 'session',
+      futures: dashboard.futuresModule.futures
+    },
+    cryptoStatsPayload: {
+      fetchedAt: '2026-07-10T21:05:00.000Z',
+      stats: dashboard.crypto.stats
+    },
+    assetAllocationPortfolioPayload: {
+      compiledAt: '2026-07-10T21:05:00.000Z',
+      source: 'Fixture portfolio',
+      month: '2026-07',
+      rows: dashboard.assetAllocationPortfolio.rows
+    },
+    assetAllocationSummaryPayload: {
+      asOf: dashboard.assetAllocationPortfolio.portfolioMtdReturnAsOf,
+      portfolioMtdReturnValue: dashboard.assetAllocationPortfolio.portfolioMtdReturnValue,
+      status: dashboard.assetAllocationPortfolio.portfolioMtdReturnStatus,
+      stale: dashboard.assetAllocationPortfolio.portfolioMtdReturnStale
+    },
+    weekAheadPayload: dashboard.weekAhead,
+    earningsWeekPayload: dashboard.earnings.week
+  };
+  const previousScheduledNow = process.env.SCHEDULED_NOW_ISO;
+  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
+  process.env.SCHEDULED_NOW_ISO = '2026-07-10T21:05:00.000Z';
+  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
+  let preparedHtml;
+  try {
+    preparedHtml = patchDashboard(args);
+    stageDashboardCandidate(args, preparedHtml);
+  } finally {
+    if (previousScheduledNow === undefined) delete process.env.SCHEDULED_NOW_ISO;
+    else process.env.SCHEDULED_NOW_ISO = previousScheduledNow;
+    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
+    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
+  }
 
-  const result = spawnSync(process.execPath, [
-    path.join(root, 'scripts/run_daily_update.js'),
-    '--dashboard', dashboardFile,
-    '--candidate', candidateFile,
-    '--afternoon',
-    '--skip-earnings',
-    '--skip-futures',
-    '--skip-chart-data',
-    '--skip-crypto-stats',
-    '--skip-asset-allocation',
-    '--skip-week-ahead'
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    env: { ...process.env, SCHEDULED_NOW_ISO: '2026-07-10T21:05:00.000Z', VALIDATE_NOW_ISO: FIXTURE_NOW }
-  });
-
-  assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml, 'Deterministic preparation must not alter the canonical dashboard.');
   assert.equal(fs.existsSync(candidateFile), true);
-  assert.match(result.stdout, /Preparation status: preparing/);
-  assert.match(result.stdout, /Preparation status: candidate ready.*canonical dashboard unchanged/);
   const canonicalData = readJsonBlock(originalHtml, 'dashboard-data');
   const candidateData = readJsonBlock(fs.readFileSync(candidateFile, 'utf8'), 'dashboard-data');
   assert.equal(candidateData.editionId, canonicalData.editionId, 'The staged candidate must retain the canonical base edition binding.');
   assert.equal(candidateData.editorialReview, undefined);
-  assert.equal(candidateData.crypto.availability.reason, 'source_refresh_skipped');
-  assert.ok(candidateData.crypto.stats.every((row) => row.availability?.status === 'carried_forward'));
+  assert.equal(candidateData.crypto.availability, undefined);
 
-  const failedDir = makeTemporaryDirectory(os.tmpdir(), 'dfd-candidate-retain-');
-  const retainedCandidateFile = path.join(failedDir, 'dashboard-candidate.html');
+  const retainedCandidateFile = path.join(dir, 'retained-dashboard-candidate.html');
   const retainedCandidate = fs.readFileSync(candidateFile, 'utf8');
   fs.writeFileSync(retainedCandidateFile, retainedCandidate);
-  const failedResult = spawnSync(process.execPath, [
-    path.join(root, 'scripts/run_daily_update.js'),
-    '--dashboard', dashboardFile,
-    '--candidate', retainedCandidateFile,
-    '--afternoon',
-    '--skip-earnings',
-    '--skip-futures',
-    '--skip-chart-data',
-    '--skip-crypto-stats',
-    '--skip-asset-allocation',
-    '--skip-week-ahead'
-  ], {
-    cwd: root,
-    encoding: 'utf8',
-    env: { ...process.env, SCHEDULED_NOW_ISO: '2026-07-10T21:05:00.000Z', VALIDATE_NOW_ISO: FIXTURE_NOW }
-  });
-  assert.notEqual(failedResult.status, 0);
-  assert.match(failedResult.stdout, /Preparation status: failed.*candidate not replaced; canonical dashboard unchanged/);
+  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
+  try {
+    assert.throws(
+      () => stageDashboardCandidate({ ...args, candidate: retainedCandidateFile }, preparedHtml.replace('"masthead"', '"brokenMasthead"')),
+      /Deterministic candidate failed validation/
+    );
+  } finally {
+    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
+    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
+  }
   assert.equal(fs.readFileSync(retainedCandidateFile, 'utf8'), retainedCandidate, 'Failed preparation must preserve the prior candidate byte-for-byte.');
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 }
@@ -1103,7 +1134,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   );
   assert.ok(handoff.editorialReview.newsSearch.generalCandidates.every((candidate) => candidate.priorCard));
   assert.ok(handoff.editorialReview.newsSearch.cryptoCandidates.every((candidate) => candidate.priorCard));
-  assert.equal(handoff.editorialReview.newsSearch.attempts.length, newsSearchPaths('afternoon').length);
+  assert.equal(handoff.editorialReview.newsSearch.attempts.length, newsAcquisitionPaths().length);
   assert.ok(handoff.editorialReview.newsSearch.attempts.every((attempt) => /Network disabled/.test(attempt.error)));
   assert.ok(!Number.isNaN(Date.parse(handoff.editorialReview.newsSearch.finishedAt)));
   assert.ok(handoff.editorialReview);
@@ -2259,6 +2290,7 @@ async function runDashboardTest(test) {
 const architectureContractTests = Object.freeze([
   testArchitectureSingleWriterAndCliBoundaries,
   testDeterministicSectionFallbackContracts,
+  testSectionCommandTimeoutFallsOpen,
   testEarningsCalendarBuildAuthorization,
   testLastGoodDashboardRecovery,
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,
