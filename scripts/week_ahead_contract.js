@@ -6,7 +6,7 @@ const SCHEMA_VERSION = 4;
 // constants rather than display copy that a fetcher or cache may freely alter.
 const FX_MACRO_PROVIDER = 'FXMacroData';
 const FX_MACRO_ENDPOINT = '/v1/announcements/{currency}/{indicator} + /v1/predictions/{currency}/{indicator}';
-const WEEK_AHEAD_OUTCOME_STATUSES = new Set(['verified', 'commentary_unavailable']);
+const WEEK_AHEAD_OUTCOME_STATUSES = new Set(['verified', 'dropped_after_review']);
 const {
   addDays,
   displayDatesForRange: calendarDisplayDatesForRange,
@@ -689,7 +689,7 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
     if (day.outcome?.status === undefined && day.outcome?.title?.trim() && day.outcome?.body?.trim()) {
       return { ...day, outcome: { ...day.outcome, status: 'verified' } };
     }
-    if (day.outcome?.status === 'commentary_unavailable'
+    if (day.outcome?.status === 'dropped_after_review'
       && day.outcome.source === 'editorial'
       && day.outcome.reason?.trim()
       && !String(day.outcome.title || '').trim()
@@ -736,14 +736,13 @@ function defaultMarketLensForEvents(events) {
   };
 }
 
-function unavailableMarketLensForEvents(events) {
+function droppedMarketLensForEvents(events) {
   const fallback = defaultMarketLensForEvents(events);
   if (!fallback) return null;
   return {
     ...fallback,
-    question: 'What changed after the release?',
-    title: 'Current release commentary unavailable',
-    body: 'The release has arrived, but current interpretation could not be verified for this update. The listed assets remain the reaction reference points.'
+    title: '',
+    body: ''
   };
 }
 
@@ -863,7 +862,8 @@ function validateMarketLens(lens, day, source, prefix = 'marketLens') {
   const errors = [];
   if (!isPlainObject(lens)) return [`${prefix} must be an object.`];
   if (Object.prototype.hasOwnProperty.call(lens, 'watchlist')) errors.push(`${prefix}.watchlist is deprecated; use reactions[].`);
-  for (const field of ['question', 'title', 'body']) {
+  const requiredTextFields = source === 'dropped_after_review' ? ['question'] : ['question', 'title', 'body'];
+  for (const field of requiredTextFields) {
     if (typeof lens[field] !== 'string' || !lens[field].trim()) errors.push(`${prefix}.${field} is required.`);
   }
   const dayEventIds = new Set((Array.isArray(day?.events) ? day.events : []).map((event) => event.id));
@@ -935,10 +935,10 @@ function validateMarketLens(lens, day, source, prefix = 'marketLens') {
     if (lens.setup !== undefined || lens.scenarios !== undefined) errors.push(`${prefix} generated fallback must not claim current setup or scenario analysis.`);
     const expected = defaultMarketLensForEvents(day?.events);
     if (expected && !isDeepStrictEqual(lens, expected)) errors.push(`${prefix} generated fallback must match the canonical default transmission path.`);
-  } else if (source === 'unavailable') {
-    if (lens.setup !== undefined || lens.scenarios !== undefined) errors.push(`${prefix} unavailable fallback must not claim current setup or scenario analysis.`);
-    const expected = unavailableMarketLensForEvents(day?.events);
-    if (expected && !isDeepStrictEqual(lens, expected)) errors.push(`${prefix} unavailable fallback must match the canonical unavailable copy.`);
+  } else if (source === 'dropped_after_review') {
+    if (lens.setup !== undefined || lens.scenarios !== undefined) errors.push(`${prefix} dropped commentary must not claim current setup or scenario analysis.`);
+    const expected = droppedMarketLensForEvents(day?.events);
+    if (expected && !isDeepStrictEqual(lens, expected)) errors.push(`${prefix} dropped commentary must retain only the deterministic transmission map.`);
   }
   return errors;
 }
@@ -1019,18 +1019,18 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
     if (!hasEvents && hasMarketLens) {
       errors.push(`weekAhead.days[${dayIndex}].marketLens must be omitted when there are no events.`);
     }
-    if (hasEvents && !['generated', 'editorial', 'unavailable'].includes(day?.marketLensSource)) {
-      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be generated, editorial, or unavailable.`);
+    if (hasEvents && !['generated', 'editorial', 'dropped_after_review'].includes(day?.marketLensSource)) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be generated, editorial, or dropped_after_review.`);
     }
     if (!hasEvents && day?.marketLensSource !== undefined) {
       errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be omitted when there are no events.`);
     }
-    if (day?.marketLensSource === 'unavailable') {
+    if (day?.marketLensSource === 'dropped_after_review') {
       if (!['released_awaiting_close', 'close_available'].includes(day?.lifecycle)) {
-        errors.push(`weekAhead.days[${dayIndex}].marketLensSource unavailable is allowed only after a release.`);
+        errors.push(`weekAhead.days[${dayIndex}].marketLensSource dropped_after_review is allowed only after a release.`);
       }
-      if (day?.marketLensDisposition?.status !== 'commentary_unavailable') {
-        errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition.status must be commentary_unavailable.`);
+      if (day?.marketLensDisposition?.status !== 'dropped_after_review') {
+        errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition.status must be dropped_after_review.`);
       }
       if (!isIsoDateTime(day?.marketLensDisposition?.attemptedAt)) {
         errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition.attemptedAt must be an offset-bearing ISO timestamp.`);
@@ -1039,7 +1039,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
         errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition.reason is required.`);
       }
     } else if (day?.marketLensDisposition !== undefined) {
-      errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition is allowed only for unavailable commentary.`);
+      errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition is allowed only for dropped commentary.`);
     }
     if (hasEvents && !['scheduled', 'awaiting_actual', 'released_awaiting_close', 'close_available'].includes(day?.lifecycle)) {
       errors.push(`weekAhead.days[${dayIndex}].lifecycle is invalid.`);
@@ -1086,7 +1086,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
       errors.push(`weekAhead.days[${dayIndex}].marketReaction is allowed only when lifecycle is close_available.`);
     }
     if (requireOutcomeDisposition && day?.lifecycle === 'close_available' && day?.outcome === undefined) {
-      errors.push(`weekAhead.days[${dayIndex}].outcome requires a verified or commentary_unavailable disposition before publication.`);
+      errors.push(`weekAhead.days[${dayIndex}].outcome requires a verified or dropped_after_review disposition before publication.`);
     }
     if (day?.outcome !== undefined) {
       if (day.lifecycle !== 'close_available') errors.push(`weekAhead.days[${dayIndex}].outcome is allowed only after the close reaction is available.`);
@@ -1096,17 +1096,17 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
         const legacyVerified = day.outcome.status === undefined && day.outcome.title?.trim() && day.outcome.body?.trim();
         const status = legacyVerified ? 'verified' : day.outcome.status;
         if (!WEEK_AHEAD_OUTCOME_STATUSES.has(status)) {
-          errors.push(`weekAhead.days[${dayIndex}].outcome.status must be verified or commentary_unavailable.`);
+          errors.push(`weekAhead.days[${dayIndex}].outcome.status must be verified or dropped_after_review.`);
         } else if (status === 'verified') {
           if (typeof day.outcome.title !== 'string' || !day.outcome.title.trim() || typeof day.outcome.body !== 'string' || !day.outcome.body.trim() || day.outcome.source !== 'editorial') {
             errors.push(`weekAhead.days[${dayIndex}].outcome verified status requires editorial title and body text.`);
           }
         } else {
           if (String(day.outcome.title || '').trim() || String(day.outcome.body || '').trim()) {
-            errors.push(`weekAhead.days[${dayIndex}].outcome commentary_unavailable status must not carry unsupported editorial copy.`);
+            errors.push(`weekAhead.days[${dayIndex}].outcome dropped_after_review status must omit editorial copy.`);
           }
           if (day.outcome.source !== 'editorial') errors.push(`weekAhead.days[${dayIndex}].outcome.source must be editorial.`);
-          if (typeof day.outcome.reason !== 'string' || !day.outcome.reason.trim()) errors.push(`weekAhead.days[${dayIndex}].outcome.reason is required when commentary is unavailable.`);
+          if (typeof day.outcome.reason !== 'string' || !day.outcome.reason.trim()) errors.push(`weekAhead.days[${dayIndex}].outcome.reason is required when commentary is dropped.`);
           if (!isIsoDateTime(day.outcome.attemptedAt)) errors.push(`weekAhead.days[${dayIndex}].outcome.attemptedAt must be an offset-bearing ISO timestamp.`);
         }
       }
@@ -1288,14 +1288,14 @@ function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialRef
       accepted.set(date, { date, action: 'retain-generated' });
       continue;
     }
-    if (decision.action === 'commentary-unavailable'
+    if (decision.action === 'dropped-after-review'
       && ['released_awaiting_close', 'close_available'].includes(day.lifecycle)
       && isIsoDateTime(decision.attemptedAt)
       && typeof decision.reason === 'string'
       && decision.reason.trim()) {
       accepted.set(date, {
         date,
-        action: 'commentary-unavailable',
+        action: 'dropped-after-review',
         attemptedAt: decision.attemptedAt,
         reason: decision.reason
       });
@@ -1339,11 +1339,17 @@ function applyMarketLensDecisions(weekAhead, payload, { validateEditorialReferen
       delete day.marketLensDisposition;
       continue;
     }
-    if (decision.action === 'commentary-unavailable') {
-      day.marketLens = unavailableMarketLensForEvents(day.events);
-      day.marketLensSource = 'unavailable';
+    if (decision.action === 'dropped-after-review') {
+      const candidateLensRemainsValid = day.marketLensSource === 'editorial'
+        || ['scheduled', 'awaiting_actual'].includes(day.lifecycle);
+      if (candidateLensRemainsValid) {
+        delete day.marketLensDisposition;
+        continue;
+      }
+      day.marketLens = droppedMarketLensForEvents(day.events);
+      day.marketLensSource = 'dropped_after_review';
       day.marketLensDisposition = {
-        status: 'commentary_unavailable',
+        status: 'dropped_after_review',
         attemptedAt: decision.attemptedAt,
         reason: decision.reason
       };

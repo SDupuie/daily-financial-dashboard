@@ -911,8 +911,19 @@ if (!dashboardMatch) {
       errors.push('crypto.tape is deprecated; crypto tickers belong in tape.rows and crypto-only stat rows belong in crypto.stats.');
     }
     const validateTickerNote = ({ row, note, values, label }) => {
-      requireString(note, `${label}.note`);
+      const dispositionStatus = row?.noteDisposition?.status;
+      const pendingStagingReview = stagingCandidate && dispositionStatus === 'pending_review';
+      const droppedAfterReview = dispositionStatus === 'dropped_after_review';
+      if (!pendingStagingReview && !droppedAfterReview) requireString(note, `${label}.note`);
       const text = String(note ?? '').trim();
+      if (!text && (pendingStagingReview || droppedAfterReview)) {
+        if (!pendingStagingReview) {
+          for (const dispositionError of validateTapeCommentaryDisposition(row)) {
+            errors.push(`${label}.${dispositionError}`);
+          }
+        }
+        return;
+      }
       if (!text) return;
       if (containsTapeCitationSyntax(text)) {
         errors.push(`${label}.note contains citation syntax.`);

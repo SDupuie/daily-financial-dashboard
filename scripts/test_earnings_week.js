@@ -7,7 +7,6 @@ const path = require('path');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
-  buildEarningsNarrativeSidecar,
   buildEarningsPreparationFallback,
   buildCompanyReleaseTasks,
   computeEarningsSourceStatus,
@@ -16,7 +15,7 @@ const {
   emptyEarningsApiUsage,
   isDisplayEligibleEarningsRow,
   metricResult,
-  mergeUnchangedEarningsNarrative,
+  prepareDeterministicEarningsWeek,
   narrativeEditorialComplete,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
@@ -193,7 +192,7 @@ function deterministicVerifiedWeekFixture() {
     },
     narrativeApply: {
       generatedAt: '2026-01-07T22:05:00.000Z',
-      narrativeArtifact: 'generated/earnings_narrative.json',
+      narrativeArtifact: 'generated/editorial/dashboard-data.json',
       applied: [{
         symbol: 'VERIFY',
         reportDate: '2026-01-06'
@@ -907,7 +906,7 @@ function testApplyEarningsNarrative() {
     }]
   }, {
     sourceArtifact: 'generated/earnings_week.json',
-    narrativeArtifact: 'generated/earnings_narrative.json'
+    narrativeArtifact: 'generated/editorial/dashboard-data.json'
   });
   const row = output.rows[0];
 
@@ -919,7 +918,14 @@ function testApplyEarningsNarrative() {
   assert.equal(row.reaction.commentaryDisposition.status, 'verified');
   assert.equal(row.revenue.note, 'Revenue +5% YoY.');
   assert.deepEqual(output.narrativeApply.applied, [{ symbol: 'NARRATIVE', reportDate: '2026-01-06' }]);
-  assert.equal(output.narrativeApply.narrativeArtifact, 'generated/earnings_narrative.json');
+  assert.equal(output.narrativeApply.narrativeArtifact, 'generated/editorial/dashboard-data.json');
+  const legacySidecarOutput = structuredClone(output);
+  legacySidecarOutput.narrativeApply.narrativeArtifact = 'generated/earnings_narrative.json';
+  assert.match(
+    validateEarningsWeekPayload(legacySidecarOutput, { requireNarrative: true }).join('\n'),
+    /must identify the editorial dashboard-data handoff/,
+    'Publication validation must reject the removed alternate Earnings editorial path.'
+  );
   assert.throws(
     () => applyEarningsNarrative(source, {
       schemaVersion: 1,
@@ -969,23 +975,31 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     'Publication validation must reject pending Earnings narrative.'
   );
 
-  const staged = buildEarningsNarrativeSidecar(source, { rows: [] }, {
-    outputPath: 'generated/editorial/earnings_narrative.json'
-  }).payload;
-  const unavailable = applyEarningsNarrative(source, staged, {
+  const staged = {
+    schemaVersion: 1,
     sourceArtifact: 'generated/earnings_week.json',
-    narrativeArtifact: 'generated/editorial/earnings_narrative.json',
+    sourceGeneratedAt: source.generatedAt,
+    sourceRange: source.range,
+    rows: [{
+      symbol: source.rows[0].symbol,
+      reportDate: source.rows[0].reportDate,
+      eps: { note: '' },
+      revenue: { note: '' },
+      outcome: { guide: '', interpretation: '' },
+      reaction: { note: '' }
+    }],
+    outputPath: 'generated/editorial/dashboard-data.json'
+  };
+  const dropped = applyEarningsNarrative(source, staged, {
+    sourceArtifact: 'generated/earnings_week.json',
+    narrativeArtifact: 'generated/editorial/dashboard-data.json',
     appliedAt: '2026-01-08T22:05:00.000Z'
   });
-  assert.match(
-    validateEarningsWeekPayload(unavailable, { requireNarrative: true }).join('\n'),
-    /outcome\.interpretation must be populated|must be verified/,
-    'Unavailable dispositions cannot complete editorial work for released results.'
-  );
-  assert.equal(unavailable.rows[0].outcome.interpretationDisposition.status, 'commentary_unavailable');
-  assert.equal(unavailable.rows[0].outcome.guidanceDisposition.status, 'unverified');
-  assert.equal(unavailable.rows[0].reaction.commentaryDisposition.status, 'commentary_unavailable');
-  assert.equal(unavailable.rows[0].outcome.interpretationDisposition.attemptedAt, '2026-01-08T22:05:00.000Z');
+  assert.deepEqual(validateEarningsWeekPayload(dropped, { requireNarrative: true }), []);
+  assert.equal(dropped.rows[0].outcome.interpretationDisposition.status, 'dropped_after_review');
+  assert.equal(dropped.rows[0].outcome.guidanceDisposition.status, 'dropped_after_review');
+  assert.equal(dropped.rows[0].reaction.commentaryDisposition.status, 'dropped_after_review');
+  assert.equal(dropped.rows[0].outcome.interpretationDisposition.attemptedAt, '2026-01-08T22:05:00.000Z');
   staged.rows[0].outcome.interpretation = originalNarrative.outcome.interpretation;
   staged.rows[0].outcome.interpretationDisposition = { status: 'verified' };
   staged.rows[0].outcome.guide = originalNarrative.outcome.guide;
@@ -994,7 +1008,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
   staged.rows[0].reaction.commentaryDisposition = { status: 'verified' };
   const finalized = applyEarningsNarrative(source, staged, {
     sourceArtifact: 'generated/earnings_week.json',
-    narrativeArtifact: 'generated/editorial/earnings_narrative.json'
+    narrativeArtifact: 'generated/editorial/dashboard-data.json'
   });
 
   assert.deepEqual(validateEarningsWeekPayload(finalized, { requireNarrative: true }), []);
@@ -1120,7 +1134,7 @@ async function testResultRefreshDoesNotRebuildSlate() {
     },
     narrativeApply: {
       generatedAt: '2026-01-06T12:30:00.000Z',
-      narrativeArtifact: 'generated/earnings_narrative.json',
+      narrativeArtifact: 'generated/editorial/dashboard-data.json',
       applied: [{ symbol: 'REFRESH', reportDate: '2026-01-06' }]
     }
   };
@@ -1612,81 +1626,6 @@ function testCompanyReleaseValidatorRejectsCalendarEstimates() {
   );
 }
 
-function testNewEarningsNarrativeRowsStagePendingEditorialCompletion() {
-  const week = {
-    generatedAt: '2026-07-09T22:00:00.000Z',
-    range: { from: '2026-07-06', to: '2026-07-10' },
-    rows: [{
-      symbol: 'NEW',
-      reportDate: '2026-07-09',
-      country: 'US',
-      exchange: 'NASDAQ',
-      marketCap: 2000000000,
-      sourceAudit: { finnhubProfile: { industry: 'Technology' } },
-      lifecycle: 'close_available',
-      outcome: { overall: 'beat' },
-      reaction: { status: 'computed' }
-    }]
-  };
-  const staged = buildEarningsNarrativeSidecar(week, { rows: [] });
-
-  assert.deepEqual(staged.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }]);
-  assert.equal(staged.payload.rows.length, 1);
-  assert.equal(staged.payload.rows[0].outcome.interpretation, '');
-  const awaitingClose = buildEarningsNarrativeSidecar({
-    ...week,
-    rows: [{ ...week.rows[0], lifecycle: 'released_awaiting_close', reaction: { status: 'awaiting_close' } }]
-  }, {
-    rows: [{
-      ...staged.payload.rows[0],
-      outcome: { interpretation: 'Pre-event demand assumptions still frame the setup.', guide: '' },
-      reaction: { note: '' }
-    }]
-  });
-  assert.deepEqual(awaitingClose.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }], 'Awaiting-close rows must require release-time guidance review after actuals arrive.');
-
-  const staleNarrative = {
-    rows: [{
-      ...staged.payload.rows[0],
-      postReportRefreshRequired: false,
-      outcome: { interpretation: 'Pre-report demand assumptions framed the setup.', guide: 'FY26 outlook reaffirmed.' },
-      reaction: { note: 'Pre-report copy should never return after actuals arrive.' }
-    }]
-  };
-  const invalidatedWeek = {
-    ...week,
-    rows: [{
-      ...week.rows[0],
-      outcome: { overall: 'mixed', guide: '', interpretation: '' },
-      reaction: { status: 'computed', note: '' }
-    }]
-  };
-  const invalidated = buildEarningsNarrativeSidecar(invalidatedWeek, staleNarrative);
-  assert.deepEqual(invalidated.missingRows, [{ symbol: 'NEW', reportDate: '2026-07-09' }]);
-  assert.equal(invalidated.payload.rows[0].outcome.interpretation, '');
-  assert.equal(invalidated.payload.rows[0].postReportRefreshRequired, true);
-
-  const completed = buildEarningsNarrativeSidecar(week, {
-    rows: [{
-      ...staged.payload.rows[0],
-      outcome: { interpretation: 'Demand and margin expansion supported the result.', guide: 'FY26 outlook reaffirmed.' },
-      reaction: { note: 'Demand and margin expansion supported the reaction.' }
-    }]
-  });
-  assert.deepEqual(completed.missingRows, []);
-
-  const refreshed = buildEarningsNarrativeSidecar(invalidatedWeek, {
-    rows: [{
-      ...invalidated.payload.rows[0],
-      outcome: { interpretation: 'Margins and the forward outlook became the post-report focus.', guide: 'FY26 outlook reaffirmed.' },
-      reaction: { note: 'Updated margin and outlook detail drove the post-report read.' }
-    }]
-  });
-  assert.deepEqual(refreshed.missingRows, []);
-  assert.equal(refreshed.payload.rows[0].postReportRefreshRequired, undefined);
-  assert.equal(refreshed.payload.rows[0].outcome.interpretation, 'Margins and the forward outlook became the post-report focus.');
-}
-
 function testEarningsNarrativeCarryForwardIsRowScoped() {
   const row = (symbol) => ({
     symbol,
@@ -1721,7 +1660,7 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
   next.rows[2].outcome.interpretation = 'Unreviewed staging copy';
   next.rows[2].outcome.interpretationDisposition = { status: 'verified' };
 
-  const merged = mergeUnchangedEarningsNarrative(previous, next);
+  const merged = prepareDeterministicEarningsWeek(previous, next);
   assert.equal(merged.rows[0].outcome.interpretation, '', 'Changed deterministic facts must invalidate only that row.');
   assert.equal(merged.rows[1].outcome.interpretation, 'BBB demand setup', 'A row awaiting actuals must retain its reviewed pre-release thesis.');
   assert.equal(merged.rows[1].outcome.interpretationDisposition.status, 'verified');
@@ -1748,7 +1687,6 @@ async function main() {
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();
   await testMixedResultRefreshAppliesSuccessfulRows();
-  testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();
   console.log('Earnings week tests passed.');
 }

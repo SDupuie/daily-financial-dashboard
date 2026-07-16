@@ -50,10 +50,10 @@ const SECONDARY_RECOVERY_PRIORITIES = new Set(['high', 'normal']);
 const SOURCE_SUMMARY_PRIMARIES = new Set(['finnhub', 'earningsApiCompany', 'sec_company_release']);
 const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
 const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
-const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable']);
-const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified']);
-const COMMENTARY_UNAVAILABLE_STATUSES = new Set(['commentary_unavailable']);
-const GUIDANCE_UNAVAILABLE_STATUSES = new Set(['unverified']);
+const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'dropped_after_review']);
+const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'dropped_after_review']);
+const COMMENTARY_DROPPED_STATUSES = new Set(['dropped_after_review']);
+const GUIDANCE_DROPPED_STATUSES = new Set(['dropped_after_review']);
 const RESULT_REFRESH_PROVIDERS = new Set(['finnhub', 'earningsApiCompany', 'yahoo']);
 const RESULT_REFRESH_FAILURE_CODES = new Set([
   'missing_api_key',
@@ -1055,7 +1055,7 @@ function validateCompanyReleaseApply(errors, data, options = {}) {
   }
 }
 
-function validateEditorialDisposition(errors, disposition, label, allowedStatuses, copy, unavailableStatuses) {
+function validateEditorialDisposition(errors, disposition, label, allowedStatuses, copy, droppedStatuses) {
   const text = String(copy || '').trim();
   if (disposition === undefined) return text ? 'verified' : '';
   if (!isObject(disposition)) {
@@ -1078,9 +1078,9 @@ function validateEditorialDisposition(errors, disposition, label, allowedStatuse
     }
     return disposition.status;
   }
-  if (unavailableStatuses.has(disposition.status)) {
-    if (text) errors.push(`${label}.status ${disposition.status} must not carry unsupported editorial copy.`);
-    if (typeof disposition.reason !== 'string' || !disposition.reason.trim()) errors.push(`${label}.reason is required when editorial verification is unavailable.`);
+  if (droppedStatuses.has(disposition.status)) {
+    if (text) errors.push(`${label}.status ${disposition.status} must omit editorial copy.`);
+    if (typeof disposition.reason !== 'string' || !disposition.reason.trim()) errors.push(`${label}.reason is required when editorial review is dropped.`);
     if (!isIsoDateTime(disposition.attemptedAt)) errors.push(`${label}.attemptedAt must be an ISO timestamp.`);
   }
   return disposition.status;
@@ -1096,8 +1096,8 @@ function validateNarrativeApply(errors, data, options = {}) {
 
   const apply = data.narrativeApply;
   if (!isIsoDateTime(apply.generatedAt)) errors.push('narrativeApply.generatedAt must be an ISO timestamp.');
-  if (typeof apply.narrativeArtifact !== 'string' || !/(?:earnings_narrative|dashboard-data)\.json$/.test(apply.narrativeArtifact)) {
-    errors.push('narrativeApply.narrativeArtifact must identify the editorial dashboard-data or Earnings narrative handoff.');
+  if (typeof apply.narrativeArtifact !== 'string' || !/dashboard-data\.json$/.test(apply.narrativeArtifact)) {
+    errors.push('narrativeApply.narrativeArtifact must identify the editorial dashboard-data handoff.');
   }
   if (!Array.isArray(apply.applied) || apply.applied.length === 0) {
     errors.push('narrativeApply.applied must be a non-empty array.');
@@ -1136,10 +1136,10 @@ function validateNarrativeApply(errors, data, options = {}) {
       `${row.symbol}.outcome.interpretationDisposition`,
       COMMENTARY_DISPOSITION_STATUSES,
       row.outcome?.interpretation,
-      COMMENTARY_UNAVAILABLE_STATUSES
+      COMMENTARY_DROPPED_STATUSES
     );
-    if (interpretationStatus !== 'verified') {
-      errors.push(`${row.symbol}.outcome.interpretation must be populated after narrative enrichment.`);
+    if (!['verified', 'dropped_after_review'].includes(interpretationStatus)) {
+      errors.push(`${row.symbol}.outcome.interpretation must be verified or explicitly dropped after bounded review.`);
     } else if (interpretationStatus === 'verified' && row.outcome.interpretation.trim().length > OUTCOME_INTERPRETATION_MAX_LENGTH) {
       errors.push(`${row.symbol}.outcome.interpretation must stay within ${OUTCOME_INTERPRETATION_MAX_LENGTH} characters for the compact earnings monitor.`);
     } else if (interpretationStatus === 'verified' && reportedRow && OUTCOME_METRIC_RECAP_PATTERN.test(row.outcome.interpretation)) {
@@ -1156,12 +1156,12 @@ function validateNarrativeApply(errors, data, options = {}) {
           `${row.symbol}.outcome.guidanceDisposition`,
           GUIDANCE_DISPOSITION_STATUSES,
           guide,
-          GUIDANCE_UNAVAILABLE_STATUSES
+          GUIDANCE_DROPPED_STATUSES
         )
       : '';
     if (guidanceRequired) {
-      if (!['verified', 'not_provided'].includes(guidanceStatus)) {
-        errors.push(`${row.symbol}.outcome.guide must summarize next-quarter or full-year guidance after a reported result.`);
+      if (!['verified', 'not_provided', 'dropped_after_review'].includes(guidanceStatus)) {
+        errors.push(`${row.symbol}.outcome.guide must be verified, officially not provided, or explicitly dropped after bounded review.`);
       } else if (guidanceStatus === 'verified' && OUTCOME_NO_GUIDANCE_PATTERN.test(guide)) {
         errors.push(`${row.symbol}.outcome.guidanceDisposition must use not_provided with official company evidence for a no-guidance claim.`);
       } else if (guidanceStatus === 'verified' && guide.length > OUTCOME_GUIDE_MAX_LENGTH) {
@@ -1180,12 +1180,12 @@ function validateNarrativeApply(errors, data, options = {}) {
           `${row.symbol}.reaction.commentaryDisposition`,
           COMMENTARY_DISPOSITION_STATUSES,
           note,
-          COMMENTARY_UNAVAILABLE_STATUSES
+          COMMENTARY_DROPPED_STATUSES
         )
       : '';
     if (row.reaction?.status === 'computed') {
-      if (reactionStatus !== 'verified') {
-        errors.push(`${row.symbol}.reaction.note must be populated after narrative enrichment.`);
+      if (!['verified', 'dropped_after_review'].includes(reactionStatus)) {
+        errors.push(`${row.symbol}.reaction.note must be verified or explicitly dropped after bounded review.`);
       } else if (reactionStatus === 'verified' && note.length > REACTION_NOTE_MAX_LENGTH) {
         errors.push(`${row.symbol}.reaction.note must stay within ${REACTION_NOTE_MAX_LENGTH} characters for the compact earnings monitor.`);
       } else if (reactionStatus === 'verified' && REACTION_PRICE_RECAP_PATTERN.test(note)) {

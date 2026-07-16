@@ -25,7 +25,7 @@ const {
 const {
   buildEarningsPreparationFallback,
   isDisplayEligibleEarningsRow,
-  mergeUnchangedEarningsNarrative,
+  prepareDeterministicEarningsWeek,
   narrativeEditorialComplete,
   earningsRowKey: earningsNarrativeRowKey
 } = require('./earnings_week_contract');
@@ -40,19 +40,18 @@ const {
   applyMarketLensDecisions,
   applyWeekAheadLifecycle,
   buildWeekAheadPreparationFallback,
-  finalizeWeekAheadOutcomes,
   mergeWeekAheadPayload,
   normalizeMarketLensDecisions,
   validateWeekAheadPayload
 } = require('./week_ahead_contract');
 const { addDays, isIsoDateTime } = require('./calendar_contract');
 const {
-  TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
   containsTapeCitationSyntax,
+  droppedTapeCommentary,
+  editorialPayloadHash,
   editorialTextEntries,
   reviewedTapeCommentary,
-  unavailableTapeCommentary,
   validateReviewManifest,
   validateTapeCommentaryDisposition
 } = require('./editorial_review_contract');
@@ -75,7 +74,6 @@ const GENERATED_DIR = path.join(ROOT, 'generated');
 const DEFAULT_CANDIDATE = path.join(GENERATED_DIR, 'daily_financial_news.candidate.html');
 const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_good.html');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
-const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
@@ -249,6 +247,7 @@ function parseArgs(argv) {
     candidate: DEFAULT_CANDIDATE,
     windowMode: '',
     applyDashboardDataJson: '',
+    validateDashboardDataJson: '',
     prepareEditorialDir: '',
     applyEarningsWeekJson: '',
     applyChartDataJson: '',
@@ -275,6 +274,12 @@ function parseArgs(argv) {
     if (arg === '--apply-dashboard-data-json') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--apply-dashboard-data-json requires a path.');
       args.applyDashboardDataJson = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--validate-dashboard-data-json') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--validate-dashboard-data-json requires a path.');
+      args.validateDashboardDataJson = path.resolve(process.cwd(), argv[i + 1]);
       i += 1;
       continue;
     }
@@ -329,13 +334,13 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  const contentModeCount = [args.applyDashboardDataJson, args.applyEarningsWeekJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.syncChartQuotes].filter(Boolean).length;
+  const contentModeCount = [args.applyDashboardDataJson, args.validateDashboardDataJson, args.applyEarningsWeekJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.syncChartQuotes].filter(Boolean).length;
   if (!args.windowMode && contentModeCount === 0) {
-    throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
+    throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --validate-dashboard-data-json, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
-  const windowAwareContentMode = args.applyDashboardDataJson || args.prepareEditorialDir;
+  const windowAwareContentMode = args.applyDashboardDataJson || args.validateDashboardDataJson || args.prepareEditorialDir;
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !windowAwareContentMode)) {
-    throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
+    throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --validate-dashboard-data-json, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
   const deterministicPreparation = Boolean(args.windowMode && contentModeCount === 0);
   if (args.scheduled && (!args.windowMode || (!deterministicPreparation && !args.applyDashboardDataJson))) {
@@ -355,6 +360,7 @@ function printHelp() {
   process.stdout.write(`Usage:
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --prepare-editorial-dir PATH [--morning|--afternoon]
+  node scripts/run_daily_update.js --validate-dashboard-data-json PATH [--morning|--afternoon]
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [--scheduled --morning|--afternoon] [options]
   node scripts/run_daily_update.js --apply-earnings-week-json PATH [options]
   node scripts/run_daily_update.js --apply-chart-data-json PATH [options]
@@ -365,6 +371,7 @@ Options:
   --dashboard PATH                     Canonical dashboard HTML (default: daily_financial_news.html)
   --candidate PATH                     Staged complete candidate (default: generated/daily_financial_news.candidate.html)
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
+  --validate-dashboard-data-json PATH  Validate the commentary file without changing the candidate or dashboard
   --prepare-editorial-dir PATH        Download News candidates and write the single dashboard-data editorial handoff
   --apply-earnings-week-json PATH     Stage a validated earnings-week payload in the complete candidate
   --apply-chart-data-json PATH        Stage chart history and derive matching Tape prices from JSON
@@ -516,9 +523,11 @@ function prepareTapeCommentaryForEditorial(tape, previousTape) {
     ...tape,
     rows: (Array.isArray(tape?.rows) ? tape.rows : []).map((row) => {
       const previous = previousByTicker.get(String(row?.ticker || '').trim().toUpperCase());
-      if (previous?.noteDisposition?.quoteRevision === row?.noteDisposition?.quoteRevision) return row;
+      if (previous?.noteDisposition?.quoteRevision === row?.noteDisposition?.quoteRevision
+        && row?.noteDisposition?.status !== 'dropped_after_review') return row;
       return {
         ...row,
+        note: '',
         noteDisposition: {
           status: 'pending_review',
           quoteRevision: row.noteDisposition.quoteRevision
@@ -623,16 +632,23 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
 
 function prepareEditorialWorkspace(args) {
   const html = fs.readFileSync(args.candidate, 'utf8');
-  const dashboardData = readJsonBlock(html, 'dashboard-data');
-  const previousDashboardData = assertCandidateMatchesCanonical(args, dashboardData);
-  const baseEditionId = dashboardData.editionId;
+  const candidateDashboardData = readJsonBlock(html, 'dashboard-data');
+  const candidateChartData = readJsonBlock(html, 'chart-data');
+  const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
+  const baseEditionId = candidateDashboardData.editionId;
+  const candidatePayloadHash = editorialPayloadHash(candidateDashboardData, candidateChartData);
+  const dashboardData = structuredClone(candidateDashboardData);
   delete dashboardData.editorialReview;
-  if (args.windowMode) applyEditionMetadata(dashboardData, args.windowMode);
   delete dashboardData.lede;
   delete dashboardData.renesas;
   const marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
     .map((day) => ({ date: day.date, action: null }));
+  const candidateEditorialTexts = new Set(editorialTextEntries(dashboardData).map(({ text }) => text));
+  const verifiedClaims = (Array.isArray(previousDashboardData.editorialReview?.verifiedClaims)
+    ? previousDashboardData.editorialReview.verifiedClaims
+    : []).filter((claim) => candidateEditorialTexts.has(String(claim?.text || '').trim())
+      && /^https:\/\//i.test(String(claim?.evidenceUrl || '')));
   const preparedAt = scheduledNow();
   const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
@@ -640,7 +656,8 @@ function prepareEditorialWorkspace(args) {
     preparedAt: preparedAt.toISOString(),
     reviewedAt: null,
     baseEditionId,
-    verifiedClaims: [],
+    candidatePayloadHash,
+    verifiedClaims,
     newsSearch,
     openingDecision: { action: null },
     marketLensDecisions
@@ -807,7 +824,7 @@ function applyCryptoQuoteRows(data, quoteRows) {
   });
 }
 
-function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null, systemFallbacks = null } = {}) {
+function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null } = {}) {
   const targetedTickers = tickers === null
     ? null
     : new Set([...tickers].map((ticker) => String(ticker || '').trim().toUpperCase()).filter(Boolean));
@@ -818,15 +835,11 @@ function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null, syst
     const quoteRevision = quoteRevisionByTicker.get(ticker);
     if (!quoteRevision) throw new Error(`Chart series ${ticker} is missing the canonical quoteRevision required to reset Tape commentary.`);
     resetCount += 1;
-    if (Array.isArray(systemFallbacks)) {
-      systemFallbacks.push({
-        section: 'tape-commentary',
-        path: `tape.rows.${ticker}.note`,
-        action: 'unavailable_disposition',
-        reason: 'editorial_commentary_unavailable'
-      });
-    }
-    return unavailableTapeCommentary(row, quoteRevision);
+    return {
+      ...row,
+      note: '',
+      noteDisposition: { status: 'pending_review', quoteRevision }
+    };
   });
   return resetCount;
 }
@@ -846,12 +859,12 @@ function applyCryptoStats(data, payload) {
   else delete data.crypto.availability;
 }
 
-function applyEarningsWeek(data, earningsWeek, { requireNarrative = true } = {}) {
-  const canonicalEarningsWeek = mergeUnchangedEarningsNarrative(data.earnings?.week, earningsWeek);
+function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, now = scheduledNow() } = {}) {
+  const canonicalEarningsWeek = prepareDeterministicEarningsWeek(data.earnings?.week, earningsWeek);
   delete canonicalEarningsWeek.policy;
   delete canonicalEarningsWeek.outputPath;
   if (!requireNarrative) delete canonicalEarningsWeek.narrativeApply;
-  const errors = validateEarningsWeekPayload(canonicalEarningsWeek, { requireNarrative });
+  const errors = validateEarningsWeekPayload(canonicalEarningsWeek, { requireNarrative, now });
   if (errors.length) {
     throw new Error(`Generated earnings week payload is invalid: ${errors.join(' ')}`);
   }
@@ -968,8 +981,7 @@ function syncDashboardPricesFromChartData(data, chartData, {
   windowMode = '',
   now = scheduledNow(),
   resetCommentary = false,
-  commentaryTickers = null,
-  systemFallbacks = null
+  commentaryTickers = null
 } = {}) {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
@@ -985,7 +997,7 @@ function syncDashboardPricesFromChartData(data, chartData, {
         series?.quoteRevision
       ])
     );
-    commentaryResetCount = resetTapeCommentary(data, quoteRevisionByTicker, { tickers: commentaryTickers, systemFallbacks });
+    commentaryResetCount = resetTapeCommentary(data, quoteRevisionByTicker, { tickers: commentaryTickers });
   }
   if (data.weekAhead) data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { windowMode, now });
   return { commentaryResetCount };
@@ -1111,12 +1123,10 @@ function applyMarketLensDecisionsData(data, chartData, payload) {
   return data;
 }
 
-function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview = null, systemFallbacks = null) {
-  void systemFallbacks;
-  const verifiedTexts = new Set([
-    ...(Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : []),
-    ...(Array.isArray(priorReview?.verifiedClaims) ? priorReview.verifiedClaims : [])
-  ].filter((claim) => /^https:\/\//i.test(String(claim?.evidenceUrl || ''))).map((claim) => String(claim.text || '').trim()));
+function normalizeMarketLensReview(data, chartData, reviewManifest) {
+  const verifiedTexts = new Set((Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : [])
+    .filter((claim) => /^https:\/\//i.test(String(claim?.evidenceUrl || '')))
+    .map((claim) => String(claim.text || '').trim()));
   const submitted = Array.isArray(reviewManifest.marketLensDecisions) ? reviewManifest.marketLensDecisions : [];
   const eventDays = (data.weekAhead?.days || []).filter((day) => Array.isArray(day?.events) && day.events.length);
   const decisionsByDate = new Map();
@@ -1130,10 +1140,10 @@ function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview 
     const decision = decisionsByDate.get(day.date);
     if (!decision) throw new Error(`Market Lens editorial work is incomplete for ${day.date}.`);
     if (['released_awaiting_close', 'close_available'].includes(day.lifecycle)
-      && decision.action !== 'replace') {
+      && !['replace', 'dropped-after-review'].includes(decision.action)) {
       throw new Error(`Released event commentary is incomplete for ${day.date}. Supply current editorial interpretation.`);
     }
-    if (!['replace', 'retain-generated'].includes(decision.action)) {
+    if (!['replace', 'retain-generated', 'dropped-after-review'].includes(decision.action)) {
       throw new Error(`Market Lens decision for ${day.date} is incomplete.`);
     }
   }
@@ -1165,22 +1175,6 @@ function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview 
   return reviewManifest;
 }
 
-function normalizeVerifiedClaims(data, reviewManifest, priorReview = null) {
-  const currentTexts = new Set(editorialTextEntries(data).map((entry) => entry.text));
-  const accepted = new Map();
-  for (const claim of [
-    ...(Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : []),
-    ...(Array.isArray(priorReview?.verifiedClaims) ? priorReview.verifiedClaims : [])
-  ]) {
-    const text = String(claim?.text || '').trim();
-    const evidenceUrl = String(claim?.evidenceUrl || '').trim();
-    if (currentTexts.has(text) && EDITORIAL_SUPERLATIVE_PATTERN.test(text) && /^https:\/\//i.test(evidenceUrl)) {
-      accepted.set(text, { text, evidenceUrl });
-    }
-  }
-  reviewManifest.verifiedClaims = [...accepted.values()];
-}
-
 function earningsNarrativeItem(row) {
   return {
     symbol: row.symbol,
@@ -1200,15 +1194,46 @@ function earningsNarrativeItem(row) {
   };
 }
 
-function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, editorialDashboardData, systemFallbacks = null, attemptThreshold = '') {
+function retainVerifiedCandidateNarrative(candidateRow, editorialRow) {
+  const item = earningsNarrativeItem(editorialRow);
+  if (item.outcome.interpretationDisposition?.status === 'dropped_after_review'
+    && candidateRow?.outcome?.interpretationDisposition?.status === 'verified'
+    && String(candidateRow.outcome.interpretation || '').trim()) {
+    item.outcome.interpretation = candidateRow.outcome.interpretation;
+    item.outcome.interpretationDisposition = structuredClone(candidateRow.outcome.interpretationDisposition);
+  }
+  if (item.outcome.guidanceDisposition?.status === 'dropped_after_review'
+    && ((candidateRow?.outcome?.guidanceDisposition?.status === 'verified' && String(candidateRow.outcome.guide || '').trim())
+      || candidateRow?.outcome?.guidanceDisposition?.status === 'not_provided')) {
+    item.outcome.guide = String(candidateRow.outcome.guide || '');
+    item.outcome.guidanceDisposition = structuredClone(candidateRow.outcome.guidanceDisposition);
+  }
+  if (item.reaction.commentaryDisposition?.status === 'dropped_after_review'
+    && candidateRow?.reaction?.commentaryDisposition?.status === 'verified'
+    && String(candidateRow.reaction.note || '').trim()) {
+    item.reaction.note = candidateRow.reaction.note;
+    item.reaction.commentaryDisposition = structuredClone(candidateRow.reaction.commentaryDisposition);
+  }
+  return item;
+}
+
+function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, editorialDashboardData, now = scheduledNow()) {
   const candidateWeek = candidateDashboardData.earnings?.week;
   if (!candidateWeek) return null;
-  const editorialRowsByKey = new Map((Array.isArray(editorialDashboardData.earnings?.week?.rows)
+  const candidateRows = Array.isArray(candidateWeek.rows) ? candidateWeek.rows : [];
+  const editorialRows = Array.isArray(editorialDashboardData.earnings?.week?.rows)
     ? editorialDashboardData.earnings.week.rows
-    : []).map((row) => [earningsNarrativeRowKey(row), row]));
-  const rows = (candidateWeek.rows || [])
+    : [];
+  const editorialRowsByKey = new Map(editorialRows.map((row) => [earningsNarrativeRowKey(row), row]));
+  const candidateRowKeys = new Set(candidateRows.map(earningsNarrativeRowKey));
+  if (editorialRows.length !== candidateRows.length
+    || editorialRowsByKey.size !== editorialRows.length
+    || [...editorialRowsByKey.keys()].some((key) => !candidateRowKeys.has(key))) {
+    throw new Error('Earnings editorial rows must match the sealed candidate exactly.');
+  }
+  const rows = candidateRows
     .filter(isDisplayEligibleEarningsRow)
-    .map((row) => earningsNarrativeItem(editorialRowsByKey.get(earningsNarrativeRowKey(row)) || {
+    .map((row) => retainVerifiedCandidateNarrative(row, editorialRowsByKey.get(earningsNarrativeRowKey(row)) || {
       symbol: row.symbol,
       reportDate: row.reportDate,
       eps: {}, revenue: {}, outcome: {}, reaction: {}
@@ -1238,71 +1263,67 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
         appliedAt: scheduledNow()
       })
     : structuredClone(candidateWeek);
-  const errors = validateEarningsWeekPayload(finalWeek, { requireNarrative: true });
+  const errors = validateEarningsWeekPayload(finalWeek, { requireNarrative: true, now });
   if (errors.length) throw new Error(`Editorial Earnings narrative is incomplete or invalid: ${errors.join(' ')}`);
-  void systemFallbacks;
-  void attemptThreshold;
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
   };
-  return { narrativePayload: rows.length ? narrativePayload : null, week: finalWeek };
+  return { week: finalWeek };
 }
 
 const EDITORIAL_SUPERLATIVE_PATTERN = /\b(?:record(?:\s+(?:closes?|highs?|lows?|sales?))?|all[- ]time|fresh highs?|new highs?)\b/i;
 
-function safeEditorialText(value, fallback, verifiedClaims, systemFallbacks = null, section = '', pathName = '') {
-  const text = typeof value === 'string' ? value.trim() : '';
-  if (!text || (EDITORIAL_SUPERLATIVE_PATTERN.test(text) && !verifiedClaims.has(text))) {
-    if (Array.isArray(systemFallbacks) && value !== fallback) {
-      systemFallbacks.push({
-        section,
-        path: pathName,
-        action: 'retained_candidate',
-        reason: text ? 'unsupported_claim' : 'editorial_content_unavailable'
-      });
-    }
-    return fallback;
-  }
-  return value;
-}
-
-function sanitizeOpening(candidate, editorial, verifiedClaims, systemFallbacks = null) {
+function openingEditorialErrors(candidate, editorial, verifiedClaims) {
+  const errors = [];
   const candidateCatalysts = Array.isArray(candidate?.catalysts) ? candidate.catalysts : [];
   const editorialCatalysts = Array.isArray(editorial?.catalysts) ? editorial.catalysts : [];
-  if (Array.isArray(systemFallbacks) && editorialCatalysts.length > candidateCatalysts.length) {
-    for (let index = candidateCatalysts.length; index < editorialCatalysts.length; index += 1) {
-      systemFallbacks.push({ section: 'opening', path: `opening.catalysts[${index}]`, action: 'omitted', reason: 'unsupported_editorial_item' });
+  const validateText = (value, pathName) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text) errors.push(`${pathName} must be populated.`);
+    else if (EDITORIAL_SUPERLATIVE_PATTERN.test(text) && !verifiedClaims.has(text)) {
+      errors.push(`${pathName} contains an unsupported superlative claim.`);
     }
+  };
+  validateText(editorial?.headline, 'opening.headline');
+  validateText(editorial?.deck, 'opening.deck');
+  if (editorialCatalysts.length !== candidateCatalysts.length) {
+    errors.push(`opening.catalysts must contain exactly ${candidateCatalysts.length} items.`);
   }
+  candidateCatalysts.forEach((_prior, index) => {
+    validateText(editorialCatalysts[index]?.label, `opening.catalysts[${index}].label`);
+    validateText(editorialCatalysts[index]?.body, `opening.catalysts[${index}].body`);
+  });
+  return errors;
+}
+
+function applyOpeningEditorial(candidate, editorial) {
+  const candidateCatalysts = Array.isArray(candidate?.catalysts) ? candidate.catalysts : [];
   return {
     ...candidate,
-    headline: safeEditorialText(editorial?.headline, candidate?.headline, verifiedClaims, systemFallbacks, 'opening', 'opening.headline'),
-    deck: safeEditorialText(editorial?.deck, candidate?.deck, verifiedClaims, systemFallbacks, 'opening', 'opening.deck'),
-    catalysts: candidateCatalysts.map((prior, index) => {
-      const next = editorialCatalysts[index];
-      if (!next || typeof next !== 'object') {
-        if (Array.isArray(systemFallbacks)) systemFallbacks.push({ section: 'opening', path: `opening.catalysts[${index}]`, action: 'retained_candidate', reason: 'editorial_content_unavailable' });
-        return prior;
-      }
-      return {
-        ...prior,
-        label: safeEditorialText(next.label, prior?.label, verifiedClaims, systemFallbacks, 'opening', `opening.catalysts[${index}].label`),
-        body: safeEditorialText(next.body, prior?.body, verifiedClaims, systemFallbacks, 'opening', `opening.catalysts[${index}].body`)
-      };
-    })
+    headline: editorial.headline,
+    deck: editorial.deck,
+    catalysts: candidateCatalysts.map((prior, index) => ({
+      ...prior,
+      label: editorial.catalysts[index].label,
+      body: editorial.catalysts[index].body
+    }))
   };
 }
 
 function finalizeOpeningEditorial(candidate, editorial, reviewManifest, verifiedClaims) {
   const decision = reviewManifest.openingDecision;
+  if (decision?.action === 'dropped-after-review'
+    && isIsoDateTime(decision.attemptedAt)
+    && typeof decision.reason === 'string'
+    && decision.reason.trim()) {
+    return structuredClone(candidate);
+  }
   if (decision?.action === 'reviewed') {
-    const fallbacks = [];
-    const opening = sanitizeOpening(candidate, editorial, verifiedClaims, fallbacks);
-    if (fallbacks.length) {
+    if (openingEditorialErrors(candidate, editorial, verifiedClaims).length) {
       throw new Error('Opening editorial review is incomplete or invalid. Correct the handoff before finalization.');
     }
-    return opening;
+    return applyOpeningEditorial(candidate, editorial);
   }
   throw new Error('Opening editorial work is incomplete. Complete and mark the Opening reviewed before finalization.');
 }
@@ -1332,68 +1353,109 @@ function structurallyUsableStory(item, options = {}) {
   return ![item.title, item.body].some((text) => EDITORIAL_SUPERLATIVE_PATTERN.test(text) && !verifiedClaims.has(text.trim()));
 }
 
-function sanitizeStoryList(editorial, candidate, options = {}) {
+function applyEditorialStoryList(editorial, options = {}) {
   if (!Array.isArray(editorial)) {
-    if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'retained_candidate', reason: 'editorial_content_unavailable' });
-    return structuredClone(Array.isArray(candidate) ? candidate : []);
+    throw new Error(`${options.path} editorial work must be an array.`);
   }
   const seen = new Set();
   const seenUrls = new Set();
   const seenTitles = new Set();
-  return editorial.filter((item, index) => {
+  return editorial.map((item, index) => {
     if (!structurallyUsableStory(item, options)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'invalid_editorial_item' });
-      return false;
+      throw new Error(`${options.path}[${index}] editorial story is invalid.`);
     }
     const identity = storyIdentity(item);
     const url = canonicalStoryUrl(item.url);
     const title = String(item.title || '').trim().toLowerCase();
     if (!identity || seen.has(identity) || seenUrls.has(url) || seenTitles.has(title)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'duplicate_editorial_item' });
-      return false;
+      throw new Error(`${options.path}[${index}] duplicates another editorial story.`);
     }
     if (seen.size >= (options.maximum || Infinity)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'section_limit' });
-      return false;
+      throw new Error(`${options.path} contains more than ${options.maximum} stories.`);
     }
     seen.add(identity);
     seenUrls.add(url);
     seenTitles.add(title);
-    return true;
+    return item;
   });
+}
+
+function editorialStoryListErrors(editorial, options = {}) {
+  const errors = [];
+  if (!Array.isArray(editorial)) return [`${options.path} editorial work must be an array.`];
+  const seen = new Set();
+  const seenUrls = new Set();
+  const seenTitles = new Set();
+  editorial.forEach((item, index) => {
+    const pathName = `${options.path}[${index}]`;
+    if (!structurallyUsableStory(item, options)) {
+      errors.push(`${pathName} editorial story is invalid.`);
+      return;
+    }
+    const identity = storyIdentity(item);
+    const url = canonicalStoryUrl(item.url);
+    const title = String(item.title || '').trim().toLowerCase();
+    if (!identity || seen.has(identity) || seenUrls.has(url) || seenTitles.has(title)) {
+      errors.push(`${pathName} duplicates another editorial story.`);
+    }
+    if (index >= (options.maximum || Infinity)) {
+      errors.push(`${pathName} exceeds the ${options.maximum}-story limit.`);
+    }
+    seen.add(identity);
+    seenUrls.add(url);
+    seenTitles.add(title);
+  });
+  return errors;
 }
 
 function usableTapeCommentary(row, note) {
   const text = String(note || '').trim();
-  return text !== TAPE_COMMENTARY_UNAVAILABLE_NOTE
-    && Boolean(text)
+  return Boolean(text)
     && !containsTapeCitationSyntax(text)
     && ![row.last, row.delta, row.pct].some((value) => value && text.includes(String(value)));
 }
 
-function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedClaims, systemFallbacks = null, now = scheduledNow(), attemptThreshold = '') {
-  const editorialByTicker = new Map((Array.isArray(editorialRows) ? editorialRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+function sanitizeTapeRows(candidateRows, editorialRows, previousRows, now = scheduledNow()) {
+  const candidateList = Array.isArray(candidateRows) ? candidateRows : [];
+  const editorialList = Array.isArray(editorialRows) ? editorialRows : [];
+  const editorialByTicker = new Map(editorialList.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+  const candidateTickers = new Set(candidateList.map((row) => String(row?.ticker || '').toUpperCase()));
+  if (editorialList.length !== candidateList.length
+    || editorialByTicker.size !== editorialList.length
+    || [...editorialByTicker.keys()].some((ticker) => !candidateTickers.has(ticker))) {
+    throw new Error('Tape editorial rows must match the sealed candidate exactly.');
+  }
   const previousByTicker = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
   const reviewedAt = new Date(now).toISOString();
-  return (Array.isArray(candidateRows) ? candidateRows : []).map((row) => {
+  return candidateList.map((row) => {
     const ticker = String(row?.ticker || '').toUpperCase();
     const editorial = editorialByTicker.get(ticker);
     const previous = previousByTicker.get(ticker);
-    const note = safeEditorialText(editorial?.note, row.note, verifiedClaims);
-    const text = String(note || '').trim();
+    if (!editorial) throw new Error(`Tape editorial work is missing row ${ticker}.`);
+    const text = String(editorial.note || '').trim();
     const candidateDispositionValid = validateTapeCommentaryDisposition(row).length === 0;
-    const quoteRevision = candidateDispositionValid
-      ? row.noteDisposition.quoteRevision
-      : previous?.noteDisposition?.quoteRevision || reviewedAt;
+    const quoteRevision = row?.noteDisposition?.quoteRevision;
+    const changesCandidateCommentary = text !== String(row?.note || '').trim();
     const quoteWasRefreshed = !previous
-      || !candidateDispositionValid
       || quoteRevision !== previous?.noteDisposition?.quoteRevision;
     const repeatsPriorCommentary = quoteWasRefreshed && text === String(previous?.note || '').trim();
 
-    if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(previous);
+    if (!quoteWasRefreshed && candidateDispositionValid && !changesCandidateCommentary) return structuredClone(row);
 
-    if (editorial && usableTapeCommentary(row, text) && !repeatsPriorCommentary) {
-      return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
+    if (editorial?.noteDisposition?.status === 'dropped_after_review') {
+      return droppedTapeCommentary(
+        row,
+        quoteRevision,
+        editorial.noteDisposition.attemptedAt,
+        editorial.noteDisposition.reason
+      );
+    }
+
+    if (changesCandidateCommentary
+      && !repeatsPriorCommentary
+      && usableTapeCommentary(row, text)
+      && editorial?.noteDisposition?.status === 'reviewed') {
+      return reviewedTapeCommentary(row, text, quoteRevision, editorial.noteDisposition.reviewedAt || reviewedAt);
     }
 
     throw new Error(`Tape editorial work is incomplete for ${ticker}. Supply current commentary before finalization.`);
@@ -1408,29 +1470,317 @@ function usableWeekAheadOutcome(outcome, attemptThreshold) {
     && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
 }
 
-function applyDashboardDataJson(args) {
+function droppedWeekAheadOutcome(outcome) {
+  return Boolean(outcome
+    && outcome.status === 'dropped_after_review'
+    && outcome.source === 'editorial'
+    && !String(outcome.title || '').trim()
+    && !String(outcome.body || '').trim()
+    && isIsoDateTime(outcome.attemptedAt)
+    && typeof outcome.reason === 'string'
+    && outcome.reason.trim());
+}
+
+function droppedDecisionErrors(value, pathName) {
+  const errors = [];
+  if (!isIsoDateTime(value?.attemptedAt)) errors.push(`${pathName}.attemptedAt must be an offset-bearing ISO timestamp.`);
+  if (typeof value?.reason !== 'string' || !value.reason.trim()) errors.push(`${pathName}.reason must explain why bounded review was exhausted.`);
+  return errors;
+}
+
+function validateEditorialSubmission(candidateData, editorialData, chartData, previousData, { now = scheduledNow() } = {}) {
+  const errors = [];
+  const manifest = editorialData?.editorialReview;
+  const reviewedManifest = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+    ? { ...manifest, reviewedAt: new Date(now).toISOString() }
+    : manifest;
+  const add = (items) => errors.push(...items);
+
+  if (!editorialData || typeof editorialData !== 'object' || Array.isArray(editorialData)) {
+    return ['dashboard-data commentary file must be an object.'];
+  }
+  if (editorialData.editionId !== candidateData.editionId) {
+    errors.push('editionId must match the sealed candidate.');
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    errors.push('editorialReview must be an object.');
+    return errors;
+  }
+  if (!isIsoDateTime(manifest.preparedAt)) errors.push('editorialReview.preparedAt must retain the preparation timestamp.');
+  const sealedCandidateHash = editorialPayloadHash(candidateData, chartData);
+  if (!/^[a-f0-9]{64}$/.test(String(manifest.candidatePayloadHash || ''))) {
+    errors.push('editorialReview.candidatePayloadHash must identify the sealed candidate.');
+  } else if (manifest.candidatePayloadHash !== sealedCandidateHash) {
+    errors.push('editorialReview.candidatePayloadHash shows the candidate changed after the commentary file was created; repeat preparation.');
+  }
+  if (manifest.systemFallbacks !== undefined
+    && (!Array.isArray(manifest.systemFallbacks) || manifest.systemFallbacks.length)) {
+    errors.push('editorialReview.systemFallbacks is not accepted; use item dispositions only.');
+  }
+
+  const editorialContractData = structuredClone(editorialData);
+  if (manifest.openingDecision?.action === 'dropped-after-review') {
+    editorialContractData.opening = structuredClone(candidateData.opening);
+  }
+  add(validateReviewManifest(reviewedManifest, editorialContractData, {
+    expectedBaseEditionId: previousData?.editionId || candidateData.editionId
+  }));
+
+  const verifiedClaims = new Set((Array.isArray(manifest.verifiedClaims) ? manifest.verifiedClaims : [])
+    .filter((claim) => typeof claim?.text === 'string' && /^https:\/\//i.test(String(claim?.evidenceUrl || '')))
+    .map((claim) => claim.text.trim()));
+  if (manifest.openingDecision?.action === 'reviewed') {
+    add(openingEditorialErrors(candidateData.opening, editorialData.opening, verifiedClaims));
+  } else if (manifest.openingDecision?.action === 'dropped-after-review') {
+    add(droppedDecisionErrors(manifest.openingDecision, 'editorialReview.openingDecision'));
+  } else {
+    errors.push('editorialReview.openingDecision.action must be reviewed or dropped-after-review.');
+  }
+
+  const editorialReferenceTime = new Date(manifest.preparedAt);
+  const freshStoryDates = allowedNewsDates(editorialReferenceTime);
+  const futuresOptions = {
+    futures: true,
+    path: 'futuresModule.stories',
+    verifiedClaims,
+    allowedDates: freshStoryDates,
+    additionalAllowedDates: new Set([sharedFuturesSessionDate(candidateData.futuresModule?.futures)].filter(Boolean)),
+    futuresWindow: futuresStoryPublicationWindow(
+      candidateData.futuresModule?.sectionTitle,
+      manifest.preparedAt,
+      editorialReferenceTime,
+      candidateData.futuresModule?.futures
+    ),
+    maximum: 3
+  };
+  add(editorialStoryListErrors(editorialData.futuresModule?.stories, futuresOptions));
+  add(editorialStoryListErrors(editorialData.stories, {
+    path: 'stories', verifiedClaims, allowedDates: freshStoryDates, maximum: 9
+  }));
+  add(editorialStoryListErrors(editorialData.crypto?.notes, {
+    crypto: true, path: 'crypto.notes', verifiedClaims, allowedDates: freshStoryDates, maximum: 6
+  }));
+  const storyLocations = [
+    ...(editorialData.futuresModule?.stories || []).map((item, index) => ({ item, path: `futuresModule.stories[${index}]` })),
+    ...(editorialData.stories || []).map((item, index) => ({ item, path: `stories[${index}]` })),
+    ...(editorialData.crypto?.notes || []).map((item, index) => ({ item, path: `crypto.notes[${index}]` }))
+  ];
+  const storyIdentities = new Map();
+  const storyUrls = new Map();
+  const storyTitles = new Map();
+  for (const { item, path: pathName } of storyLocations) {
+    const identity = storyIdentity(item);
+    const url = canonicalStoryUrl(item?.url);
+    const title = String(item?.title || '').trim().toLowerCase();
+    const duplicatePath = storyIdentities.get(identity) || storyUrls.get(url) || storyTitles.get(title);
+    if (identity && url && title && duplicatePath) errors.push(`${pathName} duplicates ${duplicatePath}.`);
+    if (identity) storyIdentities.set(identity, pathName);
+    if (url) storyUrls.set(url, pathName);
+    if (title) storyTitles.set(title, pathName);
+  }
+
+  const candidateTapeLabel = String(candidateData.tape?.label || '');
+  const editorialTapeLabel = String(editorialData.tape?.label || '');
+  if (editorialTapeLabel !== candidateTapeLabel && !editorialTapeLabel.includes(' · ')) {
+    errors.push('tape.label must retain the deterministic session prefix separator.');
+  }
+  const candidateCompiled = String(candidateData.footer?.compiled || '');
+  const editorialCompiled = String(editorialData.footer?.compiled || '');
+  const editorialContextIndex = editorialCompiled.indexOf(' · ');
+  const editorialMarketDataIndex = editorialCompiled.indexOf(' · Market data:');
+  if (editorialCompiled !== candidateCompiled
+    && (editorialContextIndex < 0 || editorialMarketDataIndex <= editorialContextIndex)) {
+    errors.push('footer.compiled must retain the deterministic compile and market-data boundaries.');
+  }
+
+  const candidateTapeRows = Array.isArray(candidateData.tape?.rows) ? candidateData.tape.rows : [];
+  const editorialTapeRows = Array.isArray(editorialData.tape?.rows) ? editorialData.tape.rows : [];
+  const priorTapeByTicker = new Map((previousData?.tape?.rows || []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+  const editorialTapeByTicker = new Map(editorialTapeRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
+  if (editorialTapeRows.length !== candidateTapeRows.length || editorialTapeByTicker.size !== editorialTapeRows.length) {
+    errors.push('tape.rows must contain exactly one commentary item for every sealed candidate row.');
+  }
+  for (const candidateRow of candidateTapeRows) {
+    const ticker = String(candidateRow?.ticker || '').toUpperCase();
+    const pathName = `tape.rows.${ticker}`;
+    const editorialRow = editorialTapeByTicker.get(ticker);
+    if (!editorialRow) {
+      errors.push(`${pathName} is missing.`);
+      continue;
+    }
+    const disposition = editorialRow.noteDisposition;
+    const boundRow = { ...candidateRow, note: String(editorialRow.note || ''), noteDisposition: disposition };
+    for (const error of validateTapeCommentaryDisposition(boundRow)) errors.push(`${pathName}.${error}`);
+    if (disposition?.quoteRevision !== candidateRow?.noteDisposition?.quoteRevision) {
+      errors.push(`${pathName}.noteDisposition.quoteRevision must match the sealed candidate revision.`);
+    }
+    if (disposition?.status === 'reviewed') {
+      if (!usableTapeCommentary(candidateRow, editorialRow.note)) errors.push(`${pathName}.note is invalid.`);
+      const prior = priorTapeByTicker.get(ticker);
+      const quoteWasRefreshed = !prior || disposition.quoteRevision !== prior?.noteDisposition?.quoteRevision;
+      if (quoteWasRefreshed && String(editorialRow.note || '').trim() === String(prior?.note || '').trim()) {
+        errors.push(`${pathName}.note must not recycle commentary bound to the previous quote revision.`);
+      }
+    }
+  }
+  for (const ticker of editorialTapeByTicker.keys()) {
+    if (!candidateTapeRows.some((row) => String(row?.ticker || '').toUpperCase() === ticker)) errors.push(`tape.rows.${ticker} is stale.`);
+  }
+
+  const candidateWeek = candidateData.earnings?.week;
+  if (candidateWeek) {
+    const editorialRows = Array.isArray(editorialData.earnings?.week?.rows) ? editorialData.earnings.week.rows : [];
+    const candidateRows = Array.isArray(candidateWeek.rows) ? candidateWeek.rows : [];
+    const editorialByKey = new Map(editorialRows.map((row) => [earningsNarrativeRowKey(row), row]));
+    const candidateKeys = new Set(candidateRows.map(earningsNarrativeRowKey));
+    if (editorialRows.length !== candidateRows.length || editorialByKey.size !== editorialRows.length) {
+      errors.push('earnings.week.rows must contain exactly one commentary item for every sealed candidate row.');
+    }
+    for (const row of candidateRows.filter(isDisplayEligibleEarningsRow)) {
+      const key = earningsNarrativeRowKey(row);
+      const item = editorialByKey.get(key);
+      if (!item) {
+        errors.push(`earnings.week.rows.${key} is missing.`);
+      } else if (!narrativeEditorialComplete(row, earningsNarrativeItem(item))) {
+        errors.push(`earnings.week.rows.${key} must end in verified or dropped_after_review dispositions.`);
+      }
+    }
+    for (const key of editorialByKey.keys()) if (!candidateKeys.has(key)) errors.push(`earnings.week.rows.${key} is stale.`);
+    try {
+      const rows = candidateRows.filter(isDisplayEligibleEarningsRow).map((row) => earningsNarrativeItem(editorialByKey.get(earningsNarrativeRowKey(row)) || row));
+      if (rows.length) {
+        const week = applyEarningsNarrative(candidateWeek, {
+          schemaVersion: 1,
+          sourceArtifact: 'generated/earnings_week.json',
+          sourceGeneratedAt: candidateWeek.generatedAt,
+          sourceRange: candidateWeek.range,
+          rows,
+          outputPath: 'generated/editorial/dashboard-data.json'
+        }, {
+          sourceArtifact: 'generated/earnings_week.json',
+          narrativeArtifact: 'generated/editorial/dashboard-data.json',
+          appliedAt: new Date(now).toISOString()
+        });
+        add(validateEarningsWeekPayload(week, { requireNarrative: true, now: editorialReferenceTime }).map((error) => `earnings.week.${error}`));
+      }
+    } catch (error) {
+      errors.push(`earnings.week ${error.message}`);
+    }
+  }
+
+  const candidateDays = Array.isArray(candidateData.weekAhead?.days) ? candidateData.weekAhead.days : [];
+  const editorialDays = Array.isArray(editorialData.weekAhead?.days) ? editorialData.weekAhead.days : [];
+  const editorialDaysByDate = new Map(editorialDays.map((day) => [day?.date, day]));
+  if (editorialDays.length !== candidateDays.length || editorialDaysByDate.size !== editorialDays.length) {
+    errors.push('weekAhead.days must contain exactly one commentary item for every sealed candidate day.');
+  }
+  const outcomeWeek = structuredClone(candidateData.weekAhead);
+  outcomeWeek.days = candidateDays.map((day) => {
+    const editorialDay = editorialDaysByDate.get(day.date);
+    if (!editorialDay) {
+      errors.push(`weekAhead.days.${day.date} is missing.`);
+      return day;
+    }
+    if (day.lifecycle === 'close_available') {
+      if (!usableWeekAheadOutcome(editorialDay.outcome, manifest.preparedAt)
+        && !droppedWeekAheadOutcome(editorialDay.outcome)) {
+        errors.push(`weekAhead.days.${day.date}.outcome must be verified or dropped_after_review.`);
+      }
+      return { ...day, outcome: editorialDay.outcome };
+    }
+    if (!isDeepStrictEqual(editorialDay.outcome, day.outcome)) errors.push(`weekAhead.days.${day.date}.outcome is not editable before close_available.`);
+    return day;
+  });
+  add(validateWeekAheadPayload(outcomeWeek, {
+    now: editorialReferenceTime,
+    requireOutcomeDisposition: true
+  }).map((error) => `weekAhead.${error}`));
+
+  const eventDays = candidateDays.filter((day) => Array.isArray(day.events) && day.events.length);
+  const decisions = Array.isArray(manifest.marketLensDecisions) ? manifest.marketLensDecisions : [];
+  const decisionsByDate = new Map();
+  for (const [index, decision] of decisions.entries()) {
+    const pathName = `editorialReview.marketLensDecisions[${index}]`;
+    if (!decision?.date || decisionsByDate.has(decision.date)) {
+      errors.push(`${pathName}.date must uniquely identify a current event day.`);
+      continue;
+    }
+    decisionsByDate.set(decision.date, decision);
+  }
+  for (const day of eventDays) {
+    const decision = decisionsByDate.get(day.date);
+    const pathName = `editorialReview.marketLensDecisions.${day.date}`;
+    if (!decision) {
+      errors.push(`${pathName} is missing.`);
+      continue;
+    }
+    const allowedActions = ['released_awaiting_close', 'close_available'].includes(day.lifecycle)
+      ? ['replace', 'dropped-after-review']
+      : ['replace', 'retain-generated', 'dropped-after-review'];
+    if (!allowedActions.includes(decision.action)) {
+      errors.push(`${pathName}.action must be ${allowedActions.join(' or ')}.`);
+      continue;
+    }
+    if (decision.action === 'dropped-after-review') {
+      add(droppedDecisionErrors(decision, pathName));
+      continue;
+    }
+    if (decision.action === 'replace') {
+      const normalized = normalizeMarketLensDecisions(candidateData.weekAhead, [decision], {
+        validateEditorialReferences: (lens) => validateMarketLensDashboardReferences(editorialData, chartData, lens)
+      }).find((item) => item.date === day.date);
+      if (normalized?.action !== 'replace') errors.push(`${pathName}.marketLens is invalid for the sealed candidate.`);
+      const lensTexts = [
+        decision.marketLens?.question,
+        decision.marketLens?.title,
+        decision.marketLens?.body,
+        decision.marketLens?.setup?.statement,
+        decision.marketLens?.scenarios?.reinforces,
+        decision.marketLens?.scenarios?.challenges
+      ]
+        .filter((value) => typeof value === 'string' && value.trim());
+      if (lensTexts.some((value) => EDITORIAL_SUPERLATIVE_PATTERN.test(value) && !verifiedClaims.has(value.trim()))) {
+        errors.push(`${pathName}.marketLens contains an unverified superlative.`);
+      }
+    }
+  }
+  for (const date of decisionsByDate.keys()) if (!eventDays.some((day) => day.date === date)) errors.push(`editorialReview.marketLensDecisions.${date} is stale.`);
+
+  return [...new Set(errors)];
+}
+
+function applyDashboardDataJson(args, { validateOnly = false } = {}) {
   const canonicalHtml = loadDashboardBase(args.dashboard).html;
   const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
   const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
+  const candidateChartData = readJsonBlock(candidateHtml, 'chart-data');
   if (args.scheduled) validateScheduledFinalization(args.dashboard, args.windowMode);
   const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
   assertChartSeriesRevisions(
     roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data')),
-    roundChartPayload(readJsonBlock(candidateHtml, 'chart-data')),
+    roundChartPayload(candidateChartData),
     'Staged dashboard candidate'
   );
   const editorialDashboardData = readJson(args.applyDashboardDataJson);
+  const editorialErrors = validateEditorialSubmission(
+    candidateDashboardData,
+    editorialDashboardData,
+    candidateChartData,
+    previousDashboardData,
+    { now: scheduledNow() }
+  );
+  if (editorialErrors.length) {
+    throw new Error(`Commentary file validation failed:\n- ${editorialErrors.join('\n- ')}`);
+  }
+  if (validateOnly) {
+    process.stdout.write('Commentary file validation passed; candidate and canonical dashboard unchanged.\n');
+    return;
+  }
   let reviewManifest = { ...editorialDashboardData.editorialReview, reviewedAt: scheduledNow().toISOString() };
-  reviewManifest.systemFallbacks = [];
-  if (editorialDashboardData.editionId !== candidateDashboardData.editionId) {
-    throw new Error('Editorial dashboard-data editionId must match the staged candidate; regenerate the editorial handoff.');
-  }
-  if (!isIsoDateTime(reviewManifest.preparedAt)) {
-    throw new Error('Editorial dashboard-data must retain the generated editorialReview.preparedAt timestamp.');
-  }
   const dashboardData = structuredClone(candidateDashboardData);
   const editorialNow = scheduledNow();
-  const freshStoryDates = allowedNewsDates(editorialNow);
+  const editorialReferenceTime = new Date(reviewManifest.preparedAt);
+  const freshStoryDates = allowedNewsDates(editorialReferenceTime);
   const verifiedClaims = new Set((Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : [])
     .filter((claim) => typeof claim?.text === 'string' && /^https:\/\//i.test(String(claim?.evidenceUrl || '')))
     .map((claim) => claim.text.trim()));
@@ -1442,18 +1792,16 @@ function applyDashboardDataJson(args) {
   );
   dashboardData.futuresModule = {
     ...dashboardData.futuresModule,
-    stories: sanitizeStoryList(editorialDashboardData.futuresModule?.stories, candidateDashboardData.futuresModule?.stories, {
+    stories: applyEditorialStoryList(editorialDashboardData.futuresModule?.stories, {
       futures: true,
-      systemFallbacks: reviewManifest.systemFallbacks,
-      section: 'futures-news',
       path: 'futuresModule.stories',
       verifiedClaims,
       allowedDates: freshStoryDates,
       additionalAllowedDates: new Set([sharedFuturesSessionDate(candidateDashboardData.futuresModule?.futures)].filter(Boolean)),
       futuresWindow: futuresStoryPublicationWindow(
         candidateDashboardData.futuresModule?.sectionTitle,
-        editorialNow.toISOString(),
-        editorialNow,
+        reviewManifest.preparedAt,
+        editorialReferenceTime,
         candidateDashboardData.futuresModule?.futures
       ),
       maximum: 3
@@ -1462,10 +1810,8 @@ function applyDashboardDataJson(args) {
   const promotedStoryIds = new Set(dashboardData.futuresModule.stories.map(storyIdentity));
   const promotedStoryUrls = new Set(dashboardData.futuresModule.stories.map((story) => canonicalStoryUrl(story.url)));
   const promotedStoryTitles = new Set(dashboardData.futuresModule.stories.map((story) => String(story.title || '').trim().toLowerCase()));
-  const sanitizedStories = sanitizeStoryList(editorialDashboardData.stories, candidateDashboardData.stories, {
+  const sanitizedStories = applyEditorialStoryList(editorialDashboardData.stories, {
     verifiedClaims,
-    systemFallbacks: reviewManifest.systemFallbacks,
-    section: 'stories',
     path: 'stories',
     allowedDates: freshStoryDates,
     maximum: 9
@@ -1474,14 +1820,12 @@ function applyDashboardDataJson(args) {
     const duplicate = promotedStoryIds.has(storyIdentity(story))
       || promotedStoryUrls.has(canonicalStoryUrl(story.url))
       || promotedStoryTitles.has(String(story.title || '').trim().toLowerCase());
-    if (duplicate) reviewManifest.systemFallbacks.push({ section: 'stories', path: `stories.accepted[${index}]`, action: 'omitted', reason: 'promoted_story_duplicate' });
+    if (duplicate) throw new Error(`stories[${index}] duplicates a promoted Futures story.`);
     return !duplicate;
   });
   const generalStoryIds = new Set(dashboardData.stories.map(storyIdentity));
-  const sanitizedCryptoNotes = sanitizeStoryList(editorialDashboardData.crypto?.notes, candidateDashboardData.crypto?.notes, {
+  const sanitizedCryptoNotes = applyEditorialStoryList(editorialDashboardData.crypto?.notes, {
     crypto: true,
-    systemFallbacks: reviewManifest.systemFallbacks,
-    section: 'crypto',
     path: 'crypto.notes',
     verifiedClaims,
     allowedDates: freshStoryDates,
@@ -1491,15 +1835,18 @@ function applyDashboardDataJson(args) {
     ...dashboardData.crypto,
     notes: sanitizedCryptoNotes.filter((story, index) => {
       const duplicate = promotedStoryIds.has(storyIdentity(story)) || generalStoryIds.has(storyIdentity(story));
-      if (duplicate) reviewManifest.systemFallbacks.push({ section: 'crypto', path: `crypto.notes.accepted[${index}]`, action: 'omitted', reason: 'cross_section_duplicate' });
+      if (duplicate) throw new Error(`crypto.notes[${index}] duplicates another published story.`);
       return !duplicate;
     })
   };
-  applyNewsCoverageState(dashboardData, { now: editorialNow });
+  applyNewsCoverageState(dashboardData, { now: editorialReferenceTime });
   const candidateTapeLabel = String(candidateDashboardData.tape?.label || '');
   const editorialTapeLabel = String(editorialDashboardData.tape?.label || '');
   const candidateTapeContextIndex = candidateTapeLabel.indexOf(' · ');
   const editorialTapeContextIndex = editorialTapeLabel.indexOf(' · ');
+  if (editorialTapeLabel !== candidateTapeLabel && editorialTapeContextIndex < 0) {
+    throw new Error('tape.label editorial context must retain the deterministic session prefix separator.');
+  }
   const tapeContext = editorialTapeContextIndex >= 0
     ? editorialTapeLabel.slice(editorialTapeContextIndex)
     : candidateTapeContextIndex >= 0 ? candidateTapeLabel.slice(candidateTapeContextIndex) : '';
@@ -1510,10 +1857,7 @@ function applyDashboardDataJson(args) {
       candidateDashboardData.tape?.rows,
       editorialDashboardData.tape?.rows,
       previousDashboardData.tape?.rows,
-      verifiedClaims,
-      reviewManifest.systemFallbacks,
-      editorialNow,
-      reviewManifest.preparedAt
+      editorialNow
     )
   };
   const candidateCompiled = String(candidateDashboardData.footer?.compiled || '');
@@ -1522,6 +1866,10 @@ function applyDashboardDataJson(args) {
   const editorialFooterContextIndex = editorialCompiled.indexOf(' · ');
   const candidateMarketDataIndex = candidateCompiled.indexOf(' · Market data:');
   const editorialMarketDataIndex = editorialCompiled.indexOf(' · Market data:');
+  if (editorialCompiled !== candidateCompiled
+    && (editorialFooterContextIndex < 0 || editorialMarketDataIndex <= editorialFooterContextIndex)) {
+    throw new Error('footer.compiled editorial context must retain the generated compile and market-data boundaries.');
+  }
   const editorialContext = editorialFooterContextIndex >= 0 && editorialMarketDataIndex > editorialFooterContextIndex
     ? editorialCompiled.slice(editorialFooterContextIndex, editorialMarketDataIndex)
     : '';
@@ -1539,8 +1887,12 @@ function applyDashboardDataJson(args) {
   );
   if (Array.isArray(dashboardData.weekAhead?.days)) {
     const candidateWeekAheadDates = new Set(dashboardData.weekAhead.days.map((day) => day.date));
+    if (editorialWeekAheadDays.size !== dashboardData.weekAhead.days.length
+      || editorialDashboardData.weekAhead?.days?.length !== dashboardData.weekAhead.days.length) {
+      throw new Error('Week Ahead editorial rows must match the sealed candidate exactly.');
+    }
     for (const date of editorialWeekAheadDays.keys()) {
-      if (!candidateWeekAheadDates.has(date)) reviewManifest.systemFallbacks.push({ section: 'market-lens', path: `weekAhead.days.${date}`, action: 'omitted', reason: 'stale_editorial_item' });
+      if (!candidateWeekAheadDates.has(date)) throw new Error(`Week Ahead editorial row ${date} is stale.`);
     }
     dashboardData.weekAhead.days = dashboardData.weekAhead.days.map((day) => {
       const editorialDay = editorialWeekAheadDays.get(day.date);
@@ -1549,10 +1901,16 @@ function applyDashboardDataJson(args) {
         return day;
       }
       const next = { ...day };
-      if (usableWeekAheadOutcome(editorialDay.outcome, reviewManifest.preparedAt)) {
+      if (droppedWeekAheadOutcome(editorialDay.outcome)
+        && usableWeekAheadOutcome(day.outcome, reviewManifest.preparedAt)) {
+        next.outcome = day.outcome;
+      } else if (usableWeekAheadOutcome(editorialDay.outcome, reviewManifest.preparedAt)
+        || droppedWeekAheadOutcome(editorialDay.outcome)) {
         next.outcome = editorialDay.outcome;
       } else if (day.lifecycle === 'close_available') {
         throw new Error(`Week Ahead editorial work is incomplete for ${day.date}. Supply current editorial interpretation.`);
+      } else if (!isDeepStrictEqual(editorialDay.outcome, day.outcome)) {
+        throw new Error(`Week Ahead editorial submission is invalid for ${day.date}.`);
       }
       return next;
     });
@@ -1561,29 +1919,23 @@ function applyDashboardDataJson(args) {
     dashboardData,
     candidateDashboardData,
     editorialDashboardData,
-    reviewManifest.systemFallbacks,
-    reviewManifest.preparedAt
+    editorialReferenceTime
   );
-  applyEditionMetadata(dashboardData, args.windowMode);
   let reviewChartData;
   let nextHtml = canonicalHtml;
   try {
-    const chartData = roundChartPayload(readJsonBlock(candidateHtml, 'chart-data'));
-    syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-    normalizeMarketLensReview(dashboardData, chartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
-    normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
+    const chartData = roundChartPayload(candidateChartData);
+    normalizeMarketLensReview(dashboardData, chartData, reviewManifest);
     const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
     if (reviewErrors.length) throw new Error(`Editorial review is incomplete or invalid: ${reviewErrors.join(' ')}`);
     applyMarketLensDecisionsData(dashboardData, chartData, reviewManifest.marketLensDecisions);
-    dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { windowMode: args.windowMode, now: scheduledNow() });
     reviewChartData = compactChartPayload(chartData);
     nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(reviewChartData));
   } catch (error) {
     // dashboard-data-only maintenance still works on staging fixtures that omit chart-data.
     if (/chart-data JSON block/.test(String(error?.message || ''))) {
       reviewChartData = { schemaVersion: 1, series: [] };
-      normalizeMarketLensReview(dashboardData, reviewChartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
-      normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
+      normalizeMarketLensReview(dashboardData, reviewChartData, reviewManifest);
       const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
       if (reviewErrors.length) throw new Error(`Editorial review is incomplete or invalid: ${reviewErrors.join(' ')}`);
       applyMarketLensDecisionsData(dashboardData, reviewChartData, reviewManifest.marketLensDecisions);
@@ -1591,14 +1943,12 @@ function applyDashboardDataJson(args) {
       throw error;
     }
   }
-  dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead, { now: scheduledNow() });
   applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode, now: scheduledNow() });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData);
   commitEditorialCandidate(args, nextHtml);
   if (finalizedEarnings && path.resolve(args.dashboard) === DEFAULT_DASHBOARD) {
     try {
       writeJson(EARNINGS_WEEK_PATH, finalizedEarnings.week);
-      if (finalizedEarnings.narrativePayload) writeJson(EARNINGS_NARRATIVE_PATH, finalizedEarnings.narrativePayload);
     } catch (error) {
       process.stderr.write(`Dashboard was committed, but Earnings staging synchronization failed and will retry later: ${error.message}\n`);
     }
@@ -1760,7 +2110,7 @@ function main() {
   if (!fs.existsSync(args.dashboard)) {
     throw new Error(`Dashboard file not found: ${args.dashboard}`);
   }
-  if (args.prepareEditorialDir && !fs.existsSync(args.candidate)) {
+  if ((args.prepareEditorialDir || args.validateDashboardDataJson || args.applyDashboardDataJson) && !fs.existsSync(args.candidate)) {
     throw new Error(`Staged dashboard candidate not found: ${args.candidate}. Run deterministic preparation first.`);
   }
 
@@ -1791,6 +2141,15 @@ function main() {
 
   if (args.mergeChartDataJson) {
     mergeChartDataJson(args);
+    return;
+  }
+
+  if (args.validateDashboardDataJson) {
+    applyDashboardDataJson({
+      ...args,
+      applyDashboardDataJson: args.validateDashboardDataJson,
+      scheduled: false
+    }, { validateOnly: true });
     return;
   }
 
@@ -1959,8 +2318,8 @@ function main() {
   }, () => buildEarningsPreparationFallback(canonicalWeek, earningsRange, { checkedAt }), {
     label: 'Earnings',
     readFresh: () => readJson(EARNINGS_WEEK_PATH),
-    validateFresh: (payload) => validateEarningsWeekPayload(payload),
-    validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
+    validateFresh: (payload) => validateEarningsWeekPayload(payload, { now: checkedAt }),
+    validateFallback: (payload) => validateEarningsWeekPayload(payload.week, { now: checkedAt })
   });
   if (earningsPreparation.error) {
     args.earningsFallbackWeek = earningsPreparation.fallback.week;
@@ -2009,6 +2368,7 @@ module.exports = {
   syncDashboardPricesFromChartData,
   patchDashboardDataBlock,
   patchDashboard,
+  prepareEarningsForEditorial,
   prepareEditorialWorkspace,
   loadDashboardBase,
   readJsonBlock,
@@ -2023,6 +2383,7 @@ module.exports = {
   reportPreparationStatus,
   stampDashboardEdition,
   stageDashboardCandidate,
+  validateEditorialSubmission,
   validateScheduledFinalization,
   validateScheduledStart
 };

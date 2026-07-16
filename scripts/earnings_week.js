@@ -24,7 +24,6 @@ const { runValidation, validateEarningsWeekPayload } = require('./earnings_week_
 const root = path.resolve(__dirname, '..');
 const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.json');
 const DEFAULT_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
-const DEFAULT_NARRATIVE = path.resolve(root, 'generated', 'earnings_narrative.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(root, 'generated', 'earnings_schedule_review.json');
 
 function printHelp() {
@@ -35,7 +34,6 @@ Commands:
   refresh           Refresh arrived earnings rows in the existing week artifact
   resolve           Resolve company-release tasks into the resolution sidecar
   apply-release     Apply company-release resolutions to the week artifact
-  apply-narrative   Apply earnings narrative sidecar to the week artifact
   validate          Validate the earnings week artifact
   validate-release  Validate company-release resolution sidecar
 
@@ -43,7 +41,6 @@ Run node scripts/earnings_week.js <command> --help for command-specific options.
 Examples:
   node scripts/earnings_week.js build --from 2026-07-06 --to 2026-07-10
   node scripts/earnings_week.js refresh
-  node scripts/earnings_week.js apply-narrative
 `);
 }
 
@@ -162,45 +159,6 @@ Options:
   --input PATH        Earnings week JSON to update (default: generated/earnings_week.json)
   --resolutions PATH  Company-release resolutions JSON (default: generated/earnings_company_release_resolutions.json)
   --output PATH       Output earnings week JSON (default: overwrite --input)
-`);
-      process.exit(0);
-    }
-    throw new Error(`Unknown argument: ${arg}`);
-  }
-  if (!args.output) args.output = args.input;
-  return args;
-}
-
-function parseApplyNarrativeArgs(argv) {
-  const args = {
-    input: DEFAULT_EARNINGS_WEEK,
-    narrative: DEFAULT_NARRATIVE,
-    output: ''
-  };
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_EARNINGS_WEEK);
-      i += 1;
-      continue;
-    }
-    if (arg === '--narrative') {
-      args.narrative = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_NARRATIVE);
-      i += 1;
-      continue;
-    }
-    if (arg === '--output') {
-      args.output = path.resolve(process.cwd(), argv[i + 1] || '');
-      i += 1;
-      continue;
-    }
-    if (arg === '--help' || arg === '-h') {
-      process.stdout.write(`Usage: node scripts/earnings_week.js apply-narrative [options]
-
-Options:
-  --input PATH       Earnings week JSON to update (default: generated/earnings_week.json)
-  --narrative PATH   Canonical narrative JSON (default: generated/earnings_narrative.json)
-  --output PATH      Output earnings week JSON (default: overwrite --input)
 `);
       process.exit(0);
     }
@@ -675,18 +633,6 @@ function applyReleaseCommand(argv) {
   if (outputErrors.length) throw new Error(`Applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
   writeJson(args.output, output);
   process.stdout.write(`Recorded ${output.companyReleaseApply.dispositions.length} company-release disposition(s); applied ${output.companyReleaseApply.applied.length} resolved result(s) to ${args.output}\n`);
-}
-
-function applyNarrativeCommand(argv) {
-  const args = parseApplyNarrativeArgs(argv);
-  const output = applyEarningsNarrative(readJson(args.input), readJson(args.narrative), {
-    sourceArtifact: path.relative(root, args.input),
-    narrativeArtifact: path.relative(root, args.narrative)
-  });
-  const outputErrors = validateEarningsWeekPayload(output, { requireNarrative: true });
-  if (outputErrors.length) throw new Error(`Narrative-applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
-  writeJson(args.output, output);
-  process.stdout.write(`Applied ${output.narrativeApply.applied.length} earnings narrative row(s) to ${args.output}\n`);
 }
 
 // Command factories keep refresh and resolution helper names private while the
@@ -2191,7 +2137,6 @@ async function main() {
   if (command === 'validate') return runValidation(argv);
   if (command === 'validate-release') return runValidation(['release', ...argv]);
   if (command === 'apply-release') return applyReleaseCommand(argv);
-  if (command === 'apply-narrative') return applyNarrativeCommand(argv);
   if (command === 'embed') {
     throw new Error('Direct dashboard writes are not supported; use run_daily_update.js --apply-earnings-week-json.');
   }

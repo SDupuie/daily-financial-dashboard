@@ -410,28 +410,30 @@ function testLifecycleAndCloseReactionTransitions() {
   releasedTuesday.events[0].actual = '0.4%';
   const awaitingClose = applyWeekAheadLifecycle(released, null, { now: new Date('2026-07-14T14:00:00Z'), windowMode: 'morning' });
   assert.equal(awaitingClose.days.find((day) => day.date === '2026-07-14').lifecycle, 'released_awaiting_close');
-  const unavailableReleasedLens = applyMarketLensDecisions(awaitingClose, awaitingClose.days
+  const droppedReleasedLens = applyMarketLensDecisions(awaitingClose, awaitingClose.days
     .filter((day) => day.events.length)
     .map((day) => day.date === '2026-07-14'
-      ? { date: day.date, action: 'commentary-unavailable', attemptedAt: '2026-07-14T14:05:00.000Z', reason: 'current_run_research_exhausted' }
+      ? { date: day.date, action: 'dropped-after-review', attemptedAt: '2026-07-14T14:05:00.000Z', reason: 'bounded_editorial_review_exhausted' }
       : { date: day.date, action: 'retain-generated' }));
-  const unavailableLensDay = unavailableReleasedLens.days.find((day) => day.date === '2026-07-14');
-  assert.equal(unavailableLensDay.marketLensSource, 'unavailable');
-  assert.equal(unavailableLensDay.marketLensDisposition.status, 'commentary_unavailable');
-  assert.deepEqual(validateWeekAheadPayload(unavailableReleasedLens), []);
-  const prematureUnavailable = applyMarketLensDecisions(awaitingActual, awaitingActual.days
+  const droppedLensDay = droppedReleasedLens.days.find((day) => day.date === '2026-07-14');
+  assert.equal(droppedLensDay.marketLensSource, 'dropped_after_review');
+  assert.equal(droppedLensDay.marketLensDisposition.status, 'dropped_after_review');
+  assert.equal(droppedLensDay.marketLens.title, '');
+  assert.equal(droppedLensDay.marketLens.body, '');
+  assert.deepEqual(validateWeekAheadPayload(droppedReleasedLens), []);
+  const prematureDropped = applyMarketLensDecisions(awaitingActual, awaitingActual.days
     .filter((day) => day.events.length)
     .map((day) => day.date === '2026-07-14'
-      ? { date: day.date, action: 'commentary-unavailable', attemptedAt: '2026-07-14T13:05:00.000Z', reason: 'current_run_research_exhausted' }
+      ? { date: day.date, action: 'dropped-after-review', attemptedAt: '2026-07-14T13:05:00.000Z', reason: 'bounded_editorial_review_exhausted' }
       : { date: day.date, action: 'retain-generated' }));
-  assert.equal(prematureUnavailable.days.find((day) => day.date === '2026-07-14').marketLensSource, 'generated');
+  assert.equal(prematureDropped.days.find((day) => day.date === '2026-07-14').marketLensSource, 'generated');
   const invalidPreRelease = structuredClone(awaitingActual);
   Object.assign(invalidPreRelease.days.find((day) => day.date === '2026-07-14'), {
-    marketLens: unavailableLensDay.marketLens,
-    marketLensSource: unavailableLensDay.marketLensSource,
-    marketLensDisposition: unavailableLensDay.marketLensDisposition
+    marketLens: droppedLensDay.marketLens,
+    marketLensSource: droppedLensDay.marketLensSource,
+    marketLensDisposition: droppedLensDay.marketLensDisposition
   });
-  assert.match(validateWeekAheadPayload(invalidPreRelease).join('\n'), /marketLensSource unavailable is allowed only after a release/);
+  assert.match(validateWeekAheadPayload(invalidPreRelease).join('\n'), /marketLensSource dropped_after_review is allowed only after a release/);
   assert.deepEqual(comparableWeekAheadSurprise('0.4%', '0.2%'), { direction: 'above', delta: 0.2, unit: '%' });
   const prematureClose = applyWeekAheadLifecycle(awaitingClose, {
     series: [
@@ -452,17 +454,17 @@ function testLifecycleAndCloseReactionTransitions() {
   assert.match(validateWeekAheadPayload(afterClose, { now: new Date('2026-07-14T19:59:00Z') }).join('\n'), /cannot precede the event-day market close/);
   assert.match(
     validateWeekAheadPayload(afterClose, { requireOutcomeDisposition: true }).join('\n'),
-    /requires a verified or commentary_unavailable disposition/,
+    /requires a verified or dropped_after_review disposition/,
     'Publication validation must require a disposition, not necessarily prose.'
   );
   const unfinishedOutcome = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
   assert.equal(unfinishedOutcome.days.find((day) => day.date === '2026-07-14').outcome, undefined);
-  assert.match(validateWeekAheadPayload(unfinishedOutcome, { requireOutcomeDisposition: true }).join('\n'), /requires a verified or commentary_unavailable disposition/);
+  assert.match(validateWeekAheadPayload(unfinishedOutcome, { requireOutcomeDisposition: true }).join('\n'), /requires a verified or dropped_after_review disposition/);
   const failOpenOutcome = structuredClone(afterClose);
   failOpenOutcome.days.find((day) => day.date === '2026-07-14').outcome = {
-    status: 'commentary_unavailable',
+    status: 'dropped_after_review',
     source: 'editorial',
-    reason: 'current_run_research_exhausted',
+    reason: 'bounded_editorial_review_exhausted',
     attemptedAt: '2026-07-14T22:05:00.000Z'
   };
   assert.deepEqual(validateWeekAheadPayload(failOpenOutcome, { requireOutcomeDisposition: true }), []);
@@ -470,7 +472,7 @@ function testLifecycleAndCloseReactionTransitions() {
   assert.equal(retriedOutcome.days.find((day) => day.date === '2026-07-14').outcome.attemptedAt, '2026-07-14T22:05:00.000Z');
   const contradictoryOutcome = structuredClone(failOpenOutcome);
   contradictoryOutcome.days.find((day) => day.date === '2026-07-14').outcome.title = 'Unsupported interpretation';
-  assert.match(validateWeekAheadPayload(contradictoryOutcome, { requireOutcomeDisposition: true }).join('\n'), /must not carry unsupported editorial copy/);
+  assert.match(validateWeekAheadPayload(contradictoryOutcome, { requireOutcomeDisposition: true }).join('\n'), /must omit editorial copy/);
   closedTuesday.outcome = { source: 'editorial', title: 'Inflation firmed', body: 'The release and close reaction reinforced a firmer expected policy path.' };
   const finalizedVerified = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
   assert.equal(finalizedVerified.days.find((day) => day.date === '2026-07-14').outcome.status, 'verified');
