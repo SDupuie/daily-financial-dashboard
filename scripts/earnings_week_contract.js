@@ -5,14 +5,14 @@ const {
 } = require('./calendar_contract');
 
 const EARNINGS_WEEK_SCHEMA_VERSION = 2;
-const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'dropped_after_review']);
-const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'dropped_after_review']);
-const EDITORIAL_DROPPED_REASON = 'bounded_editorial_review_exhausted';
+const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable']);
+const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified']);
+const EDITORIAL_UNAVAILABLE_REASON = 'not_verified_for_current_run';
 
 function defaultEditorialDisposition(status, attemptedAt) {
   return {
     status,
-    reason: EDITORIAL_DROPPED_REASON,
+    reason: EDITORIAL_UNAVAILABLE_REASON,
     attemptedAt
   };
 }
@@ -33,20 +33,20 @@ function earningsNarrativeDispositions(row, narrative, attemptedAt = '') {
     COMMENTARY_DISPOSITION_STATUSES
   ) || (interpretation
     ? { status: 'verified' }
-    : defaultEditorialDisposition('dropped_after_review', attemptedAt));
+    : defaultEditorialDisposition('commentary_unavailable', attemptedAt));
   const guidanceDisposition = suppliedDisposition(
     narrative?.outcome?.guidanceDisposition,
     GUIDANCE_DISPOSITION_STATUSES
   ) || (guide
     ? { status: 'verified' }
-    : guidanceRequired ? defaultEditorialDisposition('dropped_after_review', attemptedAt) : null);
+    : guidanceRequired ? defaultEditorialDisposition('unverified', attemptedAt) : null);
   const reactionDisposition = suppliedDisposition(
     narrative?.reaction?.commentaryDisposition,
     COMMENTARY_DISPOSITION_STATUSES
   ) || (reactionNote
     ? { status: 'verified' }
-    : reactionRequired ? defaultEditorialDisposition('dropped_after_review', attemptedAt) : null);
-  const retryDisposition = (disposition) => attemptedAt && disposition?.status === 'dropped_after_review'
+    : reactionRequired ? defaultEditorialDisposition('commentary_unavailable', attemptedAt) : null);
+  const retryDisposition = (disposition) => attemptedAt && ['commentary_unavailable', 'unverified'].includes(disposition?.status)
     ? { ...disposition, attemptedAt }
     : disposition;
   return {
@@ -56,29 +56,71 @@ function earningsNarrativeDispositions(row, narrative, attemptedAt = '') {
   };
 }
 
+function narrativeNeedsEditorialCopy(row, narrative) {
+  if (!isDisplayEligibleEarningsRow(row)) return false;
+  const dispositions = earningsNarrativeDispositions(row, narrative);
+  if (dispositions.interpretation?.status !== 'verified' || !String(narrative?.outcome?.interpretation || '').trim()) return true;
+  if (row?.outcome?.overall !== 'pending') {
+    const guidanceComplete = dispositions.guidance?.status === 'not_provided'
+      || (dispositions.guidance?.status === 'verified' && String(narrative?.outcome?.guide || '').trim());
+    if (!guidanceComplete) return true;
+  }
+  return row?.lifecycle === 'close_available'
+    && (dispositions.reaction?.status !== 'verified' || !String(narrative?.reaction?.note || '').trim());
+}
+
+function canonicalNarrativeIsEmpty(row) {
+  return [
+    row?.eps?.note,
+    row?.revenue?.note,
+    row?.outcome?.guide,
+    row?.outcome?.interpretation,
+    row?.reaction?.note
+  ].every((value) => !String(value || '').trim());
+}
+
+function narrativeEditorialAttempted(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.editorialAttempted === true) return true;
+  const copy = [
+    row.outcome?.interpretation,
+    row.outcome?.guide,
+    row.reaction?.note
+  ].some((value) => String(value || '').trim());
+  const verified = [
+    row.outcome?.interpretationDisposition?.status,
+    row.outcome?.guidanceDisposition?.status,
+    row.reaction?.commentaryDisposition?.status
+  ].some((status) => status === 'verified');
+  const unavailable = [
+    row.outcome?.interpretationDisposition,
+    row.outcome?.guidanceDisposition,
+    row.reaction?.commentaryDisposition
+  ].some((disposition) => ['commentary_unavailable', 'unverified'].includes(disposition?.status)
+    && isIsoDateTime(disposition?.attemptedAt)
+    && typeof disposition?.reason === 'string'
+    && disposition.reason.trim());
+  return copy || verified || unavailable;
+}
+
 function narrativeEditorialComplete(row, narrative) {
   if (!isDisplayEligibleEarningsRow(row)) return true;
   const interpretation = String(narrative?.outcome?.interpretation || '').trim();
   const interpretationDisposition = narrative?.outcome?.interpretationDisposition;
-  const interpretationComplete = (interpretationDisposition?.status === 'verified' && interpretation)
-    || (interpretationDisposition?.status === 'dropped_after_review' && !interpretation);
-  if (!interpretationComplete) return false;
+  if (!(interpretationDisposition?.status === 'verified' && interpretation)) return false;
 
   if (row?.outcome?.overall !== 'pending') {
     const guide = String(narrative?.outcome?.guide || '').trim();
     const guidanceDisposition = narrative?.outcome?.guidanceDisposition;
     const guidanceComplete = (guidanceDisposition?.status === 'verified' && guide)
-      || guidanceDisposition?.status === 'not_provided'
-      || (guidanceDisposition?.status === 'dropped_after_review' && !guide);
+      || guidanceDisposition?.status === 'not_provided';
     if (!guidanceComplete) return false;
   }
 
   if (row?.lifecycle === 'close_available') {
     const reaction = String(narrative?.reaction?.note || '').trim();
     const reactionDisposition = narrative?.reaction?.commentaryDisposition;
-    const reactionComplete = (reactionDisposition?.status === 'verified' && reaction)
-      || (reactionDisposition?.status === 'dropped_after_review' && !reaction);
-    if (!reactionComplete) return false;
+    if (!(reactionDisposition?.status === 'verified' && reaction)) return false;
   }
   return true;
 }
@@ -147,7 +189,7 @@ function clearEarningsNarrative(row) {
   return output;
 }
 
-function prepareDeterministicEarningsWeek(previousWeek, nextWeek) {
+function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
   const previousByKey = new Map((Array.isArray(previousWeek?.rows) ? previousWeek.rows : [])
     .map((row) => [earningsRowKey(row), row]));
   return {
@@ -162,6 +204,90 @@ function prepareDeterministicEarningsWeek(previousWeek, nextWeek) {
         ? preserveEarningsNarrative(row, prior)
         : clearEarningsNarrative(row);
     })
+  };
+}
+
+function buildEarningsNarrativeSidecar(week, existing = { rows: [] }, { outputPath = 'generated/earnings_narrative.json' } = {}) {
+  const existingByKey = new Map(
+    (Array.isArray(existing.rows) ? existing.rows : []).map((row) => [earningsRowKey(row), row])
+  );
+  const rows = (Array.isArray(week.rows) ? week.rows : [])
+    // Keep prior editorial rows and stage any newly display-eligible row for human enrichment.
+    .filter((row) => existingByKey.has(earningsRowKey(row)) || isDisplayEligibleEarningsRow(row))
+    .map((row) => {
+      const existingPrior = existingByKey.get(earningsRowKey(row));
+      const prior = existingPrior || {
+        eps: { note: row.eps?.note || '' },
+        revenue: { note: row.revenue?.note || '' },
+        outcome: {
+          guide: row.outcome?.guide || '',
+          interpretation: row.outcome?.interpretation || '',
+          ...(row.outcome?.guidanceDisposition ? { guidanceDisposition: row.outcome.guidanceDisposition } : {}),
+          ...(row.outcome?.interpretationDisposition ? { interpretationDisposition: row.outcome.interpretationDisposition } : {})
+        },
+        reaction: {
+          note: row.reaction?.note || '',
+          ...(row.reaction?.commentaryDisposition ? { commentaryDisposition: row.reaction.commentaryDisposition } : {})
+        }
+      };
+      // The earnings refresh command clears all narrative fields whenever deterministic
+      // report facts change. Do not let this sidecar restore that pre-report copy.
+      // The marker survives the first failed run so the editor's replacement copy
+      // can be accepted on the rerun without being cleared a second time.
+      const sidecarRefreshPending = prior.postReportRefreshRequired === true;
+      const stalePriorCopy = Boolean(existingPrior)
+        && canonicalNarrativeIsEmpty(row)
+        && !sidecarRefreshPending;
+      const nextNarrative = stalePriorCopy ? {} : prior;
+      const dispositions = earningsNarrativeDispositions(row, nextNarrative, week.generatedAt);
+      const missingEditorialCopy = narrativeNeedsEditorialCopy(row, nextNarrative);
+      const editorialAttempted = narrativeEditorialAttempted({
+        ...nextNarrative,
+        editorialAttempted: existingPrior?.editorialAttempted
+      });
+      const postReportRefreshRequired = missingEditorialCopy
+        && (sidecarRefreshPending || stalePriorCopy || !existingPrior);
+      return {
+        symbol: row.symbol,
+        reportDate: row.reportDate,
+        eps: {
+          note: String(nextNarrative.eps?.note || '')
+        },
+        revenue: {
+          note: String(nextNarrative.revenue?.note || '')
+        },
+        outcome: {
+          guide: String(nextNarrative.outcome?.guide || ''),
+          ...(dispositions.guidance ? { guidanceDisposition: dispositions.guidance } : {}),
+          // Numeric beat/miss fields are displayed separately. Keep only the
+          // editorial thesis and release-backed forward guidance here.
+          interpretation: String(nextNarrative.outcome?.interpretation || ''),
+          interpretationDisposition: dispositions.interpretation
+        },
+        reaction: {
+          // The calculated percentage already appears in the monitor. Keep only
+          // editorial commentary that explains the reaction's likely driver.
+          note: String(nextNarrative.reaction?.note || ''),
+          ...(dispositions.reaction ? { commentaryDisposition: dispositions.reaction } : {})
+        },
+        editorialAttempted,
+        ...(postReportRefreshRequired ? { postReportRefreshRequired: true } : {})
+      };
+    });
+  const rowsByKey = new Map(rows.map((row) => [earningsRowKey(row), row]));
+  const missingRows = (Array.isArray(week.rows) ? week.rows : [])
+    .filter((row) => narrativeNeedsEditorialCopy(row, rowsByKey.get(earningsRowKey(row))))
+    .map((row) => ({ symbol: row.symbol, reportDate: row.reportDate }));
+  return {
+    payload: {
+      schemaVersion: 1,
+      sourceArtifact: 'generated/earnings_week.json',
+      sourceGeneratedAt: week.generatedAt,
+      sourceRange: week.range,
+      rows,
+      outputPath
+    },
+    missingRows
   };
 }
 
@@ -749,6 +875,7 @@ module.exports = {
   EARNINGS_WEEK_SCHEMA_VERSION,
   applyEarningsLifecycle,
   attachReactions,
+  buildEarningsNarrativeSidecar,
   buildEarningsPreparationFallback,
   buildCompanyReleaseTasks,
   combinedOutcome,
@@ -764,6 +891,7 @@ module.exports = {
   earningsScheduleReviewRows,
   earningsNarrativeDispositions,
   earningsNarrativeFingerprint,
+  narrativeEditorialAttempted,
   narrativeEditorialComplete,
   emptyEarningsApiUsage,
   hasEarningsApiBudget,
@@ -771,7 +899,8 @@ module.exports = {
   isEarningsApiUsage,
   migrateEarningsApiUsage,
   metricResult,
-  prepareDeterministicEarningsWeek,
+  mergeUnchangedEarningsNarrative,
+  narrativeNeedsEditorialCopy,
   normalizeFinnhubCalendarFields,
   normalizeEarningsTiming,
   numberOrNull,

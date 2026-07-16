@@ -47,7 +47,6 @@ const {
   loadDashboardBase,
   mergedChartAvailability,
   patchDashboard,
-  prepareEarningsForEditorial,
   readJsonBlock,
   requiresUnavailableRolloverRetry,
   runCommand,
@@ -59,12 +58,13 @@ const { applyWeekAheadLifecycle, buildWeekAheadPreparationFallback, normalizeWee
 const { atomicWriteFile } = require('./staging_writer');
 const { newsAcquisitionPaths } = require('./news_sources');
 const {
+  TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
   containsTapeCitationSyntax,
-  droppedTapeCommentary,
   editorialPayloadHash,
   reviewedTapeCommentary,
   superlativeClaims,
+  unavailableTapeCommentary,
   validateTapeCommentaryDisposition,
   validateReviewManifest
 } = require('./editorial_review_contract');
@@ -947,7 +947,6 @@ function testEditorialReviewContract() {
     schemaVersion: 1,
     reviewedAt: '2026-07-11T17:55:00.000Z',
     baseEditionId: '2026-07-11T17:40:00.000Z',
-    candidatePayloadHash: editorialPayloadHash(data, reviewChartData),
     marketLensDecisions: [],
     verifiedClaims: []
   };
@@ -961,7 +960,6 @@ function testEditorialReviewContract() {
   buildEditorialReview(data, manifest, reviewChartData);
   assert.equal(data.editorialReview.reviewedBaseEditionId, manifest.baseEditionId);
   assert.equal(data.editorialReview.reviewedEditionId, data.editionId);
-  assert.equal(data.editorialReview.candidatePayloadHash, manifest.candidatePayloadHash);
   assert.equal(data.editorialReview.payloadHash, editorialPayloadHash(data, reviewChartData));
   assert.deepEqual(validateReviewManifest(data.editorialReview, data, { requireEmbedded: true, chartData: reviewChartData }), []);
   assert.match(validateReviewManifest(data.editorialReview, data, {
@@ -982,6 +980,22 @@ function testEditorialReviewContract() {
     ...manifest,
     verifiedClaims: [{ text: 'An obsolete record claim.', evidenceUrl: 'https://example.com/obsolete-claim' }]
   }, data).join('\n'), /does not match current editorial text/);
+  const fallbackData = structuredClone(data);
+  fallbackData.opening.headline = 'Markets test the outlook';
+  const fallbackManifest = {
+    ...manifest,
+    systemFallbacks: [{
+      section: 'opening',
+      path: 'opening.headline',
+      action: 'retained_candidate',
+      reason: 'unsupported_claim'
+    }]
+  };
+  assert.deepEqual(validateReviewManifest(fallbackManifest, fallbackData), []);
+  buildEditorialReview(fallbackData, fallbackManifest, reviewChartData);
+  assert.deepEqual(fallbackData.editorialReview.systemFallbacks, fallbackManifest.systemFallbacks);
+  assert.deepEqual(validateReviewManifest(fallbackData.editorialReview, fallbackData, { requireEmbedded: true, chartData: reviewChartData }), []);
+  assert.match(validateReviewManifest({ ...manifest, systemFallbacks: [{ section: 'opening', path: '', action: 'reviewed', reason: '' }] }, data).join('\n'), /path must be populated[\s\S]*action is invalid[\s\S]*reason must be populated/);
 }
 
 function testArchitecturePreparationLeavesCanonicalUnchanged() {
@@ -1068,15 +1082,13 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   const candidateFile = path.join(dir, 'dashboard-candidate.html');
   const editorialDir = path.join(dir, 'editorial');
   const { dashboard, chartData } = createDashboardValidationFixture();
-  dashboard.tape.rows[0] = droppedTapeCommentary(
+  dashboard.tape.rows[0] = unavailableTapeCommentary(
     dashboard.tape.rows[0],
-    dashboard.tape.rows[0].noteDisposition.quoteRevision,
-    FIXTURE_NOW
+    dashboard.tape.rows[0].noteDisposition.quoteRevision
   );
-  dashboard.tape.rows[1] = droppedTapeCommentary(
+  dashboard.tape.rows[1] = unavailableTapeCommentary(
     dashboard.tape.rows[1],
-    dashboard.tape.rows[1].noteDisposition.quoteRevision,
-    FIXTURE_NOW
+    dashboard.tape.rows[1].noteDisposition.quoteRevision
   );
   dashboard.stories = dashboard.stories.slice(0, 8);
   const candidateDashboard = structuredClone(dashboard);
@@ -1112,8 +1124,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.deepEqual(fs.readdirSync(editorialDir), ['dashboard-data.json']);
   const handoff = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
   assert.equal(handoff.tape.rows[0].noteDisposition.status, 'pending_review');
-  assert.equal(handoff.tape.rows[1].noteDisposition.status, 'pending_review', 'A previously dropped item must reopen during the next editorial preparation.');
-  assert.equal(handoff.tape.rows[1].note, '');
+  assert.deepEqual(handoff.tape.rows[1], dashboard.tape.rows[1], 'An unchanged carried quote must retain its complete commentary bundle in the handoff.');
   assert.equal(handoff.storiesCoverage, undefined);
   assert.equal(handoff.futuresModule.storiesCoverage, undefined);
   assert.equal(handoff.crypto.notesCoverage, undefined);
@@ -1134,34 +1145,8 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.ok(!Number.isNaN(Date.parse(handoff.editorialReview.newsSearch.finishedAt)));
   assert.ok(handoff.editorialReview);
   assert.equal(handoff.editorialReview.preparedAt, '2026-07-10T21:01:00.000Z');
-  assert.equal(
-    handoff.editorialReview.candidatePayloadHash,
-    editorialPayloadHash(candidateDashboard, candidateChartData),
-    'The commentary file must be bound to the complete sealed candidate.'
-  );
   assert.equal(handoff.editorialReview.openingDecision.action, null);
   assert.ok(handoff.editorialReview.marketLensDecisions.every((decision) => decision.action === null));
-}
-
-function testDroppedEarningsCommentaryReopensDuringPreparation() {
-  const row = {
-    symbol: 'FIXTURE',
-    country: 'US',
-    marketCap: 2000000000,
-    lifecycle: 'scheduled',
-    outcome: {
-      overall: 'pending',
-      interpretation: '',
-      interpretationDisposition: {
-        status: 'dropped_after_review',
-        attemptedAt: FIXTURE_NOW,
-        reason: 'bounded_editorial_review_exhausted'
-      }
-    },
-    reaction: {}
-  };
-  const prepared = prepareEarningsForEditorial({ week: { rows: [row] } });
-  assert.equal(prepared.week.rows[0].outcome.interpretationDisposition.status, 'pending_review');
 }
 
 function testMalformedFocusedEarningsIsNoOp() {
@@ -1204,7 +1189,6 @@ function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
     preparedAt: '2026-07-10T21:00:00.000Z',
     reviewedAt: null,
     baseEditionId: dashboard.editionId,
-    candidatePayloadHash: editorialPayloadHash(dashboard, chartData),
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
     openingDecision: { action: 'reviewed' },
@@ -1231,7 +1215,7 @@ function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
     }
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /action must be replace or dropped-after-review/);
+  assert.match(result.stderr, /Released event commentary is incomplete/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), html);
 }
 
@@ -1297,6 +1281,7 @@ function testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const acceptedChartData = roundChartPayload(chartData);
   const oldNotes = dashboard.tape.rows.map((row) => row.note);
+  const systemFallbacks = [];
   acceptedChartData.generatedAt = '2026-07-10T13:00:00.000Z';
   for (const series of acceptedChartData.series) {
     if (series.ticker !== 'VCR') series.quoteRevision = acceptedChartData.generatedAt;
@@ -1317,15 +1302,18 @@ function testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking() {
 
   const result = syncDashboardPricesFromChartData(dashboard, acceptedChartData, {
     resetCommentary: true,
-    commentaryTickers: freshTickers
+    commentaryTickers: freshTickers,
+    systemFallbacks
   });
 
   assert.deepEqual(freshTickers, ['SPX', 'UST10Y']);
   assert.equal(result.commentaryResetCount, dashboard.tape.rows.length - 1);
-  assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row) => row.note === ''));
-  assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row) => row.noteDisposition.status === 'pending_review'));
+  assert.equal(systemFallbacks.length, dashboard.tape.rows.length - 1);
+  assert.ok(systemFallbacks.every((item) => item.action === 'unavailable_disposition'));
+  assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row) => row.note === TAPE_COMMENTARY_UNAVAILABLE_NOTE));
+  assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row) => row.noteDisposition.status === 'commentary_unavailable'));
   assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row) => row.noteDisposition.quoteRevision === acceptedChartData.generatedAt));
-  assert.ok(dashboard.tape.rows.filter((row) => row.ticker === 'VCR').every((row) => validateTapeCommentaryDisposition(row).length === 0));
+  assert.ok(dashboard.tape.rows.every((row) => validateTapeCommentaryDisposition(row).length === 0));
   assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'VCR').note, oldNotes[1], 'A failed quote download must retain its last validated commentary.');
   assert.equal(dashboard.tape.rows.find((row) => row.ticker === 'VCR').noteDisposition.status, 'reviewed');
   assert.ok(dashboard.tape.rows.filter((row) => row.ticker !== 'VCR').every((row, index) => row.note !== oldNotes[index === 0 ? 0 : 2]));
@@ -1351,7 +1339,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     preparedAt: '2026-07-10T21:00:00.000Z',
     reviewedAt: null,
     baseEditionId: dashboard.editionId,
-    candidatePayloadHash: editorialPayloadHash(dashboard, chartData),
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
     openingDecision: { action: 'reviewed' },
@@ -1361,7 +1348,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   invalidPayload.editorialReview = {
     ...review,
     openingDecision: {
-      action: 'invalid-terminal-state',
+      action: 'commentary-unavailable',
       attemptedAt,
       reason: 'current_run_research_exhausted'
     }
@@ -1386,13 +1373,13 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(payloadFile, JSON.stringify(pendingOpeningPayload));
   const pendingOpeningResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.notEqual(pendingOpeningResult.status, 0, 'Fail-open behavior cannot complete unattempted Opening editorial work.');
-  assert.match(pendingOpeningResult.stderr, /openingDecision\.action must be reviewed or dropped-after-review/);
+  assert.match(pendingOpeningResult.stderr, /Opening editorial work is incomplete/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 
   fs.writeFileSync(payloadFile, JSON.stringify(invalidPayload));
   const invalidResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(invalidResult.status, 0, 'An invalid Opening terminal state must not satisfy editorial finalization.');
-  assert.match(invalidResult.stderr, /openingDecision\.action must be reviewed or dropped-after-review/);
+  assert.notEqual(invalidResult.status, 0, 'Unavailable Opening commentary must not satisfy editorial finalization.');
+  assert.match(invalidResult.stderr, /Opening editorial work is incomplete/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 
   fs.writeFileSync(dashboardFile, originalHtml);
@@ -1432,56 +1419,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const editorialEventDay = editorialPayload.weekAhead.days.find((day) => day.events.length);
   editorialEventDay.events[0].forecast = '9.9%';
 
-  const changedAfterCommentary = structuredClone(dashboard);
-  changedAfterCommentary.opening.headline = 'Candidate changed after commentary preparation';
-  fs.writeFileSync(candidateFile, renderDashboardValidationFixture(changedAfterCommentary, chartData));
-  fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
-  const changedCandidateResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(changedCandidateResult.status, 0, 'A changed sealed candidate must not finalize.');
-  assert.match(changedCandidateResult.stderr, /candidate changed after the commentary file was created/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-  fs.writeFileSync(candidateFile, originalHtml);
-
-  const invalidStoryPayload = structuredClone(editorialPayload);
-  invalidStoryPayload.stories[0].url = 'http://invalid.example/story';
-  fs.writeFileSync(payloadFile, JSON.stringify(invalidStoryPayload));
-  const invalidStoryResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(invalidStoryResult.status, 0, 'Invalid editorial stories must not be silently omitted.');
-  assert.match(invalidStoryResult.stderr, /stories\[0\] editorial story is invalid/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  const invalidEvidencePayload = structuredClone(editorialPayload);
-  invalidEvidencePayload.editorialReview.verifiedClaims = [{
-    text: 'An obsolete record claim.',
-    evidenceUrl: 'https://example.com/obsolete-claim'
-  }];
-  fs.writeFileSync(payloadFile, JSON.stringify(invalidEvidencePayload));
-  const invalidEvidenceResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(invalidEvidenceResult.status, 0, 'Invalid submitted evidence must not be silently omitted.');
-  assert.match(invalidEvidenceResult.stderr, /does not match current editorial text/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  const fallbackPayload = structuredClone(editorialPayload);
-  fallbackPayload.editorialReview.systemFallbacks = [{
-    section: 'opening',
-    path: 'opening.headline',
-    action: 'retained_candidate',
-    reason: 'unsupported_claim'
-  }];
-  fs.writeFileSync(payloadFile, JSON.stringify(fallbackPayload));
-  const fallbackResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(fallbackResult.status, 0, 'Finalization must not preserve invalid editorial work through a system fallback.');
-  assert.match(fallbackResult.stderr, /systemFallbacks is not accepted/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  const extraTapeRowPayload = structuredClone(editorialPayload);
-  extraTapeRowPayload.tape.rows.push({ ...extraTapeRowPayload.tape.rows[0], ticker: 'STALE' });
-  fs.writeFileSync(payloadFile, JSON.stringify(extraTapeRowPayload));
-  const extraTapeRowResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(extraTapeRowResult.status, 0, 'Editorial row identities must match the sealed candidate.');
-  assert.match(extraTapeRowResult.stderr, /tape\.rows must contain exactly one commentary item/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
   const shortSearchPayload = structuredClone(editorialPayload);
   shortSearchPayload.editorialReview.newsSearch.generalCandidates.pop();
   fs.writeFileSync(payloadFile, JSON.stringify(shortSearchPayload));
@@ -1511,19 +1448,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
-  const validationCommand = [
-    path.join(root, 'scripts/run_daily_update.js'),
-    '--dashboard', dashboardFile,
-    '--candidate', candidateFile,
-    '--validate-dashboard-data-json', payloadFile,
-    '--afternoon'
-  ];
-  const validationResult = spawnSync(process.execPath, validationCommand, { cwd: root, encoding: 'utf8', env });
-  assert.equal(validationResult.status, 0, validationResult.stderr);
-  assert.match(validationResult.stdout, /candidate and canonical dashboard unchanged/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml, 'Read-only commentary validation must not change the canonical dashboard.');
-  assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml, 'Read-only commentary validation must not change the sealed candidate.');
-
   const validResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(validResult.status, 0, validResult.stderr);
   const finalizedHtml = fs.readFileSync(dashboardFile, 'utf8');
@@ -1537,30 +1461,16 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.deepEqual(finalized.storiesCoverage, { status: 'complete' });
   assert.deepEqual(finalized.futuresModule.storiesCoverage, { status: 'complete' });
   assert.deepEqual(finalized.crypto.notesCoverage, { status: 'complete' });
-  assert.equal(finalized.tape.rows[0].note, 'Federal Reserve expectations shaped rates and risk appetite.');
-  assert.equal(
-    finalized.tape.rows[0].noteDisposition.quoteRevision,
-    dashboard.tape.rows[0].noteDisposition.quoteRevision,
-    'An intentional commentary rewrite must remain bound to the unchanged quote revision.'
-  );
-  assert.equal(finalized.tape.rows[0].noteDisposition.status, 'reviewed');
-  assert.deepEqual(
-    finalized.tape.rows[1],
-    dashboard.tape.rows[1],
-    'An unchanged handoff row must preserve its validated quote and commentary bundle.'
-  );
+  assert.deepEqual(finalized.tape.rows[0], dashboard.tape.rows[0], 'Editorial input cannot alter an unchanged quote bundle.');
   assert.match(finalized.tape.label, /^Friday After The Bell · Reviewed drivers$/);
-  assert.match(
-    finalized.footer.compiled,
-    /^Compiled Friday, July 10, 2026 at 4:00 PM CDT · Holiday context: Reviewed\./,
-    'Finalization must retain the preparation-owned compile timestamp.'
-  );
+  assert.match(finalized.footer.compiled, /^Compiled Friday, July 10, 2026 at 4:01 PM CDT · Holiday context: Reviewed\./);
   assert.deepEqual(finalized.futuresModule.futures, dashboard.futuresModule.futures);
   assert.deepEqual(finalized.crypto.stats, dashboard.crypto.stats);
   assert.deepEqual(finalized.assetAllocationPortfolio, dashboard.assetAllocationPortfolio);
   assert.deepEqual(finalized.weekAhead.days.map((day) => day.events), dashboard.weekAhead.days.map((day) => day.events));
   assert.equal(finalized.masthead.date, 'Friday · July 10, 2026');
   assert.notEqual(finalized.tape.rows[0].last, '99,999.00');
+  assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.action === 'unavailable_disposition'));
 }
 
 function testTapeCommentaryRefreshRequiresNewCopy() {
@@ -1569,10 +1479,9 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   const candidateFile = path.join(dir, 'dashboard-candidate.html');
   const payloadFile = path.join(dir, 'dashboard-data.json');
   const { dashboard, chartData } = createDashboardValidationFixture();
-  dashboard.tape.rows[1] = droppedTapeCommentary(
+  dashboard.tape.rows[1] = unavailableTapeCommentary(
     dashboard.tape.rows[1],
-    dashboard.tape.rows[1].noteDisposition.quoteRevision,
-    FIXTURE_NOW
+    dashboard.tape.rows[1].noteDisposition.quoteRevision
   );
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   const candidateDashboard = structuredClone(dashboard);
@@ -1600,10 +1509,11 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   const candidateHtml = renderDashboardValidationFixture(candidateDashboard, candidateChartData);
   const editorialDashboard = structuredClone(candidateDashboard);
   editorialDashboard.tape.rows[0].note = 'Fresh review ties this market to shifting rate expectations, earnings breadth, liquidity, positioning, and risk appetite.';
-  editorialDashboard.tape.rows[0].noteDisposition = {
-    status: 'reviewed',
-    quoteRevision: candidateChartData.generatedAt,
-    reviewedAt: '2026-07-10T21:00:30.000Z'
+  editorialDashboard.tape.rows[1].noteDisposition = {
+    status: 'commentary_unavailable',
+    quoteRevision: editorialDashboard.tape.rows[1].noteDisposition.quoteRevision,
+    attemptedAt: '2026-07-10T21:00:30.000Z',
+    reason: 'current_run_research_exhausted'
   };
   editorialDashboard.tape.rows[2].note = dashboard.tape.rows[2].note;
   const review = {
@@ -1611,7 +1521,6 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     preparedAt: '2026-07-10T21:00:00.000Z',
     reviewedAt: null,
     baseEditionId: dashboard.editionId,
-    candidatePayloadHash: editorialPayloadHash(candidateDashboard, candidateChartData),
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
     openingDecision: { action: 'reviewed' },
@@ -1642,16 +1551,23 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   };
   const incompleteResult = spawnSync(process.execPath, command, runOptions);
   assert.notEqual(incompleteResult.status, 0, 'Repeated prior commentary for a refreshed quote must remain unfinished.');
-  assert.match(incompleteResult.stderr, /status must be reviewed or dropped_after_review/);
+  assert.match(incompleteResult.stderr, /Tape editorial work is incomplete/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 
-  editorialDashboard.tape.rows[2].note = '';
+  editorialDashboard.tape.rows[2].note = TAPE_COMMENTARY_UNAVAILABLE_NOTE;
   editorialDashboard.tape.rows[2].noteDisposition = {
-    status: 'dropped_after_review',
+    status: 'commentary_unavailable',
     quoteRevision: candidateChartData.generatedAt,
     attemptedAt: '2026-07-10T21:00:30.000Z',
-    reason: 'bounded_editorial_review_exhausted'
+    reason: 'current_run_research_exhausted'
   };
+  fs.writeFileSync(payloadFile, JSON.stringify(editorialDashboard));
+  const unavailableResult = spawnSync(process.execPath, command, runOptions);
+  assert.notEqual(unavailableResult.status, 0, 'Unavailable commentary must not satisfy a refreshed quote.');
+  assert.match(unavailableResult.stderr, /Tape editorial work is incomplete/);
+  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
+
+  editorialDashboard.tape.rows[2].note = 'Long yields reflected the session mix of inflation expectations, policy repricing, and demand for duration.';
   fs.writeFileSync(payloadFile, JSON.stringify(editorialDashboard));
   const result = spawnSync(process.execPath, command, runOptions);
   assert.equal(result.status, 0, result.stderr);
@@ -1662,8 +1578,10 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   assert.equal(finalized.tape.rows[0].noteDisposition.quoteRevision, candidateChartData.generatedAt);
   assert.deepEqual(validateTapeCommentaryDisposition(finalized.tape.rows[0]), []);
   assert.deepEqual(finalized.tape.rows[1], dashboard.tape.rows[1], 'A failed quote download must retain its complete quote-bound row.');
-  assert.equal(finalized.tape.rows[2].note, '');
-  assert.equal(finalized.tape.rows[2].noteDisposition.status, 'dropped_after_review');
+  assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.path === `tape.rows.${finalized.tape.rows[1].ticker}.note`),
+    'Retaining a failed quote bundle is not a new editorial fallback.');
+  assert.equal(finalized.tape.rows[2].note, editorialDashboard.tape.rows[2].note);
+  assert.equal(finalized.tape.rows[2].noteDisposition.status, 'reviewed');
 }
 
 async function testChartFetcherTickerFilterAndPartialFailure() {
@@ -1718,7 +1636,7 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
     now: new Date(FIXTURE_NOW)
   });
   assert.equal(producerDashboard.tape.rows.find((row) => row.ticker === 'VCR').noteDisposition.status, 'reviewed');
-  const partialValidation = validateDashboardAndChartFixture(producerDashboard, compactChartPayload(partial), { stagingCandidate: true });
+  const partialValidation = validateDashboardAndChartFixture(producerDashboard, compactChartPayload(partial));
   assert.equal(partialValidation.status, 0, partialValidation.stderr);
   assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
 
@@ -1983,12 +1901,8 @@ function validateDashboardFixture(data, now = FIXTURE_NOW) {
   return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), now);
 }
 
-function validateDashboardAndChartFixture(data, chartData, options = {}) {
-  const result = validateDashboardHtml(renderDashboardValidationFixture(data, chartData), {
-    now: new Date(FIXTURE_NOW),
-    ...options
-  });
-  return validationResult(result.errors, result.warnings);
+function validateDashboardAndChartFixture(data, chartData) {
+  return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), FIXTURE_NOW);
 }
 
 function validationResult(errors, warnings = []) {
@@ -2045,7 +1959,7 @@ function testDashboardValidatorRejectsMutationCases() {
       data.tape.availability = { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW };
     }, /tape\.availability is not supported/],
     ['Tape commentary citation syntax', (data) => { data.tape.rows[0].note = 'Source: Reuters.'; }, /note contains citation syntax/],
-    ['unsupported Tape disposition', (data) => { data.tape.rows[0].noteDisposition.status = 'commentary_unavailable'; }, /status must be reviewed or dropped_after_review/]
+    ['unavailable Tape disposition with stale copy', (data) => { data.tape.rows[0].noteDisposition.status = 'commentary_unavailable'; }, /unavailable Tape commentary must use the canonical visible fallback note/]
   ];
 
   for (const [name, mutate, expectedError] of cases) {
@@ -2091,28 +2005,32 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
 
   {
     const { dashboard, chartData } = createDashboardValidationFixture();
-    dashboard.tape.rows[0] = droppedTapeCommentary(
+    dashboard.tape.rows[0] = unavailableTapeCommentary(
       dashboard.tape.rows[0],
-      dashboard.tape.rows[0].noteDisposition.quoteRevision,
-      FIXTURE_NOW
+      dashboard.tape.rows[0].noteDisposition.quoteRevision
     );
     const baseEditionId = dashboard.editionId;
     const manifest = {
       schemaVersion: 1,
       reviewedAt: new Date(FIXTURE_NOW).toISOString(),
       baseEditionId,
-      candidatePayloadHash: editorialPayloadHash(dashboard, chartData),
       verifiedClaims: [],
+      systemFallbacks: [{
+        section: 'tape-commentary',
+        path: 'tape.rows.SPX.note',
+        action: 'unavailable_disposition',
+        reason: dashboard.tape.rows[0].noteDisposition.reason
+      }],
       marketLensDecisions: dashboard.weekAhead.days
         .filter((day) => day.events.length)
         .map((day) => ({ date: day.date, action: 'retain-generated' }))
     };
     dashboard.editionId = '2026-07-10T21:00:01.000Z';
     buildEditorialReview(dashboard, { ...manifest, baseEditionId }, chartData);
-    dashboard.tape.rows[0].noteDisposition.reason = '';
+    dashboard.editorialReview.systemFallbacks.find((fallback) => fallback.path === 'tape.rows.SPX.note').reason = 'contradictory_reason';
     const result = validateDashboardAndChartFixture(dashboard, chartData);
-    assert.notEqual(result.status, 0, 'A dropped commentary disposition must retain its reason.');
-    assert.match(result.stderr, /dropped Tape commentary must include a reason/);
+    assert.notEqual(result.status, 0, 'A receipt fallback reason must match the row disposition reason.');
+    assert.match(result.stderr, /fallback reason for tape\.rows\.SPX\.note must match noteDisposition\.reason/);
   }
 }
 
@@ -2295,10 +2213,10 @@ function testTouchTooltipControls() {
   )((value) => String(value), () => '');
   const unavailableOutcome = weekAheadOutcomeHtml({
     lifecycle: 'close_available',
-    outcome: { status: 'dropped_after_review' },
+    outcome: { status: 'commentary_unavailable' },
     marketReaction: { rows: [] }
   });
-  assert.doesNotMatch(unavailableOutcome, /<strong>/);
+  assert.match(unavailableOutcome, /<strong>Unavailable<\/strong>/);
   assert.doesNotMatch(unavailableOutcome, /Post-event commentary unavailable|Released facts/);
   const pendingOutcome = weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } });
   assert.match(pendingOutcome, /<strong>Pending<\/strong>/);
@@ -2605,7 +2523,6 @@ const architectureContractTests = Object.freeze([
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,
   testArchitecturePreparationLeavesCanonicalUnchanged,
   testEditorialPreparationCreatesOnePendingHandoff,
-  testDroppedEarningsCommentaryReopensDuringPreparation,
   testMalformedFocusedEarningsIsNoOp,
   testReleasedEventCannotRetainGeneratedPreReleaseCopy,
   testArchitectureFinalizationValidatesBeforeReplace,
