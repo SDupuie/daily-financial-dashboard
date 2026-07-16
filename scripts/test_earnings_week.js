@@ -14,6 +14,7 @@ const {
   computeEarningsWeekCounts,
   earningsRowKey,
   emptyEarningsApiUsage,
+  isDisplayEligibleEarningsRow,
   metricResult,
   mergeUnchangedEarningsNarrative,
   narrativeEditorialComplete,
@@ -27,6 +28,7 @@ const {
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
   fetchEarningsApiCalendar,
+  finnhubUsSymbolsFromResponse,
   finnhubCalendarFromResponse,
   readScheduleConfirmations,
   verifyEarningsApiRecoveryRows,
@@ -61,6 +63,20 @@ function profile(symbol, marketCap = 5000000000) {
     shareOutstanding: 100,
     industry: 'Technology',
     error: ''
+  };
+}
+
+function usListing(symbol, overrides = {}) {
+  return {
+    market: 'US',
+    symbol,
+    displaySymbol: symbol,
+    mic: 'XNGS',
+    type: 'Common Stock',
+    currency: 'USD',
+    figi: `FIGI-${symbol}`,
+    shareClassFIGI: `SHARE-${symbol}`,
+    ...overrides
   };
 }
 
@@ -132,7 +148,7 @@ function embeddedWeekFixture() {
 function deterministicVerifiedWeekFixture() {
   // Keep one fully synthetic validator fixture available so this contract test
   // does not depend on whatever live/generated week artifact happens to exist.
-  const stagedRows = buildRows([finnhubRow('VERIFY')], [profile('VERIFY')]);
+  const stagedRows = buildRows([finnhubRow('VERIFY')], [profile('VERIFY')], { usListings: [usListing('VERIFY')] });
   stagedRows[0].sourceAudit.scheduleVerification = {
     status: 'corroborated',
     primaryDate: stagedRows[0].reportDate,
@@ -241,15 +257,83 @@ function testMetricComparisonsUseDisplayedPrecision() {
   const [row] = buildRows([finnhubRow('ROUND', {
     eps: { estimate: 0.3329, actual: 0.33 },
     revenue: { estimate: 2384545147, actual: 2384900000 }
-  })], [profile('ROUND')]);
+  })], [profile('ROUND')], { usListings: [usListing('ROUND')] });
   assert.equal(row.eps.result, 'met');
   assert.equal(row.revenue.result, 'met');
   assert.equal(row.outcome.overall, 'met');
 }
 
+function testUsListingEligibilityUsesExactDirectorySymbol() {
+  const directory = finnhubUsSymbolsFromResponse({
+    ok: true,
+    status: 200,
+    ms: 4,
+    data: [{
+      symbol: 'ADR',
+      displaySymbol: 'ADR',
+      mic: 'XNGS',
+      type: 'ADR',
+      currency: 'USD',
+      figi: 'ADR-FIGI'
+    }, {
+      symbol: 'OTCADR',
+      displaySymbol: 'OTCADR',
+      mic: 'OTCM',
+      type: 'ADR',
+      currency: 'USD'
+    }]
+  });
+  assert.equal(directory.ok, true);
+  const adrListing = directory.listings.find((listing) => listing.symbol === 'ADR');
+  const foreignProfile = {
+    ...profile('ADR', 500000000000),
+    ticker: 'ADR.AS',
+    exchange: 'NYSE EURONEXT - EURONEXT AMSTERDAM',
+    country: 'NL'
+  };
+  const [row] = buildRows([finnhubRow('ADR')], [foreignProfile], { usListings: directory.listings });
+  assert.equal(row.symbol, 'ADR');
+  assert.equal(row.sourceAudit.finnhubProfile.ticker, 'ADR.AS');
+  assert.deepEqual(row.sourceAudit.finnhubUsListing, adrListing);
+  assert.equal(isDisplayEligibleEarningsRow(row), true, 'Exact U.S. listing evidence must outrank issuer domicile and the profile primary ticker.');
+
+  const candidates = buildSecondaryRecoveryCandidates(
+    [],
+    [{ date: '2026-01-06', rows: [earningsApiRow('ADR')] }],
+    [foreignProfile],
+    directory.listings
+  );
+  assert.deepEqual(candidates.map((task) => task.symbol), ['ADR']);
+  assert.deepEqual(candidates[0].sourceAudit.finnhubUsListing, adrListing);
+
+  const [foreignOnly] = buildRows([finnhubRow('FOREIGN')], [{
+    ...profile('FOREIGN'),
+    ticker: 'FOREIGN.L',
+    exchange: 'LONDON STOCK EXCHANGE',
+    country: 'GB'
+  }], { usListings: directory.listings });
+  assert.equal(isDisplayEligibleEarningsRow(foreignOnly), false, 'A foreign profile without an exact U.S. directory match must stay hidden.');
+
+  const [otc] = buildRows([finnhubRow('OTCADR')], [profile('OTCADR')], { usListings: directory.listings });
+  assert.equal(isDisplayEligibleEarningsRow(otc), false, 'An exact OTC directory match must remain ineligible.');
+
+  const receiptBound = deterministicVerifiedWeekFixture();
+  receiptBound.summary.fetches.finnhubUsSymbols = { ok: true, status: 200, rows: 2, cacheHit: false, error: '' };
+  delete receiptBound.rows[0].sourceAudit.finnhubUsListing;
+  assert.match(
+    validateEarningsWeekPayload(receiptBound).join('\n'),
+    /finnhubUsListing must be present on every row/,
+    'A slate carrying the U.S. symbol-directory receipt must carry listing evidence on every row.'
+  );
+}
+
 function testPrimaryScheduleVerification() {
   const range = { from: '2026-01-05', to: '2026-01-09' };
-  const baseRows = (symbol) => buildRows([finnhubRow(symbol, { reportDate: '2026-01-06' })], [profile(symbol)]);
+  const baseRows = (symbol) => buildRows(
+    [finnhubRow(symbol, { reportDate: '2026-01-06' })],
+    [profile(symbol)],
+    { usListings: [usListing(symbol)] }
+  );
   const matching = verifyFinnhubScheduleRows(baseRows('MATCH'), [{
     date: '2026-01-06', rows: [earningsApiRow('MATCH', { reportDate: '2026-01-06' })]
   }], range);
@@ -588,7 +672,8 @@ function testSecondaryRecoveryAndRevenueComparison() {
   const secondaryRecoveryCandidates = buildSecondaryRecoveryCandidates(
     [anchor],
     [{ date: anchor.reportDate, rows: [recoveredFullCalendar, recoveredEpsOnlyCalendar] }],
-    profiles
+    profiles,
+    [usListing('ANCHOR'), usListing('RECOVERFULL'), usListing('RECOVEREPS')]
   );
   const companyFetches = [
     {
@@ -659,7 +744,12 @@ function testSecondaryRecoveryAndRevenueComparison() {
 }
 
 function testApplyCompanyReleaseResolution() {
-  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates([], [{ date: '2026-01-06', rows: [earningsApiRow('RECOVERFULL')] }], [profile('RECOVERFULL')]);
+  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
+    [],
+    [{ date: '2026-01-06', rows: [earningsApiRow('RECOVERFULL')] }],
+    [profile('RECOVERFULL')],
+    [usListing('RECOVERFULL')]
+  );
   const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, [{
     symbol: 'RECOVERFULL',
     ok: true,
@@ -781,7 +871,11 @@ function testApplyCompanyReleaseResolution() {
 }
 
 function testApplyEarningsNarrative() {
-  const rows = buildRows([finnhubRow('NARRATIVE')], [profile('NARRATIVE')]);
+  const rows = buildRows(
+    [finnhubRow('NARRATIVE')],
+    [profile('NARRATIVE')],
+    { usListings: [usListing('NARRATIVE')] }
+  );
   const source = {
     generatedAt: '2026-01-06T22:00:00.000Z',
     range: {
@@ -972,7 +1066,7 @@ async function testResultRefreshDoesNotRebuildSlate() {
       estimate: 1000000000,
       actual: null
     }
-  })], [profile('REFRESH')]);
+  })], [profile('REFRESH')], { usListings: [usListing('REFRESH')] });
   const source = {
     schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
     generatedAt: '2026-01-06T12:00:00.000Z',
@@ -1174,6 +1268,7 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
     name: 'RETAIN Corp',
     ticker: 'RETAIN'
   };
+  retained.sourceAudit.finnhubUsListing = usListing('RETAIN');
   source.rows.push(retained);
   source.narrativeApply.applied.push({ symbol: 'RETAIN', reportDate: retained.reportDate });
   source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
@@ -1246,7 +1341,8 @@ async function testNeedsReviewPromotesOfficialMetricsIndependently() {
     assert.equal(row.sourceStatus, 'partial');
     assert.equal(row.sourceAudit.companyReleaseResolution.status, 'needs_review');
     assert.deepEqual(output.companyReleaseApply.applied, []);
-    assert.deepEqual(validateEarningsWeekPayload(output), [], `${metric}-only official promotion must remain valid staging data.`);
+    const validationErrors = validateEarningsWeekPayload(output);
+    assert.deepEqual(validationErrors, [], `${metric}-only official promotion must remain valid staging data: ${validationErrors.join(' ')}`);
     assert.equal(output.narrativeApply, undefined, 'A newly promoted official actual must invalidate the prior narrative receipt.');
 
     const providerOtherActual = otherMetric === 'eps' ? 2.5 : 1234567890;
@@ -1355,6 +1451,7 @@ function companyReleaseTaskFixture(source) {
       instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub. Do not override Finnhub rows.',
       permittedUses: ['missing_row_discovery', 'eps_estimate_recovery', 'eps_actual_recovery', 'revenue_estimate_recovery', 'revenue_actual_recovery'],
       sourceAudit: {
+        finnhubUsListing: row.sourceAudit.finnhubUsListing,
         earningsApiCalendar: {
           reportDate: row.reportDate,
           company: row.company,
@@ -1636,6 +1733,7 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
 async function main() {
   testFinnhubPrimaryAcceptance();
   testMetricComparisonsUseDisplayedPrecision();
+  testUsListingEligibilityUsesExactDirectorySymbol();
   testPrimaryScheduleVerification();
   testScheduleReviewAndPreparationFallbacks();
   await testEarningsApiCalendarStopsAfterQuotaResponse();

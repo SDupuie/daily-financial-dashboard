@@ -408,6 +408,7 @@ async function fetchPortfolioRows(args, dependencies = {}) {
   );
   const currentMonth = monthKey(now);
   const canonical = readCanonicalPortfolio(args.input);
+  const canonicalLastValidatedAt = String(canonical?.availability?.lastValidatedAt || canonical?.compiledAt || '').trim();
   const priorByTicker = new Map(
     (canonical?.month === currentMonth && Array.isArray(canonical?.rows) ? canonical.rows : [])
       .map((row) => [row?.ticker, row])
@@ -419,12 +420,14 @@ async function fetchPortfolioRows(args, dependencies = {}) {
     failures.push({ ticker: holding.symbol, message: result.reason?.message || 'source unavailable' });
     const prior = priorByTicker.get(holding.symbol);
     if (prior) {
+      const lastValidatedAt = String(prior.availability?.lastValidatedAt || canonicalLastValidatedAt).trim();
       return {
         ...prior,
         availability: {
           status: 'carried_forward',
           reason: 'source_refresh_failed',
-          checkedAt: now.toISOString()
+          checkedAt: now.toISOString(),
+          ...(lastValidatedAt ? { lastValidatedAt } : {})
         }
       };
     }
@@ -495,13 +498,15 @@ function buildAssetAllocationFallback(canonicalPortfolio, { month, asOf, checked
     && Array.isArray(canonicalPortfolio?.rows)
     && canonicalPortfolio.rows.length === HOLDINGS.length;
   if (sameMonth) {
+    const lastValidatedAt = String(canonicalPortfolio?.availability?.lastValidatedAt || canonicalPortfolio?.compiledAt || '').trim();
     return {
       ...structuredClone(canonicalPortfolio),
       portfolioMtdReturnStale: true,
       availability: {
         status: 'carried_forward',
         reason: 'source_refresh_failed',
-        checkedAt: timestamp
+        checkedAt: timestamp,
+        ...(lastValidatedAt ? { lastValidatedAt } : {})
       }
     };
   }

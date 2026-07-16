@@ -78,7 +78,8 @@ const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
-const SECTION_COMMAND_TIMEOUT_MS = 15 * 60_000;
+const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const EARNINGS_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
   afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
@@ -840,6 +841,7 @@ function applyCryptoStats(data, payload) {
     throw new Error('Generated crypto stats payload is missing stats[].');
   }
   data.crypto.stats = stats;
+  if (payload.fetchedAt) data.crypto.statsFetchedAt = payload.fetchedAt;
   if (payload.availability) data.crypto.availability = payload.availability;
   else delete data.crypto.availability;
 }
@@ -1848,7 +1850,7 @@ function main() {
 
   const cryptoPreparation = runWithSectionFallback(
     () => runCommand('node', ['scripts/fetch_crypto_stats.js', '--input', args.sourceDashboard]),
-    () => buildCryptoStatsFallback(canonicalDashboardData.crypto, checkedAt),
+    () => buildCryptoStatsFallback(canonicalDashboardData.crypto, checkedAt, 'source_refresh_failed', canonicalDashboardData.editionId),
     {
       label: 'Crypto stats',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'crypto_stats.json')),
@@ -1946,14 +1948,14 @@ function main() {
         '--from', earningsRange.from,
         '--to', earningsRange.to,
         '--as-of', checkedAt.toISOString()
-      ]);
+      ], { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS });
     }
     reportPendingEarningsScheduleReviews(pendingEarningsScheduleReviews(undefined, earningsRange));
     runCommand('node', [
       'scripts/earnings_week.js',
       'refresh',
       '--as-of', checkedAt.toISOString()
-    ]);
+    ], { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS });
   }, () => buildEarningsPreparationFallback(canonicalWeek, earningsRange, { checkedAt }), {
     label: 'Earnings',
     readFresh: () => readJson(EARNINGS_WEEK_PATH),

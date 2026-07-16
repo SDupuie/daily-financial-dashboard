@@ -190,7 +190,7 @@ function createDashboardValidationFixture() {
     series: chartSeries
   });
   const stories = Array.from({ length: 9 }, (_item, index) => story('market', index + 1));
-  const cryptoNotes = Array.from({ length: 4 }, (_item, index) => story('crypto', index + 1));
+  const cryptoNotes = Array.from({ length: 6 }, (_item, index) => story('crypto', index + 1));
   const futuresStories = Array.from({ length: 3 }, (_item, index) => ({
     ...story('futures', index + 1),
     tag: 'Futures',
@@ -219,6 +219,7 @@ function createDashboardValidationFixture() {
       },
       stories,
       crypto: {
+        statsFetchedAt: FIXTURE_NOW,
         stats: [
           { sym: 'TOTAL', name: 'Crypto Market Cap', price: '$1.00T', delta: '+$0.01T' },
           { sym: 'F&G', name: 'Fear & Greed', price: '50', chg: 'Neutral' },
@@ -368,6 +369,7 @@ function testDeterministicSectionFallbackContracts() {
   applyCryptoStats(dashboard, buildCryptoStatsFallback(dashboard.crypto, checkedAt));
   assert.equal(dashboard.crypto.availability.status, 'carried_forward');
   assert.ok(dashboard.crypto.stats.every((row) => row.availability?.status === 'carried_forward'));
+  assert.ok(dashboard.crypto.stats.every((row) => row.availability?.lastValidatedAt === FIXTURE_NOW));
 
   const assetFallback = buildAssetAllocationFallback(dashboard.assetAllocationPortfolio, {
     month: '2026-08',
@@ -757,8 +759,10 @@ async function testUpdaterQuoteAndCryptoPatches() {
   assert.equal(partial.stats.find((row) => row.sym === 'F&G').price, '55');
   assert.equal(partial.stats.find((row) => row.sym === 'TOTAL').price, '$2.00T');
   assert.equal(partial.stats.find((row) => row.sym === 'ALTSEASON').availability.status, 'carried_forward');
+  assert.equal(partial.stats.find((row) => row.sym === 'ALTSEASON').availability.lastValidatedAt, FIXTURE_NOW);
   assert.deepEqual(validateCryptoStatsPayload(partial), []);
   applyCryptoStats(dashboard, partial);
+  assert.equal(dashboard.crypto.statsFetchedAt, '2026-07-10T21:05:00.000Z');
   assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
   assert.equal(fs.readFileSync(input, 'utf8'), originalInput);
 
@@ -814,6 +818,7 @@ async function testUpdaterModulePatches() {
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-asset-partial-');
   const input = path.join(dir, 'dashboard.html');
   const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.assetAllocationPortfolio.compiledAt = '2026-07-10T20:55:00.000Z';
   dashboard.assetAllocationPortfolio.month = '2026-07';
   const originalInput = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(input, originalInput);
@@ -828,6 +833,7 @@ async function testUpdaterModulePatches() {
   assert.equal(partial.availability.status, 'partial');
   assert.deepEqual(partial.availability.failures, [{ ticker: 'VTI', message: 'fixture holding failure' }]);
   assert.equal(partial.rows.find((row) => row.ticker === 'VTI').availability.status, 'carried_forward');
+  assert.equal(partial.rows.find((row) => row.ticker === 'VTI').availability.lastValidatedAt, '2026-07-10T20:55:00.000Z');
   assert.deepEqual(partial.rows.find((row) => row.ticker === 'VEA'), rows.find((row) => row.ticker === 'VEA'));
   assert.deepEqual(validateAssetAllocationPortfolioPayload(partial), []);
   applyAssetAllocationPortfolio(dashboard, partial);
@@ -1817,8 +1823,10 @@ function testDashboardEmbeddedRuntimeParses() {
 
 function testEarningsOutcomeLifecycleRendering() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
-  const source = extractDashboardRuntimeTestBlock(html, 'earnings-outcome-lifecycle');
-  const { earningsOutcomeInterpretation } = Function(`${source}\nreturn { earningsOutcomeInterpretation };`)();
+  const outcomeSource = extractDashboardRuntimeTestBlock(html, 'earnings-outcome-lifecycle');
+  const reactionSource = extractDashboardRuntimeTestBlock(html, 'earnings-reaction-note');
+  const { earningsOutcomeInterpretation } = Function(`${outcomeSource}\nreturn { earningsOutcomeInterpretation };`)();
+  const { earningsReactionNote } = Function(`${reactionSource}\nreturn { earningsReactionNote };`)();
 
   assert.equal(earningsOutcomeInterpretation({
     lifecycle: 'scheduled',
@@ -1835,7 +1843,23 @@ function testEarningsOutcomeLifecycleRendering() {
   assert.equal(earningsOutcomeInterpretation({
     lifecycle: 'released_awaiting_close',
     outcome: { interpretation: '' }
-  }), 'Editorial commentary required');
+  }), '');
+  assert.equal(earningsReactionNote({
+    lifecycle: 'close_available',
+    reaction: { status: 'computed', note: 'Verified reaction interpretation.' }
+  }), 'Verified reaction interpretation.');
+  assert.equal(earningsReactionNote({
+    lifecycle: 'close_available',
+    reaction: { status: 'unavailable', note: '' }
+  }), '');
+  assert.equal(earningsReactionNote({ lifecycle: 'scheduled', reaction: { status: 'pending' } }), 'Not reported yet');
+  assert.equal(earningsReactionNote({ lifecycle: 'awaiting_actual', reaction: { status: 'pending' } }), 'Awaiting results');
+  assert.equal(earningsReactionNote({
+    lifecycle: 'released_awaiting_close',
+    reaction: { status: 'awaiting_close', basis: 'next_session_close' }
+  }), 'Awaiting next-session close');
+  assert.match(html, /No covered earnings scheduled\./);
+  assert.doesNotMatch(html, /Editorial commentary required|Reaction commentary unavailable|Reaction window unavailable|No display-eligible earnings|canonical source may contain smaller rows/);
 }
 
 function testMarketLensReactionOpensChartBelowDay() {
@@ -2012,6 +2036,19 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
 
 function testTouchTooltipControls() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const localRefreshStatusSource = extractDashboardRuntimeTestBlock(html, 'local-refresh-status');
+  const { localRefreshStatusText, localRefreshResultMessage } = Function(
+    `${localRefreshStatusSource}\nreturn { localRefreshStatusText, localRefreshResultMessage };`
+  )();
+  const localRefreshFixture = { generatedAt: FIXTURE_NOW };
+  assert.equal(localRefreshStatusText(localRefreshFixture), '8:30 AM CT');
+  assert.equal(localRefreshResultMessage(localRefreshFixture), 'Local market data updated · Checked 8:30 AM CT');
+  assert.equal(
+    localRefreshResultMessage({ ...localRefreshFixture, partial: true }),
+    'Local market data partial · Available updates applied · Checked 8:30 AM CT'
+  );
+  assert.equal(localRefreshResultMessage(localRefreshFixture, 'cached'), 'Cached local market data shown · Checked 8:30 AM CT');
+  assert.equal(localRefreshResultMessage(localRefreshFixture, 'embedded'), 'Embedded market data shown · Checked 8:30 AM CT');
   const source = extractDashboardRuntimeTestBlock(html, 'touch-tooltip-controls');
   const makeButton = () => ({
     attributes: {},
@@ -2103,17 +2140,127 @@ function testTouchTooltipControls() {
   assert.match(html, /\.stale-info-button\s*\{[\s\S]*?width: 16px;[\s\S]*?height: 16px;/);
   assert.match(html, /transform: translateX\(var\(--week-forecast-tooltip-shift-x, 0px\)\)/);
 
+  const earningsProvenanceSource = extractDashboardRuntimeTestBlock(html, 'earnings-provenance');
+  const { earningsRowNoticeHtml } = Function(
+    'esc',
+    `${earningsProvenanceSource}\nreturn { earningsRowNoticeHtml };`
+  )((value) => String(value));
+  assert.equal(earningsRowNoticeHtml({ scheduleVerificationStatus: 'corroborated' }), '');
+  const retainedEarningsMarkup = earningsRowNoticeHtml({ lastValidatedAt: FIXTURE_NOW });
+  assert.match(retainedEarningsMarkup, /Last validated earnings data: Jul 10, 8:30 AM CT\./);
+  const unconfirmedEarningsMarkup = earningsRowNoticeHtml({ scheduleVerificationStatus: 'primary_only' });
+  assert.match(unconfirmedEarningsMarkup, /Report date is unconfirmed\./);
+  assert.doesNotMatch(unconfirmedEarningsMarkup, /Finnhub|EarningsAPI/);
+  const combinedEarningsMarkup = earningsRowNoticeHtml({
+    lastValidatedAt: FIXTURE_NOW,
+    scheduleVerificationStatus: 'secondary_only'
+  });
+  assert.match(combinedEarningsMarkup, /Last validated earnings data: Jul 10, 8:30 AM CT\. Report date is unconfirmed\./);
+  assert.doesNotMatch(combinedEarningsMarkup, /Finnhub|EarningsAPI/);
+  assert.match(html, /lastValidatedAt: week\?\.availability\?\.status === 'carried_forward' \? week\.generatedAt : ''/);
+
+  const earningsUnavailableSource = extractDashboardRuntimeTestBlock(html, 'earnings-unavailable');
+  const { earningsUnavailableHtml } = Function(
+    `${earningsUnavailableSource}\nreturn { earningsUnavailableHtml };`
+  )();
+  const earningsUnavailableMarkup = earningsUnavailableHtml();
+  assert.match(earningsUnavailableMarkup, /<strong>Unavailable<\/strong>/);
+  assert.doesNotMatch(earningsUnavailableMarkup, /refresh|calendar source|week data|retry|provider/i);
+  assert.doesNotMatch(html, /Earnings refresh unavailable; showing the last validated slate|Earnings calendar source unavailable for this week|Earnings week data unavailable/);
+  assert.match(html, /week\.availability\?\.status === 'unavailable'[\s\S]*?return earningsUnavailableHtml\(\)/);
+
+  const weekAvailabilityInfoSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-availability-info');
+  const { weekAheadAvailabilityState, weekAheadAvailabilityInfoHtml } = Function(
+    'esc',
+    `${weekAvailabilityInfoSource}\nreturn { weekAheadAvailabilityState, weekAheadAvailabilityInfoHtml };`
+  )((value) => String(value));
+  const weekStatusFixture = {
+    range: { timeZone: 'America/Chicago' },
+    source: { status: 'fresh', fetchedAt: FIXTURE_NOW }
+  };
+  assert.equal(weekAheadAvailabilityState(weekStatusFixture), 'fresh');
+  assert.equal(weekAheadAvailabilityInfoHtml(weekStatusFixture), '');
+  const cachedWeekMarkup = weekAheadAvailabilityInfoHtml({
+    ...weekStatusFixture,
+    source: { ...weekStatusFixture.source, status: 'cached' }
+  });
+  assert.match(cachedWeekMarkup, /data-stale-button/);
+  assert.match(cachedWeekMarkup, /Week Ahead numeric data is stale/);
+  assert.match(cachedWeekMarkup, /Last validated Jul 10, 8:30 AM CT\./);
+  const carriedWeek = {
+    ...weekStatusFixture,
+    availability: { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  };
+  assert.equal(weekAheadAvailabilityState(carriedWeek), 'carried_forward', 'Current availability must override retained source provenance.');
+  assert.match(weekAheadAvailabilityInfoHtml(carriedWeek), /Week Ahead numeric data is stale/);
+  const partialWeekMarkup = weekAheadAvailabilityInfoHtml({
+    ...weekStatusFixture,
+    availability: { status: 'partial', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  });
+  assert.match(partialWeekMarkup, /Week Ahead numeric data is partial/);
+  assert.match(partialWeekMarkup, /Last checked Jul 10, 8:30 AM CT\./);
+  assert.equal(weekAheadAvailabilityInfoHtml({
+    ...weekStatusFixture,
+    availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  }), '');
+  assert.doesNotMatch(`${cachedWeekMarkup}${partialWeekMarkup}`, /FXMacroData|HTTP|retry/i);
+
+  const weekOutcomeSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-outcome');
+  const { weekAheadOutcomeHtml } = Function(
+    'esc',
+    'weekReactionButtonHtml',
+    `${weekOutcomeSource}\nreturn { weekAheadOutcomeHtml };`
+  )((value) => String(value), () => '');
+  const unavailableOutcome = weekAheadOutcomeHtml({
+    lifecycle: 'close_available',
+    outcome: { status: 'commentary_unavailable' },
+    marketReaction: { rows: [] }
+  });
+  assert.match(unavailableOutcome, /<strong>Unavailable<\/strong>/);
+  assert.doesNotMatch(unavailableOutcome, /Post-event commentary unavailable|Released facts/);
+  const pendingOutcome = weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } });
+  assert.match(pendingOutcome, /<strong>Pending<\/strong>/);
+  assert.doesNotMatch(pendingOutcome, /Editorial interpretation pending|afternoon review/);
+
+  assert.doesNotMatch(html, /week-ledger-status-dot/);
+  assert.match(html, /week-ahead-stale-info \.stale-info-tooltip\s*\{[\s\S]*?right:\s*0;/);
+  assert.match(html, /weekAheadAvailabilityState\(week\) === 'unavailable'/);
+  assert.doesNotMatch(html, /Week Ahead data unavailable|Calendar cache in use|Official schedules \+ FXMacroData values/);
+
   const staleInfoSource = extractDashboardRuntimeTestBlock(html, 'crypto-stale-info');
   const { cryptoStatStaleInfo } = Function('esc', `${staleInfoSource}\nreturn { cryptoStatStaleInfo };`)((value) => String(value));
   assert.equal(cryptoStatStaleInfo({ sym: 'TOTAL', name: 'Crypto Market Cap' }), '');
   const staleMarkup = cryptoStatStaleInfo({
     sym: 'TOTAL',
     name: 'Crypto Market Cap',
-    availability: { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+    availability: {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt: FIXTURE_NOW,
+      lastValidatedAt: FIXTURE_NOW
+    }
   });
   assert.match(staleMarkup, /data-stale-button/);
   assert.match(staleMarkup, /Crypto Market Cap data is stale/);
-  assert.match(staleMarkup, /not updated during the current dashboard update/);
+  assert.match(staleMarkup, /Last validated: Jul 10, 8:30 AM CT\./);
+
+  const cryptoPresentationSource = extractDashboardRuntimeTestBlock(html, 'crypto-stat-presentation');
+  const { cryptoStatPresentation } = Function(
+    `${cryptoPresentationSource}\nreturn { cryptoStatPresentation };`
+  )();
+  assert.deepEqual(
+    cryptoStatPresentation(
+      { availability: { status: 'unavailable' } },
+      'Unavailable',
+      '<strong>Unavailable</strong><span>/100</span><span>Unavailable</span>',
+      '<div>Gauge</div>'
+    ),
+    {
+      subText: '',
+      valuesHtml: '<strong class="metric-primary">Unavailable</strong>',
+      extra: ''
+    }
+  );
 
   const tapeStaleSource = extractDashboardRuntimeTestBlock(html, 'tape-stale-info');
   const tapeStaleRuntime = Function('esc', `
@@ -2131,6 +2278,57 @@ function testTouchTooltipControls() {
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /MOVE data is stale/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /Last valid quote: 2026-07-10\./);
   assert.doesNotMatch(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /not updated/);
+  assert.doesNotMatch(html, /Data is stale: latest chart bar is/);
+
+  const futuresAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'futures-availability-info');
+  const { futuresAvailabilityInfo } = Function(
+    'esc',
+    `${futuresAvailabilitySource}\nreturn { futuresAvailabilityInfo };`
+  )((value) => String(value));
+  assert.equal(futuresAvailabilityInfo({ symbol: 'ES=F', label: 'S&P Futures' }), '');
+  const unavailableFuturesMarkup = futuresAvailabilityInfo({
+    symbol: 'ES=F',
+    label: 'S&P Futures',
+    availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  });
+  assert.match(unavailableFuturesMarkup, /data-stale-button/);
+  assert.match(unavailableFuturesMarkup, /S&amp;P Futures quote status|S&P Futures quote status/);
+  assert.match(unavailableFuturesMarkup, /Quote unavailable for this update\./);
+  assert.doesNotMatch(unavailableFuturesMarkup, /HTTP|provider|retry/i);
+  const retainedFuturesMarkup = futuresAvailabilityInfo({
+    symbol: 'NQ=F',
+    label: 'Nasdaq Futures',
+    raw: { regularMarketTime: Date.parse('2026-07-15T13:30:00.000Z') / 1000 },
+    availability: { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  });
+  assert.match(retainedFuturesMarkup, /Last valid quote: Jul 15, 8:30 AM CT\./);
+  assert.doesNotMatch(retainedFuturesMarkup, /HTTP|provider|retry/i);
+
+  const portfolioAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'portfolio-availability-info');
+  const { portfolioAvailabilityInfo } = Function(
+    'esc',
+    `${portfolioAvailabilitySource}\nreturn { portfolioAvailabilityInfo };`
+  )((value) => String(value));
+  const healthyPortfolio = { availability: { status: 'partial', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW } };
+  assert.equal(portfolioAvailabilityInfo({ ticker: 'VTI' }, healthyPortfolio, 'VTI'), '');
+  const retainedPortfolioMarkup = portfolioAvailabilityInfo({
+    ticker: 'IEF',
+    availability: {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt: FIXTURE_NOW,
+      lastValidatedAt: '2026-07-14T20:00:00.000Z'
+    }
+  }, healthyPortfolio, 'IEF');
+  assert.match(retainedPortfolioMarkup, /data-stale-button/);
+  assert.match(retainedPortfolioMarkup, /Last validated market data: Jul 14, 2026\./);
+  assert.doesNotMatch(retainedPortfolioMarkup, /HTTP|provider|retry/i);
+  const unavailablePortfolioMarkup = portfolioAvailabilityInfo(null, {
+    availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
+  }, 'VTI');
+  assert.match(unavailablePortfolioMarkup, /Market data unavailable for this update\./);
+  assert.doesNotMatch(unavailablePortfolioMarkup, /HTTP|provider|retry/i);
+  assert.match(html, /portfolioAvailabilityInfo\(row, portfolio, ticker\)\}\$\{portfolioDividendInfo\(row\)\}/);
 
   const localCryptoSource = extractDashboardRuntimeTestBlock(html, 'local-refresh-crypto-stats');
   const { applyCryptoStats: applyLocalCryptoStats } = Function(
@@ -2149,6 +2347,35 @@ function testTouchTooltipControls() {
   assert.equal(applyLocalCryptoStats(locallyRefreshed, [{ sym: 'TOTAL', price: '$1.01T' }]), true);
   assert.equal(locallyRefreshed.crypto.availability, undefined);
   assert.equal(locallyRefreshed.crypto.stats[0].availability, undefined);
+
+  const localQuoteRowsSource = extractDashboardRuntimeTestBlock(html, 'local-refresh-quote-rows');
+  const localQuoteRowsRuntime = Function(
+    `${localQuoteRowsSource}\nreturn { applyTapeQuoteRows, applyCryptoQuoteRows };`
+  )();
+  const reviewedDisposition = {
+    status: 'reviewed',
+    quoteRevision: FIXTURE_NOW,
+    reviewedAt: FIXTURE_NOW
+  };
+  const localQuoteDashboard = {
+    tape: {
+      rows: [
+        { ticker: 'SPX', last: '100', pct: '+1.00%', asOf: '2026-07-09', note: 'Existing equity commentary.', noteDisposition: reviewedDisposition },
+        { ticker: 'BTC', last: '$60,000', pct: '+2.00%', asOf: '2026-07-09', note: 'Existing crypto commentary.', noteDisposition: reviewedDisposition }
+      ]
+    }
+  };
+  assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(localQuoteDashboard, [{
+    ticker: 'SPX', last: '101', delta: '+1', pct: '+1.01%', dir: 'up', asOf: '2026-07-10'
+  }]), true);
+  assert.equal(localQuoteDashboard.tape.rows[0].note, 'Existing equity commentary.');
+  assert.deepEqual(localQuoteDashboard.tape.rows[0].noteDisposition, reviewedDisposition);
+  assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(localQuoteDashboard, [{
+    ticker: 'BTC', price: '$61,000', delta: '+$1,000', chg: '+1.67%', dir: 'up', asOf: '2026-07-10'
+  }]), true);
+  assert.equal(localQuoteDashboard.tape.rows[1].note, 'Existing crypto commentary.');
+  assert.deepEqual(localQuoteDashboard.tape.rows[1].noteDisposition, reviewedDisposition);
+  assert.doesNotMatch(html, /Market-driver commentary is temporarily unavailable/);
 }
 
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {

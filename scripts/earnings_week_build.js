@@ -43,6 +43,7 @@ const DEFAULT_FINNHUB_PROFILE_RETRIES = 3;
 const DEFAULT_FINNHUB_METRIC_DELAY_MS = 2000;
 const DEFAULT_FINNHUB_METRIC_RETRIES = 3;
 const DEFAULT_FINNHUB_PROFILE_CACHE = path.resolve(process.cwd(), 'generated', 'finnhub_profile_cache.json');
+const DEFAULT_FINNHUB_US_SYMBOL_CACHE = path.resolve(process.cwd(), 'generated', 'finnhub_us_symbol_cache.json');
 const DEFAULT_FINNHUB_METRIC_CACHE = path.resolve(process.cwd(), 'generated', 'finnhub_metric_cache.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(process.cwd(), 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
@@ -107,6 +108,7 @@ function parseArgs(argv) {
     finnhubDelayMs: DEFAULT_FINNHUB_DELAY_MS,
     finnhubProfileRetries: DEFAULT_FINNHUB_PROFILE_RETRIES,
     finnhubProfileCache: DEFAULT_FINNHUB_PROFILE_CACHE,
+    finnhubUsSymbolCache: DEFAULT_FINNHUB_US_SYMBOL_CACHE,
     finnhubMetricDelayMs: DEFAULT_FINNHUB_METRIC_DELAY_MS,
     finnhubMetricRetries: DEFAULT_FINNHUB_METRIC_RETRIES,
     finnhubMetricCache: DEFAULT_FINNHUB_METRIC_CACHE,
@@ -158,6 +160,11 @@ function parseArgs(argv) {
     }
     if (arg === '--finnhub-profile-cache') {
       args.finnhubProfileCache = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_FINNHUB_PROFILE_CACHE);
+      i += 1;
+      continue;
+    }
+    if (arg === '--finnhub-us-symbol-cache') {
+      args.finnhubUsSymbolCache = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_FINNHUB_US_SYMBOL_CACHE);
       i += 1;
       continue;
     }
@@ -245,6 +252,8 @@ Options:
   --finnhub-delay-ms 700       Delay between Finnhub profile requests
   --finnhub-profile-retries 3  Retries for Finnhub profile requests that hit HTTP 429
   --finnhub-profile-cache PATH Successful Finnhub profile cache
+  --finnhub-us-symbol-cache PATH
+                               Successful Finnhub U.S. symbol-directory cache
   --finnhub-metric-delay-ms 2000
                                Delay between Finnhub metric requests and 429 retries
   --finnhub-metric-retries 3   Retries for Finnhub metric requests that hit HTTP 429
@@ -557,10 +566,17 @@ function profileHasIdentity(profile) {
   return Boolean(profile?.name || profile?.exchange || profile?.country || Number.isFinite(profile?.marketCap));
 }
 
-function profileIsDisplayEligible(profile) {
+function isEligibleFinnhubUsListing(listing, symbol = listing?.symbol) {
+  return Boolean(listing)
+    && listing.market === 'US'
+    && listing.symbol === symbol
+    && Boolean(listing.mic)
+    && !/OTC|PIN[XML]/i.test(listing.mic);
+}
+
+function profileIsDisplayEligible(profile, listing) {
   if (!profile) return false;
-  if (profile.country && profile.country !== 'US') return false;
-  if (/OTC/i.test(profile.exchange || '')) return false;
+  if (!isEligibleFinnhubUsListing(listing, profile.symbol)) return false;
   if ((profile.industry || '').toUpperCase() === 'N/A') return false;
   return Number.isFinite(profile.marketCap) && profile.marketCap >= SECONDARY_RECOVERY_MIN_MARKET_CAP;
 }
@@ -862,9 +878,10 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidat
   return { rows: verifiedRows, review };
 }
 
-function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, profiles) {
+function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, profiles, usListings = []) {
   const finnhubKeys = new Set(finnhubRows.map((row) => `${row.reportDate}:${row.symbol}`));
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
+  const usListingsBySymbol = new Map(usListings.map((listing) => [listing.symbol, listing]));
   const seen = new Set();
   const tasks = [];
   for (const row of earningsApiCalendarDays.flatMap((day) => day.rows)) {
@@ -872,7 +889,8 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
     if (finnhubKeys.has(key)) continue;
     if (seen.has(key)) continue;
     const profile = profilesBySymbol.get(row.symbol);
-    if (!profileIsDisplayEligible(profile)) continue;
+    const finnhubUsListing = usListingsBySymbol.get(row.symbol) || null;
+    if (!profileIsDisplayEligible(profile, finnhubUsListing)) continue;
     seen.add(key);
     tasks.push({
       id: `${row.reportDate}:${row.symbol}:earningsapi-recovery`,
@@ -905,6 +923,7 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
         'revenue_actual_recovery'
       ],
       sourceAudit: {
+        finnhubUsListing,
         earningsApiCalendar: {
           reportDate: row.reportDate,
           company: row.company,
@@ -975,6 +994,90 @@ function normalizeProfile(symbol, result) {
       row: data
     }
   };
+}
+
+function compactFinnhubUsListing(row) {
+  const symbol = String(row?.symbol || '').trim().toUpperCase();
+  return {
+    market: 'US',
+    symbol,
+    displaySymbol: String(row?.displaySymbol || symbol).trim().toUpperCase(),
+    mic: String(row?.mic || '').trim().toUpperCase(),
+    type: String(row?.type || '').trim(),
+    currency: String(row?.currency || '').trim().toUpperCase(),
+    figi: String(row?.figi || '').trim(),
+    shareClassFIGI: String(row?.shareClassFIGI || '').trim()
+  };
+}
+
+function finnhubUsSymbolsFromResponse(result) {
+  const rawRows = result.ok && Array.isArray(result.data) ? result.data : [];
+  const bySymbol = new Map();
+  for (const row of rawRows) {
+    const listing = compactFinnhubUsListing(row);
+    if (!listing.symbol) continue;
+    const current = bySymbol.get(listing.symbol);
+    if (!current || (!isEligibleFinnhubUsListing(current) && isEligibleFinnhubUsListing(listing))) {
+      bySymbol.set(listing.symbol, listing);
+    }
+  }
+  const listings = [...bySymbol.values()].sort((left, right) => left.symbol.localeCompare(right.symbol));
+  return {
+    ok: result.ok && Array.isArray(result.data) && listings.length > 0,
+    status: result.status,
+    responseMs: result.ms,
+    cacheHit: false,
+    listings,
+    error: result.ok
+      ? Array.isArray(result.data) ? listings.length ? '' : 'Finnhub U.S. symbol directory is empty.' : 'Finnhub response is not an array.'
+      : result.parseError || result.bodyPreview || `HTTP ${result.status}`
+  };
+}
+
+function readFinnhubUsSymbolCache(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  try {
+    const cache = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (cache?.schemaVersion !== 1 || !Array.isArray(cache.listings) || !cache.listings.length) return null;
+    const listings = cache.listings.map(compactFinnhubUsListing).filter((listing) => listing.symbol);
+    return listings.length ? { listings, updatedAt: String(cache.updatedAt || '') } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeFinnhubUsSymbolCache(file, directory) {
+  if (!file) return;
+  try {
+    atomicWriteJson(file, {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      listings: directory.listings
+    });
+  } catch (error) {
+    process.stderr.write(`Finnhub U.S. symbol cache could not be refreshed; continuing without the cache update: ${error.message}\n`);
+  }
+}
+
+async function fetchFinnhubUsSymbols(args, token) {
+  const url = `https://finnhub.io/api/v1/stock/symbol?exchange=US&token=${encodeURIComponent(token)}`;
+  let result = await fetchJson(url, args);
+  if (result.status >= 300 && result.status < 400 && result.headers?.location) {
+    result = await fetchJson(new URL(result.headers.location, url).toString(), args);
+  }
+  const directory = finnhubUsSymbolsFromResponse(result);
+  if (directory.ok) {
+    writeFinnhubUsSymbolCache(args.finnhubUsSymbolCache, directory);
+    return directory;
+  }
+  const cached = readFinnhubUsSymbolCache(args.finnhubUsSymbolCache);
+  return cached ? {
+    ...directory,
+    ok: true,
+    cacheHit: true,
+    listings: cached.listings,
+    cacheUpdatedAt: cached.updatedAt
+  } : directory;
 }
 
 function emptyFinnhubProfileCache() {
@@ -1301,6 +1404,7 @@ function profileRecoveryForRow(calendarRow, profile, metricsBySymbol, earningsAp
 
 function buildRows(calendarRows, profiles, options = {}) {
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
+  const usListingsBySymbol = new Map((options.usListings || []).map((listing) => [listing.symbol, listing]));
   const metricsBySymbol = new Map((options.finnhubMetrics || []).map((metric) => [metric.symbol, metric]));
   const earningsApiByKey = earningsApiRowsByKey(options.earningsApiCalendarDays || []);
   return calendarRows.map((calendarRow) => {
@@ -1343,6 +1447,7 @@ function buildRows(calendarRows, profiles, options = {}) {
       sourceStatus: computeEarningsSourceStatus(calendarRow, { requireComputedReaction: false }),
       sourceSummary: sourceSummary('finnhub', fallbacks),
       sourceAudit: {
+        finnhubUsListing: usListingsBySymbol.get(calendarRow.symbol) || null,
         finnhubCalendar: {
           reportDate: auditedFinnhubCalendar.reportDate,
           reportTiming: auditedFinnhubCalendar.reportTiming,
@@ -1514,6 +1619,7 @@ function buildEarningsApiRows(tasks, companyFetches) {
       sourceStatus: computeEarningsSourceStatus(sourceRow, { requireComputedReaction: false }),
       sourceSummary: sourceSummary('earningsApiCompany', ['earningsApiCalendar', 'finnhubProfile']),
       sourceAudit: {
+        finnhubUsListing: task.sourceAudit.finnhubUsListing,
         finnhubCalendar: {
           present: false
         },
@@ -1550,6 +1656,13 @@ function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTas
         status: fetches.finnhubCalendar.status,
         rowCount: fetches.finnhubCalendar.rowCount,
         error: fetches.finnhubCalendar.error
+      },
+      finnhubUsSymbols: {
+        ok: fetches.finnhubUsSymbols.ok,
+        status: fetches.finnhubUsSymbols.status,
+        rows: fetches.finnhubUsSymbols.listings.length,
+        cacheHit: Boolean(fetches.finnhubUsSymbols.cacheHit),
+        error: fetches.finnhubUsSymbols.error
       },
       finnhubProfiles: {
         requests: fetches.finnhubProfiles.length,
@@ -1672,6 +1785,10 @@ async function runBuild(argv = process.argv.slice(2)) {
   writeEarningsApiUsage(args.earningsApiUsage, earningsApiUsage);
   const finnhubCalendar = await fetchFinnhubCalendar(args, token);
   ensureFinnhubPrimaryUsable(finnhubCalendar);
+  const finnhubUsSymbols = await fetchFinnhubUsSymbols(args, token);
+  if (!finnhubUsSymbols.ok) {
+    throw new Error(`Finnhub U.S. symbol directory is unavailable. ${finnhubUsSymbols.error || ''}`.trim());
+  }
 
   // The 26-date production window catches surrounding-date conflicts while
   // discovery remains limited to the five visible trading dates. Official
@@ -1694,12 +1811,18 @@ async function runBuild(argv = process.argv.slice(2)) {
   const profileRows = [...earningsApiCandidateRows, ...calendarResolution.finnhubRows];
   const finnhubProfiles = await fetchFinnhubProfiles(profileRows, args, token);
   const finnhubMetrics = await fetchFinnhubMetrics(calendarResolution.finnhubRows, finnhubProfiles, calendarResolution.earningsApiCalendarDays, args, token);
-  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(calendarResolution.finnhubRows, calendarResolution.earningsApiCalendarDays, finnhubProfiles);
+  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
+    calendarResolution.finnhubRows,
+    calendarResolution.earningsApiCalendarDays,
+    finnhubProfiles,
+    finnhubUsSymbols.listings
+  );
   const earningsApiCompanyFetches = await fetchEarningsApiCompanies(secondaryRecoveryCandidatesBase, args, earningsApiToken, earningsApiUsage);
   const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, earningsApiCompanyFetches);
   const finnhubRows = buildRows(calendarResolution.finnhubRows, finnhubProfiles, {
     finnhubMetrics,
-    earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays
+    earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays,
+    usListings: finnhubUsSymbols.listings
   });
   const scheduleConfirmationInput = readScheduleConfirmations(args.scheduleConfirmations);
   const scheduleVerification = verifyFinnhubScheduleRows(
@@ -1746,6 +1869,7 @@ async function runBuild(argv = process.argv.slice(2)) {
     companyReleaseTasks,
     summary: summarize(rows, {
       finnhubCalendar,
+      finnhubUsSymbols,
       finnhubProfiles,
       finnhubMetrics,
       earningsApiCalendarDays,
@@ -1781,11 +1905,14 @@ module.exports = {
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
   fetchEarningsApiCalendar,
+  fetchFinnhubUsSymbols,
   finnhubCalendarFromResponse,
+  finnhubUsSymbolsFromResponse,
   fetchFinnhubMetrics,
   fetchYahooBars,
   fetchYahooBarsForRows,
   profileFromCache,
+  isEligibleFinnhubUsListing,
   readScheduleConfirmations,
   resolveProviderDateConflicts,
   runBuild,

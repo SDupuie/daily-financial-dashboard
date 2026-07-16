@@ -156,6 +156,37 @@ function testUpdaterWeekAheadPreservesEditorialLens() {
   assert.equal(releasedMerge.days[0].marketLensSource, 'editorial');
   assert.equal(releasedMerge.days[0].lifecycle, 'released_awaiting_close');
 
+  const failedRefresh = structuredClone(releasedPayload);
+  failedRefresh.source.status = 'partial';
+  failedRefresh.availability = {
+    status: 'partial',
+    reason: 'source_refresh_failed',
+    checkedAt: '2026-07-13T13:05:00.000Z',
+    failures: [{ source: 'fxmacro:announcements', item: 'retail_sales', message: 'fixture outage' }]
+  };
+  const failedEvent = failedRefresh.days[0].events[0];
+  Object.assign(failedEvent, {
+    actual: null,
+    forecast: null,
+    forecastType: null,
+    forecastSource: null,
+    previous: null,
+    valueSource: null,
+    verification: 'official-schedule-values-unavailable',
+    surprise: null,
+    status: 'awaiting_actual'
+  });
+  failedRefresh.days[0].lifecycle = 'awaiting_actual';
+  const preservedMerge = mergeWeekAheadPayload(releasedMerge, failedRefresh);
+  const preservedEvent = preservedMerge.days[0].events[0];
+  assert.equal(preservedEvent.actual, '0.3%');
+  assert.equal(preservedEvent.forecast, '0.2%');
+  assert.equal(preservedEvent.previous, releasedMerge.days[0].events[0].previous);
+  assert.equal(preservedEvent.valueSource, 'FXMacroData');
+  assert.equal(preservedEvent.status, 'released');
+  assert.equal(preservedMerge.days[0].lifecycle, 'released_awaiting_close');
+  assert.equal(preservedMerge.availability.status, 'partial');
+
   const generatedData = weekAheadDashboardFixture();
   generatedData.weekAhead = {
     days: [{
@@ -348,6 +379,13 @@ async function testProducerAndScheduleNormalization() {
   assert.equal(collectedPartialPayload.source.status, 'partial');
   assert.deepEqual(validateWeekAheadPayload(collectedPartialPayload), []);
 
+  await assert.rejects(
+    () => requestFxMacroValues(builtSchedule, 1000, {
+      requestJson: async () => { throw new Error('fixture total outage'); }
+    }),
+    /failed every requested Week Ahead value series/
+  );
+
   const recoveredValues = await requestFxMacroValues(builtSchedule, 1000, {
     requestJson: async () => []
   });
@@ -519,6 +557,9 @@ function testWeekAheadPreparationFallbacks() {
   });
   assert.equal(carried.mode, 'carried_forward');
   assert.equal(carried.week.availability.status, 'carried_forward');
+  assert.equal(carried.week.availability.checkedAt, '2026-07-10T21:05:00.000Z');
+  assert.equal(carried.week.source.fetchedAt, payload.source.fetchedAt, 'Fallback must preserve the last successful source timestamp.');
+  assert.deepEqual(carried.week.days, payload.days, 'Fallback must preserve the existing Week Ahead values and events.');
   assert.deepEqual(validateWeekAheadPayload(carried.week), []);
 
   const unavailable = buildWeekAheadPreparationFallback(payload, {

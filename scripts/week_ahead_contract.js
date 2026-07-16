@@ -1195,9 +1195,42 @@ function hasEditorialMarketLens(day) {
     && validateMarketLens(day.marketLens, day, 'editorial').length === 0;
 }
 
+function preserveMissingWeekAheadValues(incomingEvent, priorEvent) {
+  if (!priorEvent || incomingEvent?.id !== priorEvent.id) return incomingEvent;
+  const next = { ...incomingEvent };
+  const missing = (value) => value === null || value === undefined || value === '';
+  let preserved = false;
+  for (const field of ['actual', 'forecast', 'previous']) {
+    if (missing(next[field]) && !missing(priorEvent[field])) {
+      next[field] = priorEvent[field];
+      preserved = true;
+    }
+  }
+  if (missing(incomingEvent.forecast) && !missing(priorEvent.forecast)) {
+    next.forecastType = priorEvent.forecastType ?? null;
+    next.forecastSource = priorEvent.forecastSource ?? null;
+  }
+  if (preserved) {
+    next.valueSource = next.valueSource || priorEvent.valueSource || FX_MACRO_PROVIDER;
+    next.verification = next.verification === 'official-schedule-values-unavailable'
+      ? priorEvent.verification || 'official-schedule-fxmacrodata-values'
+      : next.verification;
+    next.surprise = comparableWeekAheadSurprise(next.actual, next.forecast);
+    if (!missing(next.actual)) next.status = 'released';
+  }
+  return next;
+}
+
 function mergeWeekAheadPayload(existingWeekAhead, payload) {
   const errors = validateWeekAheadPayload(payload);
   if (errors.length) throw new Error(`Generated Week Ahead payload is invalid: ${errors.join(' ')}`);
+  const preservePriorValues = payload.availability?.status === 'partial';
+  const priorEventsById = new Map(
+    (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : [])
+      .flatMap((day) => Array.isArray(day?.events) ? day.events : [])
+      .filter((event) => typeof event?.id === 'string')
+      .map((event) => [event.id, event])
+  );
   const existingEditorialDays = new Map(
     (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : [])
       .filter((day) => typeof day?.date === 'string' && hasEditorialMarketLens(day))
@@ -1206,13 +1239,24 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
   return {
     ...payload,
     days: payload.days.map((day) => {
-      const next = { ...day };
+      const next = {
+        ...day,
+        events: (Array.isArray(day.events) ? day.events : []).map((event) => (
+          preservePriorValues
+            ? preserveMissingWeekAheadValues(event, priorEventsById.get(event.id))
+            : event
+        ))
+      };
+      if (next.events.some((event) => event.status === 'released')
+        && ['scheduled', 'awaiting_actual'].includes(next.lifecycle)) {
+        next.lifecycle = 'released_awaiting_close';
+      }
       const editorialDay = existingEditorialDays.get(day.date);
       const priorDay = (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : []).find((candidate) => candidate?.date === day.date);
-      const deterministicValuesUnchanged = weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(day);
+      const deterministicValuesUnchanged = weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(next);
       // An arriving actual advances lifecycle state but does not retire a
       // still-valid pre-close thesis; the completed close response does that.
-      if (editorialDay && validateMarketLens(editorialDay.marketLens, day, 'editorial').length === 0) {
+      if (editorialDay && validateMarketLens(editorialDay.marketLens, next, 'editorial').length === 0) {
         next.marketLens = editorialDay.marketLens;
         next.marketLensSource = 'editorial';
       }

@@ -780,6 +780,16 @@ function validateSourceAudit(errors, row, label) {
   if (audit.finnhubProfile !== null && !isObject(audit.finnhubProfile)) {
     errors.push(`${label}.sourceAudit.finnhubProfile must be an object or null.`);
   }
+  if (Object.prototype.hasOwnProperty.call(audit, 'finnhubUsListing')) {
+    const listing = audit.finnhubUsListing;
+    if (listing !== null && !isObject(listing)) {
+      errors.push(`${label}.sourceAudit.finnhubUsListing must be an object or null.`);
+    } else if (isObject(listing)) {
+      if (listing.market !== 'US') errors.push(`${label}.sourceAudit.finnhubUsListing.market must be US.`);
+      if (listing.symbol !== row.symbol) errors.push(`${label}.sourceAudit.finnhubUsListing.symbol must match row.symbol.`);
+      if (typeof listing.mic !== 'string' || !listing.mic.trim()) errors.push(`${label}.sourceAudit.finnhubUsListing.mic must be populated.`);
+    }
+  }
   if (isDisplayEligibleEarningsRow(row) && !isObject(audit.scheduleVerification)) {
     errors.push(`${label}.sourceAudit.scheduleVerification must be populated for every display-eligible row.`);
   }
@@ -1192,6 +1202,7 @@ function validateSecondaryRecoveryCandidates(errors, data) {
     errors.push('secondaryRecoveryCandidates must be an array.');
     return;
   }
+  const requiresUsListingEvidence = Object.prototype.hasOwnProperty.call(data.summary?.fetches || {}, 'finnhubUsSymbols');
   const seen = new Set();
   data.secondaryRecoveryCandidates.forEach((task, index) => {
     const label = task?.id || `secondaryRecoveryCandidates[${index}]`;
@@ -1223,6 +1234,13 @@ function validateSecondaryRecoveryCandidates(errors, data) {
       errors.push(`${label}.sourceAudit.earningsApiCalendar must be populated.`);
     } else {
       validateAuditMetricSnapshot(errors, task.sourceAudit.earningsApiCalendar, `${label}.sourceAudit.earningsApiCalendar`);
+    }
+    const hasListingEvidence = Object.prototype.hasOwnProperty.call(task.sourceAudit || {}, 'finnhubUsListing');
+    if (requiresUsListingEvidence || hasListingEvidence) {
+      const listing = task.sourceAudit?.finnhubUsListing;
+      if (!isObject(listing) || listing.market !== 'US' || listing.symbol !== task.symbol || !String(listing.mic || '').trim() || /OTC|PIN[XML]/i.test(listing.mic)) {
+        errors.push(`${label}.sourceAudit.finnhubUsListing must prove an exact non-OTC U.S. listing.`);
+      }
     }
     validateSecondaryRecoveryTaskCompanyAudit(errors, task, label);
     if (task.sourceAudit?.finnhubCalendar?.present !== false) errors.push(`${label}.sourceAudit.finnhubCalendar.present must be false.`);
@@ -1435,6 +1453,7 @@ function validateEarningsWeekPayload(data, options = {}) {
   if (!Array.isArray(data.rows)) {
     errors.push('rows must be an array.');
   } else {
+    const requiresUsListingEvidence = Object.prototype.hasOwnProperty.call(data.summary?.fetches || {}, 'finnhubUsSymbols');
     const seen = new Set();
     const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
       ? options.now
@@ -1443,6 +1462,9 @@ function validateEarningsWeekPayload(data, options = {}) {
       const key = `${row?.reportDate || index}:${row?.symbol || index}`;
       if (seen.has(key)) errors.push(`Duplicate earnings row ${key}.`);
       seen.add(key);
+      if (requiresUsListingEvidence && !Object.prototype.hasOwnProperty.call(row?.sourceAudit || {}, 'finnhubUsListing')) {
+        errors.push(`${key}.sourceAudit.finnhubUsListing must be present on every row built with the U.S. symbol directory.`);
+      }
       validateRow(errors, row, index, data.range, now);
     });
   }

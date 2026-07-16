@@ -719,6 +719,9 @@ function validateSectionAvailability(errors, availability, label, allowedStatuse
   if (!isOffsetBearingIsoDateTime(availability.checkedAt)) {
     errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
   }
+  if (availability.lastValidatedAt !== undefined && !isOffsetBearingIsoDateTime(availability.lastValidatedAt)) {
+    errors.push(`${label}.availability.lastValidatedAt must be an offset-bearing ISO timestamp when present.`);
+  }
   if (availability.failures !== undefined) {
     if (!Array.isArray(availability.failures) || !availability.failures.length) {
       errors.push(`${label}.availability.failures must be a non-empty array when present.`);
@@ -1464,6 +1467,14 @@ if (!dashboardMatch) {
     const fng = cryptoStatRows.find(row => row.sym === 'F&G');
     const altcoinSeason = cryptoStatRows.find(row => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name ?? '')));
     const cryptoStatUnavailable = (row) => row?.availability?.status === 'unavailable';
+    const validateCryptoStatAvailability = (row, label) => {
+      if (row?.availability === undefined) return '';
+      const status = validateSectionAvailability(errors, row.availability, label, ['carried_forward', 'unavailable'], ['source_refresh_failed']);
+      if (status === 'carried_forward' && !isOffsetBearingIsoDateTime(row.availability.lastValidatedAt)) {
+        errors.push(`${label}.availability.lastValidatedAt must identify the retained value's successful validation time.`);
+      }
+      return status;
+    };
     const staleFngPattern = /(numeric read|pull still failed|F&G ~|unavailable|not retrievable|not extractable)/i;
 
     for (const rowRaw of cryptoTickerRows) {
@@ -1500,7 +1511,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !cryptoTotal) {
       errors.push('crypto.stats is missing the Crypto Market Cap stat row.');
     } else if (cryptoTotal) {
-      if (cryptoTotal.availability !== undefined) validateSectionAvailability(errors, cryptoTotal.availability, 'Crypto Market Cap', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
+      validateCryptoStatAvailability(cryptoTotal, 'Crypto Market Cap');
       requireString(cryptoTotal.price, 'Crypto Market Cap price');
       requireString(cryptoTotal.delta, 'Crypto Market Cap value change');
     }
@@ -1508,7 +1519,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !fng) {
       errors.push('crypto.stats is missing the F&G row.');
     } else if (fng) {
-      if (fng.availability !== undefined) validateSectionAvailability(errors, fng.availability, 'F&G', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
+      validateCryptoStatAvailability(fng, 'F&G');
       const fngPrice = String(fng.price ?? '').trim();
       const fngChange = String(fng.chg ?? '').trim();
 
@@ -1531,7 +1542,7 @@ if (!dashboardMatch) {
     if (cryptoAvailability !== 'unavailable' && !altcoinSeason) {
       errors.push('crypto.stats is missing the Altcoin Season Index stat row.');
     } else if (altcoinSeason) {
-      if (altcoinSeason.availability !== undefined) validateSectionAvailability(errors, altcoinSeason.availability, 'Altcoin Season Index', ['carried_forward', 'unavailable'], ['source_refresh_failed']);
+      validateCryptoStatAvailability(altcoinSeason, 'Altcoin Season Index');
       const altcoinSeasonPrice = String(altcoinSeason.price ?? '').trim();
       const altcoinSeasonRange = String(altcoinSeason.chg ?? '').trim();
 

@@ -80,7 +80,7 @@ function testDashboardNewsCollections() {
 
 function testNewsCoverageState() {
   assert.deepEqual(validateNewsCoverageState(undefined, 9, NEWS_COVERAGE_POLICIES.stories), []);
-  assert.deepEqual(validateNewsCoverageState(undefined, 4, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
+  assert.deepEqual(validateNewsCoverageState(undefined, 6, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
   assert.deepEqual(validateNewsCoverageState(undefined, 3, NEWS_COVERAGE_POLICIES.futuresStories), []);
   assert.deepEqual(
     validateNewsCoverageState(undefined, 0, NEWS_COVERAGE_POLICIES.futuresStories, { allowIncomplete: true }),

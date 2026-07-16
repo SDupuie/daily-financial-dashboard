@@ -8,6 +8,7 @@ const {
   applyWeekAheadLifecycle,
   displayDatesForRange,
   fxMacroValueRequests,
+  mergeWeekAheadPayload,
   normalizeWeekAhead,
   rangeForDate,
   validateWeekAheadPayload
@@ -374,7 +375,12 @@ async function requestFxMacroValues(officialSchedule, timeoutMs, dependencies = 
     const responses = [];
     settled.forEach((result, index) => {
       if (result.status === 'fulfilled') responses.push(result.value);
-      else failures.push({ kind, indicator: indicators[index], message: result.reason?.message || 'source unavailable' });
+      else failures.push({
+        kind,
+        indicator: indicators[index],
+        message: result.reason?.message || 'source unavailable',
+        transient: isTransient(result.reason)
+      });
     });
     return { values: Object.fromEntries(responses), failures };
   };
@@ -382,6 +388,13 @@ async function requestFxMacroValues(officialSchedule, timeoutMs, dependencies = 
     fetchEntries('announcements', requests.announcements),
     fetchEntries('predictions', requests.predictions)
   ]);
+  const requestedCount = requests.announcements.length + requests.predictions.length;
+  const returnedCount = Object.keys(announcements.values).length + Object.keys(predictions.values).length;
+  if (requestedCount > 0 && returnedCount === 0) {
+    const error = new Error('FXMacroData failed every requested Week Ahead value series.');
+    error.transient = [...announcements.failures, ...predictions.failures].every((failure) => failure.transient);
+    throw error;
+  }
   return {
     announcements: announcements.values,
     predictions: predictions.values,
@@ -395,6 +408,12 @@ function readCache(output, range, now) {
     const cached = applyWeekAheadLifecycle(JSON.parse(fs.readFileSync(output, 'utf8')), null, { now });
     const errors = validateWeekAheadPayload(cached);
     if (errors.length || cached.range?.from !== range.from || cached.range?.to !== range.to) return null;
+    const fxMacroFailures = (cached.availability?.failures || [])
+      .some((failure) => String(failure?.source || '').startsWith('fxmacro:'));
+    const hasNumericValue = (cached.days || []).some((day) => (day.events || []).some((event) => (
+      [event.actual, event.forecast, event.previous].some((value) => value !== null && value !== undefined && value !== '')
+    )));
+    if (cached.source?.status === 'partial' && fxMacroFailures && !hasNumericValue) return null;
     const fetchedAt = Date.parse(cached.source?.fetchedAt || '');
     if (!Number.isFinite(fetchedAt) || now.getTime() - fetchedAt > 96 * 60 * 60 * 1000) return null;
     return {
@@ -445,7 +464,8 @@ async function run(args = parseArgs(process.argv.slice(2))) {
       });
     })();
     const valuePayload = await requestFxMacroValues(officialSchedule, args.timeoutMs);
-    const payload = normalizeWeekAhead(valuePayload, { range, officialSchedule, now });
+    const normalized = normalizeWeekAhead(valuePayload, { range, officialSchedule, now });
+    const payload = staged ? mergeWeekAheadPayload(staged, normalized) : normalized;
     writePayload(args.output, payload);
     process.stdout.write(`Week Ahead ${args.refreshValues ? 'values refreshed' : 'fetched'}: ${range.from} to ${range.to}; ${payload.sourceSummary.includedEvents} covered events.\n`);
     return payload;

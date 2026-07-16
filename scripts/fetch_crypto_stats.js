@@ -365,14 +365,17 @@ async function main() {
   process.stdout.write(`Wrote ${args.output}\n`);
 }
 
-function canonicalCryptoStats(input) {
+function canonicalCryptoState(input) {
   try {
     const html = fs.readFileSync(input, 'utf8');
     const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
     const data = match ? JSON.parse(match[1]) : null;
-    return Array.isArray(data?.crypto?.stats) ? data.crypto.stats : [];
+    return {
+      stats: Array.isArray(data?.crypto?.stats) ? data.crypto.stats : [],
+      lastValidatedAt: String(data?.crypto?.statsFetchedAt || data?.editionId || '').trim()
+    };
   } catch (_error) {
-    return [];
+    return { stats: [], lastValidatedAt: '' };
   }
 }
 
@@ -414,7 +417,8 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
       normalize: normalizeTotalMarketCap
     }
   ];
-  const priorBySymbol = new Map(canonicalCryptoStats(args.input).map((row) => [row?.sym, row]));
+  const canonical = canonicalCryptoState(args.input);
+  const priorBySymbol = new Map(canonical.stats.map((row) => [row?.sym, row]));
   const settled = await Promise.allSettled(tasks.map(async (task) => (
     dependencies.collectProvider ? dependencies.collectProvider(task) : task.normalize(await task.fetch())
   )));
@@ -430,13 +434,15 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
     }
     failures.push({ provider: task.key, message: result.reason?.message || 'source unavailable' });
     const prior = priorBySymbol.get(task.sym);
+    const lastValidatedAt = String(prior?.availability?.lastValidatedAt || canonical.lastValidatedAt).trim();
     const stat = prior
       ? {
         ...prior,
         availability: {
           status: 'carried_forward',
           reason: 'source_refresh_failed',
-          checkedAt: checkedAt.toISOString()
+          checkedAt: checkedAt.toISOString(),
+          ...(lastValidatedAt ? { lastValidatedAt } : {})
         }
       }
       : unavailableCryptoStat(task.sym, task.name, checkedAt, result.reason);
@@ -494,8 +500,9 @@ async function fetchCryptoStats(options = {}) {
   return normalized;
 }
 
-function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reason = 'source_refresh_failed') {
+function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reason = 'source_refresh_failed', legacyLastValidatedAt = '') {
   const timestamp = new Date(checkedAt).toISOString();
+  const canonicalLastValidatedAt = String(canonicalCrypto?.statsFetchedAt || legacyLastValidatedAt || '').trim();
   const stats = Array.isArray(canonicalCrypto?.stats)
     ? structuredClone(canonicalCrypto.stats).map((row) => row?.availability?.status === 'unavailable'
       ? row
@@ -504,7 +511,10 @@ function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reaso
         availability: {
           status: 'carried_forward',
           reason,
-          checkedAt: timestamp
+          checkedAt: timestamp,
+          ...(String(row?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim()
+            ? { lastValidatedAt: String(row?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim() }
+            : {})
         }
       })
     : [];
