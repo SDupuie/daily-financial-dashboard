@@ -630,12 +630,42 @@ function testScheduleReviewAndPreparationFallbacks() {
     fs.rmSync(retryDir, { recursive: true, force: true });
   }
 
+  const scheduledRows = buildRows([
+    finnhubRow('SCHEDULED', {
+      reportDate: '2026-01-08',
+      reportTiming: 'bmo',
+      eps: { estimate: 1, actual: null },
+      revenue: { estimate: 1000000000, actual: null }
+    })
+  ], [profile('SCHEDULED')], { usListings: [usListing('SCHEDULED')] });
+  scheduledRows[0].sourceAudit.scheduleVerification = {
+    status: 'corroborated',
+    primaryDate: scheduledRows[0].reportDate,
+    secondaryDates: [scheduledRows[0].reportDate],
+    official: null
+  };
+  const scheduledCanonicalRows = attachReactions(scheduledRows, [], {
+    asOf: canonical.generatedAt
+  });
+  assert.equal(scheduledCanonicalRows[0].lifecycle, 'scheduled');
+  scheduledCanonicalRows[0].outcome.interpretation = 'Consensus estimates remain the key setup before the scheduled report.';
+  scheduledCanonicalRows[0].outcome.guide = 'No company guidance update available yet.';
+  canonical.rows.push(scheduledCanonicalRows[0]);
+  canonical.narrativeApply.applied.push({
+    symbol: 'SCHEDULED',
+    reportDate: '2026-01-08'
+  });
+  canonical.summary.counts = computeEarningsWeekCounts(canonical.rows);
+
+  const carriedCheckedAt = '2026-01-08T13:00:00.000Z';
   const carried = buildEarningsPreparationFallback(canonical, canonical.range, {
-    checkedAt: '2026-01-08T13:00:00.000Z'
+    checkedAt: carriedCheckedAt
   });
   assert.equal(carried.mode, 'carried_forward');
   assert.equal(carried.week.rows.length, canonical.rows.length);
+  assert.equal(carried.week.generatedAt, carriedCheckedAt);
   assert.equal(carried.week.availability.status, 'carried_forward');
+  assert.equal(carried.week.rows.find((row) => row.symbol === 'SCHEDULED').lifecycle, 'awaiting_actual');
   validateWeekPayload(carried.week);
 
   const unavailable = buildEarningsPreparationFallback(canonical, {

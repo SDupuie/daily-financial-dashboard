@@ -379,12 +379,40 @@ async function testProducerAndScheduleNormalization() {
   assert.equal(collectedPartialPayload.source.status, 'partial');
   assert.deepEqual(validateWeekAheadPayload(collectedPartialPayload), []);
 
-  await assert.rejects(
-    () => requestFxMacroValues(builtSchedule, 1000, {
-      requestJson: async () => { throw new Error('fixture total outage'); }
-    }),
-    /failed every requested Week Ahead value series/
-  );
+  const failedValues = await requestFxMacroValues(builtSchedule, 1000, {
+    requestJson: async () => { throw new Error('fixture total outage'); }
+  });
+  assert.equal(Object.keys(failedValues.announcements).length, 0);
+  assert.equal(Object.keys(failedValues.predictions).length, 0);
+  assert.ok(failedValues.failures.length > 0);
+  const failedValuePayload = normalizeWeekAhead(failedValues, {
+    range,
+    officialSchedule: builtSchedule,
+    now: new Date('2026-07-10T18:05:00Z')
+  });
+  assert.equal(failedValuePayload.source.status, 'partial');
+  assert.equal(failedValuePayload.availability.status, 'partial');
+  assert.deepEqual(validateWeekAheadPayload(failedValuePayload), []);
+  const priorValuePayload = normalizeWeekAhead(fxMacroFixture(), {
+    range,
+    officialSchedule: builtSchedule,
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  const priorSeedEvent = priorValuePayload.days
+    .flatMap((day) => day.events)
+    .find((event) => event.id === '2026-07-15:08:30:ppi-yoy');
+  priorSeedEvent.actual = '5.1%';
+  priorSeedEvent.status = 'released';
+  const mergedAfterValueOutage = mergeWeekAheadPayload(priorValuePayload, failedValuePayload);
+  const preservedRelease = mergedAfterValueOutage.days
+    .flatMap((day) => day.events)
+    .find((event) => event.id === '2026-07-15:08:30:ppi-yoy');
+  const priorRelease = priorValuePayload.days
+    .flatMap((day) => day.events)
+    .find((event) => event.id === '2026-07-15:08:30:ppi-yoy');
+  assert.equal(preservedRelease.actual, priorRelease.actual);
+  assert.equal(preservedRelease.forecast, priorRelease.forecast);
+  assert.equal(mergedAfterValueOutage.availability.status, 'partial');
 
   const recoveredValues = await requestFxMacroValues(builtSchedule, 1000, {
     requestJson: async () => []

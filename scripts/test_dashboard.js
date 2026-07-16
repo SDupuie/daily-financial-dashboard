@@ -48,6 +48,7 @@ const {
   mergedChartAvailability,
   patchDashboard,
   readJsonBlock,
+  readCurrentEarningsWeekArtifact,
   requiresUnavailableRolloverRetry,
   runCommand,
   runWithSectionFallback,
@@ -55,6 +56,7 @@ const {
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
 const { applyWeekAheadLifecycle, buildWeekAheadPreparationFallback, normalizeWeekAhead } = require('./week_ahead_contract');
+const { validateEarningsWeekPayload } = require('./earnings_week_contract');
 const { atomicWriteFile } = require('./staging_writer');
 const { newsAcquisitionPaths } = require('./news_sources');
 const {
@@ -267,7 +269,12 @@ function createDashboardValidationFixture() {
 
 function fixtureNewsSearch(dashboard) {
   const generalCandidates = [...dashboard.stories, ...dashboard.futuresModule.stories]
-    .map(({ title, url, publishedOn }) => ({ title, url, publishedOn }));
+    .map(({ title, url, publishedOn, publishedAt }) => ({
+      title,
+      url,
+      publishedOn,
+      ...(publishedAt ? { publishedAt } : {})
+    }));
   const cryptoCandidates = dashboard.crypto.notes
     .map(({ title, url, publishedOn }) => ({ title, url, publishedOn }));
   while (generalCandidates.length < 36) {
@@ -287,6 +294,23 @@ function fixtureNewsSearch(dashboard) {
     });
   }
   return { generalCandidates, cryptoCandidates };
+}
+
+function writeFixtureNewsCandidates(dashboard, generatedAt = '2026-07-10T21:00:00.000Z') {
+  const newsSearch = fixtureNewsSearch(dashboard);
+  const outputPath = path.join(root, 'generated', 'news_candidates.json');
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, `${JSON.stringify({
+    schemaVersion: 2,
+    generatedAt,
+    finishedAt: generatedAt,
+    eligibleDates: ['2026-07-09', '2026-07-10'],
+    sourceCatalog: [],
+    attempts: [],
+    articleReview: { status: 'complete' },
+    generalCandidates: newsSearch.generalCandidates,
+    cryptoCandidates: newsSearch.cryptoCandidates
+  }, null, 2)}\n`);
 }
 
 function renderDashboardValidationFixture(dashboard, chartData) {
@@ -428,6 +452,34 @@ function testSectionCommandTimeoutFallsOpen() {
   );
   assert.match(result.error.message, /Command timed out after 100ms/);
   assert.deepEqual(result.payload, { status: 'carried_forward' });
+}
+
+function testEarningsRefreshFailureKeepsFreshBuildArtifact() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-earnings-recovery-');
+  const output = path.join(dir, 'earnings_week.json');
+  const checkedAt = new Date('2026-07-10T21:05:00.000Z');
+  const range = { from: '2026-07-10', to: '2026-07-16' };
+  const freshWeek = {
+    ...fixtureEarningsWeek(),
+    generatedAt: checkedAt.toISOString(),
+    range
+  };
+  fs.writeFileSync(output, `${JSON.stringify(freshWeek, null, 2)}\n`);
+
+  const result = runWithSectionFallback(
+    () => { throw new Error('fixture refresh failure after build'); },
+    () => ({ mode: 'carried_forward', week: { ...fixtureEarningsWeek(), generatedAt: '2026-07-09T21:05:00.000Z' } }),
+    {
+      label: 'Earnings',
+      readFreshOnError: () => readCurrentEarningsWeekArtifact(range, checkedAt, output),
+      validateFresh: validateEarningsWeekPayload,
+      validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
+    }
+  );
+
+  assert.equal(result.recovered, true);
+  assert.equal(result.fallback, null);
+  assert.deepEqual(result.payload, freshWeek);
 }
 
 function testEarningsCalendarBuildAuthorization() {
@@ -1199,6 +1251,7 @@ function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
   fs.writeFileSync(dashboardFile, html);
   fs.writeFileSync(candidateFile, html);
   fs.writeFileSync(payloadFile, JSON.stringify(editorial));
+  writeFixtureNewsCandidates(dashboard);
   const result = spawnSync(process.execPath, [
     path.join(root, 'scripts/run_daily_update.js'),
     '--dashboard', dashboardFile,
@@ -1356,6 +1409,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(invalidPayload));
+  writeFixtureNewsCandidates(dashboard);
   const command = [
     path.join(root, 'scripts/run_daily_update.js'),
     '--dashboard', dashboardFile,
@@ -1447,6 +1501,35 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
+  const mixedNewsPayload = structuredClone(editorialPayload);
+  mixedNewsPayload.editorialReview.newsSearch = { generalCandidates: [], cryptoCandidates: [] };
+  mixedNewsPayload.stories[0] = {
+    tag: 'Markets',
+    title: 'Outside inventory story',
+    body: 'A structurally valid but ungenerated card should be omitted without stopping publication.',
+    url: 'https://outside.test/story',
+    publishedOn: '2026-07-10'
+  };
+  mixedNewsPayload.stories[1] = structuredClone(mixedNewsPayload.futuresModule.stories[0]);
+  const duplicateCryptoTitle = mixedNewsPayload.stories[2].title;
+  mixedNewsPayload.crypto.notes[0].title = duplicateCryptoTitle;
+  fs.writeFileSync(payloadFile, JSON.stringify(mixedNewsPayload));
+  const mixedNewsResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(mixedNewsResult.status, 0, mixedNewsResult.stderr);
+  const mixedNewsFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.equal(mixedNewsFinalized.stories.length, 7);
+  assert.equal(mixedNewsFinalized.storiesCoverage.status, 'partial');
+  assert.equal(mixedNewsFinalized.crypto.notes.length, 5);
+  assert.equal(mixedNewsFinalized.crypto.notesCoverage.status, 'partial');
+  assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === 'https://outside.test/story'));
+  assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.futuresModule.stories[0].url));
+  assert.ok(!mixedNewsFinalized.crypto.notes.some((story) => story.title === duplicateCryptoTitle));
+  assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'not_in_candidate_inventory'));
+  assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'promoted_story_duplicate'));
+  assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'cross_section_duplicate'));
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
   const validResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(validResult.status, 0, validResult.stderr);
@@ -1533,6 +1616,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, candidateHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialDashboard));
+  writeFixtureNewsCandidates(dashboard);
   const command = [
     path.join(root, 'scripts/run_daily_update.js'),
     '--dashboard', dashboardFile,
@@ -1593,6 +1677,9 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   const { dashboard: producerDashboard, chartData: producerChartData } = createDashboardValidationFixture();
   const originalProducerInput = renderDashboardValidationFixture(producerDashboard, producerChartData);
   fs.writeFileSync(producerInput, originalProducerInput);
+  const progressWrites = [];
+  let activeChartFetches = 0;
+  let maxActiveChartFetches = 0;
   await runChart([
     '--input', producerInput,
     '--output', producerOutput,
@@ -1604,6 +1691,10 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   ], {
     now: new Date('2026-07-10T21:05:00.000Z'),
     fetchSeries: async (row) => {
+      activeChartFetches += 1;
+      maxActiveChartFetches = Math.max(maxActiveChartFetches, activeChartFetches);
+      await new Promise((resolve) => setImmediate(resolve));
+      activeChartFetches -= 1;
       if (row.ticker === 'VCR') throw new Error('fixture ticker failure');
       return {
         ticker: row.ticker,
@@ -1620,8 +1711,17 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
           { time: '2026-07-10', open: 6190, high: 6210, low: 6180, close: 6200, volume: 1100 }
         ]
       };
+    },
+    writeJson: (file, payload) => {
+      progressWrites.push(structuredClone(payload));
+      fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
     }
   });
+  assert.ok(maxActiveChartFetches > 1, 'Chart rows should be fetched with bounded concurrency.');
+  assert.ok(progressWrites.length > 1, 'Chart fetcher must stage progress before the final write.');
+  assert.equal(progressWrites[0].availability.status, 'partial');
+  assert.equal(progressWrites[0].availability.failures.length, 3);
+  assert.deepEqual(validateChartStagingPayload(progressWrites[0], producerDashboard.tape.rows), []);
   const partial = JSON.parse(fs.readFileSync(producerOutput, 'utf8'));
   assert.equal(partial.availability.status, 'partial');
   assert.deepEqual(partial.availability.failures, [{ ticker: 'VCR', message: 'fixture ticker failure' }]);
@@ -2518,6 +2618,7 @@ const architectureContractTests = Object.freeze([
   testArchitectureSingleWriterAndCliBoundaries,
   testDeterministicSectionFallbackContracts,
   testSectionCommandTimeoutFallsOpen,
+  testEarningsRefreshFailureKeepsFreshBuildArtifact,
   testEarningsCalendarBuildAuthorization,
   testLastGoodDashboardRecovery,
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,

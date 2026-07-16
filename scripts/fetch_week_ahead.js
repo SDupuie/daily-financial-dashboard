@@ -388,13 +388,6 @@ async function requestFxMacroValues(officialSchedule, timeoutMs, dependencies = 
     fetchEntries('announcements', requests.announcements),
     fetchEntries('predictions', requests.predictions)
   ]);
-  const requestedCount = requests.announcements.length + requests.predictions.length;
-  const returnedCount = Object.keys(announcements.values).length + Object.keys(predictions.values).length;
-  if (requestedCount > 0 && returnedCount === 0) {
-    const error = new Error('FXMacroData failed every requested Week Ahead value series.');
-    error.transient = [...announcements.failures, ...predictions.failures].every((failure) => failure.transient);
-    throw error;
-  }
   return {
     announcements: announcements.values,
     predictions: predictions.values,

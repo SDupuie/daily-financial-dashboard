@@ -315,6 +315,7 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
       mode: 'carried_forward',
       week: {
         ...canonical,
+        generatedAt: checkedAt,
         availability: {
           status: 'carried_forward',
           reason: 'earnings_preparation_failed',

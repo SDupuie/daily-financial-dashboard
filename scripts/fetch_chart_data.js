@@ -11,6 +11,7 @@ const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'chart_data.json
 const DEFAULT_DAYS = 1826;
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const FINNHUB_HOST = 'finnhub.io';
+const CHART_ROW_CONCURRENCY = 4;
 const TREASURY_FIELDS = new Map([
   ['TREASURY:CURVE', 'BC_10YEAR'],
   ['TREASURY:3M', 'BC_3MONTH'],
@@ -621,6 +622,7 @@ function parseArgs(argv) {
     days: DEFAULT_DAYS,
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: 250,
+    asOf: null,
     tickers: [],
     compact: false
   };
@@ -648,6 +650,13 @@ function parseArgs(argv) {
     if (arg === '--timeout-ms') {
       if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 1000) throw new Error('--timeout-ms must be a finite number of at least 1000 milliseconds.');
       args.timeoutMs = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--as-of') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--as-of requires an ISO timestamp.');
+      args.asOf = new Date(argv[i + 1]);
+      if (Number.isNaN(args.asOf.getTime())) throw new Error('--as-of must be a valid ISO timestamp.');
       i += 1;
       continue;
     }
@@ -689,6 +698,7 @@ Options:
   --output PATH       Unified chart JSON output path (default: generated/chart_data.json)
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
+  --as-of TIMESTAMP   Fixed run timestamp used as generatedAt and quoteRevision
   --delay-ms 250      Delay between source requests
   --ticker SYMBOL     Fetch only this dashboard ticker (repeatable)
   --compact           Print one-line series summary
@@ -953,6 +963,17 @@ function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
       status: 'carried_forward',
       reason: 'source_refresh_failed',
       checkedAt: timestamp
+    }
+  };
+}
+
+function carriedForwardChartSeries(prior, checkedAt) {
+  return {
+    ...prior,
+    availability: {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt
     }
   };
 }
@@ -1538,44 +1559,9 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
   return fetchYahooSeries(row, args, startDate, endDate);
 }
 
-async function main(argv = process.argv.slice(2), dependencies = {}) {
-  const args = parseArgs(argv);
-  const requestedTickers = new Set(args.tickers.filter(Boolean));
-  const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
-  if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
-  const endDate = dependencies.now instanceof Date ? dependencies.now : new Date();
-  const quoteRevision = endDate.toISOString();
-  const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
-  const treasuryMonthCache = new Map();
-  const series = [];
-  const failures = [];
-  const canonicalPayload = readEmbeddedChartPayload(args.input);
-  const canonicalByTicker = new Map(
-    (canonicalPayload?.series || []).map((item) => [String(item?.ticker || '').toUpperCase(), item])
-  );
-
-  for (const row of inputRows) {
-    try {
-      const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
-      series.push({ ...item, quoteRevision });
-    } catch (error) {
-      const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
-      failures.push({ ticker: row.ticker, message: error.message });
-      if (!prior) throw new Error(`${row.ticker} refresh failed and no validated embedded series is available: ${error.message}`);
-      series.push({
-        ...prior,
-        availability: {
-          status: 'carried_forward',
-          reason: 'source_refresh_failed',
-          checkedAt: quoteRevision
-        }
-      });
-    }
-    if (args.delayMs) await (dependencies.sleep || sleep)(args.delayMs);
-  }
-
+function chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate }) {
   const quoteRows = deriveQuoteRowsFromSeries(series);
-  const output = {
+  return {
     schemaVersion: 1,
     generatedAt: quoteRevision,
     dashboardSource: path.relative(process.cwd(), args.input) || path.basename(args.input),
@@ -1597,11 +1583,90 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     quoteRows,
     series
   };
+}
 
-  const validationErrors = validateChartStagingPayload(output, inputRows);
+function validateAndWriteChartOutput(output, expectedRows, writeJson, outputPath) {
+  const validationErrors = validateChartStagingPayload(output, expectedRows);
   if (validationErrors.length) throw new Error(`Chart staging payload is invalid: ${validationErrors.join(' ')}`);
+  writeJson(outputPath, output);
+}
 
-  (dependencies.writeJson || atomicWriteJson)(args.output, output);
+async function mapIndexesConcurrent(indexes, concurrency, worker, delayMs, sleepFn) {
+  let next = 0;
+  async function run() {
+    while (next < indexes.length) {
+      await worker(indexes[next++]);
+      if (delayMs) await sleepFn(delayMs);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, indexes.length) }, run));
+}
+
+async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const args = parseArgs(argv);
+  const requestedTickers = new Set(args.tickers.filter(Boolean));
+  const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
+  if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
+  const endDate = args.asOf || (dependencies.now instanceof Date ? dependencies.now : new Date());
+  const quoteRevision = endDate.toISOString();
+  const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
+  const treasuryMonthCache = new Map();
+  const canonicalPayload = readEmbeddedChartPayload(args.input);
+  const canonicalByTicker = new Map(
+    (canonicalPayload?.series || []).map((item) => [String(item?.ticker || '').toUpperCase(), item])
+  );
+  const seriesByIndex = inputRows.map((row) => {
+    const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
+    return prior ? carriedForwardChartSeries(prior, quoteRevision) : null;
+  });
+  const failuresByTicker = new Map(inputRows.map((row) => [
+    String(row.ticker || '').toUpperCase(),
+    { ticker: row.ticker, message: 'Refresh did not complete before this staging snapshot.' }
+  ]));
+  const writeJson = dependencies.writeJson || atomicWriteJson;
+  const reportProgress = () => {
+    const series = seriesByIndex.filter(Boolean);
+    if (series.length !== inputRows.length) return;
+    const failures = [...failuresByTicker.values()];
+    const output = chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate });
+    validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
+  };
+  const processRow = async (index) => {
+    const row = inputRows[index];
+    const tickerKey = String(row.ticker || '').toUpperCase();
+    try {
+      const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
+      seriesByIndex[index] = { ...item, quoteRevision };
+      failuresByTicker.delete(tickerKey);
+    } catch (error) {
+      const prior = canonicalByTicker.get(tickerKey);
+      failuresByTicker.set(tickerKey, { ticker: row.ticker, message: error.message });
+      if (!prior) {
+        seriesByIndex[index] = null;
+        return;
+      }
+      seriesByIndex[index] = carriedForwardChartSeries(prior, quoteRevision);
+    }
+    reportProgress();
+  };
+
+  reportProgress();
+  const treasuryIndexes = inputRows.map((row, index) => row.sourceSymbol.startsWith('TREASURY:') ? index : null).filter((index) => index !== null);
+  const independentIndexes = inputRows.map((row, index) => row.sourceSymbol.startsWith('TREASURY:') ? null : index).filter((index) => index !== null);
+  await Promise.all([
+    mapIndexesConcurrent(independentIndexes, CHART_ROW_CONCURRENCY, processRow, args.delayMs, dependencies.sleep || sleep),
+    mapIndexesConcurrent(treasuryIndexes, 1, processRow, args.delayMs, dependencies.sleep || sleep)
+  ]);
+
+  const missingRows = inputRows.filter((row, index) => !seriesByIndex[index]
+    && !canonicalByTicker.has(String(row.ticker || '').toUpperCase()));
+  if (missingRows.length) {
+    throw new Error(`${missingRows.map((row) => row.ticker).join(', ')} refresh failed and no validated embedded series is available.`);
+  }
+  const series = seriesByIndex.filter(Boolean);
+  const failures = [...failuresByTicker.values()];
+  const output = chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate });
+  validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
 
   if (args.compact) {
     process.stdout.write(series.map((item) => `${item.ticker}:${item.bars.length}`).join(' | '));
@@ -1618,6 +1683,7 @@ module.exports = {
   acceptedFreshChartTickers,
   buildChartDataFallback,
   buildUnavailableFuturesPayload: futuresModule.buildUnavailableFuturesPayload,
+  CHART_ROW_CONCURRENCY,
     easternCashOpen: futuresModule.easternCashOpen,
   deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,

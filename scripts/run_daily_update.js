@@ -79,6 +79,7 @@ const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.jso
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const NEWS_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const EARNINGS_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
@@ -419,6 +420,15 @@ function runWithSectionFallback(runFresh, buildFallback, options = {}) {
     if (errors?.length) throw new Error(`${options.label || 'Section'} staging payload is invalid: ${errors.join(' ')}`);
     return { error: null, fallback: null, payload };
   } catch (error) {
+    if (options.readFreshOnError) {
+      try {
+        const payload = options.readFreshOnError(error);
+        const errors = options.validateFresh ? options.validateFresh(payload) : [];
+        if (!errors?.length) return { error, fallback: null, payload, recovered: true };
+      } catch (_recoveryError) {
+        // Continue to the section fallback when the latest staged artifact is absent or invalid.
+      }
+    }
     const fallback = buildFallback(error);
     const fallbackErrors = options.validateFallback ? options.validateFallback(fallback) : [];
     if (fallbackErrors?.length) {
@@ -444,6 +454,17 @@ function earningsStagingNeedsRebuild(filePath = EARNINGS_WEEK_PATH, now = schedu
   } catch (_error) {
     return true;
   }
+}
+
+function readCurrentEarningsWeekArtifact(targetRange, checkedAt, filePath = EARNINGS_WEEK_PATH) {
+  const payload = readJson(filePath);
+  if (payload?.generatedAt !== checkedAt.toISOString()) {
+    throw new Error('Earnings staging artifact does not belong to this preparation run.');
+  }
+  if (payload?.range?.from !== targetRange?.from || payload?.range?.to !== targetRange?.to) {
+    throw new Error('Earnings staging artifact does not match the target range.');
+  }
+  return payload;
 }
 
 function earningsTargetRange(args, canonicalWeek) {
@@ -597,6 +618,45 @@ function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
   };
 }
 
+function validNewsCandidateArtifact(artifact, asOf) {
+  return artifact?.schemaVersion === 2
+    && artifact.generatedAt === asOf.toISOString()
+    && Array.isArray(artifact.attempts)
+    && Array.isArray(artifact.generalCandidates)
+    && Array.isArray(artifact.cryptoCandidates);
+}
+
+function partialNewsCandidateArtifact(asOf, error) {
+  try {
+    const artifact = readJson(NEWS_CANDIDATES_PATH);
+    if (!validNewsCandidateArtifact(artifact, asOf)) return null;
+    return {
+      ...artifact,
+      finishedAt: scheduledNow().toISOString(),
+      attempts: [
+        ...artifact.attempts,
+        {
+          id: 'news-worker',
+          provider: 'news-acquisition',
+          phase: 'worker',
+          pool: 'all',
+          attemptedAt: scheduledNow().toISOString(),
+          resultCount: 0,
+          acceptedCount: 0,
+          error: String(error?.message || error || 'News worker did not finish.')
+        }
+      ],
+      articleReview: {
+        ...(artifact.articleReview || {}),
+        status: artifact.articleReview?.status === 'complete' ? 'complete' : 'partial',
+        error: String(error?.message || error || 'News worker did not finish.')
+      }
+    };
+  } catch (_readError) {
+    return null;
+  }
+}
+
 function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
   try {
     runCommand('node', [
@@ -605,16 +665,20 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
       '--input', args.candidate,
       '--output', NEWS_CANDIDATES_PATH,
       ...(args.windowMode ? [`--${args.windowMode}`] : [])
-    ]);
+    ], { timeoutMs: NEWS_COMMAND_TIMEOUT_MS });
     const artifact = readJson(NEWS_CANDIDATES_PATH);
-    if (!Array.isArray(artifact?.attempts)
-      || !Array.isArray(artifact?.generalCandidates)
-      || !Array.isArray(artifact?.cryptoCandidates)) {
+    if (!validNewsCandidateArtifact(artifact, asOf)) {
       throw new Error('News candidate artifact is malformed.');
     }
     return artifact;
   } catch (error) {
-    process.stderr.write(`News candidate acquisition failed; continuing with still-fresh prior cards: ${error.message}\n`);
+    const partial = partialNewsCandidateArtifact(asOf, error);
+    if (partial) {
+      process.stderr.write(`News candidate acquisition did not finish; continuing with partial staged candidates: ${error.message}\n`);
+      writeJson(NEWS_CANDIDATES_PATH, partial);
+      return partial;
+    }
+    process.stderr.write(`News candidate acquisition failed before staging candidates; continuing with still-fresh prior cards: ${error.message}\n`);
     const artifact = emptyNewsCandidateArtifact(asOf, error, dashboardData);
     writeJson(NEWS_CANDIDATES_PATH, artifact);
     return artifact;
@@ -1332,14 +1396,18 @@ function structurallyUsableStory(item, options = {}) {
   return ![item.title, item.body].some((text) => EDITORIAL_SUPERLATIVE_PATTERN.test(text) && !verifiedClaims.has(text.trim()));
 }
 
-function sanitizeStoryList(editorial, candidate, options = {}) {
+function sanitizeStoryList(editorial, options = {}) {
   if (!Array.isArray(editorial)) {
-    if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'retained_candidate', reason: 'editorial_content_unavailable' });
-    return structuredClone(Array.isArray(candidate) ? candidate : []);
+    if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'omitted', reason: 'editorial_content_unavailable' });
+    return [];
   }
   const seen = new Set();
   const seenUrls = new Set();
   const seenTitles = new Set();
+  const candidateUrls = options.candidateUrls instanceof Set ? options.candidateUrls : null;
+  const blockedIdentities = options.blockedIdentities instanceof Set ? options.blockedIdentities : new Set();
+  const blockedUrls = options.blockedUrls instanceof Set ? options.blockedUrls : new Set();
+  const blockedTitles = options.blockedTitles instanceof Set ? options.blockedTitles : new Set();
   return editorial.filter((item, index) => {
     if (!structurallyUsableStory(item, options)) {
       if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'invalid_editorial_item' });
@@ -1348,8 +1416,15 @@ function sanitizeStoryList(editorial, candidate, options = {}) {
     const identity = storyIdentity(item);
     const url = canonicalStoryUrl(item.url);
     const title = String(item.title || '').trim().toLowerCase();
-    if (!identity || seen.has(identity) || seenUrls.has(url) || seenTitles.has(title)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'duplicate_editorial_item' });
+    if (candidateUrls && !candidateUrls.has(url)) {
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
+      return false;
+    }
+    const duplicate = !identity || seen.has(identity) || seenUrls.has(url) || seenTitles.has(title);
+    const blockedDuplicate = blockedIdentities.has(identity) || blockedUrls.has(url) || blockedTitles.has(title);
+    if (duplicate || blockedDuplicate) {
+      const reason = blockedDuplicate ? options.blockedDuplicateReason || 'duplicate_editorial_item' : 'duplicate_editorial_item';
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason });
       return false;
     }
     if (seen.size >= (options.maximum || Infinity)) {
@@ -1361,6 +1436,62 @@ function sanitizeStoryList(editorial, candidate, options = {}) {
     seenTitles.add(title);
     return true;
   });
+}
+
+function storyBlockSets(...groups) {
+  const stories = groups.flatMap((group) => (Array.isArray(group) ? group : []));
+  return {
+    blockedIdentities: new Set(stories.map(storyIdentity).filter(Boolean)),
+    blockedUrls: new Set(stories.map((story) => canonicalStoryUrl(story?.url)).filter(Boolean)),
+    blockedTitles: new Set(stories.map((story) => String(story?.title || '').trim().toLowerCase()).filter(Boolean))
+  };
+}
+
+function canonicalCandidateUrl(candidate) {
+  return canonicalStoryUrl(candidate?.url);
+}
+
+function candidatePublishedOnAllowed(candidate, options = {}) {
+  return !(options.allowedDates instanceof Set)
+    || options.allowedDates.has(candidate?.publishedOn)
+    || options.additionalAllowedDates?.has(candidate?.publishedOn);
+}
+
+function candidateEligibleForNewsSection(candidate, options = {}) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+  if (!canonicalCandidateUrl(candidate)) return false;
+  if (!candidatePublishedOnAllowed(candidate, options)) return false;
+  if (options.futures) {
+    if (!options.futuresWindow) return false;
+    const publishedAt = Date.parse(candidate.publishedAt);
+    if (!Number.isFinite(publishedAt)) return false;
+    return publishedAt >= options.futuresWindow.start.getTime()
+      && publishedAt <= options.futuresWindow.end.getTime();
+  }
+  return true;
+}
+
+function candidateUrlSet(candidates, options = {}) {
+  return new Set((Array.isArray(candidates) ? candidates : [])
+    .filter((candidate) => candidateEligibleForNewsSection(candidate, options))
+    .map(canonicalCandidateUrl));
+}
+
+function readNewsCandidateSource(preparedAt) {
+  const generatedAt = new Date(preparedAt);
+  if (Number.isNaN(generatedAt.getTime())) {
+    throw new Error('Editorial dashboard-data must retain a valid news candidate preparation timestamp.');
+  }
+  let artifact;
+  try {
+    artifact = readJson(NEWS_CANDIDATES_PATH);
+  } catch (error) {
+    throw new Error(`Generated News candidate source is unavailable; rerun --prepare-editorial-dir before finalization: ${error.message}`);
+  }
+  if (!validNewsCandidateArtifact(artifact, generatedAt)) {
+    throw new Error('Generated News candidate source is missing or stale; rerun --prepare-editorial-dir before finalization.');
+  }
+  return artifact;
 }
 
 function usableTapeCommentary(row, note) {
@@ -1414,9 +1545,11 @@ function applyDashboardDataJson(args) {
   const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
   if (args.scheduled) validateScheduledFinalization(args.dashboard, args.windowMode);
   const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
+  const canonicalChartData = roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data'));
+  const candidateChartData = roundChartPayload(readJsonBlock(candidateHtml, 'chart-data'));
   assertChartSeriesRevisions(
-    roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data')),
-    roundChartPayload(readJsonBlock(candidateHtml, 'chart-data')),
+    canonicalChartData,
+    candidateChartData,
     'Staged dashboard candidate'
   );
   const editorialDashboardData = readJson(args.applyDashboardDataJson);
@@ -1428,9 +1561,27 @@ function applyDashboardDataJson(args) {
   if (!isIsoDateTime(reviewManifest.preparedAt)) {
     throw new Error('Editorial dashboard-data must retain the generated editorialReview.preparedAt timestamp.');
   }
+  const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
   const dashboardData = structuredClone(candidateDashboardData);
   const editorialNow = scheduledNow();
   const freshStoryDates = allowedNewsDates(editorialNow);
+  const additionalFuturesDates = new Set([sharedFuturesSessionDate(candidateDashboardData.futuresModule?.futures)].filter(Boolean));
+  const futuresWindow = futuresStoryPublicationWindow(
+    candidateDashboardData.futuresModule?.sectionTitle,
+    editorialNow.toISOString(),
+    editorialNow,
+    candidateDashboardData.futuresModule?.futures
+  );
+  const newsCandidateSets = {
+    futuresCandidateUrls: candidateUrlSet(newsSource.generalCandidates, {
+      allowedDates: freshStoryDates,
+      additionalAllowedDates: additionalFuturesDates,
+      futures: true,
+      futuresWindow
+    }),
+    storyCandidateUrls: candidateUrlSet(newsSource.generalCandidates, { allowedDates: freshStoryDates }),
+    cryptoCandidateUrls: candidateUrlSet(newsSource.cryptoCandidates, { allowedDates: freshStoryDates, crypto: true })
+  };
   const verifiedClaims = new Set((Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : [])
     .filter((claim) => typeof claim?.text === 'string' && /^https:\/\//i.test(String(claim?.evidenceUrl || '')))
     .map((claim) => claim.text.trim()));
@@ -1442,57 +1593,43 @@ function applyDashboardDataJson(args) {
   );
   dashboardData.futuresModule = {
     ...dashboardData.futuresModule,
-    stories: sanitizeStoryList(editorialDashboardData.futuresModule?.stories, candidateDashboardData.futuresModule?.stories, {
+    stories: sanitizeStoryList(editorialDashboardData.futuresModule?.stories, {
       futures: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'futures-news',
       path: 'futuresModule.stories',
       verifiedClaims,
       allowedDates: freshStoryDates,
-      additionalAllowedDates: new Set([sharedFuturesSessionDate(candidateDashboardData.futuresModule?.futures)].filter(Boolean)),
-      futuresWindow: futuresStoryPublicationWindow(
-        candidateDashboardData.futuresModule?.sectionTitle,
-        editorialNow.toISOString(),
-        editorialNow,
-        candidateDashboardData.futuresModule?.futures
-      ),
+      additionalAllowedDates: additionalFuturesDates,
+      futuresWindow,
+      candidateUrls: newsCandidateSets.futuresCandidateUrls,
       maximum: 3
     })
   };
-  const promotedStoryIds = new Set(dashboardData.futuresModule.stories.map(storyIdentity));
-  const promotedStoryUrls = new Set(dashboardData.futuresModule.stories.map((story) => canonicalStoryUrl(story.url)));
-  const promotedStoryTitles = new Set(dashboardData.futuresModule.stories.map((story) => String(story.title || '').trim().toLowerCase()));
-  const sanitizedStories = sanitizeStoryList(editorialDashboardData.stories, candidateDashboardData.stories, {
+  dashboardData.stories = sanitizeStoryList(editorialDashboardData.stories, {
     verifiedClaims,
     systemFallbacks: reviewManifest.systemFallbacks,
     section: 'stories',
     path: 'stories',
     allowedDates: freshStoryDates,
+    candidateUrls: newsCandidateSets.storyCandidateUrls,
+    ...storyBlockSets(dashboardData.futuresModule.stories),
+    blockedDuplicateReason: 'promoted_story_duplicate',
     maximum: 9
-  });
-  dashboardData.stories = sanitizedStories.filter((story, index) => {
-    const duplicate = promotedStoryIds.has(storyIdentity(story))
-      || promotedStoryUrls.has(canonicalStoryUrl(story.url))
-      || promotedStoryTitles.has(String(story.title || '').trim().toLowerCase());
-    if (duplicate) reviewManifest.systemFallbacks.push({ section: 'stories', path: `stories.accepted[${index}]`, action: 'omitted', reason: 'promoted_story_duplicate' });
-    return !duplicate;
-  });
-  const generalStoryIds = new Set(dashboardData.stories.map(storyIdentity));
-  const sanitizedCryptoNotes = sanitizeStoryList(editorialDashboardData.crypto?.notes, candidateDashboardData.crypto?.notes, {
-    crypto: true,
-    systemFallbacks: reviewManifest.systemFallbacks,
-    section: 'crypto',
-    path: 'crypto.notes',
-    verifiedClaims,
-    allowedDates: freshStoryDates,
-    maximum: 6
   });
   dashboardData.crypto = {
     ...dashboardData.crypto,
-    notes: sanitizedCryptoNotes.filter((story, index) => {
-      const duplicate = promotedStoryIds.has(storyIdentity(story)) || generalStoryIds.has(storyIdentity(story));
-      if (duplicate) reviewManifest.systemFallbacks.push({ section: 'crypto', path: `crypto.notes.accepted[${index}]`, action: 'omitted', reason: 'cross_section_duplicate' });
-      return !duplicate;
+    notes: sanitizeStoryList(editorialDashboardData.crypto?.notes, {
+      crypto: true,
+      systemFallbacks: reviewManifest.systemFallbacks,
+      section: 'crypto',
+      path: 'crypto.notes',
+      verifiedClaims,
+      allowedDates: freshStoryDates,
+      candidateUrls: newsCandidateSets.cryptoCandidateUrls,
+      ...storyBlockSets(dashboardData.futuresModule.stories, dashboardData.stories),
+      blockedDuplicateReason: 'cross_section_duplicate',
+      maximum: 6
     })
   };
   applyNewsCoverageState(dashboardData, { now: editorialNow });
@@ -1565,32 +1702,15 @@ function applyDashboardDataJson(args) {
     reviewManifest.preparedAt
   );
   applyEditionMetadata(dashboardData, args.windowMode);
-  let reviewChartData;
-  let nextHtml = canonicalHtml;
-  try {
-    const chartData = roundChartPayload(readJsonBlock(candidateHtml, 'chart-data'));
-    syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
-    normalizeMarketLensReview(dashboardData, chartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
-    normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
-    const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
-    if (reviewErrors.length) throw new Error(`Editorial review is incomplete or invalid: ${reviewErrors.join(' ')}`);
-    applyMarketLensDecisionsData(dashboardData, chartData, reviewManifest.marketLensDecisions);
-    dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { windowMode: args.windowMode, now: scheduledNow() });
-    reviewChartData = compactChartPayload(chartData);
-    nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(reviewChartData));
-  } catch (error) {
-    // dashboard-data-only maintenance still works on staging fixtures that omit chart-data.
-    if (/chart-data JSON block/.test(String(error?.message || ''))) {
-      reviewChartData = { schemaVersion: 1, series: [] };
-      normalizeMarketLensReview(dashboardData, reviewChartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
-      normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
-      const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
-      if (reviewErrors.length) throw new Error(`Editorial review is incomplete or invalid: ${reviewErrors.join(' ')}`);
-      applyMarketLensDecisionsData(dashboardData, reviewChartData, reviewManifest.marketLensDecisions);
-    } else {
-      throw error;
-    }
-  }
+  syncDashboardPricesFromChartData(dashboardData, candidateChartData, { windowMode: args.windowMode });
+  normalizeMarketLensReview(dashboardData, candidateChartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
+  normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
+  const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
+  if (reviewErrors.length) throw new Error(`Editorial review is incomplete or invalid: ${reviewErrors.join(' ')}`);
+  applyMarketLensDecisionsData(dashboardData, candidateChartData, reviewManifest.marketLensDecisions);
+  dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, candidateChartData, { windowMode: args.windowMode, now: scheduledNow() });
+  const reviewChartData = compactChartPayload(candidateChartData);
+  let nextHtml = replaceJsonBlock(canonicalHtml, 'chart-data', JSON.stringify(reviewChartData));
   dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead, { now: scheduledNow() });
   applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode, now: scheduledNow() });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData);
@@ -1829,12 +1949,20 @@ function main() {
     reportSectionFallback('Futures', 'unavailable', futuresPreparation.error);
   }
 
+  const chartCommandArgs = ['scripts/fetch_chart_data.js', '--input', args.sourceDashboard, '--as-of', checkedAt.toISOString()];
   const chartPreparation = runWithSectionFallback(
-    () => runCommand('node', ['scripts/fetch_chart_data.js', '--input', args.sourceDashboard]),
+    () => runCommand('node', chartCommandArgs),
     () => buildChartDataFallback(canonicalChartData, checkedAt),
     {
       label: 'Chart and Tape',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'chart_data.json')),
+      readFreshOnError: () => {
+        const payload = readJson(path.join(GENERATED_DIR, 'chart_data.json'));
+        if (payload?.generatedAt !== checkedAt.toISOString()) {
+          throw new Error('Chart staging artifact does not belong to this preparation run.');
+        }
+        return payload;
+      },
       validateFresh: (payload) => [
         ...validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard)),
         ...chartSeriesRevisionErrors(canonicalChartData, payload)
@@ -1844,8 +1972,12 @@ function main() {
   );
   args.chartDataPayload = chartPreparation.payload;
   if (chartPreparation.error) {
-    args.chartDataFallbackPayload = chartPreparation.fallback;
-    reportSectionFallback('Chart and Tape', 'carried_forward', chartPreparation.error);
+    if (chartPreparation.recovered) {
+      process.stderr.write(`Chart and Tape preparation did not finish; continuing with partial staged chart data: ${chartPreparation.error.message}\n`);
+    } else {
+      args.chartDataFallbackPayload = chartPreparation.fallback;
+      reportSectionFallback('Chart and Tape', 'carried_forward', chartPreparation.error);
+    }
   }
 
   const cryptoPreparation = runWithSectionFallback(
@@ -1959,12 +2091,18 @@ function main() {
   }, () => buildEarningsPreparationFallback(canonicalWeek, earningsRange, { checkedAt }), {
     label: 'Earnings',
     readFresh: () => readJson(EARNINGS_WEEK_PATH),
+    readFreshOnError: () => readCurrentEarningsWeekArtifact(earningsRange, checkedAt),
     validateFresh: (payload) => validateEarningsWeekPayload(payload),
     validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
   });
   if (earningsPreparation.error) {
-    args.earningsFallbackWeek = earningsPreparation.fallback.week;
-    process.stderr.write(`Earnings preparation failed; continuing with ${earningsPreparation.fallback.mode} section fallback: ${earningsPreparation.error.message}\n`);
+    if (earningsPreparation.recovered) {
+      args.earningsWeekPayload = earningsPreparation.payload;
+      process.stderr.write(`Earnings preparation did not finish; continuing with staged earnings week: ${earningsPreparation.error.message}\n`);
+    } else {
+      args.earningsFallbackWeek = earningsPreparation.fallback.week;
+      process.stderr.write(`Earnings preparation failed; continuing with ${earningsPreparation.fallback.mode} section fallback: ${earningsPreparation.error.message}\n`);
+    }
   } else {
     args.earningsWeekPayload = earningsPreparation.payload;
   }
@@ -2015,6 +2153,7 @@ module.exports = {
   replaceJsonBlock,
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
+  readCurrentEarningsWeekArtifact,
   earningsTargetRange,
   earningsCalendarBuildDecision,
   weekAheadStagingNeedsRebuild,

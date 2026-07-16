@@ -19,7 +19,12 @@ const {
   storyIdentity,
   validateNewsCoverageState
 } = require('./news_contract');
-const { collectNewsCandidates, extractArticleMetadata, parseNewsFeed } = require('./fetch_news_candidates');
+const {
+  ARTICLE_REVIEW_CANDIDATE_LIMIT,
+  collectNewsCandidates,
+  extractArticleMetadata,
+  parseNewsFeed
+} = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
 const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
 const temporaryDirectories = new Set();
@@ -217,7 +222,12 @@ async function testDeterministicNewsCandidateAcquisition() {
     }
   });
 
-  assert.deepEqual(calls, acquisitionPaths.map((entry) => entry.id), 'Every configured API and direct-feed path must be attempted.');
+  assert.deepEqual([...calls].sort(), acquisitionPaths.map((entry) => entry.id).sort(), 'Every configured API and direct-feed path must be attempted.');
+  assert.deepEqual(artifact.attempts.map((attempt) => attempt.id), acquisitionPaths.map((entry) => entry.id), 'Acquisition attempts must remain in manifest order.');
+  assert.ok(
+    calls.indexOf('stockfit-market') >= 0 && calls.indexOf('stockfit-market') < calls.indexOf('alpha-blockchain'),
+    'Distinct non-Alpha endpoints should not wait for the second paced Alpha call.'
+  );
   assert.deepEqual(pauses, [1250], 'The two Alpha Vantage calls must be paced.');
   assert.equal(artifact.generalCandidates.length, 5, 'Direct duplicates, two Yahoo stories, and the prior card must remain available once each.');
   assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
@@ -239,6 +249,125 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.priorCard).priorCopy.tag, 'Prior');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'coindesk').acceptedCount, 1);
+  assert.equal(artifact.articleReview.status, 'complete');
+}
+
+async function testNewsCandidateReviewCapAndProgress() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const reviewed = [];
+  const progressArtifacts = [];
+  const itemCount = ARTICLE_REVIEW_CANDIDATE_LIMIT + 10;
+  const items = Array.from({ length: itemCount }, (_unused, index) => ({
+    publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
+    title: `Cap fixture ${String(index).padStart(3, '0')}`,
+    url: `https://www.cnbc.com/2026/07/10/cap-fixture-${String(index).padStart(3, '0')}.html`
+  }));
+  const artifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [{ id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({ items }),
+    fetchArticle: async (candidate) => {
+      reviewed.push(candidate.title);
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: new Date(candidate.publishedAt)
+      };
+    },
+    onProgress: (progressArtifact) => progressArtifacts.push(progressArtifact)
+  });
+
+  assert.equal(reviewed.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.eligibleDownloadedCount, itemCount);
+  assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.reviewedCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.skippedCount, 10);
+  assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 000'), false);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 259'), true);
+  assert.ok(
+    progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'acquiring'
+      && progressArtifact.generalCandidates.length === 0),
+    'Progress artifacts must not expose unreviewed feed candidates.'
+  );
+  assert.ok(
+    progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'reviewing'
+      && progressArtifact.generalCandidates.length > 0
+      && progressArtifact.generalCandidates.length < ARTICLE_REVIEW_CANDIDATE_LIMIT),
+    'Progress artifacts should expose reviewed candidates incrementally.'
+  );
+}
+
+async function testNewsCandidateCapAfterEligibilityAndDedupe() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const validItems = Array.from({ length: ARTICLE_REVIEW_CANDIDATE_LIMIT }, (_unused, index) => ({
+    publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
+    title: `Cap ordering valid fixture ${String(index).padStart(3, '0')}`,
+    url: `https://www.cnbc.com/2026/07/10/cap-ordering-valid-${String(index).padStart(3, '0')}.html`
+  }));
+  const invalidItems = [
+    {
+      publishedAt: '2026-07-10T23:59:59.000Z',
+      title: 'Cap ordering unapproved fixture',
+      url: 'https://unapproved.example/cap-ordering-unapproved.html'
+    },
+    {
+      publishedAt: '2026-07-10T23:59:58.000Z',
+      title: 'Cap ordering non-HTTPS fixture',
+      url: 'http://www.cnbc.com/2026/07/10/cap-ordering-non-https.html'
+    },
+    {
+      publishedAt: '2026-07-10T23:59:57.000Z',
+      title: '',
+      url: 'https://www.cnbc.com/2026/07/10/cap-ordering-missing-title.html'
+    },
+    {
+      title: 'Cap ordering missing-date fixture',
+      url: 'https://www.cnbc.com/2026/07/10/cap-ordering-missing-date.html'
+    },
+    {
+      publishedAt: '2026-07-01T23:59:56.000Z',
+      title: 'Cap ordering stale fixture',
+      url: 'https://www.cnbc.com/2026/07/01/cap-ordering-stale.html'
+    }
+  ];
+  const duplicateItem = {
+    ...validItems[0],
+    publishedAt: '2026-07-10T23:59:55.000Z',
+    url: `${validItems[0].url}?utm_source=duplicate`
+  };
+  const reviewed = [];
+
+  const artifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [{ id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({ items: [...invalidItems, duplicateItem, ...validItems] }),
+    fetchArticle: async (candidate) => {
+      reviewed.push(candidate.title);
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: new Date(candidate.publishedAt)
+      };
+    }
+  });
+
+  assert.equal(reviewed.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.eligibleDownloadedCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.skippedCount, 0);
+  assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap ordering valid fixture 000'), true);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap ordering valid fixture 249'), true);
+  assert.equal(artifact.generalCandidates.some((candidate) => /unapproved|non-HTTPS|missing|stale/.test(candidate.title)), false);
 }
 
 async function testYahooOriginalPromotionValidation() {
@@ -499,6 +628,8 @@ async function main() {
   testArticleMetadataExtraction();
   testRssParsing();
   await testDeterministicNewsCandidateAcquisition();
+  await testNewsCandidateReviewCapAndProgress();
+  await testNewsCandidateCapAfterEligibilityAndDedupe();
   await testYahooOriginalPromotionValidation();
   testBaselineSanitization();
   testNewMarkerAssignment();

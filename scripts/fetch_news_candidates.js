@@ -13,6 +13,7 @@ const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_CONCURRENCY = 8;
+const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const ALPHA_VANTAGE_PACING_MS = 1250;
 const PROVENANCE_PRIORITY = Object.freeze({ rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 
@@ -424,10 +425,14 @@ function candidateOrder(left, right) {
     || left.url.localeCompare(right.url);
 }
 
-async function mapConcurrent(items, concurrency, worker) {
+async function mapConcurrent(items, concurrency, worker, onSettled = null) {
   let next = 0;
   async function run() {
-    while (next < items.length) await worker(items[next++]);
+    while (next < items.length) {
+      const item = items[next++];
+      await worker(item);
+      if (onSettled) await onSettled(item);
+    }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
 }
@@ -539,14 +544,49 @@ async function collectNewsCandidates({
   offline = false,
   clock = () => new Date(),
   pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  env = process.env
+  env = process.env,
+  onProgress = null
 } = {}) {
   const eligibleDates = allowedNewsDates(asOf);
-  const attempts = [];
-  const downloaded = [];
-  let alphaNetworkCallMade = false;
+  const attemptsByIndex = Array(acquisitionPaths.length).fill(null);
+  const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
+  const reviewedDownloaded = [];
+  const articleReview = {
+    candidateLimit: ARTICLE_REVIEW_CANDIDATE_LIMIT,
+    eligibleDownloadedCount: 0,
+    reviewCandidateCount: 0,
+    reviewedCount: 0,
+    skippedCount: 0,
+    concurrency: ARTICLE_CONCURRENCY,
+    status: 'not_started'
+  };
+  const downloadedCandidates = () => downloadedByIndex.flat();
+  const buildArtifact = (status = articleReview.status) => {
+    const prior = priorNewsCandidates(dashboardData, eligibleDates);
+    const candidates = deduplicateCandidates([
+      ...reviewedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
+      ...prior.generalCandidates,
+      ...prior.cryptoCandidates
+    ]);
+    return {
+      schemaVersion: 2,
+      generatedAt: asOf.toISOString(),
+      finishedAt: clock().toISOString(),
+      eligibleDates: [...eligibleDates].sort(),
+      sourceCatalog: APPROVED_NEWS_SOURCES,
+      attempts: attemptsByIndex.filter(Boolean),
+      articleReview: { ...articleReview, status },
+      generalCandidates: candidates.filter((candidate) => candidate.pool === 'generalCandidates').sort(candidateOrder),
+      cryptoCandidates: candidates.filter((candidate) => candidate.pool === 'cryptoCandidates').sort(candidateOrder)
+    };
+  };
+  const reportProgress = (status = articleReview.status) => {
+    if (onProgress) onProgress(buildArtifact(status));
+  };
 
-  for (const acquisitionPath of acquisitionPaths) {
+  reportProgress('starting');
+
+  async function fetchOnePath(acquisitionPath, index) {
     const attempt = {
       id: acquisitionPath.id,
       provider: acquisitionPath.provider,
@@ -559,43 +599,58 @@ async function collectNewsCandidates({
     };
     try {
       if (offline) throw new Error('Network disabled for offline test.');
-      if (acquisitionPath.provider === 'alpha-vantage' && alphaNetworkCallMade) await pause(ALPHA_VANTAGE_PACING_MS);
-      if (acquisitionPath.provider === 'alpha-vantage') alphaNetworkCallMade = true;
       const result = await fetchPath(acquisitionPath, { eligibleDates, timeoutMs: searchTimeoutMs, env });
       if (!Array.isArray(result?.items)) throw new Error(`${acquisitionPath.provider} result must contain items[].`);
       attempt.resultCount = result.items.length;
       for (const item of result.items) {
         const candidate = normalizeProviderCandidate(item, acquisitionPath, eligibleDates);
         if (!candidate) continue;
-        downloaded.push(candidate);
+        downloadedByIndex[index].push(candidate);
         attempt.acceptedCount += 1;
       }
     } catch (error) {
       attempt.error = String(error?.message || error);
     }
-    attempts.push(attempt);
+    attemptsByIndex[index] = attempt;
+    reportProgress('acquiring');
   }
 
-  await mapConcurrent(downloaded, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
-    eligibleDates, fetchArticle, articleTimeoutMs, clock
-  }));
-  const prior = priorNewsCandidates(dashboardData, eligibleDates);
-  const candidates = deduplicateCandidates([
-    ...downloaded.filter((candidate) => candidate.pageDateFresh !== false),
-    ...prior.generalCandidates,
-    ...prior.cryptoCandidates
-  ]);
+  const groups = new Map();
+  acquisitionPaths.forEach((acquisitionPath, index) => {
+    const key = acquisitionPath.provider === 'alpha-vantage' ? 'provider:alpha-vantage' : `path:${acquisitionPath.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ acquisitionPath, index });
+  });
 
-  return {
-    schemaVersion: 2,
-    generatedAt: asOf.toISOString(),
-    finishedAt: clock().toISOString(),
-    eligibleDates: [...eligibleDates].sort(),
-    sourceCatalog: APPROVED_NEWS_SOURCES,
-    attempts,
-    generalCandidates: candidates.filter((candidate) => candidate.pool === 'generalCandidates').sort(candidateOrder),
-    cryptoCandidates: candidates.filter((candidate) => candidate.pool === 'cryptoCandidates').sort(candidateOrder)
-  };
+  await Promise.all([...groups.values()].map(async (group) => {
+    for (let groupIndex = 0; groupIndex < group.length; groupIndex += 1) {
+      if (groupIndex > 0 && group[groupIndex].acquisitionPath.provider === 'alpha-vantage') {
+        await pause(ALPHA_VANTAGE_PACING_MS);
+      }
+      await fetchOnePath(group[groupIndex].acquisitionPath, group[groupIndex].index);
+    }
+  }));
+
+  const reviewCandidates = deduplicateCandidates(downloadedCandidates()).sort(candidateOrder);
+  const cappedReviewCandidates = reviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  articleReview.eligibleDownloadedCount = reviewCandidates.length;
+  articleReview.reviewCandidateCount = cappedReviewCandidates.length;
+  articleReview.skippedCount = Math.max(0, reviewCandidates.length - cappedReviewCandidates.length);
+  articleReview.status = 'reviewing';
+  reportProgress();
+
+  await mapConcurrent(cappedReviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
+    eligibleDates, fetchArticle, articleTimeoutMs, clock
+  }), (candidate) => {
+    reviewedDownloaded.push(candidate);
+    articleReview.reviewedCount += 1;
+    if (articleReview.reviewedCount % ARTICLE_CONCURRENCY === 0
+      || articleReview.reviewedCount === cappedReviewCandidates.length) {
+      reportProgress('reviewing');
+    }
+  });
+  articleReview.status = 'complete';
+  return buildArtifact('complete');
 }
 
 async function main() {
@@ -607,7 +662,8 @@ async function main() {
     dashboardData,
     searchTimeoutMs: args.searchTimeoutMs,
     articleTimeoutMs: args.articleTimeoutMs,
-    offline: process.env.DASHBOARD_TEST_NO_NETWORK === '1' || process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1'
+    offline: process.env.DASHBOARD_TEST_NO_NETWORK === '1' || process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1',
+    onProgress: (progressArtifact) => atomicWriteJson(args.output, progressArtifact)
   });
   atomicWriteJson(args.output, artifact);
   const failures = artifact.attempts.filter((attempt) => attempt.error).length;
@@ -622,6 +678,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ARTICLE_REVIEW_CANDIDATE_LIMIT,
   alphaTimeFrom,
   collectNewsCandidates,
   extractArticleMetadata,
