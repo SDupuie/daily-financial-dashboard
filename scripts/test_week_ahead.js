@@ -230,6 +230,8 @@ function testMarketLensDecisionApplication() {
   assert.equal(data.weekAhead.days[0].marketLens.title, 'Household demand tests growth');
   const missingDecisionFallback = applyMarketLensDecisions(data.weekAhead, []);
   assert.equal(missingDecisionFallback.days[0].marketLensSource, 'generated');
+  const pendingDecisionFallback = applyMarketLensDecisions(data.weekAhead, [{ date: '2026-07-13', action: 'pending_review' }]);
+  assert.equal(pendingDecisionFallback.days[0].marketLensSource, missingDecisionFallback.days[0].marketLensSource);
   const replacementWithOptionalTicker = applyMarketLensDecisions(data.weekAhead, [{
     date: '2026-07-13',
     action: 'replace',
@@ -486,11 +488,11 @@ function testLifecycleAndCloseReactionTransitions() {
   assert.match(validateWeekAheadPayload(afterClose, { now: new Date('2026-07-14T19:59:00Z') }).join('\n'), /cannot precede the event-day market close/);
   assert.match(
     validateWeekAheadPayload(afterClose, { requireOutcomeDisposition: true }).join('\n'),
-    /requires a verified or commentary_unavailable disposition/,
+    /requires an outcome disposition/,
     'Publication validation must require a disposition, not necessarily prose.'
   );
   const unfinishedOutcome = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
-  assert.equal(unfinishedOutcome.days.find((day) => day.date === '2026-07-14').outcome.status, 'commentary_unavailable');
+  assert.equal(unfinishedOutcome.days.find((day) => day.date === '2026-07-14').outcome.status, 'pending_review');
   assert.deepEqual(validateWeekAheadPayload(unfinishedOutcome, { requireOutcomeDisposition: true }), []);
   const failOpenOutcome = structuredClone(afterClose);
   failOpenOutcome.days.find((day) => day.date === '2026-07-14').outcome = {

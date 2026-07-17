@@ -26,6 +26,7 @@ const {
   buildEarningsPreparationFallback,
   combinedOutcome,
   computeEarningsWeekCounts,
+  narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
   earningsRowKey: earningsNarrativeRowKey
 } = require('./earnings_week_contract');
@@ -72,6 +73,8 @@ const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_DASHBOARD = path.join(ROOT, 'daily_financial_news.html');
 const GENERATED_DIR = path.join(ROOT, 'generated');
 const DEFAULT_CANDIDATE = path.join(GENERATED_DIR, 'daily_financial_news.candidate.html');
+const DEFAULT_EDITORIAL_DIR = path.join(GENERATED_DIR, 'editorial');
+const DEFAULT_EDITORIAL_DASHBOARD_DATA = path.join(DEFAULT_EDITORIAL_DIR, 'dashboard-data.json');
 const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_good.html');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
@@ -256,12 +259,15 @@ function applyEditionMetadata(data, windowMode, now = scheduledNow()) {
 }
 
 function parseArgs(argv) {
+  const dailyCommand = ['prepare', 'apply'].includes(argv[0]) ? argv.shift() : '';
   const args = {
+    dailyCommand,
     dashboard: DEFAULT_DASHBOARD,
     candidate: DEFAULT_CANDIDATE,
     windowMode: '',
     applyDashboardDataJson: '',
     prepareEditorialDir: '',
+    prepareEditorialAfterStaging: dailyCommand === 'prepare',
     applyEarningsWeekJson: '',
     applyChartDataJson: '',
     mergeChartDataJson: '',
@@ -341,9 +347,10 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
+  if (dailyCommand === 'apply' && !args.applyDashboardDataJson) args.applyDashboardDataJson = DEFAULT_EDITORIAL_DASHBOARD_DATA;
   const contentModeCount = [args.applyDashboardDataJson, args.applyEarningsWeekJson, args.applyChartDataJson, args.mergeChartDataJson, args.prepareEditorialDir, args.syncChartQuotes].filter(Boolean).length;
   if (!args.windowMode && contentModeCount === 0) {
-    throw new Error('You must pass --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
+    throw new Error('You must pass prepare, apply, --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
   const windowAwareContentMode = args.applyDashboardDataJson || args.prepareEditorialDir;
   if (contentModeCount > 1 || (args.windowMode && contentModeCount && !windowAwareContentMode)) {
@@ -365,6 +372,8 @@ function parseArgs(argv) {
 
 function printHelp() {
   process.stdout.write(`Usage:
+  node scripts/run_daily_update.js prepare (--morning | --afternoon) [--scheduled] [options]
+  node scripts/run_daily_update.js apply [--scheduled --morning|--afternoon] [options]
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --prepare-editorial-dir PATH [--morning|--afternoon]
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [--scheduled --morning|--afternoon] [options]
@@ -376,6 +385,8 @@ function printHelp() {
 Options:
   --dashboard PATH                     Canonical dashboard HTML (default: daily_financial_news.html)
   --candidate PATH                     Staged complete candidate (default: generated/daily_financial_news.candidate.html)
+  prepare                              Run deterministic preparation, then write generated/editorial/dashboard-data.json
+  apply                                Apply generated/editorial/dashboard-data.json to the canonical dashboard
   --apply-dashboard-data-json PATH    Safely replace only the embedded dashboard-data block from JSON
   --prepare-editorial-dir PATH        Download News candidates and write the single dashboard-data editorial handoff
   --apply-earnings-week-json PATH     Stage a validated earnings-week payload in the complete candidate
@@ -391,10 +402,9 @@ Options:
 Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
 Manual finalization is time-unrestricted and preserves the scheduled News baseline.
 
-This orchestrator standardizes the three-phase daily workflow:
-  1. refresh deterministic data and edition metadata
-  2. download News candidates and prepare one dashboard-data handoff for editorial work
-  3. merge editorial work, advance the scheduled baseline, stamp, receipt, validate, and atomically apply
+This orchestrator standardizes the daily workflow:
+  1. prepare: refresh deterministic data, download News candidates, and write one dashboard-data handoff
+  2. apply: merge editorial work, advance the scheduled baseline, stamp, receipt, validate, and atomically apply
 
 Publish remains a separate explicit step via ./scripts/publish_main.sh.
 `);
@@ -457,11 +467,11 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
-function earningsStagingNeedsRebuild(filePath = EARNINGS_WEEK_PATH, now = scheduledNow()) {
+function earningsStagingNeedsRebuild(filePath = EARNINGS_WEEK_PATH) {
   if (!fs.existsSync(filePath)) return false;
   try {
     const payload = readJson(filePath);
-    return validateEarningsWeekPayload(payload, { now })?.length > 0;
+    return validateEarningsWeekPayload(payload)?.length > 0;
   } catch (_error) {
     return true;
   }
@@ -707,7 +717,7 @@ function prepareEditorialWorkspace(args) {
   delete dashboardData.renesas;
   const marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
-    .map((day) => ({ date: day.date, action: null }));
+    .map((day) => ({ date: day.date, action: 'pending_review' }));
   const preparedAt = scheduledNow();
   const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
@@ -717,6 +727,7 @@ function prepareEditorialWorkspace(args) {
     baseEditionId,
     verifiedClaims: [],
     newsSearch,
+    newsSelection: { futures: [], stories: [], crypto: [] },
     openingDecision: { action: null },
     marketLensDecisions
   };
@@ -724,6 +735,9 @@ function prepareEditorialWorkspace(args) {
   delete dashboardData.storiesCoverage;
   if (dashboardData.crypto) delete dashboardData.crypto.notesCoverage;
   if (dashboardData.futuresModule) delete dashboardData.futuresModule.storiesCoverage;
+  if (dashboardData.futuresModule) dashboardData.futuresModule.stories = [];
+  dashboardData.stories = [];
+  if (dashboardData.crypto) dashboardData.crypto.notes = [];
   dashboardData.earnings = prepareEarningsForEditorial(dashboardData.earnings);
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
   dashboardData.editorialReview = reviewManifest;
@@ -877,7 +891,7 @@ function stageDashboardCandidate(args, nextHtml) {
   const temporary = `${args.candidate}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.writeFileSync(temporary, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), temporary, '--staging-candidate'], {
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), temporary], {
       cwd: ROOT,
       stdio: 'inherit'
     });
@@ -993,7 +1007,6 @@ function prepareCandidateNews(data, now = scheduledNow()) {
     .filter((item) => {
       if (!structurallyUsableStory(item, {
         allowedDates,
-        verifiedClaims: new Set(),
         ...options
       })) return false;
       const identity = storyIdentity(item);
@@ -1206,13 +1219,6 @@ function patchDashboard(args) {
   return nextHtml;
 }
 
-function validateMarketLensDashboardReferences(data, chartData, lens) {
-  void data;
-  void chartData;
-  void lens;
-  return [];
-}
-
 function normalizeWeekAheadReactionButtons(data, chartData) {
   const tapeTickers = new Set((Array.isArray(data?.tape?.rows) ? data.tape.rows : []).map((row) => String(row?.ticker || '').toUpperCase()));
   const chartTickers = new Set((Array.isArray(chartData?.series) ? chartData.series : []).map((series) => String(series?.ticker || '').toUpperCase()));
@@ -1223,22 +1229,16 @@ function normalizeWeekAheadReactionButtons(data, chartData) {
   }
 }
 
-function applyMarketLensDecisionsData(data, chartData, payload) {
-  data.weekAhead = applyMarketLensDecisions(data.weekAhead, payload, {
-    validateEditorialReferences: (lens) => validateMarketLensDashboardReferences(data, chartData, lens)
-  });
+function applyMarketLensDecisionsData(data, payload) {
+  data.weekAhead = applyMarketLensDecisions(data.weekAhead, payload);
   return data;
 }
 
-function normalizeMarketLensReview(data, chartData, reviewManifest, priorReview = null, systemFallbacks = null) {
-  void systemFallbacks;
-  void priorReview;
+function normalizeMarketLensReview(data, reviewManifest) {
   const submitted = Array.isArray(reviewManifest.marketLensDecisions) ? reviewManifest.marketLensDecisions : [];
   const eventDays = (data.weekAhead?.days || []).filter((day) => Array.isArray(day?.events) && day.events.length);
   const submittedByDate = new Map(submitted.filter((decision) => decision?.date).map((decision) => [decision.date, decision]));
-  const normalized = normalizeMarketLensDecisions(data.weekAhead, submitted, {
-    validateEditorialReferences: (lens) => validateMarketLensDashboardReferences(data, chartData, lens)
-  }).map((decision) => {
+  const normalized = normalizeMarketLensDecisions(data.weekAhead, submitted).map((decision) => {
     const day = eventDays.find((item) => item.date === decision.date);
     const submittedDecision = submittedByDate.get(decision.date);
     const released = ['released_awaiting_close', 'close_available'].includes(day?.lifecycle);
@@ -1307,7 +1307,21 @@ function earningsNarrativeItem(row) {
   };
 }
 
-function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, editorialDashboardData, systemFallbacks = null, attemptThreshold = '') {
+function preserveSafePriorEarningsNarrative(finalWeek, previousWeek) {
+  const fallbackWeek = mergeUnchangedEarningsNarrative(previousWeek, finalWeek);
+  const fallbackRowsByKey = new Map((Array.isArray(fallbackWeek?.rows) ? fallbackWeek.rows : [])
+    .map((row) => [earningsNarrativeRowKey(row), row]));
+  return {
+    ...finalWeek,
+    rows: (Array.isArray(finalWeek?.rows) ? finalWeek.rows : []).map((row) => (
+      narrativeEditorialComplete(row, row)
+        ? row
+        : fallbackRowsByKey.get(earningsNarrativeRowKey(row)) || row
+    ))
+  };
+}
+
+function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, editorialDashboardData, previousDashboardData = null) {
   const candidateWeek = candidateDashboardData.earnings?.week;
   if (!candidateWeek) return null;
   const editorialRowsByKey = new Map((Array.isArray(editorialDashboardData.earnings?.week?.rows)
@@ -1336,13 +1350,12 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
         appliedAt: scheduledNow()
       })
     : structuredClone(candidateWeek);
+  finalWeek = preserveSafePriorEarningsNarrative(finalWeek, previousDashboardData?.earnings?.week);
   const finalized = { earnings: { week: finalWeek } };
   normalizeEarningsForPublication(finalized);
   finalWeek = finalized.earnings.week;
-  const errors = validateEarningsWeekPayload(finalWeek, { requireNarrative: true });
+  const errors = validateEarningsWeekPayload(finalWeek);
   if (errors.length) process.stderr.write(`Editorial Earnings narrative warning: ${errors.join(' ')}\n`);
-  void systemFallbacks;
-  void attemptThreshold;
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
@@ -1350,26 +1363,12 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
   return { narrativePayload: rows.length ? narrativePayload : null, week: finalWeek };
 }
 
-function safeEditorialText(value, fallback, verifiedClaims, systemFallbacks = null, section = '', pathName = '') {
+function safeEditorialText(value, fallback) {
   const text = typeof value === 'string' ? value.trim() : '';
-  if (!text) {
-    if (Array.isArray(systemFallbacks) && value !== fallback) {
-      systemFallbacks.push({
-        section,
-        path: pathName,
-        action: 'retained_candidate',
-        reason: 'editorial_content_unavailable'
-      });
-    }
-    return fallback;
-  }
-  return value;
+  return text ? value : fallback;
 }
 
-function sanitizeOpening(candidate, editorial, verifiedClaims, systemFallbacks = null) {
-  void candidate;
-  void verifiedClaims;
-  void systemFallbacks;
+function sanitizeOpening(editorial) {
   const opening = {};
   const headline = typeof editorial?.headline === 'string' ? editorial.headline.trim() : '';
   const deck = typeof editorial?.deck === 'string' ? editorial.deck.trim() : '';
@@ -1385,11 +1384,6 @@ function sanitizeOpening(candidate, editorial, verifiedClaims, systemFallbacks =
     .filter((item) => item.label && item.body);
   if (editorialCatalysts.length) opening.catalysts = editorialCatalysts;
   return opening;
-}
-
-function finalizeOpeningEditorial(candidate, editorial, reviewManifest, verifiedClaims) {
-  void reviewManifest;
-  return sanitizeOpening(candidate, editorial, verifiedClaims);
 }
 
 function structurallyUsableStory(item, options = {}) {
@@ -1416,34 +1410,58 @@ function structurallyUsableStory(item, options = {}) {
   return true;
 }
 
+function storyWithCandidateMetadata(item, candidate, options = {}) {
+  const source = candidate || item;
+  const story = {
+    ...(options.crypto ? { kicker: item?.kicker } : { tag: item?.tag }),
+    ...(typeof item?.tone === 'string' ? { tone: item.tone } : {}),
+    title: item?.title,
+    body: item?.body,
+    url: source?.url,
+    publishedOn: source?.publishedOn,
+    ...(source?.publishedAt ? { publishedAt: source.publishedAt } : {}),
+    ...(typeof item?.isNewSinceScheduledUpdate === 'boolean' ? { isNewSinceScheduledUpdate: item.isNewSinceScheduledUpdate } : {})
+  };
+  return story;
+}
+
 function sanitizeStoryList(editorial, options = {}) {
   if (!Array.isArray(editorial)) {
     if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'omitted', reason: 'editorial_content_unavailable' });
     return [];
   }
   const seenUrls = new Set();
-  const candidateUrls = options.candidateUrls instanceof Set ? options.candidateUrls : null;
+  const candidateByUrl = options.candidateByUrl instanceof Map ? options.candidateByUrl : null;
+  const candidateUrls = options.candidateUrls instanceof Set ? options.candidateUrls : candidateByUrl ? new Set(candidateByUrl.keys()) : null;
   const blockedUrls = options.blockedUrls instanceof Set ? options.blockedUrls : new Set();
-  return editorial.filter((item, index) => {
-    if (!structurallyUsableStory(item, options)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'invalid_editorial_item' });
-      return false;
+  const selected = [];
+  editorial.forEach((item, index) => {
+    const candidate = candidateByUrl ? candidateByUrl.get(canonicalStoryUrl(item?.url)) : null;
+    if (candidateByUrl && !candidate) {
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
+      return;
     }
-    const url = canonicalStoryUrl(item.url);
+    const story = storyWithCandidateMetadata(item, candidate, options);
+    if (!structurallyUsableStory(story, options)) {
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'invalid_editorial_item' });
+      return;
+    }
+    const url = canonicalStoryUrl(story.url);
     if (candidateUrls && !candidateUrls.has(url)) {
       if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
-      return false;
+      return;
     }
     const duplicate = !url || seenUrls.has(url);
     const blockedDuplicate = blockedUrls.has(url);
     if (duplicate || blockedDuplicate) {
       const reason = blockedDuplicate ? options.blockedDuplicateReason || 'duplicate_editorial_item' : 'duplicate_editorial_item';
       if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason });
-      return false;
+      return;
     }
     seenUrls.add(url);
-    return true;
+    selected.push(story);
   });
+  return selected;
 }
 
 function storyBlockSets(...groups) {
@@ -1477,10 +1495,17 @@ function candidateEligibleForNewsSection(candidate, options = {}) {
   return true;
 }
 
-function candidateUrlSet(candidates, options = {}) {
-  return new Set((Array.isArray(candidates) ? candidates : [])
+function candidateUrlMap(candidates, options = {}) {
+  const entries = (Array.isArray(candidates) ? candidates : [])
     .filter((candidate) => candidateEligibleForNewsSection(candidate, options))
-    .map(canonicalCandidateUrl));
+    .map((candidate) => [canonicalCandidateUrl(candidate), candidate])
+    .filter(([url]) => url);
+  return new Map(entries);
+}
+
+function newsSelection(manifest, key) {
+  const selection = manifest?.newsSelection;
+  return Array.isArray(selection?.[key]) ? selection[key] : [];
 }
 
 function readNewsCandidateSource(preparedAt) {
@@ -1501,14 +1526,13 @@ function readNewsCandidateSource(preparedAt) {
   return artifact;
 }
 
-function usableTapeCommentary(row, note) {
-  void row;
+function usableTapeCommentary(note) {
   const text = String(note || '').trim();
   return text !== TAPE_COMMENTARY_UNAVAILABLE_NOTE
     && Boolean(text);
 }
 
-function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedClaims, systemFallbacks = null, now = scheduledNow(), attemptThreshold = '') {
+function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFallbacks = null, now = scheduledNow(), attemptThreshold = '') {
   const editorialByTicker = new Map((Array.isArray(editorialRows) ? editorialRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
   const previousByTicker = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
   const reviewedAt = new Date(now).toISOString();
@@ -1516,7 +1540,7 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedCl
     const ticker = String(row?.ticker || '').toUpperCase();
     const editorial = editorialByTicker.get(ticker);
     const previous = previousByTicker.get(ticker);
-    const note = safeEditorialText(editorial?.note, row.note, verifiedClaims);
+    const note = safeEditorialText(editorial?.note, row.note);
     const text = String(note || '').trim();
     const candidateDispositionValid = validateTapeCommentaryDisposition(row).length === 0;
     const quoteRevision = candidateDispositionValid
@@ -1529,7 +1553,7 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedCl
 
     if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(previous);
 
-    if (editorial && usableTapeCommentary(row, text) && !repeatsPriorCommentary) {
+    if (editorial && usableTapeCommentary(text) && !repeatsPriorCommentary) {
       return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
     }
 
@@ -1545,9 +1569,8 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, verifiedCl
   });
 }
 
-function usableWeekAheadOutcome(outcome, attemptThreshold) {
+function usableWeekAheadOutcome(outcome) {
   if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
-  void attemptThreshold;
   return outcome.status === 'verified'
     && outcome.source === 'editorial'
     && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
@@ -1681,26 +1704,47 @@ function validEarningsGuidanceDisposition(disposition, text) {
   return false;
 }
 
+function pendingReviewDisposition(disposition) {
+  return Boolean(disposition && typeof disposition === 'object' && !Array.isArray(disposition)
+    && disposition.status === 'pending_review');
+}
+
 function normalizeEarningsCommentaryForPublication(row) {
   if (!row || typeof row !== 'object' || Array.isArray(row) || !row.outcome || typeof row.outcome !== 'object' || Array.isArray(row.outcome)) return row;
   const next = structuredClone(row);
   const outcome = next.outcome;
+  const reaction = next.reaction;
   next.scheduleVerificationStatus = String(next.scheduleVerificationStatus || next.sourceAudit?.scheduleVerification?.status || '');
   next.companyReleaseStatus = String(next.companyReleaseStatus || next.sourceAudit?.companyReleaseResolution?.status || '');
   outcome.overall = combinedOutcome(next.eps?.result, next.revenue?.result);
 
-  if (!validEarningsCommentaryDisposition(outcome.interpretationDisposition, outcome.interpretation)) {
+  if (pendingReviewDisposition(outcome.interpretationDisposition)) {
+    outcome.interpretation = '';
+  } else if (!validEarningsCommentaryDisposition(outcome.interpretationDisposition, outcome.interpretation)) {
     outcome.interpretation = '';
     delete outcome.interpretationDisposition;
   } else if (outcome.interpretationDisposition?.status === 'commentary_unavailable') {
     outcome.interpretation = '';
   }
 
-  if (!validEarningsGuidanceDisposition(outcome.guidanceDisposition, outcome.guide)) {
+  if (pendingReviewDisposition(outcome.guidanceDisposition)) {
+    outcome.guide = '';
+  } else if (!validEarningsGuidanceDisposition(outcome.guidanceDisposition, outcome.guide)) {
     outcome.guide = '';
     delete outcome.guidanceDisposition;
   } else if (['not_provided', 'unverified'].includes(outcome.guidanceDisposition?.status)) {
     outcome.guide = '';
+  }
+
+  if (reaction && typeof reaction === 'object' && !Array.isArray(reaction)) {
+    if (pendingReviewDisposition(reaction.commentaryDisposition)) {
+      reaction.note = '';
+    } else if (!validEarningsCommentaryDisposition(reaction.commentaryDisposition, reaction.note)) {
+      reaction.note = '';
+      delete reaction.commentaryDisposition;
+    } else if (reaction.commentaryDisposition?.status === 'commentary_unavailable') {
+      reaction.note = '';
+    }
   }
 
   return next;
@@ -1770,49 +1814,47 @@ function applyDashboardDataJson(args) {
   const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
   const dashboardData = structuredClone(candidateDashboardData);
   const editorialNow = scheduledNow();
-  const allNewsCandidates = [
-    ...(Array.isArray(newsSource?.generalCandidates) ? newsSource.generalCandidates : []),
-    ...(Array.isArray(newsSource?.cryptoCandidates) ? newsSource.cryptoCandidates : [])
-  ];
-  const newsCandidateSets = {
-    allCandidateUrls: newsSource ? candidateUrlSet(allNewsCandidates) : null
-  };
-  const verifiedClaims = new Set((Array.isArray(reviewManifest.verifiedClaims) ? reviewManifest.verifiedClaims : [])
-    .filter((claim) => typeof claim?.text === 'string' && /^https:\/\//i.test(String(claim?.evidenceUrl || '')))
-    .map((claim) => claim.text.trim()));
-  dashboardData.opening = finalizeOpeningEditorial(
-    candidateDashboardData.opening,
-    editorialDashboardData.opening,
-    reviewManifest,
-    verifiedClaims
+  const generalNewsCandidates = Array.isArray(newsSource?.generalCandidates) ? newsSource.generalCandidates : [];
+  const cryptoNewsCandidates = Array.isArray(newsSource?.cryptoCandidates) ? newsSource.cryptoCandidates : [];
+  const futuresWindow = futuresStoryPublicationWindow(
+    dashboardData.futuresModule?.sectionTitle,
+    dashboardData.editionId,
+    editorialNow,
+    dashboardData.futuresModule?.futures
   );
+  const newsCandidateSets = {
+    generalCandidateByUrl: newsSource ? candidateUrlMap(generalNewsCandidates) : null,
+    cryptoCandidateByUrl: newsSource ? candidateUrlMap(cryptoNewsCandidates) : null,
+    futuresCandidateByUrl: newsSource ? candidateUrlMap(generalNewsCandidates, { futures: true, futuresWindow }) : null
+  };
+  dashboardData.opening = sanitizeOpening(editorialDashboardData.opening);
   dashboardData.futuresModule = {
     ...dashboardData.futuresModule,
-    stories: sanitizeStoryList(editorialDashboardData.futuresModule?.stories, {
+    stories: sanitizeStoryList(newsSelection(reviewManifest, 'futures'), {
       futures: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'futures-news',
-      path: 'futuresModule.stories',
-      candidateUrls: newsCandidateSets.allCandidateUrls
+      path: 'editorialReview.newsSelection.futures',
+      candidateByUrl: newsCandidateSets.futuresCandidateByUrl,
+      futuresWindow
     })
   };
-  dashboardData.stories = sanitizeStoryList(editorialDashboardData.stories, {
-    verifiedClaims,
+  dashboardData.stories = sanitizeStoryList(newsSelection(reviewManifest, 'stories'), {
     systemFallbacks: reviewManifest.systemFallbacks,
     section: 'stories',
-    path: 'stories',
-    candidateUrls: newsCandidateSets.allCandidateUrls,
+    path: 'editorialReview.newsSelection.stories',
+    candidateByUrl: newsCandidateSets.generalCandidateByUrl,
     ...storyBlockSets(dashboardData.futuresModule.stories),
     blockedDuplicateReason: 'promoted_story_duplicate'
   });
   dashboardData.crypto = {
     ...dashboardData.crypto,
-    notes: sanitizeStoryList(editorialDashboardData.crypto?.notes, {
+    notes: sanitizeStoryList(newsSelection(reviewManifest, 'crypto'), {
       crypto: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'crypto',
-      path: 'crypto.notes',
-      candidateUrls: newsCandidateSets.allCandidateUrls,
+      path: 'editorialReview.newsSelection.crypto',
+      candidateByUrl: newsCandidateSets.cryptoCandidateByUrl,
       ...storyBlockSets(dashboardData.futuresModule.stories, dashboardData.stories),
       blockedDuplicateReason: 'cross_section_duplicate'
     })
@@ -1832,7 +1874,6 @@ function applyDashboardDataJson(args) {
       candidateDashboardData.tape?.rows,
       editorialDashboardData.tape?.rows,
       previousDashboardData.tape?.rows,
-      verifiedClaims,
       reviewManifest.systemFallbacks,
       editorialNow,
       reviewManifest.preparedAt
@@ -1870,7 +1911,7 @@ function applyDashboardDataJson(args) {
         return day;
       }
       const next = { ...day };
-      if (usableWeekAheadOutcome(editorialDay.outcome, reviewManifest.preparedAt)) {
+      if (usableWeekAheadOutcome(editorialDay.outcome)) {
         next.outcome = editorialDay.outcome;
       }
       return next;
@@ -1880,17 +1921,16 @@ function applyDashboardDataJson(args) {
     dashboardData,
     candidateDashboardData,
     editorialDashboardData,
-    reviewManifest.systemFallbacks,
-    reviewManifest.preparedAt
+    previousDashboardData
   );
   applyEditionMetadata(dashboardData, args.windowMode);
   syncDashboardPricesFromChartData(dashboardData, candidateChartData, { windowMode: args.windowMode });
   normalizePublicationDisplaySections(dashboardData, { windowMode: args.windowMode, now: editorialNow });
-  normalizeMarketLensReview(dashboardData, candidateChartData, reviewManifest, previousDashboardData.editorialReview, reviewManifest.systemFallbacks);
+  normalizeMarketLensReview(dashboardData, reviewManifest);
   normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
   const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
   if (reviewErrors.length) process.stderr.write(`Editorial review receipt will be best-effort: ${reviewErrors.join(' ')}\n`);
-  applyMarketLensDecisionsData(dashboardData, candidateChartData, reviewManifest.marketLensDecisions);
+  applyMarketLensDecisionsData(dashboardData, reviewManifest.marketLensDecisions);
   normalizeWeekAheadReactionButtons(dashboardData, candidateChartData);
   dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, candidateChartData, { windowMode: args.windowMode, now: scheduledNow() });
   normalizeWeekAheadReactionButtons(dashboardData, candidateChartData);
@@ -2249,7 +2289,7 @@ function main() {
   const canonicalWeek = canonicalDashboardData.earnings?.week || null;
   const earningsRange = earningsTargetRange(args, canonicalWeek);
   const earningsPreparation = runWithSectionFallback(() => {
-    const invalidPersistedArtifact = earningsStagingNeedsRebuild(EARNINGS_WEEK_PATH, checkedAt);
+    const invalidPersistedArtifact = earningsStagingNeedsRebuild(EARNINGS_WEEK_PATH);
     if (invalidPersistedArtifact) {
       process.stderr.write('Earnings staging artifact is invalid under the current contract; evaluating an authorized rebuild or active-range fallback.\n');
     }
@@ -2299,6 +2339,13 @@ function main() {
   }
 
   stageDashboardCandidate(args, patchDashboard(args));
+  if (args.prepareEditorialAfterStaging) {
+    reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
+    args.prepareEditorialDir = DEFAULT_EDITORIAL_DIR;
+    const workspace = prepareEditorialWorkspace(args);
+    process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
+    return;
+  }
   reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
 }
 
@@ -2335,6 +2382,7 @@ module.exports = {
   syncDashboardPricesFromChartData,
   patchDashboardDataBlock,
   patchDashboard,
+  parseArgs,
   prepareEditorialWorkspace,
   normalizePublicationDisplaySections,
   loadDashboardBase,

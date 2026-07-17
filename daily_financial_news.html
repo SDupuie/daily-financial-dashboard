@@ -20246,6 +20246,7 @@
       /* TEST BLOCK START: earnings-reaction-note */
       function earningsReactionNote(row) {
         if (row.reaction?.note) return row.reaction.note;
+        if (row.reaction?.commentaryDisposition?.status === 'pending_review') return '';
         if (row.lifecycle === 'scheduled') return 'Not reported yet';
         if (row.lifecycle === 'awaiting_actual') return 'Awaiting results';
         if (row.reaction?.status === 'awaiting_close') {
@@ -20282,6 +20283,11 @@
 
       function normalizeEarningsRow(row, week) {
         const guidanceStatus = row.outcome?.guidanceDisposition?.status || '';
+        const editorialPending = [
+          row.outcome?.interpretationDisposition?.status,
+          row.outcome?.guidanceDisposition?.status,
+          row.reaction?.commentaryDisposition?.status
+        ].includes('pending_review');
         return {
           company: row.company,
           ticker: row.symbol,
@@ -20303,7 +20309,8 @@
           sourceStatus: row.sourceStatus,
           companyReleaseStatus: row.companyReleaseStatus || '',
           scheduleVerificationStatus: row.scheduleVerificationStatus || '',
-          lastValidatedAt: week?.availability?.status === 'carried_forward' ? week.generatedAt : ''
+          lastValidatedAt: week?.availability?.status === 'carried_forward' ? week.generatedAt : '',
+          editorialPending
         };
       }
 
@@ -20502,6 +20509,9 @@
         }
         if (['primary_only', 'secondary_only'].includes(row.scheduleVerificationStatus)) {
           messages.push('Report date is unconfirmed.');
+        }
+        if (row.editorialPending) {
+          messages.push('Editorial commentary was not completed for this update.');
         }
         const label = messages.join(' ');
         if (!label) return '';
@@ -20876,31 +20886,41 @@
       }
 
       /* TEST BLOCK START: week-ahead-outcome */
-      function weekAheadCloseReactionHtml(day) {
+      function weekAheadPendingOutcomeInfoHtml(day) {
+        const tooltipId = `week-outcome-pending-${String(day?.date || 'day').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+        const message = 'Outcome commentary was not completed for this update.';
+        return `<span class="stale-info week-outcome-pending-info" data-stale-info><button class="stale-info-button" type="button" aria-label="${esc(message)}" aria-describedby="${esc(tooltipId)}" aria-expanded="false" data-stale-button>i</button><span class="stale-info-tooltip" id="${esc(tooltipId)}" role="tooltip">${esc(message)}</span></span>`;
+      }
+
+      function weekAheadCloseReactionHtml(day, suffixHtml = '') {
         const rows = (Array.isArray(day.marketReaction?.rows) ? day.marketReaction.rows : [])
           .filter((row) => Number(row.delta) !== 0)
           .sort((left, right) => {
             const magnitude = (row) => row.unit === 'percent_yield' ? Math.abs(Number(row.delta) * 100) : Math.abs(Number(row.percentChange));
             return magnitude(right) - magnitude(left);
           });
-        if (!rows.length) return '<div class="week-reactions"><span class="week-reactions-label">No selected transmission ticker registered a close-to-close move</span></div>';
+        if (!rows.length) return `<div class="week-reactions"><span class="week-reactions-label">No selected transmission ticker registered a close-to-close move</span>${suffixHtml}</div>`;
         const buttons = rows.map((row) => {
           const move = row.unit === 'percent_yield'
             ? `${Number(row.delta) > 0 ? '+' : ''}${Math.round(Number(row.delta) * 100)} bp`
             : `${Number(row.percentChange) > 0 ? '+' : ''}${Number(row.percentChange).toFixed(2)}%`;
           return weekReactionButtonHtml(day, row.ticker, `${row.role}, ${move}`, `${row.ticker} ${move}`);
         }).join('');
-        return `<div class="week-reactions"><span class="week-reactions-label">Event-day close reaction</span>${buttons}</div>`;
+        return `<div class="week-reactions"><span class="week-reactions-label">Event-day close reaction</span>${buttons}${suffixHtml}</div>`;
       }
 
       function weekAheadOutcomeHtml(day) {
         if (day.lifecycle !== 'close_available') return '';
         const outcome = day.outcome;
+        if (outcome?.status === 'pending_review') {
+          return `<div class="week-market-lens week-outcome">${weekAheadCloseReactionHtml(day, weekAheadPendingOutcomeInfoHtml(day))}</div>`;
+        }
         const copy = outcome?.status === 'commentary_unavailable'
           ? '<strong>Unavailable</strong>'
           : outcome?.title && outcome?.body
           ? `<strong>${esc(outcome.title)}</strong>${esc(outcome.body)}`
-          : '<strong>Pending</strong>';
+          : '';
+        if (!copy) return '';
         return `<div class="week-market-lens week-outcome">${copy}${weekAheadCloseReactionHtml(day)}</div>`;
       }
       /* TEST BLOCK END: week-ahead-outcome */

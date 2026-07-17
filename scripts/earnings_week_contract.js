@@ -5,8 +5,8 @@ const {
 } = require('./calendar_contract');
 
 const EARNINGS_WEEK_SCHEMA_VERSION = 2;
-const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable']);
-const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified']);
+const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
+const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const EDITORIAL_UNAVAILABLE_REASON = 'not_verified_for_current_run';
 
 function defaultEditorialDisposition(status, attemptedAt) {
@@ -183,9 +183,15 @@ function clearEarningsNarrative(row) {
   output.revenue = { ...output.revenue, note: '' };
   output.outcome = { ...output.outcome, guide: '', interpretation: '' };
   output.reaction = { ...output.reaction, note: '' };
-  delete output.outcome.guidanceDisposition;
-  delete output.outcome.interpretationDisposition;
-  delete output.reaction.commentaryDisposition;
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (row.outcome?.[field]?.status === 'pending_review') output.outcome[field] = structuredClone(row.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
+    output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
   return output;
 }
 

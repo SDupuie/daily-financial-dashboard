@@ -241,9 +241,15 @@ function clearAppliedNarrative(row) {
     outcome: { ...row.outcome, guide: '', interpretation: '' },
     reaction: { ...row.reaction, note: '' }
   };
-  delete output.outcome.guidanceDisposition;
-  delete output.outcome.interpretationDisposition;
-  delete output.reaction.commentaryDisposition;
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (row.outcome?.[field]?.status === 'pending_review') output.outcome[field] = structuredClone(row.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
+    output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
   return output;
 }
 
@@ -665,10 +671,8 @@ function applyEarningsNarrative(source, narrativePayload, options = {}) {
   return output;
 }
 
-function validateWeek(file, requireNarrative = false) {
-  const command = ['--input', file];
-  if (requireNarrative) command.push('--require-narrative');
-  runValidation(command);
+function validateWeek(file) {
+  runValidation(['--input', file]);
 }
 
 function validateResolutions(input, resolutions) {
@@ -698,7 +702,7 @@ function applyNarrativeCommand(argv) {
     sourceArtifact: path.relative(root, args.input),
     narrativeArtifact: path.relative(root, args.narrative)
   });
-  const outputErrors = validateEarningsWeekPayload(output, { requireNarrative: true });
+  const outputErrors = validateEarningsWeekPayload(output);
   if (outputErrors.length) throw new Error(`Narrative-applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
   writeJson(args.output, output);
   process.stdout.write(`Applied ${output.narrativeApply.applied.length} earnings narrative row(s) to ${args.output}\n`);
@@ -1076,9 +1080,15 @@ function clearNarrative(row) {
       note: ''
     }
   };
-  delete output.outcome.guidanceDisposition;
-  delete output.outcome.interpretationDisposition;
-  delete output.reaction.commentaryDisposition;
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (row.outcome?.[field]?.status === 'pending_review') output.outcome[field] = structuredClone(row.outcome[field]);
+    else delete output.outcome[field];
+  }
+  if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
+    output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
   return output;
 }
 
@@ -1536,10 +1546,8 @@ async function collectRefreshData(source, args, dependencies = {}) {
   };
 }
 
-function validateWeek(file, requireNarrative = false) {
-  const command = ['--input', file];
-  if (requireNarrative) command.push('--require-narrative');
-  runValidation(command);
+function validateWeek(file) {
+  runValidation(['--input', file]);
 }
 
 function printReport(result, outputPath, compact) {
@@ -1565,7 +1573,7 @@ async function run(argv) {
     asOf: args.asOf,
     outputPath: args.output
   });
-  const outputErrors = validateEarningsWeekPayload(result.payload, { now: new Date(args.asOf) });
+  const outputErrors = validateEarningsWeekPayload(result.payload);
   if (outputErrors.length) throw new Error(`Refreshed earnings week payload is invalid: ${outputErrors.join(' ')}`);
   writeJson(args.output, result.payload);
   if (args.output === DEFAULT_INPUT && removeStaleCompanyReleaseResolutionSidecar(result.payload, DEFAULT_COMPANY_RELEASE_RESOLUTIONS)) {

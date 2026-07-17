@@ -687,7 +687,7 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
   const days = (Array.isArray(week?.days) ? week.days : []).map((day) => {
     const next = { ...day };
     const hasEvents = Array.isArray(next.events) && next.events.length;
-    if (hasEvents && validateMarketLens(next.marketLens, next, next.marketLensSource).length) {
+    if (hasEvents && validateMarketLens(next.marketLens).length) {
       if (['released_awaiting_close', 'close_available'].includes(next.lifecycle)) {
         next.marketLens = unavailableMarketLensForEvents(next.events);
         next.marketLensSource = 'unavailable';
@@ -705,15 +705,16 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
     if (next?.lifecycle !== 'close_available') return next;
     if (next.outcome === undefined) {
       next.outcome = {
-        status: 'commentary_unavailable',
-        source: 'editorial',
-        reason: 'editorial_commentary_unavailable',
-        attemptedAt
+        status: 'pending_review'
       };
       return next;
     }
     if (next.outcome?.status === undefined && next.outcome?.title?.trim() && next.outcome?.body?.trim()) {
       return { ...next, outcome: { ...next.outcome, status: 'verified' } };
+    }
+    if (next.outcome?.status === 'pending_review') {
+      next.outcome = { status: 'pending_review' };
+      return next;
     }
     if (next.outcome?.status === 'commentary_unavailable'
       && next.outcome.source === 'editorial'
@@ -724,10 +725,7 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
       return next;
     }
     next.outcome = {
-      status: 'commentary_unavailable',
-      source: 'editorial',
-      reason: 'editorial_commentary_unavailable',
-      attemptedAt
+      status: 'pending_review'
     };
     return next;
   });
@@ -892,7 +890,7 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function validateMarketLens(lens, day, source, prefix = 'marketLens') {
+function validateMarketLens(lens, prefix = 'marketLens') {
   const errors = [];
   if (!isPlainObject(lens)) return [`${prefix} must be an object.`];
   if (Array.isArray(lens.reactions)) {
@@ -906,8 +904,6 @@ function validateMarketLens(lens, day, source, prefix = 'marketLens') {
       if (!/^[A-Z0-9]+$/.test(ticker)) errors.push(`${reactionPrefix}.ticker must be a canonical uppercase Tape symbol.`);
     });
   }
-  void day;
-  void source;
   return errors;
 }
 
@@ -960,7 +956,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
     }
     const hasEvents = day.events.length > 0;
     const hasMarketLens = day.marketLens !== undefined && day.marketLens !== null;
-    if (hasEvents && isPlainObject(day.marketLens)) errors.push(...validateMarketLens(day.marketLens, day, day.marketLensSource, `weekAhead.days[${dayIndex}].marketLens`));
+    if (hasEvents && isPlainObject(day.marketLens)) errors.push(...validateMarketLens(day.marketLens, `weekAhead.days[${dayIndex}].marketLens`));
     if (!hasEvents && hasMarketLens) {
       errors.push(`weekAhead.days[${dayIndex}].marketLens must be omitted when there are no events.`);
     }
@@ -985,7 +981,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
       }
     }
     if (requireOutcomeDisposition && day?.lifecycle === 'close_available' && day?.outcome === undefined) {
-      errors.push(`weekAhead.days[${dayIndex}].outcome requires a verified or commentary_unavailable disposition before publication.`);
+      errors.push(`weekAhead.days[${dayIndex}].outcome requires an outcome disposition before publication.`);
     }
     if (day?.outcome !== undefined) {
       if (!isPlainObject(day.outcome)) {
@@ -1021,7 +1017,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
 
 function hasEditorialMarketLens(day) {
   return day?.marketLensSource === 'editorial'
-    && validateMarketLens(day.marketLens, day, 'editorial').length === 0;
+    && validateMarketLens(day.marketLens).length === 0;
 }
 
 function preserveMissingWeekAheadValues(incomingEvent, priorEvent) {
@@ -1085,7 +1081,7 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
       const deterministicValuesUnchanged = weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(next);
       // An arriving actual advances lifecycle state but does not retire a
       // still-valid pre-close thesis; the completed close response does that.
-      if (editorialDay && validateMarketLens(editorialDay.marketLens, next, 'editorial').length === 0) {
+      if (editorialDay && validateMarketLens(editorialDay.marketLens).length === 0) {
         next.marketLens = editorialDay.marketLens;
         next.marketLensSource = 'editorial';
       }
@@ -1113,6 +1109,7 @@ function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialRef
     if (!expectedDates.has(date) || seenDates.has(date)) continue;
     seenDates.add(date);
     const day = eventDays.find((item) => item.date === date);
+    if (decision.action === 'pending_review') continue;
     if (decision.action === 'retain-generated') {
       accepted.set(date, { date, action: 'retain-generated' });
       continue;
@@ -1133,7 +1130,7 @@ function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialRef
     if (decision.action !== 'replace') continue;
     if (day.lifecycle === 'close_available'
       && !isDeepStrictEqual(decision.marketLens?.reactions || [], day.marketLens?.reactions || [])) continue;
-    const lensErrors = validateMarketLens(decision.marketLens, day, 'editorial', `Market Lens decision for ${date}`);
+    const lensErrors = validateMarketLens(decision.marketLens, `Market Lens decision for ${date}`);
     let referenceErrors = [];
     if (!lensErrors.length) {
       try {
@@ -1147,7 +1144,7 @@ function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialRef
   return eventDays.map((day) => {
     if (accepted.has(day.date)) return accepted.get(day.date);
     if (day.lifecycle === 'close_available' && day.marketLensSource === 'editorial'
-      && validateMarketLens(day.marketLens, day, 'editorial').length === 0) {
+      && validateMarketLens(day.marketLens).length === 0) {
       return { date: day.date, action: 'replace', marketLens: day.marketLens };
     }
     return { date: day.date, action: 'retain-generated' };

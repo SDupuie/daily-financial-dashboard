@@ -39,6 +39,7 @@ const {
   applyAssetAllocationSummary,
   applyCryptoQuoteRows,
   applyCryptoStats,
+  applyEditorialEarningsNarrative,
   commitDashboardCandidate,
   earningsCalendarBuildDecision,
   earningsTargetRange,
@@ -49,6 +50,7 @@ const {
   normalizePublicationDisplaySections,
   patchDashboard,
   patchDashboardDataBlock,
+  parseArgs: parseRunDailyUpdateArgs,
   readJsonBlock,
   readCurrentEarningsWeekArtifact,
   requiresUnavailableRolloverRetry,
@@ -158,6 +160,50 @@ function fixtureEarningsWeek() {
         secondaryRecoveryCandidates: 0,
         companyReleaseTasks: 0
       }
+    }
+  };
+}
+
+function fixtureReportedEarningsRow() {
+  return {
+    symbol: 'EARN',
+    company: 'Earnings Fixture Inc',
+    exchange: 'NYSE',
+    country: 'US',
+    currency: 'USD',
+    marketCap: 10000000000,
+    marketCapDisplay: '$10.0B',
+    reportDate: '2026-07-10',
+    reportTiming: 'bmo',
+    fiscalQuarterEnding: '2026-06-30',
+    fiscalQuarter: 2,
+    fiscalYear: 2026,
+    eps: { estimate: 1, actual: 1.2, surprisePercent: 20, result: 'beat', basis: 'adjusted', note: '' },
+    revenue: { estimate: 1000000000, actual: 1100000000, surprisePercent: 10, result: 'beat', note: '' },
+    outcome: {
+      overall: 'beat',
+      guide: '',
+      guidanceDisposition: {
+        status: 'not_provided',
+        evidenceSource: 'official_company',
+        evidenceUrl: 'https://investors.fixture.test/earnings'
+      },
+      interpretation: 'Prior verified commentary explains the reported earnings driver.',
+      interpretationDisposition: { status: 'verified' }
+    },
+    reaction: {
+      basis: 'same_day_close',
+      percent: 2,
+      status: 'computed',
+      note: 'Prior verified reaction commentary explains the move.',
+      commentaryDisposition: { status: 'verified' }
+    },
+    lifecycle: 'close_available',
+    sourceStatus: 'verified',
+    sourceSummary: { primary: 'finnhub', fallbacks: [], reaction: 'yahoo' },
+    sourceAudit: {
+      finnhubUsListing: { market: 'US', symbol: 'EARN', mic: 'XNYS' },
+      finnhubProfile: { industry: 'Industrials' }
     }
   };
 }
@@ -298,6 +344,15 @@ function fixtureNewsSearch(dashboard) {
   return { generalCandidates, cryptoCandidates };
 }
 
+function fixtureNewsSelection(dashboard) {
+  const storyFields = ({ url, tag, title, body }) => ({ url, tag, title, body });
+  return {
+    futures: dashboard.futuresModule.stories.map(storyFields),
+    stories: dashboard.stories.map(storyFields),
+    crypto: dashboard.crypto.notes.map(({ url, kicker, title, body }) => ({ url, kicker, title, body }))
+  };
+}
+
 function writeFixtureNewsCandidates(dashboard, generatedAt = '2026-07-10T21:00:00.000Z') {
   const newsSearch = fixtureNewsSearch(dashboard);
   const outputPath = path.join(root, 'generated', 'news_candidates.json');
@@ -368,6 +423,14 @@ function testArchitectureSingleWriterAndCliBoundaries() {
     () => parseFetchChartDataArgs(['--embed-compact']),
     /Direct dashboard writes are not supported/
   );
+  const prepareArgs = parseRunDailyUpdateArgs(['prepare', '--morning']);
+  assert.equal(prepareArgs.prepareEditorialAfterStaging, true);
+  assert.equal(prepareArgs.prepareEditorialDir, '');
+  assert.equal(prepareArgs.windowMode, 'morning');
+  const applyArgs = parseRunDailyUpdateArgs(['apply', '--scheduled', '--morning']);
+  assert.equal(applyArgs.applyDashboardDataJson, path.join(root, 'generated', 'editorial', 'dashboard-data.json'));
+  assert.equal(applyArgs.scheduled, true);
+  assert.equal(applyArgs.windowMode, 'morning');
 
   const earningsEmbed = spawnSync(process.execPath, [path.join(scriptsDir, 'earnings_week.js'), 'embed'], {
     cwd: root,
@@ -585,17 +648,10 @@ function testLastGoodDashboardRecovery() {
   assert.equal(recovered.sourcePath, lastGoodFile);
   assert.equal(readJsonBlock(recovered.html, 'dashboard-data').editionId, dashboard.editionId);
   const nextHtml = recovered.html.replace('Fixture headline', 'Recovered fixture headline');
-  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
-  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
-  try {
-    commitDashboardCandidate({ dashboard: dashboardFile }, nextHtml, {
-      refreshLastGood: true,
-      lastGoodPath: lastGoodFile
-    });
-  } finally {
-    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
-  }
+  commitDashboardCandidate({ dashboard: dashboardFile }, nextHtml, {
+    refreshLastGood: true,
+    lastGoodPath: lastGoodFile
+  });
   assert.equal(readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data').opening.headline, 'Recovered fixture headline');
   assert.equal(fs.readFileSync(lastGoodFile, 'utf8'), nextHtml, 'The next successful replacement must refresh the recovery snapshot.');
 
@@ -618,36 +674,23 @@ function testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails() {
 
   const committedHtml = originalHtml.replace('Fixture headline', 'Committed despite snapshot failure');
   const snapshotFile = path.join(dir, 'dashboard.last-good.html');
-  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
-  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
-  try {
-    assert.doesNotThrow(() => commitDashboardCandidate(
-      { dashboard: dashboardFile },
-      committedHtml,
-      {
-        refreshLastGood: true,
-        lastGoodPath: snapshotFile,
-        snapshotWriter: () => { throw new Error('fixture synchronization failure'); }
-      }
-    ));
-  } finally {
-    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
-  }
+  assert.doesNotThrow(() => commitDashboardCandidate(
+    { dashboard: dashboardFile },
+    committedHtml,
+    {
+      refreshLastGood: true,
+      lastGoodPath: snapshotFile,
+      snapshotWriter: () => { throw new Error('fixture synchronization failure'); }
+    }
+  ));
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), committedHtml, 'Post-commit synchronization failure must not roll back the validated dashboard.');
   assert.equal(fs.existsSync(snapshotFile), false);
 
-  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
-  try {
-    commitDashboardCandidate(
-      { dashboard: dashboardFile },
-      committedHtml,
-      { refreshLastGood: true, lastGoodPath: snapshotFile }
-    );
-  } finally {
-    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
-  }
+  commitDashboardCandidate(
+    { dashboard: dashboardFile },
+    committedHtml,
+    { refreshLastGood: true, lastGoodPath: snapshotFile }
+  );
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), committedHtml, 'A synchronization retry must preserve the committed dashboard.');
   assert.equal(fs.readFileSync(snapshotFile, 'utf8'), committedHtml, 'The next successful run must complete the deferred snapshot synchronization.');
 
@@ -1183,9 +1226,7 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
     earningsWeekPayload: dashboard.earnings.week
   };
   const previousScheduledNow = process.env.SCHEDULED_NOW_ISO;
-  const previousValidateNow = process.env.VALIDATE_NOW_ISO;
   process.env.SCHEDULED_NOW_ISO = '2026-07-10T21:05:00.000Z';
-  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
   let preparedHtml;
   try {
     preparedHtml = patchDashboard(args);
@@ -1193,8 +1234,6 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   } finally {
     if (previousScheduledNow === undefined) delete process.env.SCHEDULED_NOW_ISO;
     else process.env.SCHEDULED_NOW_ISO = previousScheduledNow;
-    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
   }
 
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml, 'Deterministic preparation must not alter the canonical dashboard.');
@@ -1208,20 +1247,14 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   const retainedCandidateFile = path.join(dir, 'retained-dashboard-candidate.html');
   const retainedCandidate = fs.readFileSync(candidateFile, 'utf8');
   fs.writeFileSync(retainedCandidateFile, retainedCandidate);
-  process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
-  try {
-    const brokenJsonHtml = preparedHtml.replace(
-      '<script type="application/json" id="dashboard-data">',
-      '<script type="application/json" id="dashboard-data">broken'
-    );
-    assert.throws(
-      () => stageDashboardCandidate({ ...args, candidate: retainedCandidateFile }, brokenJsonHtml),
-      /Deterministic candidate failed validation/
-    );
-  } finally {
-    if (previousValidateNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = previousValidateNow;
-  }
+  const brokenJsonHtml = preparedHtml.replace(
+    '<script type="application/json" id="dashboard-data">',
+    '<script type="application/json" id="dashboard-data">broken'
+  );
+  assert.throws(
+    () => stageDashboardCandidate({ ...args, candidate: retainedCandidateFile }, brokenJsonHtml),
+    /Deterministic candidate failed validation/
+  );
   assert.equal(fs.readFileSync(retainedCandidateFile, 'utf8'), retainedCandidate, 'Failed preparation must preserve the prior candidate byte-for-byte.');
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 }
@@ -1319,6 +1352,10 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.equal(handoff.storiesCoverage, undefined);
   assert.equal(handoff.futuresModule.storiesCoverage, undefined);
   assert.equal(handoff.crypto.notesCoverage, undefined);
+  assert.deepEqual(handoff.futuresModule.stories, []);
+  assert.deepEqual(handoff.stories, []);
+  assert.deepEqual(handoff.crypto.notes, []);
+  assert.deepEqual(handoff.editorialReview.newsSelection, { futures: [], stories: [], crypto: [] });
   assert.equal(
     handoff.editorialReview.newsSearch.generalCandidates.length,
     dashboard.stories.length + dashboard.futuresModule.stories.length,
@@ -1337,7 +1374,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.ok(handoff.editorialReview);
   assert.equal(handoff.editorialReview.preparedAt, '2026-07-10T21:01:00.000Z');
   assert.equal(handoff.editorialReview.openingDecision.action, null);
-  assert.ok(handoff.editorialReview.marketLensDecisions.every((decision) => decision.action === null));
+  assert.ok(handoff.editorialReview.marketLensDecisions.every((decision) => decision.action === 'pending_review'));
 }
 
 function testMalformedFocusedEarningsIsNoOp() {
@@ -1382,6 +1419,7 @@ function testReleasedEventRetainGeneratedBecomesUnavailableLens() {
     baseEditionId: dashboard.editionId,
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
+    newsSelection: fixtureNewsSelection(dashboard),
     openingDecision: { action: 'reviewed' },
     marketLensDecisions: dashboard.weekAhead.days
       .filter((day) => day.events.length)
@@ -1402,8 +1440,7 @@ function testReleasedEventRetainGeneratedBecomesUnavailableLens() {
     encoding: 'utf8',
     env: {
       ...process.env,
-      SCHEDULED_NOW_ISO: '2026-07-13T22:01:00.000Z',
-      VALIDATE_NOW_ISO: '2026-07-13T22:01:00.000Z'
+      SCHEDULED_NOW_ISO: '2026-07-13T22:01:00.000Z'
     }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -1535,6 +1572,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     baseEditionId: dashboard.editionId,
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
+    newsSelection: fixtureNewsSelection(dashboard),
     openingDecision: { action: 'reviewed' },
     marketLensDecisions: eventDays.map((day) => ({ date: day.date, action: 'retain-generated' }))
   };
@@ -1552,8 +1590,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   ];
   const env = {
     ...process.env,
-    SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z',
-    VALIDATE_NOW_ISO: FIXTURE_NOW
+    SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z'
   };
   const pendingOpeningPayload = structuredClone(dashboard);
   pendingOpeningPayload.opening = { headline: '', deck: 'Deck without a headline should not render.', catalysts: [{ label: 'Valid', body: '' }] };
@@ -1590,16 +1627,16 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const editorialPayload = structuredClone(dashboard);
   editorialPayload.masthead.date = 'Saturday · January 1, 2000';
   editorialPayload.opening.headline = 'Reviewed fixture headline';
-  editorialPayload.stories[0].title = 'Reviewed market story';
+  editorialPayload.editorialReview = structuredClone(review);
+  editorialPayload.editorialReview.newsSelection.stories[0].title = 'Reviewed market story';
   editorialPayload.futuresModule.sectionTitle = 'Unauthorized futures title';
   editorialPayload.futuresModule.futures[0].value = '99,999.00';
-  editorialPayload.futuresModule.stories[0].title = 'Reviewed futures story';
+  editorialPayload.editorialReview.newsSelection.futures[0].title = 'Reviewed futures story';
   editorialPayload.tape.label = 'Unauthorized session label · Reviewed drivers';
   editorialPayload.tape.rows[0].last = '99,999.00';
   editorialPayload.tape.rows[0].note = 'Federal Reserve expectations shaped rates and risk appetite.';
   editorialPayload.crypto.stats[0].price = '$9.99T';
-  editorialPayload.crypto.notes[0].title = 'Reviewed crypto story';
-  editorialPayload.editorialReview = review;
+  editorialPayload.editorialReview.newsSelection.crypto[0].title = 'Reviewed crypto story';
   editorialPayload.assetAllocationPortfolio.rows[0].price = '$999.00';
   editorialPayload.footer.compiled = dashboard.footer.compiled.replace(' · Market data:', ' · Holiday context: Reviewed. · Market data:');
   const editorialEventDay = editorialPayload.weekAhead.days.find((day) => day.events.length);
@@ -1616,10 +1653,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   const emptyNewsPayload = structuredClone(editorialPayload);
-  emptyNewsPayload.editorialReview.newsSearch = { generalCandidates: [], cryptoCandidates: [] };
-  emptyNewsPayload.stories = [];
-  emptyNewsPayload.futuresModule.stories = [];
-  emptyNewsPayload.crypto.notes = [];
+  emptyNewsPayload.editorialReview.newsSelection = { futures: [], stories: [], crypto: [] };
   fs.writeFileSync(payloadFile, JSON.stringify(emptyNewsPayload));
   const emptyNewsResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(emptyNewsResult.status, 0, emptyNewsResult.stderr);
@@ -1634,17 +1668,15 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   const mixedNewsPayload = structuredClone(editorialPayload);
-  mixedNewsPayload.editorialReview.newsSearch = { generalCandidates: [], cryptoCandidates: [] };
-  mixedNewsPayload.stories[0] = {
+  mixedNewsPayload.editorialReview.newsSelection.stories[0] = {
     tag: 'Markets',
     title: 'Outside inventory story',
     body: 'A structurally valid but ungenerated card should be omitted without stopping publication.',
-    url: 'https://outside.test/story',
-    publishedOn: '2026-07-10'
+    url: 'https://outside.test/story'
   };
-  mixedNewsPayload.stories[1] = structuredClone(mixedNewsPayload.futuresModule.stories[0]);
-  const duplicateCryptoTitle = mixedNewsPayload.stories[2].title;
-  mixedNewsPayload.crypto.notes[0].title = duplicateCryptoTitle;
+  mixedNewsPayload.editorialReview.newsSelection.stories[1] = structuredClone(mixedNewsPayload.editorialReview.newsSelection.futures[0]);
+  const duplicateCryptoTitle = mixedNewsPayload.editorialReview.newsSelection.stories[2].title;
+  mixedNewsPayload.editorialReview.newsSelection.crypto[0].title = duplicateCryptoTitle;
   fs.writeFileSync(payloadFile, JSON.stringify(mixedNewsPayload));
   const mixedNewsResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(mixedNewsResult.status, 0, mixedNewsResult.stderr);
@@ -1654,7 +1686,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(mixedNewsFinalized.crypto.notes.length, 6);
   assert.equal(mixedNewsFinalized.crypto.notesCoverage.status, 'complete');
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === 'https://outside.test/story'));
-  assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.futuresModule.stories[0].url));
+  assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.editorialReview.newsSelection.futures[0].url));
   assert.ok(mixedNewsFinalized.crypto.notes.some((story) => story.title === duplicateCryptoTitle));
   assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'not_in_candidate_inventory'));
   assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'promoted_story_duplicate'));
@@ -1671,6 +1703,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.opening.headline, 'Reviewed fixture headline');
   assert.equal(finalized.stories[0].title, 'Reviewed market story');
   assert.equal(finalized.futuresModule.stories[0].title, 'Reviewed futures story');
+  assert.equal(finalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
   assert.equal(finalized.crypto.notes[0].title, 'Reviewed crypto story');
   assert.deepEqual(finalized.storiesCoverage, { status: 'complete' });
   assert.deepEqual(finalized.futuresModule.storiesCoverage, { status: 'complete' });
@@ -1685,6 +1718,62 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.masthead.date, 'Friday · July 10, 2026');
   assert.notEqual(finalized.tape.rows[0].last, '99,999.00');
   assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.action === 'unavailable_disposition'));
+}
+
+function testEarningsFinalizationPreservesOnlySafePriorNarrative() {
+  const prior = fixtureReportedEarningsRow();
+  const pending = structuredClone(prior);
+  pending.outcome = {
+    ...pending.outcome,
+    guide: '',
+    guidanceDisposition: { status: 'pending_review' },
+    interpretation: '',
+    interpretationDisposition: { status: 'pending_review' }
+  };
+  pending.reaction = {
+    ...pending.reaction,
+    note: '',
+    commentaryDisposition: { status: 'pending_review' }
+  };
+  const week = (row) => ({
+    schemaVersion: 2,
+    generatedAt: '2026-07-10T21:00:00.000Z',
+    range: { from: '2026-07-10', to: '2026-07-16' },
+    rows: [row],
+    secondaryRecoveryCandidates: [],
+    companyReleaseTasks: [],
+    summary: { counts: {} }
+  });
+
+  const unchanged = {};
+  applyEditorialEarningsNarrative(
+    unchanged,
+    { earnings: { week: week(pending) } },
+    { earnings: { week: { rows: [pending] } } },
+    { earnings: { week: week(prior) } }
+  );
+  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretation, prior.outcome.interpretation);
+  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretationDisposition.status, 'verified');
+  assert.equal(unchanged.earnings.week.rows[0].reaction.note, prior.reaction.note);
+  assert.equal(unchanged.earnings.week.rows[0].reaction.commentaryDisposition.status, 'verified');
+
+  const changedPending = structuredClone(pending);
+  changedPending.eps = {
+    ...changedPending.eps,
+    actual: 1.3,
+    surprisePercent: 30
+  };
+  const changed = {};
+  applyEditorialEarningsNarrative(
+    changed,
+    { earnings: { week: week(changedPending) } },
+    { earnings: { week: { rows: [changedPending] } } },
+    { earnings: { week: week(prior) } }
+  );
+  assert.equal(changed.earnings.week.rows[0].outcome.interpretation, '');
+  assert.equal(changed.earnings.week.rows[0].outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(changed.earnings.week.rows[0].reaction.note, '');
+  assert.equal(changed.earnings.week.rows[0].reaction.commentaryDisposition.status, 'pending_review');
 }
 
 function testTapeCommentaryRefreshRequiresNewCopy() {
@@ -1735,6 +1824,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     baseEditionId: dashboard.editionId,
     verifiedClaims: [],
     newsSearch: fixtureNewsSearch(dashboard),
+    newsSelection: fixtureNewsSelection(dashboard),
     openingDecision: { action: 'reviewed' },
     marketLensDecisions: dashboard.weekAhead.days
       .filter((day) => day.events.length)
@@ -1758,8 +1848,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     encoding: 'utf8',
     env: {
       ...process.env,
-      SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z',
-      VALIDATE_NOW_ISO: FIXTURE_NOW
+      SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z'
     }
   };
   const result = spawnSync(process.execPath, command, runOptions);
@@ -1970,8 +2059,7 @@ function testChartRepairStagesMixedResultForEditorialReview() {
   fs.writeFileSync(candidateFile, stagedHtml);
   const environment = {
     ...process.env,
-    SCHEDULED_NOW_ISO: FIXTURE_NOW,
-    VALIDATE_NOW_ISO: FIXTURE_NOW
+    SCHEDULED_NOW_ISO: FIXTURE_NOW
   };
   const command = [
     path.join(root, 'scripts/run_daily_update.js'),
@@ -2096,6 +2184,14 @@ function testEarningsOutcomeLifecycleRendering() {
     lifecycle: 'close_available',
     reaction: { status: 'computed', note: 'Verified reaction interpretation.' }
   }), 'Verified reaction interpretation.');
+  assert.equal(earningsReactionNote({
+    lifecycle: 'close_available',
+    reaction: {
+      status: 'computed',
+      basis: 'next_session_close',
+      commentaryDisposition: { status: 'pending_review' }
+    }
+  }), '');
   assert.equal(earningsReactionNote({
     lifecycle: 'close_available',
     reaction: { status: 'unavailable', note: '' }
@@ -2362,6 +2458,8 @@ function testTouchTooltipControls() {
   });
   assert.match(combinedEarningsMarkup, /Last validated earnings data: Jul 10, 8:30 AM CT\. Report date is unconfirmed\./);
   assert.doesNotMatch(combinedEarningsMarkup, /Finnhub|EarningsAPI/);
+  const pendingEditorialMarkup = earningsRowNoticeHtml({ editorialPending: true });
+  assert.match(pendingEditorialMarkup, /Editorial commentary was not completed for this update\./);
   assert.match(html, /lastValidatedAt: week\?\.availability\?\.status === 'carried_forward' \? week\.generatedAt : ''/);
 
   const earningsUnavailableSource = extractDashboardRuntimeTestBlock(html, 'earnings-unavailable');
@@ -2423,9 +2521,16 @@ function testTouchTooltipControls() {
   });
   assert.match(unavailableOutcome, /<strong>Unavailable<\/strong>/);
   assert.doesNotMatch(unavailableOutcome, /Post-event commentary unavailable|Released facts/);
-  const pendingOutcome = weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } });
-  assert.match(pendingOutcome, /<strong>Pending<\/strong>/);
-  assert.doesNotMatch(pendingOutcome, /Editorial interpretation pending|afternoon review/);
+  const pendingOutcome = weekAheadOutcomeHtml({
+    date: '2026-07-14',
+    lifecycle: 'close_available',
+    outcome: { status: 'pending_review' },
+    marketReaction: { rows: [] }
+  });
+  assert.doesNotMatch(pendingOutcome, /<strong>(?:Pending|Unavailable)<\/strong>/);
+  assert.match(pendingOutcome, /Outcome commentary was not completed for this update\./);
+  assert.match(pendingOutcome, /data-stale-button/);
+  assert.equal(weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } }), '');
 
   assert.doesNotMatch(html, /week-ledger-status-dot/);
   assert.match(html, /week-ahead-stale-info \.stale-info-tooltip\s*\{[\s\S]*?right:\s*0;/);
@@ -2739,6 +2844,7 @@ const architectureContractTests = Object.freeze([
   testMalformedFocusedEarningsIsNoOp,
   testReleasedEventRetainGeneratedBecomesUnavailableLens,
   testArchitectureFinalizationValidatesBeforeReplace,
+  testEarningsFinalizationPreservesOnlySafePriorNarrative,
   testTapeCommentaryRefreshRequiresNewCopy
 ]);
 

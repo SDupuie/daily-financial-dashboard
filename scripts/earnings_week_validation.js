@@ -46,8 +46,8 @@ const LIFECYCLES = new Set(['scheduled', 'awaiting_actual', 'released_awaiting_c
 const SOURCE_SUMMARY_PRIMARIES = new Set(['finnhub', 'earningsApiCompany', 'sec_company_release']);
 const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
 const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
-const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable']);
-const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified']);
+const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
+const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const COMMENTARY_UNAVAILABLE_STATUSES = new Set(['commentary_unavailable']);
 const GUIDANCE_UNAVAILABLE_STATUSES = new Set(['unverified']);
 const RESULT_REFRESH_PROVIDERS = new Set(['finnhub', 'earningsApiCompany', 'yahoo']);
@@ -134,8 +134,7 @@ function parseArgs(argv) {
   const args = {
     mode,
     input: mode === 'release' ? defaultCompanyReleaseInput : defaultEarningsInput,
-    week: defaultEarningsInput,
-    requireNarrative: false
+    week: defaultEarningsInput
   };
 
   for (let i = offset; i < argv.length; i += 1) {
@@ -148,10 +147,6 @@ function parseArgs(argv) {
     if (arg === '--week') {
       args.week = path.resolve(process.cwd(), argv[i + 1] || defaultEarningsInput);
       i += 1;
-      continue;
-    }
-    if (arg === '--require-narrative') {
-      args.requireNarrative = true;
       continue;
     }
     if (arg === '--help' || arg === '-h') {
@@ -180,8 +175,6 @@ Options:
 
 Options:
   --input PATH      Generated earnings week JSON (default: generated/earnings_week.json)
-  --require-narrative
-                    Require applied narrative for every display-eligible row
   --help           Show this help
 `);
 }
@@ -264,7 +257,7 @@ function validateSecondaryRecoveryTaskCompanyAudit(errors, task, label) {
   }
 }
 
-function validateReaction(errors, row, label, now) {
+function validateReaction(errors, row, label) {
   const reaction = row.reaction;
   if (!isObject(reaction)) {
     errors.push(`${label}.reaction must be an object.`);
@@ -274,8 +267,6 @@ function validateReaction(errors, row, label, now) {
   if (!nullableNumber(reaction.percent)) errors.push(`${label}.reaction.percent must be numeric or null.`);
   if (!REACTION_STATUSES.has(reaction.status)) errors.push(`${label}.reaction.status is invalid.`);
   if (typeof reaction.note !== 'string') errors.push(`${label}.reaction.note must be a string.`);
-  void row;
-  void now;
 }
 
 function expectedSource(value, source) {
@@ -611,19 +602,7 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
-function validateSourceAudit(errors, row, label) {
-  void errors;
-  void row;
-  void label;
-}
-
-function validateSourceSummary(errors, row, label) {
-  void errors;
-  void row;
-  void label;
-}
-
-function validateRow(errors, rowRaw, index, range, now) {
+function validateRow(errors, rowRaw, index, range) {
   const row = isObject(rowRaw) ? rowRaw : {};
   const label = row.symbol || `rows[${index}]`;
 
@@ -641,7 +620,6 @@ function validateRow(errors, rowRaw, index, range, now) {
   }
   if (!TIMINGS.has(row.reportTiming)) errors.push(`${label}.reportTiming is invalid.`);
   if (!LIFECYCLES.has(row.lifecycle)) errors.push(`${label}.lifecycle is invalid.`);
-  void now;
   if (!nullableNumber(row.fiscalQuarter)) errors.push(`${label}.fiscalQuarter must be numeric or null.`);
   if (!nullableNumber(row.fiscalYear)) errors.push(`${label}.fiscalYear must be numeric or null.`);
   validateMetric(errors, row.eps, `${label}.eps`, { metric: 'eps', requireBasis: true });
@@ -660,9 +638,7 @@ function validateRow(errors, rowRaw, index, range, now) {
   if (row.companyReleaseStatus !== undefined && typeof row.companyReleaseStatus !== 'string') {
     errors.push(`${label}.companyReleaseStatus must be a string.`);
   }
-  validateReaction(errors, row, label, now);
-  validateSourceSummary(errors, row, label);
-  validateSourceAudit(errors, row, label);
+  validateReaction(errors, row, label);
 }
 
 function validateSummary(errors, data) {
@@ -772,6 +748,10 @@ function validateEditorialDisposition(errors, disposition, label, allowedStatuse
     errors.push(`${label}.status is invalid.`);
     return '';
   }
+  if (disposition.status === 'pending_review') {
+    if (text) errors.push(`${label}.status pending_review must not carry editorial copy.`);
+    return disposition.status;
+  }
   if (disposition.status === 'verified') {
     if (!text) errors.push(`${label}.status verified requires populated editorial copy.`);
     return disposition.status;
@@ -790,14 +770,13 @@ function validateEditorialDisposition(errors, disposition, label, allowedStatuse
   return disposition.status;
 }
 
-function validateNarrativeApply(errors, data, options = {}) {
+function validateNarrativeApply(errors, data) {
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const requiredRows = rows.filter(isRenderableEarningsRow);
-  void options;
 
   for (const row of requiredRows) {
     const reportedRow = row.outcome?.overall !== 'pending';
-    const interpretationStatus = validateEditorialDisposition(
+    validateEditorialDisposition(
       errors,
       row.outcome?.interpretationDisposition,
       `${row.symbol}.outcome.interpretationDisposition`,
@@ -805,7 +784,6 @@ function validateNarrativeApply(errors, data, options = {}) {
       row.outcome?.interpretation,
       COMMENTARY_UNAVAILABLE_STATUSES
     );
-    void interpretationStatus;
     const guidanceRequired = reportedRow;
     const guide = String(row.outcome?.guide || '').trim();
     const guidanceStatus = guidanceRequired || row.outcome?.guidanceDisposition !== undefined
@@ -824,17 +802,16 @@ function validateNarrativeApply(errors, data, options = {}) {
       }
     }
     const note = String(row.reaction?.note || '').trim();
-    const reactionStatus = row.reaction?.status === 'computed' || row.reaction?.commentaryDisposition !== undefined
-      ? validateEditorialDisposition(
-          errors,
-          row.reaction?.commentaryDisposition,
-          `${row.symbol}.reaction.commentaryDisposition`,
-          COMMENTARY_DISPOSITION_STATUSES,
-          note,
-          COMMENTARY_UNAVAILABLE_STATUSES
-        )
-      : '';
-    void reactionStatus;
+    if (row.reaction?.status === 'computed' || row.reaction?.commentaryDisposition !== undefined) {
+      validateEditorialDisposition(
+        errors,
+        row.reaction?.commentaryDisposition,
+        `${row.symbol}.reaction.commentaryDisposition`,
+        COMMENTARY_DISPOSITION_STATUSES,
+        note,
+        COMMENTARY_UNAVAILABLE_STATUSES
+      );
+    }
   }
 }
 
@@ -993,7 +970,7 @@ function validateReleaseSummary(errors, data) {
   }
 }
 
-function validateEarningsWeekPayload(data, options = {}) {
+function validateEarningsWeekPayload(data) {
   const errors = [];
 
   validateRange(errors, data.range);
@@ -1003,18 +980,15 @@ function validateEarningsWeekPayload(data, options = {}) {
     errors.push('rows must be an array.');
   } else {
     const seen = new Set();
-    const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
-      ? options.now
-      : new Date(data.generatedAt);
     data.rows.forEach((row, index) => {
       const key = `${row?.reportDate || index}:${row?.symbol || index}`;
       if (seen.has(key)) errors.push(`Duplicate earnings row ${key}.`);
       seen.add(key);
-      validateRow(errors, row, index, data.range, now);
+      validateRow(errors, row, index, data.range);
     });
   }
 
-  validateNarrativeApply(errors, data, { required: options.requireNarrative });
+  validateNarrativeApply(errors, data);
 
   return errors;
 }
@@ -1073,7 +1047,7 @@ function runValidation(argv = process.argv.slice(2)) {
   }
 
   const data = readJson(args.input);
-  const errors = validateEarningsWeekPayload(data, { requireNarrative: args.requireNarrative });
+  const errors = validateEarningsWeekPayload(data);
 
   if (errors.length) {
     throw new Error(`Earnings week validation failed for ${args.input}: ${errors.join(' ')}`);
