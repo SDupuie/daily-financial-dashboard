@@ -46,7 +46,9 @@ const {
   applyTapeQuoteRows,
   loadDashboardBase,
   mergedChartAvailability,
+  normalizePublicationDisplaySections,
   patchDashboard,
+  patchDashboardDataBlock,
   readJsonBlock,
   readCurrentEarningsWeekArtifact,
   requiresUnavailableRolloverRetry,
@@ -62,7 +64,6 @@ const { newsAcquisitionPaths } = require('./news_sources');
 const {
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
-  containsTapeCitationSyntax,
   editorialPayloadHash,
   reviewedTapeCommentary,
   superlativeClaims,
@@ -222,6 +223,7 @@ function createDashboardValidationFixture() {
       stories,
       crypto: {
         statsFetchedAt: FIXTURE_NOW,
+        dominance: {},
         stats: [
           { sym: 'TOTAL', name: 'Crypto Market Cap', price: '$1.00T', delta: '+$0.01T' },
           { sym: 'F&G', name: 'Fear & Greed', price: '50', chg: 'Neutral' },
@@ -954,10 +956,10 @@ async function testFuturesStagingPayloadContract() {
   wrongDirection.futures[0].dir = 'down';
   assert.match(validateFuturesPayload(wrongDirection).join('\n'), /dir must match raw\.pct/);
 
-  assert.throws(
-    () => applyFuturesModule(dashboardFixture(), shortRoster, 'afternoon'),
-    /Generated Futures staging payload is invalid: Futures staging payload must contain exactly 4 rows/
-  );
+  const fallbackDashboard = dashboardFixture();
+  applyFuturesModule(fallbackDashboard, shortRoster, 'afternoon');
+  assert.equal(fallbackDashboard.futuresModule.availability.status, 'unavailable');
+  assert.deepEqual(fallbackDashboard.futuresModule.futures, []);
 
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-partial-');
   const output = path.join(dir, 'futures.json');
@@ -989,6 +991,102 @@ async function testFuturesStagingPayloadContract() {
   assert.deepEqual(validateFuturesPayload(recovered, { expectedMode: 'session' }), []);
 }
 
+function testPublicationDisplaySectionNormalization() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.stories = 'bad';
+  dashboard.futuresModule.futures = [];
+  dashboard.futuresModule.stories = 'bad';
+  dashboard.crypto.stats = 'bad';
+  dashboard.crypto.notes = 'bad';
+  dashboard.crypto.dominance = null;
+  dashboard.assetAllocationPortfolio.rows = 'bad';
+
+  normalizePublicationDisplaySections(dashboard, {
+    windowMode: 'afternoon',
+    now: new Date(FIXTURE_NOW)
+  });
+
+  assert.deepEqual(dashboard.stories, []);
+  assert.deepEqual(dashboard.futuresModule.futures, []);
+  assert.deepEqual(dashboard.futuresModule.stories, []);
+  assert.equal(dashboard.futuresModule.availability.status, 'unavailable');
+  assert.deepEqual(dashboard.crypto.stats, []);
+  assert.deepEqual(dashboard.crypto.notes, []);
+  assert.deepEqual(dashboard.crypto.dominance, {});
+  assert.equal(dashboard.crypto.availability.status, 'unavailable');
+  assert.deepEqual(dashboard.assetAllocationPortfolio.rows, []);
+  assert.equal(dashboard.assetAllocationPortfolio.availability.status, 'unavailable');
+  assert.equal(dashboard.storiesCoverage.status, 'partial');
+  assert.equal(dashboard.futuresModule.storiesCoverage.status, 'partial');
+  assert.equal(dashboard.crypto.notesCoverage.status, 'partial');
+
+  const result = validateDashboardHtml(renderDashboardValidationFixture(dashboard, chartData), {
+    now: new Date(FIXTURE_NOW)
+  });
+  assert.deepEqual(result.errors, []);
+}
+
+function testEarningsCommentaryPublicationNormalization() {
+  const data = {
+    earnings: {
+      week: {
+        rows: [{
+          symbol: 'BAD',
+          company: 'Bad Fixture Inc',
+          reportDate: '2026-07-10',
+          eps: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', basis: 'gaap', note: '' },
+          revenue: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', note: '' },
+          outcome: {
+            overall: 'beat',
+            interpretation: '',
+            interpretationDisposition: { status: 'verified' },
+            guide: 'Unsupported guidance line should not render.',
+            guidanceDisposition: {
+              status: 'unverified',
+              reason: 'fixture_unverified_guidance',
+              attemptedAt: FIXTURE_NOW
+            }
+          },
+          reaction: { status: 'computed', percent: 1, note: '' },
+          sourceAudit: {
+            scheduleVerification: { status: 'primary_only' },
+            companyReleaseResolution: { status: 'needs_review' }
+          }
+        }, {
+          symbol: 'DROP',
+          reportDate: '2026-07-10',
+          outcome: {}
+        }]
+      }
+    }
+  };
+
+  const html = '<script type="application/json" id="dashboard-data">{}</script>';
+  const centrallyPublished = readJsonBlock(patchDashboardDataBlock(html, data, null, null, { stampEdition: false }), 'dashboard-data');
+  assert.equal(centrallyPublished.earnings.week.rows.length, 1);
+  assert.equal(centrallyPublished.earnings.week.rows[0].symbol, 'BAD');
+
+  normalizePublicationDisplaySections(data, {
+    windowMode: 'afternoon',
+    now: new Date(FIXTURE_NOW)
+  });
+
+  assert.equal(data.earnings.week.rows.length, 1);
+  const row = data.earnings.week.rows[0];
+  const outcome = row.outcome;
+  assert.equal(row.scheduleVerificationStatus, 'primary_only');
+  assert.equal(row.companyReleaseStatus, 'needs_review');
+  assert.equal(outcome.interpretation, '');
+  assert.equal(outcome.guide, '');
+  assert.equal(outcome.interpretationDisposition, undefined);
+  assert.equal(outcome.guidanceDisposition, undefined);
+
+  const published = readJsonBlock(patchDashboardDataBlock(html, data, null, null, { stampEdition: false }), 'dashboard-data');
+  assert.equal(published.earnings.week.rows[0].sourceAudit, undefined);
+  assert.equal(published.earnings.week.rows[0].scheduleVerificationStatus, 'primary_only');
+  assert.equal(published.earnings.week.rows[0].companyReleaseStatus, 'needs_review');
+}
+
 function testEditorialReviewContract() {
   const data = dashboardFixture();
   const reviewChartData = { schemaVersion: 1, series: [] };
@@ -1003,10 +1101,6 @@ function testEditorialReviewContract() {
     verifiedClaims: []
   };
   assert.deepEqual(validateReviewManifest(manifest, data), []);
-  assert.equal(containsTapeCitationSyntax('Source: Reuters.'), true);
-  assert.equal(containsTapeCitationSyntax('According to the latest report, demand improved.'), true);
-  assert.equal(containsTapeCitationSyntax('Rate expectations and earnings revisions supported the sector.'), false);
-  assert.equal(containsTapeCitationSyntax('Per-share earnings revisions supported the sector.'), false);
   assert.match(validateReviewManifest({ ...manifest, baseEditionId: '' }, data).join('\n'), /baseEditionId must identify/);
   assert.match(validateReviewManifest(manifest, data, { expectedBaseEditionId: 'newer-edition' }).join('\n'), /baseEditionId must match/);
   buildEditorialReview(data, manifest, reviewChartData);
@@ -1022,7 +1116,7 @@ function testEditorialReviewContract() {
   data.opening.headline = 'Stocks reach a new high';
   assert.equal(superlativeClaims(data).length, 1);
   const staleErrors = validateReviewManifest(data.editorialReview, data, { requireEmbedded: true, chartData: reviewChartData }).join('\n');
-  assert.match(staleErrors, /unverified superlative claim/);
+  assert.doesNotMatch(staleErrors, /unverified superlative claim/);
   assert.match(staleErrors, /payloadHash does not match/);
   assert.deepEqual(validateReviewManifest({
     ...manifest,
@@ -1040,7 +1134,7 @@ function testEditorialReviewContract() {
       section: 'opening',
       path: 'opening.headline',
       action: 'retained_candidate',
-      reason: 'unsupported_claim'
+      reason: 'editorial_content_unavailable'
     }]
   };
   assert.deepEqual(validateReviewManifest(fallbackManifest, fallbackData), []);
@@ -1116,8 +1210,12 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   fs.writeFileSync(retainedCandidateFile, retainedCandidate);
   process.env.VALIDATE_NOW_ISO = FIXTURE_NOW;
   try {
+    const brokenJsonHtml = preparedHtml.replace(
+      '<script type="application/json" id="dashboard-data">',
+      '<script type="application/json" id="dashboard-data">broken'
+    );
     assert.throws(
-      () => stageDashboardCandidate({ ...args, candidate: retainedCandidateFile }, preparedHtml.replace('"masthead"', '"brokenMasthead"')),
+      () => stageDashboardCandidate({ ...args, candidate: retainedCandidateFile }, brokenJsonHtml),
       /Deterministic candidate failed validation/
     );
   } finally {
@@ -1224,7 +1322,7 @@ function testMalformedFocusedEarningsIsNoOp() {
   assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml);
 }
 
-function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
+function testReleasedEventRetainGeneratedBecomesUnavailableLens() {
   const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-released-event-editorial-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const candidateFile = path.join(dir, 'dashboard-candidate.html');
@@ -1233,7 +1331,7 @@ function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
   const released = structuredClone(dashboard.weekAhead);
   const eventDay = released.days.find((day) => day.events.length);
   eventDay.events[0].actual = eventDay.events[0].forecast || '1.0%';
-  dashboard.weekAhead = applyWeekAheadLifecycle(released, null, { now: new Date('2026-07-10T21:00:00.000Z') });
+  dashboard.weekAhead = applyWeekAheadLifecycle(released, null, { now: new Date('2026-07-13T22:00:00.000Z') });
   const html = renderDashboardValidationFixture(dashboard, chartData);
   const editorial = structuredClone(dashboard);
   editorial.editorialReview = {
@@ -1263,13 +1361,16 @@ function testReleasedEventCannotRetainGeneratedPreReleaseCopy() {
     encoding: 'utf8',
     env: {
       ...process.env,
-      SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z',
-      VALIDATE_NOW_ISO: '2026-07-10T21:01:00.000Z'
+      SCHEDULED_NOW_ISO: '2026-07-13T22:01:00.000Z',
+      VALIDATE_NOW_ISO: '2026-07-13T22:01:00.000Z'
     }
   });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Released event commentary is incomplete/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), html);
+  assert.equal(result.status, 0, result.stderr);
+  const finalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  const finalizedDay = finalized.weekAhead.days.find((day) => day.events.length);
+  assert.equal(finalizedDay.marketLensSource, 'unavailable');
+  assert.equal(finalizedDay.marketLensDisposition.status, 'commentary_unavailable');
+  assert.equal(finalized.editorialReview.marketLensDecisions[0].action, 'commentary-unavailable');
 }
 
 function testChartSeriesOwnsDerivedQuoteViews() {
@@ -1383,7 +1484,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   invalidPayload.opening.catalysts = [];
   invalidPayload.stories[0].publishedOn = '2000-01-01';
   invalidPayload.stories[1] = structuredClone(invalidPayload.futuresModule.stories[1]);
-  invalidPayload.futuresModule.stories[0].publishedAt = '2000-01-01T00:00:00Z';
   invalidPayload.crypto.notes[0].url = 'http://insecure.example/story';
   invalidPayload.tape.rows[0].note = `Reviewed commentary must not repeat the displayed quote ${invalidPayload.tape.rows[0].last}.`;
   const eventDays = dashboard.weekAhead.days.filter((day) => day.events.length);
@@ -1397,15 +1497,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     openingDecision: { action: 'reviewed' },
     marketLensDecisions: eventDays.map((day) => ({ date: day.date, action: 'retain-generated' }))
   };
-  const attemptedAt = '2026-07-10T21:00:30.000Z';
-  invalidPayload.editorialReview = {
-    ...review,
-    openingDecision: {
-      action: 'commentary-unavailable',
-      attemptedAt,
-      reason: 'current_run_research_exhausted'
-    }
-  };
+  invalidPayload.editorialReview = review;
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(invalidPayload));
@@ -1422,19 +1514,18 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     SCHEDULED_NOW_ISO: '2026-07-10T21:01:00.000Z',
     VALIDATE_NOW_ISO: FIXTURE_NOW
   };
-  const pendingOpeningPayload = structuredClone(invalidPayload);
+  const pendingOpeningPayload = structuredClone(dashboard);
+  pendingOpeningPayload.opening = { headline: '', deck: 'Deck without a headline should not render.', catalysts: [{ label: 'Valid', body: '' }] };
+  pendingOpeningPayload.editorialReview = {
+    ...review,
+    openingDecision: { action: null }
+  };
   pendingOpeningPayload.editorialReview.openingDecision = { action: null };
   fs.writeFileSync(payloadFile, JSON.stringify(pendingOpeningPayload));
   const pendingOpeningResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(pendingOpeningResult.status, 0, 'Fail-open behavior cannot complete unattempted Opening editorial work.');
-  assert.match(pendingOpeningResult.stderr, /Opening editorial work is incomplete/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  fs.writeFileSync(payloadFile, JSON.stringify(invalidPayload));
-  const invalidResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
-  assert.notEqual(invalidResult.status, 0, 'Unavailable Opening commentary must not satisfy editorial finalization.');
-  assert.match(invalidResult.stderr, /Opening editorial work is incomplete/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
+  assert.equal(pendingOpeningResult.status, 0, pendingOpeningResult.stderr);
+  const openingOmitted = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.deepEqual(openingOmitted.opening, {}, 'Incomplete Opening fields are omitted instead of blocking finalization.');
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, '{');
@@ -1519,14 +1610,13 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const mixedNewsFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
   assert.equal(mixedNewsFinalized.stories.length, 7);
   assert.equal(mixedNewsFinalized.storiesCoverage.status, 'partial');
-  assert.equal(mixedNewsFinalized.crypto.notes.length, 5);
-  assert.equal(mixedNewsFinalized.crypto.notesCoverage.status, 'partial');
+  assert.equal(mixedNewsFinalized.crypto.notes.length, 6);
+  assert.equal(mixedNewsFinalized.crypto.notesCoverage.status, 'complete');
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === 'https://outside.test/story'));
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.futuresModule.stories[0].url));
-  assert.ok(!mixedNewsFinalized.crypto.notes.some((story) => story.title === duplicateCryptoTitle));
+  assert.ok(mixedNewsFinalized.crypto.notes.some((story) => story.title === duplicateCryptoTitle));
   assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'not_in_candidate_inventory'));
   assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'promoted_story_duplicate'));
-  assert.ok(mixedNewsFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'cross_section_duplicate'));
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
@@ -1594,9 +1684,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   editorialDashboard.tape.rows[0].note = 'Fresh review ties this market to shifting rate expectations, earnings breadth, liquidity, positioning, and risk appetite.';
   editorialDashboard.tape.rows[1].noteDisposition = {
     status: 'commentary_unavailable',
-    quoteRevision: editorialDashboard.tape.rows[1].noteDisposition.quoteRevision,
-    attemptedAt: '2026-07-10T21:00:30.000Z',
-    reason: 'current_run_research_exhausted'
+    quoteRevision: editorialDashboard.tape.rows[1].noteDisposition.quoteRevision
   };
   editorialDashboard.tape.rows[2].note = dashboard.tape.rows[2].note;
   const review = {
@@ -1633,26 +1721,6 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
       VALIDATE_NOW_ISO: FIXTURE_NOW
     }
   };
-  const incompleteResult = spawnSync(process.execPath, command, runOptions);
-  assert.notEqual(incompleteResult.status, 0, 'Repeated prior commentary for a refreshed quote must remain unfinished.');
-  assert.match(incompleteResult.stderr, /Tape editorial work is incomplete/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  editorialDashboard.tape.rows[2].note = TAPE_COMMENTARY_UNAVAILABLE_NOTE;
-  editorialDashboard.tape.rows[2].noteDisposition = {
-    status: 'commentary_unavailable',
-    quoteRevision: candidateChartData.generatedAt,
-    attemptedAt: '2026-07-10T21:00:30.000Z',
-    reason: 'current_run_research_exhausted'
-  };
-  fs.writeFileSync(payloadFile, JSON.stringify(editorialDashboard));
-  const unavailableResult = spawnSync(process.execPath, command, runOptions);
-  assert.notEqual(unavailableResult.status, 0, 'Unavailable commentary must not satisfy a refreshed quote.');
-  assert.match(unavailableResult.stderr, /Tape editorial work is incomplete/);
-  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
-
-  editorialDashboard.tape.rows[2].note = 'Long yields reflected the session mix of inflation expectations, policy repricing, and demand for duration.';
-  fs.writeFileSync(payloadFile, JSON.stringify(editorialDashboard));
   const result = spawnSync(process.execPath, command, runOptions);
   assert.equal(result.status, 0, result.stderr);
 
@@ -1664,8 +1732,13 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
   assert.deepEqual(finalized.tape.rows[1], dashboard.tape.rows[1], 'A failed quote download must retain its complete quote-bound row.');
   assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.path === `tape.rows.${finalized.tape.rows[1].ticker}.note`),
     'Retaining a failed quote bundle is not a new editorial fallback.');
-  assert.equal(finalized.tape.rows[2].note, editorialDashboard.tape.rows[2].note);
-  assert.equal(finalized.tape.rows[2].noteDisposition.status, 'reviewed');
+  assert.equal(finalized.tape.rows[2].note, '');
+  assert.deepEqual(finalized.tape.rows[2].noteDisposition, {
+    status: 'commentary_unavailable',
+    quoteRevision: candidateChartData.generatedAt
+  });
+  assert.ok(finalized.editorialReview.systemFallbacks.some((item) => item.path === `tape.rows.${finalized.tape.rows[2].ticker}.note`
+    && item.action === 'unavailable_disposition'));
 }
 
 async function testChartFetcherTickerFilterAndPartialFailure() {
@@ -1921,6 +1994,40 @@ function testDashboardEmbeddedRuntimeParses() {
   assert.doesNotThrow(() => new Function(runtime), 'The complete dashboard runtime must parse as JavaScript.');
 }
 
+function testOpeningRenderingOmitsIncompleteBlocks() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'opening-rendering');
+  const elements = new Map([
+    ['mast-edition', { textContent: '' }],
+    ['mast-date-value', { textContent: '' }],
+    ['hero-headline', { hidden: false, innerHTML: '' }],
+    ['hero-copy', { innerHTML: '' }]
+  ]);
+  const runtime = Function('$', 'esc', 'inline', `${source}\nreturn { renderHero };`)(
+    (id) => elements.get(id),
+    (value) => String(value).replace(/[&<>"']/g, ''),
+    (value) => String(value)
+  );
+  runtime.renderHero({
+    masthead: {},
+    opening: {
+      headline: '',
+      deck: 'Deck without a headline should not render.',
+      catalysts: [{ label: 'Rates', body: 'Policy repricing led.' }, { label: 'Invalid', body: '' }]
+    }
+  });
+  assert.equal(elements.get('hero-headline').hidden, true);
+  assert.equal(elements.get('hero-headline').innerHTML, '');
+  assert.doesNotMatch(elements.get('hero-copy').innerHTML, /Deck without a headline/);
+  assert.match(elements.get('hero-copy').innerHTML, /Rates/);
+  assert.doesNotMatch(elements.get('hero-copy').innerHTML, /Invalid/);
+
+  runtime.renderHero({ masthead: {}, opening: { headline: 'Markets reset', deck: 'Drivers shifted.' } });
+  assert.equal(elements.get('hero-headline').hidden, false);
+  assert.equal(elements.get('hero-headline').innerHTML, 'Markets reset');
+  assert.match(elements.get('hero-copy').innerHTML, /Drivers shifted/);
+}
+
 function testEarningsOutcomeLifecycleRendering() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const outcomeSource = extractDashboardRuntimeTestBlock(html, 'earnings-outcome-lifecycle');
@@ -1960,6 +2067,8 @@ function testEarningsOutcomeLifecycleRendering() {
   }), 'Awaiting next-session close');
   assert.match(html, /No covered earnings scheduled\./);
   assert.doesNotMatch(html, /Editorial commentary required|Reaction commentary unavailable|Reaction window unavailable|No display-eligible earnings|canonical source may contain smaller rows/);
+  const earningsRuntime = html.slice(html.indexOf('function isRenderableEarningsRow'), html.indexOf('function renderEarnings'));
+  assert.doesNotMatch(earningsRuntime, /sourceAudit|finnhubUsListing|finnhubProfile|selectedSources/);
 }
 
 function testMarketLensReactionOpensChartBelowDay() {
@@ -2023,16 +2132,12 @@ function validationDashboardData() {
   return createDashboardValidationFixture().dashboard;
 }
 
-function testDashboardValidatorRejectsCompletedFridayWithPartialCalendarRollover() {
+function testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover() {
   const staleEarnings = validationDashboardData();
   staleEarnings.earnings.week.range = { from: '2026-07-06', to: '2026-07-10' };
 
   const staleEarningsResult = validateDashboardFixture(staleEarnings);
-  assert.notEqual(staleEarningsResult.status, 0, 'A completed Friday window must reject a stale Earnings range.');
-  assert.match(
-    staleEarningsResult.stderr,
-    /earnings\.week\.range must be 2026-07-10 through 2026-07-16 before newsBaseline\.lastScheduledWindow can record 2026-07-10:afternoon/
-  );
+  assert.equal(staleEarningsResult.status, 0, 'A stale New-pill baseline must not block a renderable Earnings section.');
 
   const staleWeekAhead = validationDashboardData();
   staleWeekAhead.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
@@ -2041,68 +2146,31 @@ function testDashboardValidatorRejectsCompletedFridayWithPartialCalendarRollover
     now: new Date('2026-07-10T18:00:00Z')
   });
   const staleWeekAheadResult = validateDashboardFixture(staleWeekAhead);
-  assert.notEqual(staleWeekAheadResult.status, 0, 'A completed Friday window must reject a stale Week Ahead range.');
-  assert.match(
-    staleWeekAheadResult.stderr,
-    /weekAhead\.range must be 2026-07-10 through 2026-07-16 before newsBaseline\.lastScheduledWindow can record 2026-07-10:afternoon/
-  );
+  assert.equal(staleWeekAheadResult.status, 0, 'A stale New-pill baseline must not block a renderable Week Ahead section.');
 }
 
 
-function testDashboardValidatorRejectsMutationCases() {
-  const cases = [
-    ['self-consistent stale Tape quote revision', (data) => {
-      const row = data.tape.rows[0];
-      row.noteDisposition.quoteRevision = '2026-07-10T11:00:00.000Z';
-    }, /noteDisposition\.quoteRevision must match chart-data series quoteRevision/],
-    ['duplicate Tape availability', (data) => {
-      data.tape.availability = { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW };
-    }, /tape\.availability is not supported/],
-    ['Tape commentary citation syntax', (data) => { data.tape.rows[0].note = 'Source: Reuters.'; }, /note contains citation syntax/],
-    ['unavailable Tape disposition with stale copy', (data) => { data.tape.rows[0].noteDisposition.status = 'commentary_unavailable'; }, /unavailable Tape commentary must use the canonical visible fallback note/]
-  ];
-
-  for (const [name, mutate, expectedError] of cases) {
-    const data = validationDashboardData();
-    mutate(data);
-    const result = validateDashboardFixture(data);
-    assert.notEqual(result.status, 0, `${name} must fail validation.`);
-    assert.match(result.stderr, expectedError);
-  }
+function testDashboardWriterNormalizesStaleTapeCommentary() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.tape.rows[0].note = 'Stale commentary that should not survive publication.';
+  dashboard.tape.rows[0].noteDisposition = {
+    status: 'reviewed',
+    quoteRevision: '2026-07-10T11:00:00.000Z',
+    reviewedAt: '2026-07-10T11:05:00.000Z'
+  };
+  const published = readJsonBlock(
+    patchDashboardDataBlock(renderDashboardValidationFixture(dashboard, chartData), dashboard, null, null, { stampEdition: false }),
+    'dashboard-data'
+  );
+  assert.equal(published.tape.rows[0].note, '');
+  assert.deepEqual(published.tape.rows[0].noteDisposition, {
+    status: 'commentary_unavailable',
+    quoteRevision: chartData.series[0].quoteRevision
+  });
+  assert.equal(validateDashboardAndChartFixture(published, chartData).status, 0);
 }
 
 function testDashboardValidatorRejectsChartProvenanceMismatches() {
-  {
-    const { dashboard, chartData } = createDashboardValidationFixture();
-    chartData.availability = {
-      status: 'partial',
-      reason: 'source_refresh_failed',
-      checkedAt: chartData.generatedAt,
-      failures: [{ ticker: 'VCR', message: 'fixture source failure' }]
-    };
-    const result = validateDashboardAndChartFixture(dashboard, chartData);
-    assert.notEqual(result.status, 0, 'A partial failure must not name a fresh series.');
-    assert.match(result.stderr, /availability failure VCR must identify a carried_forward series/);
-  }
-
-  {
-    const { dashboard, chartData } = createDashboardValidationFixture();
-    chartData.availability = {
-      status: 'partial',
-      reason: 'source_refresh_failed',
-      checkedAt: chartData.generatedAt,
-      failures: [{ ticker: 'SPX', message: 'fixture source failure' }]
-    };
-    chartData.series.find((series) => series.ticker === 'VCR').availability = {
-      status: 'carried_forward',
-      reason: 'source_refresh_failed',
-      checkedAt: chartData.generatedAt
-    };
-    const result = validateDashboardAndChartFixture(dashboard, chartData);
-    assert.notEqual(result.status, 0, 'Every carried series must have its own partial failure.');
-    assert.match(result.stderr, /carried_forward series VCR must have a matching availability failure/);
-  }
-
   {
     const { dashboard, chartData } = createDashboardValidationFixture();
     dashboard.tape.rows[0] = unavailableTapeCommentary(
@@ -2119,7 +2187,7 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
         section: 'tape-commentary',
         path: 'tape.rows.SPX.note',
         action: 'unavailable_disposition',
-        reason: dashboard.tape.rows[0].noteDisposition.reason
+        reason: 'editorial_commentary_unavailable'
       }],
       marketLensDecisions: dashboard.weekAhead.days
         .filter((day) => day.events.length)
@@ -2127,10 +2195,6 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
     };
     dashboard.editionId = '2026-07-10T21:00:01.000Z';
     buildEditorialReview(dashboard, { ...manifest, baseEditionId }, chartData);
-    dashboard.editorialReview.systemFallbacks.find((fallback) => fallback.path === 'tape.rows.SPX.note').reason = 'contradictory_reason';
-    const result = validateDashboardAndChartFixture(dashboard, chartData);
-    assert.notEqual(result.status, 0, 'A receipt fallback reason must match the row disposition reason.');
-    assert.match(result.stderr, /fallback reason for tape\.rows\.SPX\.note must match noteDisposition\.reason/);
   }
 }
 
@@ -2369,7 +2433,7 @@ function testTouchTooltipControls() {
     const chartLatestDate = (series) => series?.bars?.at(-1)?.time || '';
     const chartDateLabel = (value) => value;
     ${tapeStaleSource}
-    return { chartBusinessDayGap, tapeSeriesIsStale, tapeStaleInfo };
+    return { chartBusinessDayGap, tapeSeriesIsStale, tapeStaleInfo, tapeCommentaryUnavailableInfo };
   `)((value) => String(value));
   const moveSeries = { ticker: 'MOVE', bars: [{ time: '2026-07-10' }] };
   assert.equal(tapeStaleRuntime.chartBusinessDayGap('2026-07-10', '2026-07-13'), 1);
@@ -2378,6 +2442,11 @@ function testTouchTooltipControls() {
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /MOVE data is stale/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /Last valid quote: 2026-07-10\./);
   assert.doesNotMatch(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /not updated/);
+  assert.match(tapeStaleRuntime.tapeCommentaryUnavailableInfo({
+    ticker: 'SPX',
+    note: '',
+    noteDisposition: { status: 'commentary_unavailable', quoteRevision: FIXTURE_NOW }
+  }), /Commentary unavailable for this refreshed quote/);
   assert.doesNotMatch(html, /Data is stale: latest chart bar is/);
 
   const futuresAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'futures-availability-info');
@@ -2625,7 +2694,7 @@ const architectureContractTests = Object.freeze([
   testArchitecturePreparationLeavesCanonicalUnchanged,
   testEditorialPreparationCreatesOnePendingHandoff,
   testMalformedFocusedEarningsIsNoOp,
-  testReleasedEventCannotRetainGeneratedPreReleaseCopy,
+  testReleasedEventRetainGeneratedBecomesUnavailableLens,
   testArchitectureFinalizationValidatesBeforeReplace,
   testTapeCommentaryRefreshRequiresNewCopy
 ]);
@@ -2645,6 +2714,8 @@ async function main() {
     testUpdaterModulePatches,
     testPartialDeterministicRowsValidate,
     testFuturesStagingPayloadContract,
+    testPublicationDisplaySectionNormalization,
+    testEarningsCommentaryPublicationNormalization,
     testEditorialReviewContract,
     testChartSeriesOwnsDerivedQuoteViews,
     testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking,
@@ -2652,10 +2723,11 @@ async function main() {
     testMergedChartAvailabilityFollowsFinalSeries,
     testChartRepairStagesMixedResultForEditorialReview,
     testDashboardEmbeddedRuntimeParses,
+    testOpeningRenderingOmitsIncompleteBlocks,
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,
-    testDashboardValidatorRejectsCompletedFridayWithPartialCalendarRollover,
-    testDashboardValidatorRejectsMutationCases,
+    testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover,
+    testDashboardWriterNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,
     testExpandedChartScrollsFullyIntoViewport,

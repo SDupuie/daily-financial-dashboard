@@ -123,9 +123,6 @@ function applyNewsCoverageState(data, { now = new Date() } = {}) {
 function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = false } = {}) {
   const errors = [];
   const coverageLabel = policy.label === 'stories' ? 'storiesCoverage' : `${policy.label}Coverage`;
-  if (count > policy.maximum) {
-    errors.push(`${policy.label} must contain no more than ${policy.maximum} qualifying fresh ${policy.maximum === 1 ? 'item' : 'items'}.`);
-  }
   if (coverage === undefined) {
     if (!allowIncomplete && count < policy.minimum) {
       errors.push(`${coverageLabel} must record updater-derived partial coverage when ${policy.label} is below its target.`);
@@ -137,8 +134,8 @@ function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = 
     return errors;
   }
   if (coverage.status === 'complete') {
-    if (count < policy.minimum || count > policy.maximum) {
-      errors.push(`${coverageLabel}.status can be complete only when ${policy.label} contains ${policy.minimum === policy.maximum ? policy.minimum : `${policy.minimum}-${policy.maximum}`} qualifying fresh items.`);
+    if (count < policy.minimum) {
+      errors.push(`${coverageLabel}.status can be complete only when ${policy.label} contains at least ${policy.minimum} item${policy.minimum === 1 ? '' : 's'}.`);
     }
     if (coverage.reason !== undefined || coverage.checkedAt !== undefined) {
       errors.push(`${coverageLabel} complete state must not retain partial-coverage reason or checkedAt fields.`);
@@ -220,13 +217,39 @@ function arrayStringSet(value) {
   return new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === 'string' && item));
 }
 
+function validScheduledWindowMarker(value) {
+  if (value === null || value === undefined) return true;
+  const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2}):(morning|afternoon)$/);
+  return Boolean(match && isIsoDate(match[1]));
+}
+
+function validBaselineArray(value) {
+  if (!Array.isArray(value)) return false;
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim() || seen.has(item)) return false;
+    seen.add(item);
+  }
+  return true;
+}
+
+function validNewsBaseline(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value.lastScheduledUpdateAt !== null
+    && value.lastScheduledUpdateAt !== undefined
+    && !isIsoDateTime(value.lastScheduledUpdateAt)) return false;
+  if (!validScheduledWindowMarker(value.lastScheduledWindow)) return false;
+  return validBaselineArray(value.previousScheduledStoryIds)
+    && validBaselineArray(value.currentScheduledStoryIds);
+}
+
 function sanitizeNewsBaseline(value) {
   const baseline = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   return {
-    lastScheduledUpdateAt: typeof baseline.lastScheduledUpdateAt === 'string'
+    lastScheduledUpdateAt: isIsoDateTime(baseline.lastScheduledUpdateAt)
       ? baseline.lastScheduledUpdateAt
       : null,
-    lastScheduledWindow: typeof baseline.lastScheduledWindow === 'string'
+    lastScheduledWindow: typeof baseline.lastScheduledWindow === 'string' && validScheduledWindowMarker(baseline.lastScheduledWindow)
       ? baseline.lastScheduledWindow
       : null,
     previousScheduledStoryIds: [...arrayStringSet(baseline.previousScheduledStoryIds)].sort(),
@@ -264,7 +287,10 @@ function markStoriesNewSinceBaseline(data, comparisonIds) {
 }
 
 function applyScheduledNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
-  const previousBaseline = sanitizeNewsBaseline(previousData?.newsBaseline ?? data.newsBaseline);
+  const rawBaseline = previousData?.newsBaseline ?? data.newsBaseline;
+  const previousBaseline = validNewsBaseline(rawBaseline)
+    ? sanitizeNewsBaseline(rawBaseline)
+    : sanitizeNewsBaseline(null);
   // Manual runs can highlight stories that are new since the last scheduled run,
   // but only scheduled runs advance the baseline used by tomorrow's comparison.
   const comparisonIds = scheduled

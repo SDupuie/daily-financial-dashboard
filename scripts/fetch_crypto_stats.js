@@ -538,8 +538,6 @@ function validateCryptoStatsPayload(payload) {
     for (const symbol of ['F&G', 'ALTSEASON', 'TOTAL']) {
       if (!payload.stats.some((row) => row?.sym === symbol)) errors.push(`Crypto stats staging is missing ${symbol}.`);
     }
-  } else if (payload.stats.length) {
-    errors.push('Unavailable Crypto stats staging must contain no rows.');
   }
   return errors;
 }

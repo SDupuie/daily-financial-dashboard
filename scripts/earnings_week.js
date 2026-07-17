@@ -315,6 +315,21 @@ function rowFromTask(task, resolution) {
   };
 }
 
+function companyReleaseAudit(resolution) {
+  return {
+    taskId: resolution.taskId,
+    symbol: resolution.symbol,
+    company: resolution.company,
+    reportDate: resolution.reportDate,
+    status: resolution.status,
+    sourceType: resolution.sourceType || '',
+    sourceUrl: resolution.sourceUrl || '',
+    secFilingUrl: resolution.secFilingUrl || '',
+    confidence: resolution.confidence || '',
+    notes: Array.isArray(resolution.notes) ? [...resolution.notes] : []
+  };
+}
+
 function applyResolution(row, task, resolution) {
   const epsFields = resolution.fields?.eps || {};
   const revenueFields = resolution.fields?.revenue || {};
@@ -372,7 +387,7 @@ function applyResolution(row, task, resolution) {
     },
     sourceAudit: {
       ...row.sourceAudit,
-      companyReleaseResolution: resolution,
+      companyReleaseResolution: companyReleaseAudit(resolution),
       selectedSources,
       yahoo: reaction.sourceAudit || row.sourceAudit?.yahoo || {}
     }
@@ -398,7 +413,7 @@ function applyPartialResolutionMetrics(row, resolution) {
         ...row,
         sourceAudit: {
           ...row.sourceAudit,
-          companyReleaseResolution: resolution
+          companyReleaseResolution: companyReleaseAudit(resolution)
         }
       },
       factsChanged: false
@@ -456,7 +471,7 @@ function applyPartialResolutionMetrics(row, resolution) {
     },
     sourceAudit: {
       ...row.sourceAudit,
-      companyReleaseResolution: resolution,
+      companyReleaseResolution: companyReleaseAudit(resolution),
       selectedSources
     }
   });
@@ -511,7 +526,7 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
               ...existing.row,
               sourceAudit: {
                 ...existing.row.sourceAudit,
-                companyReleaseResolution: resolution
+                companyReleaseResolution: companyReleaseAudit(resolution)
               }
             },
             factsChanged: false
@@ -1228,15 +1243,7 @@ function applyEarningsApiCompanyRefresh(row, providerRow) {
         ...(row.sourceAudit?.earningsApiCompany || {}),
         selectedRow: {
           reportDate: providerRow.reportDate,
-          reportTiming: providerRow.reportTiming,
-          eps: {
-            estimate: providerRow.eps.estimate,
-            actual: providerRow.eps.actual
-          },
-          revenue: {
-            estimate: providerRow.revenue.estimate,
-            actual: providerRow.revenue.actual
-          }
+          reportTiming: providerRow.reportTiming
         }
       },
       selectedSources: {
@@ -1886,28 +1893,25 @@ function moneyText(value) {
   return Number.isFinite(value) ? `$${value.toFixed(2)}` : '';
 }
 
-function earningsApiBackup(task) {
-  const coverage = task.sourceAudit?.earningsApiCompany?.selectedRow || {};
-  const finnhub = task.sourceAudit?.finnhubCalendar || {};
+function earningsApiBackup(task, row = {}) {
   const useFinnhub = task.trigger === 'provider_date_conflict_requires_company_release';
   const source = useFinnhub ? 'finnhub' : 'earningsapi_company';
-  const backup = useFinnhub ? finnhub : coverage;
   return {
     eps: {
-      estimate: numberOrNull(backup.eps?.estimate),
-      actual: numberOrNull(backup.eps?.actual),
-      estimateSource: Number.isFinite(numberOrNull(backup.eps?.estimate)) ? source : ''
+      estimate: numberOrNull(row.eps?.estimate),
+      actual: numberOrNull(row.eps?.actual),
+      estimateSource: Number.isFinite(numberOrNull(row.eps?.estimate)) ? source : ''
     },
     revenue: {
-      estimate: numberOrNull(backup.revenue?.estimate),
-      estimateSource: Number.isFinite(numberOrNull(backup.revenue?.estimate)) ? source : ''
+      estimate: numberOrNull(row.revenue?.estimate),
+      estimateSource: Number.isFinite(numberOrNull(row.revenue?.estimate)) ? source : ''
     },
-    fiscalQuarterEnding: String(backup.fiscalQuarterEnding || '').trim()
+    fiscalQuarterEnding: String(row.fiscalQuarterEnding || '').trim()
   };
 }
 
-function resolveComparableEps(secEps, task, text) {
-  const backup = earningsApiBackup(task);
+function resolveComparableEps(secEps, task, text, row) {
+  const backup = earningsApiBackup(task, row);
   const adjustment = extractPerShareAdjustment(text, secEps.value);
   const result = {
     actual: secEps.value,
@@ -1979,7 +1983,7 @@ async function resolveReaction(task, reportTiming, args) {
   };
 }
 
-async function resolveTask(task, tickerMap, args) {
+async function resolveTask(task, tickerMap, args, row = {}) {
   const ticker = tickerMap.get(task.symbol);
   if (!ticker) {
     return unresolved(task, 'ticker_not_found_in_sec_company_tickers');
@@ -2016,8 +2020,8 @@ async function resolveTask(task, tickerMap, args) {
   const eps = extractEps(text);
   // Company releases may report GAAP, adjusted, and special-item EPS in the
   // same exhibit; reconcile to the queued task before classifying beat/miss.
-  const comparableEps = resolveComparableEps(eps, task, text);
-  const backup = earningsApiBackup(task);
+  const comparableEps = resolveComparableEps(eps, task, text, row);
+  const backup = earningsApiBackup(task, row);
   const revenueActual = extractRevenue(text);
   const reportTiming = extractReportTiming(filing);
   const officialReport = { ...task, reportDate: filing.filingDate };
@@ -2133,10 +2137,11 @@ async function run(argv) {
   const args = parseArgs(argv);
   const source = readJson(args.input);
   const companyReleaseTasks = Array.isArray(source.companyReleaseTasks) ? source.companyReleaseTasks : [];
+  const rowsByKey = new Map((Array.isArray(source.rows) ? source.rows : []).map((row) => [rowKey(row), row]));
   const tickerMap = await loadTickerMap(args);
   const companyReleaseResolutions = [];
   for (const task of companyReleaseTasks) {
-    companyReleaseResolutions.push(await resolveTask(task, tickerMap, args));
+    companyReleaseResolutions.push(await resolveTask(task, tickerMap, args, rowsByKey.get(rowKey(task)) || {}));
   }
 
   const payload = {

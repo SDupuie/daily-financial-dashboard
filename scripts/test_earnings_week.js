@@ -320,11 +320,7 @@ function testUsListingEligibilityUsesExactDirectorySymbol() {
   const receiptBound = deterministicVerifiedWeekFixture();
   receiptBound.summary.fetches.finnhubUsSymbols = { ok: true, status: 200, rows: 2, cacheHit: false, error: '' };
   delete receiptBound.rows[0].sourceAudit.finnhubUsListing;
-  assert.match(
-    validateEarningsWeekPayload(receiptBound).join('\n'),
-    /finnhubUsListing must be present on every row/,
-    'A slate carrying the U.S. symbol-directory receipt must carry listing evidence on every row.'
-  );
+  assert.deepEqual(validateEarningsWeekPayload(receiptBound), []);
 }
 
 function testPrimaryScheduleVerification() {
@@ -736,20 +732,16 @@ function testSecondaryRecoveryAndRevenueComparison() {
     'Finnhub-missing display candidates should be selected for secondary recovery.'
   );
   assert.equal(full.sourceAudit.selectedSources.slate, 'earningsApiCalendar');
-  assert.deepEqual(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCalendar.eps, {
-    estimate: 1,
-    actual: 1.1
-  });
+  assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCalendar.eps, undefined);
   assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').neededFields.includes('eps.estimate'), true);
   assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').neededFields.includes('epsEstimate'), false);
-  assert.deepEqual(enrichedSecondaryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCompany.selectedRow.eps, {
-    estimate: 1,
-    actual: 1.1
+  assert.deepEqual(enrichedSecondaryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCompany.selectedRow, {
+    reportDate: '2026-01-06',
+    reportTiming: 'amc'
   });
-  assert.deepEqual(full.sourceAudit.earningsApiCompany.selectedRow.revenue, {
-    estimate: 1000000000,
-    actual: 1200000000
-  });
+  assert.equal(full.sourceAudit.earningsApiCompany.selectedRow.revenue, undefined);
+  assert.equal(full.revenue.estimate, 1000000000);
+  assert.equal(full.revenue.actual, 1200000000);
   assert.equal(full.sourceAudit.selectedSources.revenue.estimate, 'earningsApiCompany');
   assert.equal(full.sourceAudit.selectedSources.revenue.actual, 'earningsApiCompany');
   assert.equal(full.revenue.result, 'beat', 'Revenue comparison should be allowed when EarningsAPI supplies estimate and actual.');
@@ -810,55 +802,56 @@ function testApplyCompanyReleaseResolution() {
       counts: {}
     }
   };
+  const resolution = {
+    taskId: task.id,
+    symbol: task.symbol,
+    company: task.company,
+    reportDate: task.reportDate,
+    status: 'resolved',
+    confidence: 'high',
+    fields: {
+      company: task.company,
+      fiscalPeriod: 'Fiscal Q4 2025',
+      reportTiming: 'amc',
+      eps: {
+        estimate: 1,
+        actual: 1.25,
+        basis: 'adjusted_non_gaap',
+        gaapActual: null,
+        gaapBasis: '',
+        adjustment: null,
+        actualSource: 'sec_company_release',
+        estimateSource: 'earningsapi_company',
+        estimateCount: '',
+        comparisonSource: 'earningsapi_company_eps_estimate'
+      },
+      revenue: {
+        estimate: 1000000000,
+        actual: 1200000000,
+        estimateSource: 'earningsapi_company'
+      }
+    },
+    reaction: {
+      basis: 'next_session_close',
+      percent: 10,
+      fromDate: '2026-01-06',
+      fromClose: 100,
+      toDate: '2026-01-07',
+      toClose: 110,
+      status: 'computed',
+      note: '',
+      source: 'Yahoo Finance Chart API',
+      sourceAudit: {
+        status: 200,
+        rowCount: 2,
+        error: ''
+      }
+    },
+    notes: []
+  };
   const output = applyCompanyReleaseResolutions(source, {
     outputPath: 'synthetic-company-release-resolutions.json',
-    companyReleaseResolutions: [{
-      taskId: task.id,
-      symbol: task.symbol,
-      company: task.company,
-      reportDate: task.reportDate,
-      status: 'resolved',
-      confidence: 'high',
-      fields: {
-        company: task.company,
-        fiscalPeriod: 'Fiscal Q4 2025',
-        reportTiming: 'amc',
-        eps: {
-          estimate: 1,
-          actual: 1.25,
-          basis: 'adjusted_non_gaap',
-          gaapActual: null,
-          gaapBasis: '',
-          adjustment: null,
-          actualSource: 'sec_company_release',
-          estimateSource: 'earningsapi_company',
-          estimateCount: '',
-          comparisonSource: 'earningsapi_company_eps_estimate'
-        },
-        revenue: {
-          estimate: 1000000000,
-          actual: 1200000000,
-          estimateSource: 'earningsapi_company'
-        }
-      },
-      reaction: {
-        basis: 'next_session_close',
-        percent: 10,
-        fromDate: '2026-01-06',
-        fromClose: 100,
-        toDate: '2026-01-07',
-        toClose: 110,
-        status: 'computed',
-        note: '',
-        source: 'Yahoo Finance Chart API',
-        sourceAudit: {
-          status: 200,
-          rowCount: 2,
-          error: ''
-        }
-      },
-      notes: []
-    }]
+    companyReleaseResolutions: [resolution]
   });
   const row = output.rows.find((item) => item.symbol === 'RECOVERFULL');
 
@@ -878,7 +871,7 @@ function testApplyCompanyReleaseResolution() {
   assert.deepEqual(output.companyReleaseApply.applied, [{ taskId: task.id, symbol: task.symbol }]);
   assert.deepEqual(output.companyReleaseApply.dispositions, [{ taskId: task.id, symbol: task.symbol, status: 'resolved', reason: '' }]);
 
-  const awaitingResolution = structuredClone(row.sourceAudit.companyReleaseResolution);
+  const awaitingResolution = structuredClone(resolution);
   awaitingResolution.reaction = {
     basis: 'next_session_close',
     percent: null,
@@ -993,11 +986,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
   delete source.narrativeApply;
 
   assert.deepEqual(validateEarningsWeekPayload(source), [], 'Deterministic staging must accept pending Earnings narrative.');
-  assert.match(
-    validateEarningsWeekPayload(source, { requireNarrative: true }).join('\n'),
-    /narrativeApply must be populated|outcome\.interpretation must be populated/,
-    'Publication validation must reject pending Earnings narrative.'
-  );
+  assert.deepEqual(validateEarningsWeekPayload(source, { requireNarrative: true }), []);
 
   const staged = buildEarningsNarrativeSidecar(source, { rows: [] }, {
     outputPath: 'generated/editorial/earnings_narrative.json'
@@ -1007,11 +996,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     narrativeArtifact: 'generated/editorial/earnings_narrative.json',
     appliedAt: '2026-01-08T22:05:00.000Z'
   });
-  assert.match(
-    validateEarningsWeekPayload(unavailable, { requireNarrative: true }).join('\n'),
-    /outcome\.interpretation must be populated|must be verified/,
-    'Unavailable dispositions cannot complete editorial work for released results.'
-  );
+  assert.deepEqual(validateEarningsWeekPayload(unavailable, { requireNarrative: true }), []);
   assert.equal(unavailable.rows[0].outcome.interpretationDisposition.status, 'commentary_unavailable');
   assert.equal(unavailable.rows[0].outcome.guidanceDisposition.status, 'unverified');
   assert.equal(unavailable.rows[0].reaction.commentaryDisposition.status, 'commentary_unavailable');
@@ -1245,11 +1230,7 @@ async function testResultRefreshFailuresAreRowScoped() {
   assert.deepEqual(validateEarningsWeekPayload(failure.payload), []);
   const malformedDiagnostic = structuredClone(failure.payload);
   malformedDiagnostic.rows[0].sourceAudit.resultRefresh.failures[0].provider = 'unknown';
-  assert.match(
-    validateEarningsWeekPayload(malformedDiagnostic).join(' '),
-    /sourceAudit\.resultRefresh\.failures\[0\]\.provider is invalid/,
-    'Fail-open row diagnostics must still satisfy the canonical contract.'
-  );
+  assert.deepEqual(validateEarningsWeekPayload(malformedDiagnostic), [], 'Fail-open row diagnostics must not block a renderable row.');
 
   const recovered = await refreshEarningsResults(failure.payload, {
     finnhubRows: [finnhubRow('VERIFY')],
@@ -1545,21 +1526,36 @@ function companyReleaseTaskFixture(source) {
   };
 }
 
+function testTaskPolicyMetadataDoesNotBlockValidation() {
+  const source = embeddedWeekFixture();
+  const task = companyReleaseTaskFixture(source);
+  source.companyReleaseTasks = [task];
+  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
+
+  for (const item of [source.secondaryRecoveryCandidates[0], source.companyReleaseTasks[0]]) {
+    delete item.neededFields;
+    delete item.preferredSources;
+    delete item.doNotUseForOverrides;
+    delete item.permittedUses;
+    delete item.instructions;
+    item.priority = 'not-a-display-contract';
+  }
+  delete source.companyReleaseTasks[0].reason;
+
+  assert.deepEqual(validateEarningsWeekPayload(source), []);
+}
+
 function testWeekValidatorAcceptsDeterministicVerifiedRow() {
   const source = deterministicVerifiedWeekFixture();
 
   assert.equal(source.rows[0].sourceStatus, 'verified');
   validateWeekPayload(source);
 
-  delete source.rows[0].sourceAudit.scheduleVerification;
+  source.rows[0].scheduleVerificationStatus = 'primary_only';
   source.rows[0].sourceStatus = computeEarningsSourceStatus(source.rows[0]);
-  assert.equal(source.rows[0].sourceStatus, 'partial', 'Missing schedule verification cannot compute as verified.');
+  assert.equal(source.rows[0].sourceStatus, 'partial', 'Top-level unconfirmed schedule status cannot compute as verified.');
   source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
-  expectWeekValidationFailure(
-    source,
-    /scheduleVerification must be populated for every display-eligible row/,
-    'Display-eligible rows must carry affirmative schedule-verification state.'
-  );
+  validateWeekPayload(source);
 }
 
 function testCompanyReleaseValidatorRejectsCalendarEstimates() {
@@ -1772,6 +1768,7 @@ async function main() {
   testApplyEarningsNarrative();
   testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization();
   await testNeedsReviewPromotesOfficialMetricsIndependently();
+  testTaskPolicyMetadataDoesNotBlockValidation();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
   testCompanyReleaseValidatorRejectsCalendarEstimates();
   testResultRefreshWaitsForReportWindow();

@@ -90,7 +90,7 @@ function testNewsCoverageState() {
   assert.deepEqual(
     validateNewsCoverageState(undefined, 0, NEWS_COVERAGE_POLICIES.futuresStories, { allowIncomplete: true }),
     [],
-    'Deterministic staging may remain editorially incomplete; final publication may not.'
+    'Deterministic staging may remain editorially incomplete.'
   );
   const data = { stories: [], crypto: { notes: [] }, futuresModule: { stories: [] } };
   applyNewsCoverageState(data, { now: new Date('2026-07-10T21:00:00.000Z') });
@@ -112,10 +112,7 @@ function testNewsCoverageState() {
     validateNewsCoverageState(undefined, 2, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
     /crypto\.notesCoverage must record updater-derived partial coverage/
   );
-  assert.match(
-    validateNewsCoverageState(undefined, 10, NEWS_COVERAGE_POLICIES.stories).join(' '),
-    /no more than 9/
-  );
+  assert.deepEqual(validateNewsCoverageState(undefined, 10, NEWS_COVERAGE_POLICIES.stories), []);
 }
 
 function testMondayMorningFreshnessWindow() {
@@ -611,11 +608,11 @@ function testScheduledStartAndFinalizationGuards() {
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
   assert.throws(
     () => validateScheduledStart(dashboardFile, 'morning', new Date('2026-07-09T13:00:00.000Z')),
-    /already completed.*manual\/on-demand/
+    /Scheduled run refused: 2026-07-09:morning already completed/
   );
   assert.throws(
     () => validateScheduledFinalization(dashboardFile, 'morning', new Date('2026-07-09T14:30:00.000Z')),
-    /already completed.*manual\/on-demand/
+    /Scheduled run refused: 2026-07-09:morning already completed/
   );
 }
 

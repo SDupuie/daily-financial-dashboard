@@ -486,10 +486,11 @@ function computeEarningsWeekCounts(rows, secondaryRecoveryCandidates = [], compa
 // and validators must require the computed reaction to mark a row verified.
 function computeEarningsSourceStatus(row, options = {}) {
   const requireComputedReaction = options.requireComputedReaction !== false;
-  const scheduleVerificationStatus = row?.sourceAudit?.scheduleVerification?.status;
+  const scheduleVerificationStatus = row?.scheduleVerificationStatus || row?.sourceAudit?.scheduleVerification?.status;
+  const companyReleaseStatus = row?.companyReleaseStatus || row?.sourceAudit?.companyReleaseResolution?.status;
   if (row?.sourceAudit?.resultRefresh?.status === 'partial') return 'partial';
-  if (['needs_review', 'unresolved'].includes(row?.sourceAudit?.companyReleaseResolution?.status)) return 'partial';
-  if (isDisplayEligibleEarningsRow(row) && !['corroborated', 'official_confirmed'].includes(scheduleVerificationStatus)) return 'partial';
+  if (['needs_review', 'unresolved'].includes(companyReleaseStatus)) return 'partial';
+  if (!['corroborated', 'official_confirmed'].includes(scheduleVerificationStatus)) return 'partial';
   if (row?.reportTiming === 'unknown') return 'partial';
   if (!Number.isFinite(row?.eps?.estimate) || !Number.isFinite(row?.eps?.actual)) return 'partial';
   if (!Number.isFinite(row?.revenue?.estimate) || !Number.isFinite(row?.revenue?.actual)) return 'partial';

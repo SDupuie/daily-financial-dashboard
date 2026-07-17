@@ -927,14 +927,6 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
         earningsApiCalendar: {
           reportDate: row.reportDate,
           company: row.company,
-          eps: {
-            estimate: row.eps.estimate,
-            actual: row.eps.actual
-          },
-          revenue: {
-            estimate: row.revenue.estimate,
-            actual: row.revenue.actual
-          },
           reportTiming: row.reportTiming,
           bucket: row.source.bucket
         },
@@ -1450,17 +1442,7 @@ function buildRows(calendarRows, profiles, options = {}) {
         finnhubUsListing: usListingsBySymbol.get(calendarRow.symbol) || null,
         finnhubCalendar: {
           reportDate: auditedFinnhubCalendar.reportDate,
-          reportTiming: auditedFinnhubCalendar.reportTiming,
-          fiscalQuarter: calendarRow.fiscalQuarter,
-          fiscalYear: calendarRow.fiscalYear,
-          eps: {
-            estimate: calendarRow.eps.estimate,
-            actual: calendarRow.eps.actual
-          },
-          revenue: {
-            estimate: calendarRow.revenue.estimate,
-            actual: calendarRow.revenue.actual
-          }
+          reportTiming: auditedFinnhubCalendar.reportTiming
         },
         finnhubProfile: profile ? {
           status: profile.status,
@@ -1491,14 +1473,6 @@ function buildRows(calendarRows, profiles, options = {}) {
         earningsApiCalendar: profileRecovery ? {
           reportDate: profileRecovery.earningsApiCalendar.reportDate,
           company: profileRecovery.earningsApiCalendar.company,
-          eps: {
-            estimate: profileRecovery.earningsApiCalendar.eps.estimate,
-            actual: profileRecovery.earningsApiCalendar.eps.actual
-          },
-          revenue: {
-            estimate: profileRecovery.earningsApiCalendar.revenue.estimate,
-            actual: profileRecovery.earningsApiCalendar.revenue.actual
-          },
           reportTiming: profileRecovery.earningsApiCalendar.reportTiming,
           bucket: profileRecovery.earningsApiCalendar.source.bucket
         } : null,
@@ -1545,15 +1519,7 @@ function earningsApiCompanyAudit(fetch, companyRow) {
     ok: Boolean(fetch?.ok),
     selectedRow: companyRow ? {
       reportDate: companyRow.reportDate,
-      reportTiming: companyRow.reportTiming,
-      eps: {
-        estimate: companyRow.eps.estimate,
-        actual: companyRow.eps.actual
-      },
-      revenue: {
-        estimate: companyRow.revenue.estimate,
-        actual: companyRow.revenue.actual
-      }
+      reportTiming: companyRow.reportTiming
     } : null,
     rowCount: fetch?.rows?.length || 0,
     error: fetch?.error || (!companyRow ? 'No matching EarningsAPI company row was returned; retry is required.' : '')

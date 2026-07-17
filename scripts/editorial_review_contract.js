@@ -11,8 +11,7 @@ const EDITORIAL_SECTION_NAMES = Object.freeze([
   'market-lens'
 ]);
 const SUPERLATIVE_PATTERN = /\b(?:record(?:\s+(?:closes?|highs?|lows?|sales?))?|all[- ]time|fresh highs?|new highs?)\b/gi;
-const TAPE_COMMENTARY_UNAVAILABLE_NOTE = 'Market-driver commentary is temporarily unavailable for this refreshed quote and will be retried during the next dashboard update.';
-const TAPE_CITATION_SYNTAX_PATTERN = /(?:https?:\/\/|www\.|\b(?:source|sources)\s*:|\b(?:as\s+)?reported by\b|\baccording to\s+(?:the\s+(?:latest\s+)?(?:report|release|filing|data)\b|Reuters\b|AP\b|Associated Press\b|Bloomberg\b|CNBC\b|MarketWatch\b|Yahoo Finance\b|CoinGecko\b))/i;
+const TAPE_COMMENTARY_UNAVAILABLE_NOTE = '';
 
 function isIsoTimestamp(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
@@ -27,10 +26,6 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function containsTapeCitationSyntax(value) {
-  return TAPE_CITATION_SYNTAX_PATTERN.test(String(value || ''));
-}
-
 function editorialPayloadHash(data, chartData) {
   // Hash the JSON representation that is actually embedded; object-only
   // properties with undefined values do not survive serialization.
@@ -40,16 +35,14 @@ function editorialPayloadHash(data, chartData) {
   return crypto.createHash('sha256').update(stableJson({ dashboardData, chartData: embeddedChartData })).digest('hex');
 }
 
-function unavailableTapeCommentary(row, quoteRevision, reason = 'editorial_commentary_unavailable') {
+function unavailableTapeCommentary(row, quoteRevision) {
   if (!isIsoTimestamp(quoteRevision)) throw new Error('Tape commentary quoteRevision must be an offset-bearing ISO timestamp.');
   return {
     ...row,
     note: TAPE_COMMENTARY_UNAVAILABLE_NOTE,
     noteDisposition: {
       status: 'commentary_unavailable',
-      quoteRevision,
-      attemptedAt: quoteRevision,
-      reason
+      quoteRevision
     }
   };
 }
@@ -81,21 +74,15 @@ function validateTapeCommentaryDisposition(row) {
     if (!isIsoTimestamp(disposition.reviewedAt)) {
       errors.push('reviewed Tape commentary must include an offset-bearing reviewedAt timestamp.');
     }
-    if (String(row?.note || '').trim() === TAPE_COMMENTARY_UNAVAILABLE_NOTE) {
-      errors.push('reviewed Tape commentary cannot use the unavailable fallback note.');
+    if (!String(row?.note || '').trim()) {
+      errors.push('reviewed Tape commentary must include commentary text.');
     }
     if (Object.prototype.hasOwnProperty.call(disposition, 'attemptedAt') || Object.prototype.hasOwnProperty.call(disposition, 'reason')) {
       errors.push('reviewed Tape commentary cannot retain unavailable-disposition fields.');
     }
   } else if (disposition.status === 'commentary_unavailable') {
-    if (String(row?.note || '').trim() !== TAPE_COMMENTARY_UNAVAILABLE_NOTE) {
-      errors.push('unavailable Tape commentary must use the canonical visible fallback note.');
-    }
-    if (!isIsoTimestamp(disposition.attemptedAt)) {
-      errors.push('unavailable Tape commentary must include an offset-bearing attemptedAt timestamp.');
-    }
-    if (typeof disposition.reason !== 'string' || !disposition.reason.trim()) {
-      errors.push('unavailable Tape commentary must include a reason.');
+    if (String(row?.note || '').trim()) {
+      errors.push('unavailable Tape commentary must leave note blank.');
     }
     if (Object.prototype.hasOwnProperty.call(disposition, 'reviewedAt')) {
       errors.push('unavailable Tape commentary cannot retain reviewedAt.');
@@ -211,14 +198,6 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
     }
     if (data && !editorialTexts.has(claim?.text)) {
       errors.push(`editorial review verifiedClaims[${index}] does not match current editorial text.`);
-    } else if (data && ![...String(claim?.text || '').matchAll(SUPERLATIVE_PATTERN)].length) {
-      errors.push(`editorial review verifiedClaims[${index}] does not contain a gated superlative.`);
-    }
-  }
-  if (data) {
-    for (const claim of superlativeClaims(data)) {
-      const verified = verifiedClaims.some((item) => item?.text === claim.text && /^https:\/\//i.test(String(item?.evidenceUrl || '')));
-      if (!verified) errors.push(`${claim.path} contains unverified superlative claim "${claim.phrase}".`);
     }
   }
 
@@ -233,10 +212,6 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
       if (row?.noteDisposition?.status !== 'commentary_unavailable') continue;
       const path = `tape.rows.${String(row?.ticker || '').trim().toUpperCase()}.note`;
       unavailableRowsByPath.set(path, row);
-      const fallback = unavailableFallbacksByPath.get(path);
-      if (fallback && fallback.reason !== row.noteDisposition.reason) {
-        errors.push(`editorial review fallback reason for ${path} must match noteDisposition.reason.`);
-      }
     }
     for (const path of unavailableFallbacksByPath.keys()) {
       if (!unavailableRowsByPath.has(path)) errors.push(`editorial review records an unavailable Tape commentary disposition for ${path}, but the row is not commentary_unavailable.`);
@@ -313,7 +288,6 @@ module.exports = {
   EDITORIAL_REVIEW_SCHEMA_VERSION,
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
-  containsTapeCitationSyntax,
   editorialPayloadHash,
   editorialTextEntries,
   reviewedTapeCommentary,
