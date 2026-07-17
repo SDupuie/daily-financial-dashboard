@@ -94,11 +94,23 @@ const WINDOW_LABELS = {
     sectionTitle: 'Session Futures'
   }
 };
-let preparationInProgress = false;
+let preparationStatus = null;
 
 function reportPreparationStatus(status, detail = '') {
-  process.stdout.write(`Preparation status: ${status}${detail ? ` — ${detail}` : ''}\n`);
+  preparationStatus = status;
+  fs.writeSync(1, `Preparation status: ${status}${detail ? ` — ${detail}` : ''}\n`);
 }
+
+function failIncompletePreparation(message) {
+  if (preparationStatus !== 'preparing') return false;
+  reportPreparationStatus('failed', `candidate not replaced; canonical dashboard unchanged: ${message}`);
+  process.exitCode = 1;
+  return true;
+}
+
+process.on('exit', () => {
+  failIncompletePreparation('preparation ended without terminal status');
+});
 
 function chicagoDateParts(date) {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -1967,7 +1979,7 @@ function applyEarningsWeekJson(args) {
     earningsWeek = readJson(args.applyEarningsWeekJson);
     applyEarningsWeek(dashboardData, earningsWeek, { requireNarrative: false });
   } catch (error) {
-    process.stderr.write(`Earnings focused preparation input was unusable; candidate and canonical dashboard unchanged: ${error.message}\n`);
+    reportPreparationStatus('skipped', `Earnings focused preparation input was unusable; candidate and canonical dashboard unchanged: ${error.message}`);
     return;
   }
   const scheduleReviewPath = path.join(path.dirname(args.applyEarningsWeekJson), 'earnings_schedule_review.json');
@@ -2059,7 +2071,14 @@ function main() {
 
   // Only scheduler-driven preparation owns the wall-clock guard. Finalization
   // rechecks completion without turning the start window into a deadline.
-  if (args.scheduled && !args.applyDashboardDataJson) validateScheduledStart(args.dashboard, args.windowMode);
+  if (args.scheduled && !args.applyDashboardDataJson) {
+    try {
+      validateScheduledStart(args.dashboard, args.windowMode);
+    } catch (error) {
+      reportPreparationStatus('skipped', `${error.message}; canonical dashboard unchanged`);
+      return;
+    }
+  }
 
   if (args.prepareEditorialDir) {
     const workspace = prepareEditorialWorkspace(args);
@@ -2092,7 +2111,6 @@ function main() {
     return;
   }
 
-  preparationInProgress = true;
   reportPreparationStatus('preparing');
 
   const canonicalBase = loadDashboardBase(args.dashboard);
@@ -2281,7 +2299,6 @@ function main() {
   }
 
   stageDashboardCandidate(args, patchDashboard(args));
-  preparationInProgress = false;
   reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
 }
 
@@ -2289,12 +2306,10 @@ if (require.main === module) {
   try {
     main();
   } catch (error) {
-    if (preparationInProgress) {
-      reportPreparationStatus('failed', `candidate not replaced; canonical dashboard unchanged: ${error.message}`);
-    } else {
+    if (!failIncompletePreparation(error.message)) {
       process.stderr.write(`run_daily_update failed: ${error.message}\n`);
+      process.exitCode = error.exitCode || 1;
     }
-    process.exit(error.exitCode || 1);
   }
 }
 

@@ -1226,6 +1226,47 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
 }
 
+function testPreparationStatusCannotEndIntermediate() {
+  const result = spawnSync(process.execPath, [
+    '-e',
+    "require('./scripts/run_daily_update').reportPreparationStatus('preparing');"
+  ], {
+    cwd: root,
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 1, result.stderr || result.stdout);
+  assert.match(result.stdout, /Preparation status: preparing/);
+  assert.match(result.stdout, /Preparation status: failed .*preparation ended without terminal status/);
+}
+
+function testScheduledPreparationRefusalSkipsCleanly() {
+  const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-scheduled-skip-');
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const candidateFile = path.join(dir, 'dashboard-candidate.html');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData));
+
+  const result = spawnSync(process.execPath, [
+    path.join(root, 'scripts/run_daily_update.js'),
+    '--dashboard', dashboardFile,
+    '--candidate', candidateFile,
+    '--scheduled',
+    '--afternoon'
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      SCHEDULED_NOW_ISO: '2026-07-10T13:00:00.000Z'
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Preparation status: skipped .*outside its America\/Chicago update window/);
+  assert.equal(fs.existsSync(candidateFile), false);
+}
+
 function testEditorialPreparationCreatesOnePendingHandoff() {
   const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-editorial-handoff-');
   const dashboardFile = path.join(dir, 'dashboard.html');
@@ -1317,7 +1358,7 @@ function testMalformedFocusedEarningsIsNoOp() {
     '--apply-earnings-week-json', payloadFile
   ], { cwd: root, encoding: 'utf8', env: { ...process.env, SCHEDULED_NOW_ISO: FIXTURE_NOW } });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /candidate and canonical dashboard unchanged/);
+  assert.match(result.stdout, /Preparation status: skipped .*candidate and canonical dashboard unchanged/);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
   assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml);
 }
@@ -2692,6 +2733,8 @@ const architectureContractTests = Object.freeze([
   testLastGoodDashboardRecovery,
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,
   testArchitecturePreparationLeavesCanonicalUnchanged,
+  testPreparationStatusCannotEndIntermediate,
+  testScheduledPreparationRefusalSkipsCleanly,
   testEditorialPreparationCreatesOnePendingHandoff,
   testMalformedFocusedEarningsIsNoOp,
   testReleasedEventRetainGeneratedBecomesUnavailableLens,
