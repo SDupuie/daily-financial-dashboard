@@ -5,7 +5,7 @@ This folder contains the tracked backup template for the optional local market r
 - `com.scott.daily-financial-dashboard.plist` runs `scripts/local_market_server.js` with Node over HTTPS on port `2210`.
 - The server binds to the Mac Mini's reserved primary-LAN address `192.168.2.2`, loads its dedicated certificate and private key from `~/.daily-financial-dashboard/tls/`, and exposes `GET /health` plus `GET /api/market-refresh`.
 - Browser requests are accepted only from `https://sdupuie.github.io` and local HTTP(S) development origins; other browser origins receive `403`.
-- `GET /api/market-refresh` now returns quote-row staging, chart series, and `cryptoStats` staging for the `crypto.stats[]` cards.
+- `GET /api/market-refresh` returns quote rows, chart series, and crypto stat-card data.
 - Logs are written to `~/Library/Logs/DailyFinancialDashboard/`.
 
 The helper requires a dedicated leaf certificate signed by a private CA trusted on each client. The tracked `local-market-ca.cnf` and `local-market-server.cnf` templates enforce the intended constraints: the root is `CA:TRUE`; the leaf is `CA:FALSE`, is restricted to TLS server authentication, and covers `192.168.2.2`, `localhost`, `127.0.0.1`, and `::1`. No certificate or private key belongs in Git.
@@ -53,7 +53,17 @@ security add-trusted-cert -d -r trustRoot -p ssl \
 ./scripts/archive_local_ca_key.sh
 ```
 
-`archive_local_ca_key.sh` encrypts the CA key with AES-256, stores a random archive password in the login Keychain under `Daily Financial Dashboard Local CA Archive`, writes the encrypted key to `~/.daily-financial-dashboard/ca-archive/`, verifies it against the CA certificate, and only then removes the plaintext CA key from the live TLS directory. Copy the encrypted archive to offline backup media for stronger recovery protection. Before relying on that copy for disaster recovery, retrieve the archive password with `security find-generic-password -a "$USER" -s "Daily Financial Dashboard Local CA Archive" -w` and save it in a password manager separately from the archive. The running helper needs only the CA certificate plus the server certificate and server key.
+`archive_local_ca_key.sh`:
+
+- encrypts the CA key with AES-256;
+- stores a random archive password in the login Keychain under `Daily Financial Dashboard Local CA Archive`;
+- writes the encrypted key to `~/.daily-financial-dashboard/ca-archive/`;
+- verifies the encrypted key against the CA certificate;
+- removes the plaintext CA key from the live TLS directory only after verification.
+
+Copy the encrypted archive to offline backup media for stronger recovery protection. Before relying on that copy for disaster recovery, retrieve the archive password with `security find-generic-password -a "$USER" -s "Daily Financial Dashboard Local CA Archive" -w` and save it in a password manager separately from the archive.
+
+The running helper needs only the CA certificate plus the server certificate and server key.
 
 ### iPhone trust and browser permission
 
@@ -98,6 +108,7 @@ Install or refresh the LaunchAgent:
 
 ```sh
 mkdir -p "$HOME/Library/Logs/DailyFinancialDashboard"
+test -x /usr/local/bin/node
 cp "launchd/com.scott.daily-financial-dashboard.plist" "$HOME/Library/LaunchAgents/com.scott.daily-financial-dashboard.plist"
 launchctl bootout "gui/$UID/com.scott.daily-financial-dashboard" 2>/dev/null || true
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.scott.daily-financial-dashboard.plist"
@@ -109,9 +120,23 @@ Check it:
 ```sh
 launchctl print "gui/$UID/com.scott.daily-financial-dashboard"
 curl --cacert "$HOME/.daily-financial-dashboard/tls/local-market-ca-cert.pem" https://192.168.2.2:2210/health
+curl --cacert "$HOME/.daily-financial-dashboard/tls/local-market-ca-cert.pem" https://192.168.2.2:2210/api/market-refresh
+```
+
+For live diagnostics, tail the error log:
+
+```sh
+tail -f "$HOME/Library/Logs/DailyFinancialDashboard/dashboard.err.log"
 ```
 
 The exact browser-origin allowlist is a CORS boundary, not authentication. Origin-less command-line clients on the trusted LAN can call the read-only endpoints. Keep guest-to-primary-LAN routing blocked and never forward port `2210` from the WAN.
+
+After manually adding, removing, renaming, or changing the `sourceSymbol` of a dashboard ticker, restart the helper and verify the changed ticker before considering the dashboard complete:
+
+1. Run `launchctl kickstart -k "gui/$UID/com.scott.daily-financial-dashboard"`.
+2. Request `https://192.168.2.2:2210/api/market-refresh` and confirm the changed ticker has a non-empty series and no ticker-specific error.
+
+Static dashboard validation does not prove that the already-running helper loaded new ticker support.
 
 Unload it:
 

@@ -1076,6 +1076,9 @@ function testEarningsCommentaryPublicationNormalization() {
         rows: [{
           symbol: 'BAD',
           company: 'Bad Fixture Inc',
+          exchange: 'NYSE',
+          country: 'US',
+          marketCap: 10000000000,
           reportDate: '2026-07-10',
           eps: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', basis: 'gaap', note: '' },
           revenue: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', note: '' },
@@ -1092,8 +1095,25 @@ function testEarningsCommentaryPublicationNormalization() {
           },
           reaction: { status: 'computed', percent: 1, note: '' },
           sourceAudit: {
+            finnhubUsListing: { market: 'US', symbol: 'BAD', mic: 'XNYS' },
+            finnhubProfile: { industry: 'Industrials' },
             scheduleVerification: { status: 'primary_only' },
             companyReleaseResolution: { status: 'needs_review' }
+          }
+        }, {
+          symbol: 'SMALL',
+          company: 'Small Fixture Inc',
+          exchange: 'NYSE',
+          country: 'US',
+          marketCap: 999999999,
+          reportDate: '2026-07-10',
+          eps: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', basis: 'gaap', note: '' },
+          revenue: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', note: '' },
+          outcome: { overall: 'beat' },
+          reaction: { status: 'computed', percent: 1, note: '' },
+          sourceAudit: {
+            finnhubUsListing: { market: 'US', symbol: 'SMALL', mic: 'XNYS' },
+            finnhubProfile: { industry: 'Industrials' }
           }
         }, {
           symbol: 'DROP',
@@ -1116,6 +1136,7 @@ function testEarningsCommentaryPublicationNormalization() {
 
   assert.equal(data.earnings.week.rows.length, 1);
   const row = data.earnings.week.rows[0];
+  assert.equal(row.symbol, 'BAD');
   const outcome = row.outcome;
   assert.equal(row.scheduleVerificationStatus, 'primary_only');
   assert.equal(row.companyReleaseStatus, 'needs_review');
@@ -1317,10 +1338,137 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   dashboard.stories = dashboard.stories.slice(0, 8);
   const candidateDashboard = structuredClone(dashboard);
   const candidateChartData = roundChartPayload(chartData);
+  const earningsNeedsReview = fixtureReportedEarningsRow();
+  earningsNeedsReview.outcome.interpretation = 'Old result interpretation must not enter editorial handoff.';
+  delete earningsNeedsReview.outcome.interpretationDisposition;
+  earningsNeedsReview.outcome.guide = 'Old guidance copy must not enter editorial handoff.';
+  delete earningsNeedsReview.outcome.guidanceDisposition;
+  earningsNeedsReview.reaction.note = 'Old reaction note must not enter editorial handoff.';
+  delete earningsNeedsReview.reaction.commentaryDisposition;
+  const earningsAwaitingResults = structuredClone(earningsNeedsReview);
+  earningsAwaitingResults.symbol = 'WAIT';
+  earningsAwaitingResults.eps = { ...earningsAwaitingResults.eps, actual: null, surprisePercent: null, result: 'pending' };
+  earningsAwaitingResults.revenue = { ...earningsAwaitingResults.revenue, actual: null, surprisePercent: null, result: 'pending' };
+  earningsAwaitingResults.outcome = { overall: 'pending', interpretation: 'Pre-release focus can remain.' };
+  earningsAwaitingResults.reaction = { status: 'pending', note: '' };
+  earningsAwaitingResults.lifecycle = 'awaiting_actual';
+  const earningsOneActual = structuredClone(earningsNeedsReview);
+  earningsOneActual.symbol = 'ONEACT';
+  earningsOneActual.revenue = {
+    ...earningsOneActual.revenue,
+    actual: null,
+    surprisePercent: null,
+    result: 'pending'
+  };
+  earningsOneActual.reaction = { status: 'awaiting_close', note: '' };
+  earningsOneActual.lifecycle = 'released_awaiting_close';
+  const earningsNotComparedActual = structuredClone(earningsNeedsReview);
+  earningsNotComparedActual.symbol = 'NOCOMP';
+  earningsNotComparedActual.eps = {
+    ...earningsNotComparedActual.eps,
+    estimate: null,
+    actual: 1.2,
+    surprisePercent: null,
+    result: 'not_compared'
+  };
+  earningsNotComparedActual.revenue = {
+    ...earningsNotComparedActual.revenue,
+    actual: null,
+    surprisePercent: null,
+    result: 'pending'
+  };
+  earningsNotComparedActual.outcome.overall = 'pending';
+  earningsNotComparedActual.reaction = { status: 'awaiting_close', note: '' };
+  earningsNotComparedActual.lifecycle = 'released_awaiting_close';
+  const earningsGuidanceNotProvided = fixtureReportedEarningsRow();
+  earningsGuidanceNotProvided.symbol = 'NOGD';
+  const earningsVerifiedGuidance = fixtureReportedEarningsRow();
+  earningsVerifiedGuidance.symbol = 'VGUID';
+  earningsVerifiedGuidance.outcome.guide = 'FY outlook was reaffirmed.';
+  earningsVerifiedGuidance.outcome.guidanceDisposition = { status: 'verified' };
+  const earningsGuidanceRetry = fixtureReportedEarningsRow();
+  earningsGuidanceRetry.symbol = 'GRETRY';
+  earningsGuidanceRetry.outcome.interpretation = 'Verified result interpretation can remain.';
+  earningsGuidanceRetry.outcome.interpretationDisposition = { status: 'verified' };
+  earningsGuidanceRetry.outcome.guide = '';
+  earningsGuidanceRetry.outcome.guidanceDisposition = { status: 'pending_review' };
+  earningsGuidanceRetry.reaction = { status: 'awaiting_close', note: '' };
+  earningsGuidanceRetry.lifecycle = 'released_awaiting_close';
+  const earningsCloseReactionOnly = fixtureReportedEarningsRow();
+  earningsCloseReactionOnly.symbol = 'RXN';
+  earningsCloseReactionOnly.outcome.guide = 'FY outlook was reaffirmed.';
+  earningsCloseReactionOnly.outcome.guidanceDisposition = { status: 'verified' };
+  earningsCloseReactionOnly.reaction.note = 'Old reaction copy must be refreshed.';
+  delete earningsCloseReactionOnly.reaction.commentaryDisposition;
+  candidateDashboard.earnings.week.rows = [
+    earningsNeedsReview,
+    earningsAwaitingResults,
+    earningsOneActual,
+    earningsNotComparedActual,
+    earningsGuidanceNotProvided,
+    earningsVerifiedGuidance,
+    earningsGuidanceRetry,
+    earningsCloseReactionOnly
+  ];
+  const sourceWeekDay = candidateDashboard.weekAhead.days.find((day) => day.events.length);
+  const sourceWeekEvent = structuredClone(sourceWeekDay.events[0]);
+  const sourceWeekLens = structuredClone(sourceWeekDay.marketLens || {
+    title: 'Generated pre-release lens',
+    body: 'Generated pre-release Market Lens commentary.',
+    reactions: [{ ticker: 'UST10Y', role: 'rates response' }]
+  });
+  const configureWeekDay = (index, { lifecycle, eventStatus, actual, editorialLens = false, closeReaction = false }) => {
+    const day = candidateDashboard.weekAhead.days[index];
+    day.events = [{
+      ...sourceWeekEvent,
+      id: `fixture-week-ahead-${index}`,
+      date: day.date,
+      status: eventStatus,
+      actual
+    }];
+    day.lifecycle = lifecycle;
+    day.marketLens = editorialLens
+      ? { ...sourceWeekLens, title: 'Editorial current lens', body: 'Editorial current release interpretation.' }
+      : structuredClone(sourceWeekLens);
+    day.marketLensSource = editorialLens ? 'editorial' : 'generated';
+    delete day.marketLensDisposition;
+    delete day.outcome;
+    delete day.marketReaction;
+    if (closeReaction) {
+      day.marketReaction = {
+        window: 'event-day-close-vs-previous-close',
+        asOf: day.date,
+        rows: [{ ticker: 'UST10Y', role: 'rates response', delta: 0.02, percentChange: 0.2, unit: 'percent_yield' }]
+      };
+      day.outcome = { title: 'Old outcome copy must not enter editorial handoff.', body: 'Old outcome body.' };
+    }
+    return day;
+  };
+  let scheduledWeekDay;
+  let missingActualsWeekDay;
+  let releasedNeedsLensWeekDay;
+  let closeCurrentLensWeekDay;
+  let closeNeedsLensWeekDay;
   candidateChartData.series.find((series) => series.ticker === 'SPX').quoteRevision = FIXTURE_NOW;
   syncDashboardPricesFromChartData(candidateDashboard, candidateChartData, {
     resetCommentary: true,
     commentaryTickers: ['SPX']
+  });
+  scheduledWeekDay = configureWeekDay(0, { lifecycle: 'scheduled', eventStatus: 'scheduled', actual: null });
+  missingActualsWeekDay = configureWeekDay(1, { lifecycle: 'released_awaiting_close', eventStatus: 'awaiting_actual', actual: null });
+  releasedNeedsLensWeekDay = configureWeekDay(2, { lifecycle: 'released_awaiting_close', eventStatus: 'released', actual: '1.0%' });
+  closeCurrentLensWeekDay = configureWeekDay(3, {
+    lifecycle: 'close_available',
+    eventStatus: 'released',
+    actual: '1.0%',
+    editorialLens: true,
+    closeReaction: true
+  });
+  closeNeedsLensWeekDay = configureWeekDay(4, {
+    lifecycle: 'close_available',
+    eventStatus: 'released',
+    actual: '1.0%',
+    closeReaction: true
   });
   const html = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, html);
@@ -1348,6 +1496,54 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.deepEqual(fs.readdirSync(editorialDir), ['dashboard-data.json']);
   const handoff = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
   assert.equal(handoff.tape.rows[0].noteDisposition.status, 'pending_review');
+  assert.equal(handoff.tape.rows[0].note, '');
+  const handoffEarningsNeedsReview = handoff.earnings.week.rows.find((row) => row.symbol === 'EARN');
+  assert.equal(handoffEarningsNeedsReview.outcome.interpretation, '');
+  assert.equal(handoffEarningsNeedsReview.outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsNeedsReview.outcome.guide, '');
+  assert.equal(handoffEarningsNeedsReview.outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsNeedsReview.reaction.note, '');
+  assert.equal(handoffEarningsNeedsReview.reaction.commentaryDisposition.status, 'pending_review');
+  const handoffEarningsAwaitingResults = handoff.earnings.week.rows.find((row) => row.symbol === 'WAIT');
+  assert.equal(handoffEarningsAwaitingResults.outcome.interpretationDisposition, undefined);
+  assert.equal(handoffEarningsAwaitingResults.outcome.guidanceDisposition, undefined);
+  assert.equal(handoffEarningsAwaitingResults.reaction.commentaryDisposition, undefined);
+  const handoffEarningsOneActual = handoff.earnings.week.rows.find((row) => row.symbol === 'ONEACT');
+  assert.equal(handoffEarningsOneActual.outcome.interpretation, '');
+  assert.equal(handoffEarningsOneActual.outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsOneActual.outcome.guide, '');
+  assert.equal(handoffEarningsOneActual.outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsOneActual.reaction.commentaryDisposition, undefined);
+  const handoffEarningsNotCompared = handoff.earnings.week.rows.find((row) => row.symbol === 'NOCOMP');
+  assert.equal(handoffEarningsNotCompared.outcome.overall, 'pending');
+  assert.equal(handoffEarningsNotCompared.outcome.interpretation, '');
+  assert.equal(handoffEarningsNotCompared.outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsNotCompared.outcome.guide, '');
+  assert.equal(handoffEarningsNotCompared.outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(handoffEarningsNotCompared.reaction.commentaryDisposition, undefined);
+  const handoffEarningsGuidanceNotProvided = handoff.earnings.week.rows.find((row) => row.symbol === 'NOGD');
+  assert.equal(handoffEarningsGuidanceNotProvided.outcome.guidanceDisposition.status, 'not_provided');
+  const handoffEarningsVerifiedGuidance = handoff.earnings.week.rows.find((row) => row.symbol === 'VGUID');
+  assert.equal(handoffEarningsVerifiedGuidance.outcome.guide, 'FY outlook was reaffirmed.');
+  assert.equal(handoffEarningsVerifiedGuidance.outcome.guidanceDisposition.status, 'verified');
+  const handoffEarningsGuidanceRetry = handoff.earnings.week.rows.find((row) => row.symbol === 'GRETRY');
+  assert.equal(handoffEarningsGuidanceRetry.outcome.interpretation, 'Verified result interpretation can remain.');
+  assert.equal(handoffEarningsGuidanceRetry.outcome.interpretationDisposition.status, 'verified');
+  assert.equal(handoffEarningsGuidanceRetry.outcome.guide, '');
+  assert.equal(handoffEarningsGuidanceRetry.outcome.guidanceDisposition.status, 'pending_review');
+  const handoffEarningsCloseReactionOnly = handoff.earnings.week.rows.find((row) => row.symbol === 'RXN');
+  assert.equal(handoffEarningsCloseReactionOnly.outcome.interpretation, earningsCloseReactionOnly.outcome.interpretation);
+  assert.equal(handoffEarningsCloseReactionOnly.outcome.guidanceDisposition.status, 'verified');
+  assert.equal(handoffEarningsCloseReactionOnly.reaction.note, '');
+  assert.equal(handoffEarningsCloseReactionOnly.reaction.commentaryDisposition.status, 'pending_review');
+  const marketLensDecisionByDate = new Map(handoff.editorialReview.marketLensDecisions.map((decision) => [decision.date, decision]));
+  assert.equal(marketLensDecisionByDate.get(scheduledWeekDay.date).action, 'retain-generated');
+  assert.equal(marketLensDecisionByDate.get(missingActualsWeekDay.date).action, 'retain-generated');
+  assert.equal(marketLensDecisionByDate.get(releasedNeedsLensWeekDay.date).action, 'pending_review');
+  assert.equal(marketLensDecisionByDate.get(closeCurrentLensWeekDay.date).action, 'replace');
+  assert.equal(marketLensDecisionByDate.get(closeNeedsLensWeekDay.date).action, 'pending_review');
+  const handoffCloseWeekDay = handoff.weekAhead.days.find((day) => day.date === closeCurrentLensWeekDay.date);
+  assert.deepEqual(handoffCloseWeekDay.outcome, { status: 'pending_review' });
   assert.deepEqual(handoff.tape.rows[1], dashboard.tape.rows[1], 'An unchanged carried quote must retain its complete commentary bundle in the handoff.');
   assert.equal(handoff.storiesCoverage, undefined);
   assert.equal(handoff.futuresModule.storiesCoverage, undefined);
@@ -1374,7 +1570,6 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.ok(handoff.editorialReview);
   assert.equal(handoff.editorialReview.preparedAt, '2026-07-10T21:01:00.000Z');
   assert.equal(handoff.editorialReview.openingDecision.action, null);
-  assert.ok(handoff.editorialReview.marketLensDecisions.every((decision) => decision.action === 'pending_review'));
 }
 
 function testMalformedFocusedEarningsIsNoOp() {
@@ -1816,7 +2011,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     status: 'commentary_unavailable',
     quoteRevision: editorialDashboard.tape.rows[1].noteDisposition.quoteRevision
   };
-  editorialDashboard.tape.rows[2].note = dashboard.tape.rows[2].note;
+  editorialDashboard.tape.rows[2].note = '';
   const review = {
     schemaVersion: 1,
     preparedAt: '2026-07-10T21:00:00.000Z',
@@ -2113,7 +2308,9 @@ function testChartRepairStagesMixedResultForEditorialReview() {
   assert.equal(editorialResult.status, 0, editorialResult.stderr);
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
   const handoff = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
-  assert.equal(handoff.tape.rows.find((item) => item.ticker === 'SPX').noteDisposition.status, 'pending_review');
+  const handoffSpxRow = handoff.tape.rows.find((item) => item.ticker === 'SPX');
+  assert.equal(handoffSpxRow.noteDisposition.status, 'pending_review');
+  assert.equal(handoffSpxRow.note, '');
   assert.deepEqual(handoff.tape.rows.find((item) => item.ticker === 'VCR'), originalVcrRow);
 }
 
@@ -2460,7 +2657,7 @@ function testTouchTooltipControls() {
   assert.doesNotMatch(combinedEarningsMarkup, /Finnhub|EarningsAPI/);
   const pendingEditorialMarkup = earningsRowNoticeHtml({ editorialPending: true });
   assert.match(pendingEditorialMarkup, /Editorial commentary was not completed for this update\./);
-  assert.match(html, /lastValidatedAt: week\?\.availability\?\.status === 'carried_forward' \? week\.generatedAt : ''/);
+  assert.match(html, /lastValidatedAt: carriedForwardAt && !sameEditionDate\(carriedForwardAt, dashboardData\?\.editionId\) \? carriedForwardAt : ''/);
 
   const earningsUnavailableSource = extractDashboardRuntimeTestBlock(html, 'earnings-unavailable');
   const { earningsUnavailableHtml } = Function(
@@ -2515,11 +2712,15 @@ function testTouchTooltipControls() {
     `${weekOutcomeSource}\nreturn { weekAheadOutcomeHtml };`
   )((value) => String(value), () => '');
   const unavailableOutcome = weekAheadOutcomeHtml({
+    date: '2026-07-15',
     lifecycle: 'close_available',
-    outcome: { status: 'commentary_unavailable' },
+    outcome: { status: 'pending_review' },
     marketReaction: { rows: [] }
   });
-  assert.match(unavailableOutcome, /<strong>Unavailable<\/strong>/);
+  assert.doesNotMatch(unavailableOutcome, /<strong>(?:Pending|Unavailable)<\/strong>/);
+  assert.match(unavailableOutcome, /Outcome commentary was not completed for this update\./);
+  assert.match(unavailableOutcome, /data-stale-button/);
+  assert.match(unavailableOutcome, /data-stale-button>i<\/button>[\s\S]*?<span class="week-reactions-label">No selected transmission ticker/);
   assert.doesNotMatch(unavailableOutcome, /Post-event commentary unavailable|Released facts/);
   const pendingOutcome = weekAheadOutcomeHtml({
     date: '2026-07-14',
@@ -2533,6 +2734,8 @@ function testTouchTooltipControls() {
   assert.equal(weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } }), '');
 
   assert.doesNotMatch(html, /week-ledger-status-dot/);
+  assert.match(html, /Market Lens commentary was not completed for this update\./);
+  assert.match(html, /day\.marketLensSource === 'unavailable'\s*\?\s*weekAheadReactionsHtml\(day, lens, weekAheadPendingMarketLensInfoHtml\(day\)\)/);
   assert.match(html, /week-ahead-stale-info \.stale-info-tooltip\s*\{[\s\S]*?right:\s*0;/);
   assert.match(html, /weekAheadAvailabilityState\(week\) === 'unavailable'/);
   assert.doesNotMatch(html, /Week Ahead data unavailable|Calendar cache in use|Official schedules \+ FXMacroData values/);

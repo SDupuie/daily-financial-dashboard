@@ -503,7 +503,7 @@ function testLifecycleAndCloseReactionTransitions() {
   };
   assert.deepEqual(validateWeekAheadPayload(failOpenOutcome, { requireOutcomeDisposition: true }), []);
   const retriedOutcome = finalizeWeekAheadOutcomes(failOpenOutcome, { now: new Date('2026-07-15T22:05:00Z') });
-  assert.equal(retriedOutcome.days.find((day) => day.date === '2026-07-14').outcome.attemptedAt, '2026-07-14T22:05:00.000Z');
+  assert.deepEqual(retriedOutcome.days.find((day) => day.date === '2026-07-14').outcome, { status: 'pending_review' });
   const contradictoryOutcome = structuredClone(failOpenOutcome);
   contradictoryOutcome.days.find((day) => day.date === '2026-07-14').outcome.title = 'Unsupported interpretation';
   assert.deepEqual(validateWeekAheadPayload(finalizeWeekAheadOutcomes(contradictoryOutcome, { now: new Date('2026-07-14T22:05:00Z') }), { requireOutcomeDisposition: true }), []);

@@ -15741,10 +15741,7 @@
         "marketLensSource": "editorial",
         "lifecycle": "close_available",
         "outcome": {
-          "status": "commentary_unavailable",
-          "source": "editorial",
-          "reason": "editorial_commentary_unavailable",
-          "attemptedAt": "2026-07-17T14:00:41.601Z"
+          "status": "pending_review"
         },
         "marketReaction": {
           "window": "event-day-close-vs-previous-close",
@@ -15920,10 +15917,7 @@
         "marketLensSource": "editorial",
         "lifecycle": "close_available",
         "outcome": {
-          "status": "commentary_unavailable",
-          "source": "editorial",
-          "reason": "editorial_commentary_unavailable",
-          "attemptedAt": "2026-07-17T14:00:41.601Z"
+          "status": "pending_review"
         },
         "marketReaction": {
           "window": "event-day-close-vs-previous-close",
@@ -16043,10 +16037,7 @@
         "marketLensSource": "editorial",
         "lifecycle": "close_available",
         "outcome": {
-          "status": "commentary_unavailable",
-          "source": "editorial",
-          "reason": "editorial_commentary_unavailable",
-          "attemptedAt": "2026-07-17T14:00:41.601Z"
+          "status": "pending_review"
         },
         "marketReaction": {
           "window": "event-day-close-vs-previous-close",
@@ -20288,6 +20279,20 @@
           row.outcome?.guidanceDisposition?.status,
           row.reaction?.commentaryDisposition?.status
         ].includes('pending_review');
+        const sameEditionDate = (left, right) => {
+          const dateFor = (value) => {
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return '';
+            return new Intl.DateTimeFormat('en-CA', {
+              timeZone: 'America/Chicago',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit'
+            }).format(date);
+          };
+          return dateFor(left) && dateFor(left) === dateFor(right);
+        };
+        const carriedForwardAt = week?.availability?.status === 'carried_forward' ? week.generatedAt : '';
         return {
           company: row.company,
           ticker: row.symbol,
@@ -20309,7 +20314,7 @@
           sourceStatus: row.sourceStatus,
           companyReleaseStatus: row.companyReleaseStatus || '',
           scheduleVerificationStatus: row.scheduleVerificationStatus || '',
-          lastValidatedAt: week?.availability?.status === 'carried_forward' ? week.generatedAt : '',
+          lastValidatedAt: carriedForwardAt && !sameEditionDate(carriedForwardAt, dashboardData?.editionId) ? carriedForwardAt : '',
           editorialPending
         };
       }
@@ -20879,34 +20884,40 @@
         return `<button class="week-reaction-button" type="button" data-week-chart-day="${esc(day.date)}" data-week-chart-ticker="${esc(selectedTicker)}" title="${esc(role)}" aria-label="Open ${esc(selectedTicker)} chart below ${esc(day.label)}: ${esc(role)}" aria-controls="${esc(weekChartSlotId(day.date))}" aria-expanded="${expanded}">${esc(label)}</button>`;
       }
 
-      function weekAheadReactionsHtml(day, lens) {
+      function weekAheadReactionsHtml(day, lens, prefixHtml = '') {
         if (!Array.isArray(lens?.reactions) || !lens.reactions.length) return '';
         const buttons = lens.reactions.map((reaction) => weekReactionButtonHtml(day, reaction.ticker, reaction.role)).join('');
-        return `<div class="week-reactions"><span class="week-reactions-label">Watch the reaction in</span>${buttons}</div>`;
+        return `<div class="week-reactions">${prefixHtml}<span class="week-reactions-label">Watch the reaction in</span>${buttons}</div>`;
       }
 
       /* TEST BLOCK START: week-ahead-outcome */
+      function weekAheadPendingMarketLensInfoHtml(day) {
+        const tooltipId = `week-market-lens-pending-${String(day?.date || 'day').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+        const message = 'Market Lens commentary was not completed for this update.';
+        return `<span class="stale-info week-outcome-pending-info" data-stale-info><button class="stale-info-button" type="button" aria-label="${esc(message)}" aria-describedby="${esc(tooltipId)}" aria-expanded="false" data-stale-button>i</button><span class="stale-info-tooltip" id="${esc(tooltipId)}" role="tooltip">${esc(message)}</span></span>`;
+      }
+
       function weekAheadPendingOutcomeInfoHtml(day) {
         const tooltipId = `week-outcome-pending-${String(day?.date || 'day').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
         const message = 'Outcome commentary was not completed for this update.';
         return `<span class="stale-info week-outcome-pending-info" data-stale-info><button class="stale-info-button" type="button" aria-label="${esc(message)}" aria-describedby="${esc(tooltipId)}" aria-expanded="false" data-stale-button>i</button><span class="stale-info-tooltip" id="${esc(tooltipId)}" role="tooltip">${esc(message)}</span></span>`;
       }
 
-      function weekAheadCloseReactionHtml(day, suffixHtml = '') {
+      function weekAheadCloseReactionHtml(day, prefixHtml = '') {
         const rows = (Array.isArray(day.marketReaction?.rows) ? day.marketReaction.rows : [])
           .filter((row) => Number(row.delta) !== 0)
           .sort((left, right) => {
             const magnitude = (row) => row.unit === 'percent_yield' ? Math.abs(Number(row.delta) * 100) : Math.abs(Number(row.percentChange));
             return magnitude(right) - magnitude(left);
           });
-        if (!rows.length) return `<div class="week-reactions"><span class="week-reactions-label">No selected transmission ticker registered a close-to-close move</span>${suffixHtml}</div>`;
+        if (!rows.length) return `<div class="week-reactions">${prefixHtml}<span class="week-reactions-label">No selected transmission ticker registered a close-to-close move</span></div>`;
         const buttons = rows.map((row) => {
           const move = row.unit === 'percent_yield'
             ? `${Number(row.delta) > 0 ? '+' : ''}${Math.round(Number(row.delta) * 100)} bp`
             : `${Number(row.percentChange) > 0 ? '+' : ''}${Number(row.percentChange).toFixed(2)}%`;
           return weekReactionButtonHtml(day, row.ticker, `${row.role}, ${move}`, `${row.ticker} ${move}`);
         }).join('');
-        return `<div class="week-reactions"><span class="week-reactions-label">Event-day close reaction</span>${buttons}${suffixHtml}</div>`;
+        return `<div class="week-reactions">${prefixHtml}<span class="week-reactions-label">Event-day close reaction</span>${buttons}</div>`;
       }
 
       function weekAheadOutcomeHtml(day) {
@@ -20915,9 +20926,7 @@
         if (outcome?.status === 'pending_review') {
           return `<div class="week-market-lens week-outcome">${weekAheadCloseReactionHtml(day, weekAheadPendingOutcomeInfoHtml(day))}</div>`;
         }
-        const copy = outcome?.status === 'commentary_unavailable'
-          ? '<strong>Unavailable</strong>'
-          : outcome?.title && outcome?.body
+        const copy = outcome?.title && outcome?.body
           ? `<strong>${esc(outcome.title)}</strong>${esc(outcome.body)}`
           : '';
         if (!copy) return '';
@@ -20987,6 +20996,8 @@
           const lens = day.marketLens;
           const lensHtml = day.lifecycle === 'close_available'
             ? weekAheadOutcomeHtml(day)
+            : day.marketLensSource === 'unavailable'
+            ? weekAheadReactionsHtml(day, lens, weekAheadPendingMarketLensInfoHtml(day))
             : lens?.title && lens.body
             ? `<div class="week-market-lens"><strong>${esc(lens.title)}</strong>${esc(lens.body)}${weekAheadReactionsHtml(day, lens)}</div>`
             : '';

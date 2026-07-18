@@ -168,6 +168,16 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
   const decisions = Array.isArray(manifest.marketLensDecisions) ? manifest.marketLensDecisions : null;
   if (!decisions) errors.push('editorial review marketLensDecisions must be an array.');
 
+  if (manifest.newsSelection !== undefined) {
+    if (!manifest.newsSelection || typeof manifest.newsSelection !== 'object' || Array.isArray(manifest.newsSelection)) {
+      errors.push('editorial review newsSelection must be an object when present.');
+    } else {
+      for (const key of ['futures', 'stories', 'crypto']) {
+        if (!Array.isArray(manifest.newsSelection[key])) errors.push(`editorial review newsSelection.${key} must be an array.`);
+      }
+    }
+  }
+
   const systemFallbacks = manifest.systemFallbacks === undefined
     ? []
     : Array.isArray(manifest.systemFallbacks) ? manifest.systemFallbacks : null;
@@ -201,6 +211,7 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
     }
   }
 
+  // Embedded receipt validation is diagnostic/test-only; readiness does not require receipts.
   if (requireEmbedded) {
     const unavailableFallbacksByPath = new Map(
       (systemFallbacks || [])

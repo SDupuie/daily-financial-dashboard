@@ -125,11 +125,10 @@ function narrativeEditorialComplete(row, narrative) {
   return true;
 }
 
-function earningsNarrativeFingerprint(row) {
+function earningsResultNarrativeFingerprint(row) {
   return JSON.stringify({
     reportDate: row?.reportDate,
     reportTiming: row?.reportTiming,
-    lifecycle: row?.lifecycle,
     eps: {
       estimate: row?.eps?.estimate,
       actual: row?.eps?.actual,
@@ -143,9 +142,21 @@ function earningsNarrativeFingerprint(row) {
       surprisePercent: row?.revenue?.surprisePercent,
       result: row?.revenue?.result
     },
-    overall: row?.outcome?.overall,
+    overall: row?.outcome?.overall
+  });
+}
+
+function earningsReactionNarrativeFingerprint(row) {
+  return JSON.stringify({
+    result: JSON.parse(earningsResultNarrativeFingerprint(row)),
     reaction: {
+      basis: row?.reaction?.basis,
       status: row?.reaction?.status,
+      percent: row?.reaction?.percent,
+      fromDate: row?.reaction?.fromDate,
+      fromClose: row?.reaction?.fromClose,
+      toDate: row?.reaction?.toDate,
+      toClose: row?.reaction?.toClose,
       sessionDate: row?.reaction?.sessionDate,
       closeDate: row?.reaction?.closeDate,
       preClose: row?.reaction?.preClose,
@@ -155,26 +166,8 @@ function earningsNarrativeFingerprint(row) {
   });
 }
 
-function preserveEarningsNarrative(row, prior) {
-  const output = structuredClone(row);
-  output.eps = { ...output.eps, note: String(prior?.eps?.note || '') };
-  output.revenue = { ...output.revenue, note: String(prior?.revenue?.note || '') };
-  output.outcome = {
-    ...output.outcome,
-    guide: String(prior?.outcome?.guide || ''),
-    interpretation: String(prior?.outcome?.interpretation || '')
-  };
-  output.reaction = { ...output.reaction, note: String(prior?.reaction?.note || '') };
-  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
-    if (prior?.outcome?.[field] !== undefined) output.outcome[field] = structuredClone(prior.outcome[field]);
-    else delete output.outcome[field];
-  }
-  if (prior?.reaction?.commentaryDisposition !== undefined) {
-    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
-  } else {
-    delete output.reaction.commentaryDisposition;
-  }
-  return output;
+function earningsNarrativeFingerprint(row) {
+  return earningsReactionNarrativeFingerprint(row);
 }
 
 function clearEarningsNarrative(row) {
@@ -195,6 +188,39 @@ function clearEarningsNarrative(row) {
   return output;
 }
 
+function preserveEarningsNarrativeByField(row, prior) {
+  const output = structuredClone(row);
+  const resultSame = earningsResultNarrativeFingerprint(prior) === earningsResultNarrativeFingerprint(row);
+  const reactionSame = earningsReactionNarrativeFingerprint(prior) === earningsReactionNarrativeFingerprint(row);
+
+  output.eps = { ...output.eps, note: resultSame ? String(prior?.eps?.note || '') : '' };
+  output.revenue = { ...output.revenue, note: resultSame ? String(prior?.revenue?.note || '') : '' };
+  output.outcome = {
+    ...output.outcome,
+    guide: resultSame ? String(prior?.outcome?.guide || '') : '',
+    interpretation: resultSame ? String(prior?.outcome?.interpretation || '') : ''
+  };
+  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
+    if (resultSame && prior?.outcome?.[field] !== undefined) output.outcome[field] = structuredClone(prior.outcome[field]);
+    else if (row.outcome?.[field]?.status === 'pending_review') output.outcome[field] = structuredClone(row.outcome[field]);
+    else delete output.outcome[field];
+  }
+
+  output.reaction = {
+    ...output.reaction,
+    note: reactionSame ? String(prior?.reaction?.note || '') : ''
+  };
+  if (reactionSame && prior?.reaction?.commentaryDisposition !== undefined) {
+    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
+  } else if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
+    output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
+  } else {
+    delete output.reaction.commentaryDisposition;
+  }
+
+  return output;
+}
+
 function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
   const previousByKey = new Map((Array.isArray(previousWeek?.rows) ? previousWeek.rows : [])
     .map((row) => [earningsRowKey(row), row]));
@@ -205,9 +231,9 @@ function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
       if (!prior) return clearEarningsNarrative(row);
       const sameUnreportedFacts = prior.outcome?.overall === 'pending'
         && row.outcome?.overall === 'pending'
-        && earningsNarrativeFingerprint({ ...prior, lifecycle: '' }) === earningsNarrativeFingerprint({ ...row, lifecycle: '' });
-      return earningsNarrativeFingerprint(prior) === earningsNarrativeFingerprint(row) || sameUnreportedFacts
-        ? preserveEarningsNarrative(row, prior)
+        && earningsResultNarrativeFingerprint({ ...prior, lifecycle: '' }) === earningsResultNarrativeFingerprint({ ...row, lifecycle: '' });
+      return sameUnreportedFacts || earningsResultNarrativeFingerprint(prior) === earningsResultNarrativeFingerprint(row)
+        ? preserveEarningsNarrativeByField(row, prior)
         : clearEarningsNarrative(row);
     })
   };

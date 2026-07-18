@@ -405,17 +405,7 @@ function runCompleteTestSuite() {
     runReadinessCommand(process.execPath, [path.join('scripts', file)], { env: testEnvironment });
   }
   process.stdout.write('Validating the canonical dashboard artifact...\n');
-  const canonicalHtml = fs.readFileSync(defaultDashboard, 'utf8');
-  const canonicalDataMatch = canonicalHtml.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  const canonicalEditionId = canonicalDataMatch ? JSON.parse(canonicalDataMatch[1]).editionId : '';
-  const priorValidationNow = process.env.VALIDATE_NOW_ISO;
-  if (canonicalEditionId) process.env.VALIDATE_NOW_ISO = canonicalEditionId;
-  try {
-    runReadinessCommand(process.execPath, ['scripts/validate_dashboard.js', 'daily_financial_news.html']);
-  } finally {
-    if (priorValidationNow === undefined) delete process.env.VALIDATE_NOW_ISO;
-    else process.env.VALIDATE_NOW_ISO = priorValidationNow;
-  }
+  runReadinessCommand(process.execPath, ['scripts/validate_dashboard.js', 'daily_financial_news.html']);
   runReadinessCommand('tidy', ['-q', '-e', 'daily_financial_news.html']);
   runReadinessCommand('git', ['diff', '--check']);
   runReadinessCommand('git', ['diff', '--cached', '--check']);
@@ -559,62 +549,12 @@ function runChartDataValidation(argv) {
   }
 }
 
-function validateDashboardHtml(html, {
-  requireEditorialReview = false,
-  stagingCandidate = false,
-  now: validationNow = new Date()
-} = {}) {
+function validateDashboardHtml(html) {
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const runtimeScriptMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
 const errors = [];
 const warnings = [];
-
-function escRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function getNow() {
-  return validationNow;
-}
-
-function chicagoClockMinutes(epochSeconds) {
-  const seconds = Number(epochSeconds);
-  if (!Number.isFinite(seconds)) return null;
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).formatToParts(new Date(seconds * 1000));
-  const part = (type) => parts.find((item) => item.type === type)?.value || '';
-  const hour = Number(part('hour'));
-  const minute = Number(part('minute'));
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
-  return (hour % 24) * 60 + minute;
-}
-
-function validateSectionAvailability(errors, availability, label, allowedStatuses, allowedReasons = ['source_refresh_failed']) {
-  void allowedReasons;
-  if (availability === undefined) return '';
-  if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
-    errors.push(`${label}.availability must be an object.`);
-    return '';
-  }
-  if (!allowedStatuses.includes(availability.status)) {
-    errors.push(`${label}.availability.status must be ${allowedStatuses.join(' or ')}.`);
-  }
-  return availability.status;
-}
-
-function numericPercent(value) {
-  const match = String(value ?? '').trim().match(/^([+-]?\d+(?:\.\d+)?)%$/);
-  return match ? Number(match[1]) : null;
-}
-
-function nearlyEqual(left, right, tolerance = 0.01) {
-  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) <= tolerance;
-}
 
 function countMatches(pattern) {
   return [...html.matchAll(pattern)].length;
@@ -757,14 +697,8 @@ return { errors, warnings };
 
 function runDashboardValidation(argv) {
   let inputFile = '';
-  let requireEditorialReview = false;
-  let stagingCandidate = false;
   for (const arg of argv) {
-    if (arg === '--require-editorial-review') {
-      requireEditorialReview = true;
-    } else if (arg === '--staging-candidate') {
-      stagingCandidate = true;
-    } else if (arg.startsWith('-')) {
+    if (arg.startsWith('-')) {
       console.error(`Unknown argument: ${arg}`);
       process.exit(1);
     } else if (inputFile) {
@@ -781,14 +715,7 @@ function runDashboardValidation(argv) {
     console.error(`Refusing to validate a file outside this repository: ${inputFile}`);
     process.exit(1);
   }
-  const override = process.env.VALIDATE_NOW_ISO;
-  const parsedOverride = override ? new Date(override) : null;
-  const now = parsedOverride && !Number.isNaN(parsedOverride.getTime()) ? parsedOverride : new Date();
-  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'), {
-    requireEditorialReview,
-    stagingCandidate,
-    now
-  });
+  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'));
 
   if (errors.length) {
     console.error('Dashboard validation failed:');
@@ -804,7 +731,7 @@ function runDashboardValidation(argv) {
 
 function main(argv = process.argv.slice(2)) {
   if (argv[0] === '--help' || argv[0] === '-h') {
-    process.stdout.write('Usage: node scripts/validate_dashboard.js [dashboard.html] [--staging-candidate]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n');
+    process.stdout.write('Usage: node scripts/validate_dashboard.js [dashboard.html]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n');
     return;
   }
   if (argv[0] === 'chart-data') return runChartDataValidation(argv.slice(1));

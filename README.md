@@ -92,8 +92,8 @@ The AI fills the Opening decision and one Market Lens decision for every current
    - `stories`: select the broad-market news collection through `editorialReview.newsSelection.stories` per the News-card contract.
    - `crypto`: leave generated `crypto.stats[]` values unchanged and select only the crypto news collection through `editorialReview.newsSelection.crypto` per the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial.
    - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged; edit only its narrative text and disposition fields in `generated/editorial/dashboard-data.json`.
-   - `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. During afternoon editorial work, supply `days[].outcome.title` and `body` for every `close_available` day and describe the combined released facts and event-day close response without overstating causality.
-   - Evaluate each event day against the current Tape, opening, and verified news. Scheduled or awaiting days may retain generated Market Lens copy or use a valid replacement. Once any event is released, supply current replacement commentary. At `close_available`, supply a verified editorial `outcome`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
+   - `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. Fill only the Week Ahead fields marked `pending_review`; Stage 1 marks Outcome only after released actuals and close-reaction rows are available.
+   - Evaluate each event day against the current Tape, opening, and verified news. Scheduled or awaiting days may retain generated Market Lens copy or use a valid replacement. Released days without actuals keep trying deterministic value recovery. Once released actuals are available, supply current Market Lens commentary if a valid current editorial lens is not already present. At `close_available`, supply verified Outcome copy only when Stage 1 marks it `pending_review`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
    - Before Apply Handoff, confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape, Earnings, Week Ahead Outcome, or `editorialReview.marketLensDecisions[].action`.
    - `footer`: preserve the generated compile prefix and maintain only concise non-derivable source-family or holiday context.
 
@@ -141,12 +141,12 @@ Treat every visible Earnings row as an independent editorial assignment. Researc
 Earnings has two narrative states:
 
 - **Before actuals:** Explain the company-specific business question, operating metric, or management outlook most likely to determine the earnings read. Base this on the company’s latest results and guidance, current expectations, and known company-specific developments.
-- **After actuals:** Replace the pre-release commentary with the principal business takeaway from the reported results. Explain what drove the outcome and summarize official guidance. If the company did not provide guidance, record `not_provided` only after reviewing the official release or earnings materials.
+- **After at least one verified actual:** Replace the pre-release commentary with the principal business takeaway from the verified reported facts. If EPS or revenue is still missing, discuss only the verified facts and do not imply the missing metric was reviewed. Complete each required field under the Earnings field contract below.
 
 Editorial work is required at these transitions:
 
 1. **Calendar rollover:** Write fresh pre-release commentary for every visible row in the new slate, including companies retained from the preceding calendar. Prior copy cannot be carried forward as completed work.
-2. **Results arrival:** Remove the pre-release commentary and write a new post-release interpretation and guidance treatment.
+2. **Results arrival:** Once at least one verified actual is available, remove the pre-release commentary, write the post-release interpretation, and complete the guidance determination.
 3. **Verified close arrival:** Add company-specific reaction commentary explaining what the market response indicates. Update the result interpretation as well if the reaction materially changes the earnings read.
 
 A transition from `scheduled` to `awaiting_actual` does not create a new narrative state because no results have arrived. Continue to show the current pre-release thesis and do not invent results. Any correction to the report date, timing, estimates, actuals, guidance, or closing reaction invalidates the commentary affected by that correction.
@@ -154,6 +154,12 @@ A transition from `scheduled` to `awaiting_actual` does not create a new narrati
 Use official company releases, filings, presentations, and earnings-call materials first. Use the deterministic Earnings facts for reported values and reaction data. Use reputable reporting when needed to explain market context or reaction. Evidence reviewed for one company does not verify commentary for another.
 
 `verified` means that current evidence was reviewed for that specific company, transition, and narrative field. The presence of text alone does not make a field verified.
+
+Earnings field contract after actuals arrive:
+
+- `outcome.interpretation`: required once at least one verified actual is available. Explain the result takeaway using only verified EPS, revenue, guidance, operating, and management-commentary facts.
+- `outcome.guide`: required as a guidance determination once at least one verified actual is available. Search official company sources first and exhaustively: earnings release, investor-relations release page, shareholder letter, earnings presentation, and linked or available 8-K exhibits; use earnings-call materials or transcripts when release materials do not answer the guidance question. If official forward guidance exists, write concise guide text and mark `guidanceDisposition.status = "verified"`. If exhaustive official-source review finds no guidance was provided, leave `outcome.guide` blank and mark `guidanceDisposition.status = "not_provided"` with official-company evidence. If the guidance determination cannot be completed, leave or keep `guidanceDisposition.status = "pending_review"`; do not guess and do not mark `not_provided`.
+- `reaction.note`: required only after the verified close reaction is available. Explain the earnings driver behind the market response.
 
 Commentary is not completed editorial work when it:
 
@@ -173,7 +179,6 @@ Compact Earnings monitor writing rules:
 - For reported rows, explain the business takeaway rather than restating an EPS or revenue beat or miss.
 - Name at least one concrete business driver and explain why it matters to the earnings read.
 - When guidance is provided, summarize only the official company outlook and identify whether it is next-quarter or full-year guidance. If both are provided, lead with the quarterly outlook.
-- If the company did not provide guidance, confirm that from official company materials before marking the row complete.
 - For stock-reaction notes, explain the earnings driver behind the move rather than repeating the displayed percentage change.
 
 ## Validation and Publish
@@ -216,7 +221,7 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 - Owner: `scripts/week_ahead_contract.js` defines the deterministic slate, Market Lens channel rules, and Outcome contract.
 - Boundary rules: Market Lens reactions must use canonical Tape tickers present in both `tape.rows[]` and `chart-data.series[]`; released events require current replacement commentary; `outcome` exists only at `close_available` and cannot change the preselected reaction ticker set.
-- Publication safety: Apply/finalization must not retain stale generated or pre-release Market Lens or Outcome commentary after release. When verified current copy is unavailable or invalid, the implementation records an explicit `commentary_unavailable` disposition.
+- Publication safety: Apply/finalization must not retain stale generated or pre-release Market Lens or Outcome commentary after release. When verified current Outcome copy is unavailable or invalid, the implementation records `pending_review` and publishes no Outcome copy.
 
 #### Tape and chart data
 

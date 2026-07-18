@@ -1559,7 +1559,7 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
   return fetchYahooSeries(row, args, startDate, endDate);
 }
 
-function chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate }) {
+function chartOutput({ args, series, failures, quoteRevision, startDate, endDate }) {
   const quoteRows = deriveQuoteRowsFromSeries(series);
   return {
     schemaVersion: 1,
@@ -1628,7 +1628,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const series = seriesByIndex.filter(Boolean);
     if (series.length !== inputRows.length) return;
     const failures = [...failuresByTicker.values()];
-    const output = chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate });
+    const output = chartOutput({ args, series, failures, quoteRevision, startDate, endDate });
     validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
   };
   const processRow = async (index) => {
@@ -1665,7 +1665,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
   const series = seriesByIndex.filter(Boolean);
   const failures = [...failuresByTicker.values()];
-  const output = chartOutput({ args, inputRows, series, failures, quoteRevision, startDate, endDate });
+  const output = chartOutput({ args, series, failures, quoteRevision, startDate, endDate });
   validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
 
   if (args.compact) {

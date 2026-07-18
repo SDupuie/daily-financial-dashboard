@@ -716,14 +716,6 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
       next.outcome = { status: 'pending_review' };
       return next;
     }
-    if (next.outcome?.status === 'commentary_unavailable'
-      && next.outcome.source === 'editorial'
-      && next.outcome.reason?.trim()
-      && isIsoDateTime(next.outcome.attemptedAt)
-      && !String(next.outcome.title || '').trim()
-      && !String(next.outcome.body || '').trim()) {
-      return next;
-    }
     next.outcome = {
       status: 'pending_review'
     };

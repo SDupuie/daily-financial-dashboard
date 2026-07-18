@@ -127,7 +127,7 @@ function assertThrowsLike(fn, pattern, label) {
 }
 
 function validateWeekPayload(payload) {
-  const errors = validateEarningsWeekPayload(payload, { requireNarrative: true });
+  const errors = validateEarningsWeekPayload(payload);
   if (errors.length) throw new Error(errors.join(' '));
 }
 
@@ -316,6 +316,17 @@ function testUsListingEligibilityUsesExactDirectorySymbol() {
 
   const [otc] = buildRows([finnhubRow('OTCADR')], [profile('OTCADR')], { usListings: directory.listings });
   assert.equal(isDisplayEligibleEarningsRow(otc), false, 'An exact OTC directory match must remain ineligible.');
+
+  const [smallCap] = buildRows([finnhubRow('SMALL')], [profile('SMALL', 999999999)], { usListings: [usListing('SMALL')] });
+  assert.equal(isDisplayEligibleEarningsRow(smallCap), false, 'A sub-$1B market-cap row must remain ineligible.');
+  assert.equal(verifyFinnhubScheduleRows([smallCap], [], {
+    from: '2026-01-05',
+    to: '2026-01-09'
+  }).rows.length, 0, 'Stage 1 must not admit primary rows that can never display.');
+  assert.equal(verifyEarningsApiRecoveryRows([smallCap], {
+    from: '2026-01-05',
+    to: '2026-01-09'
+  }).rows.length, 0, 'Stage 1 must not admit recovered rows that can never display.');
 
   const receiptBound = deterministicVerifiedWeekFixture();
   receiptBound.summary.fetches.finnhubUsSymbols = { ok: true, status: 200, rows: 2, cacheHit: false, error: '' };
@@ -986,7 +997,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
   delete source.narrativeApply;
 
   assert.deepEqual(validateEarningsWeekPayload(source), [], 'Deterministic staging must accept pending Earnings narrative.');
-  assert.deepEqual(validateEarningsWeekPayload(source, { requireNarrative: true }), []);
+  assert.deepEqual(validateEarningsWeekPayload(source), []);
 
   const staged = buildEarningsNarrativeSidecar(source, { rows: [] }, {
     outputPath: 'generated/editorial/earnings_narrative.json'
@@ -996,7 +1007,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     narrativeArtifact: 'generated/editorial/earnings_narrative.json',
     appliedAt: '2026-01-08T22:05:00.000Z'
   });
-  assert.deepEqual(validateEarningsWeekPayload(unavailable, { requireNarrative: true }), []);
+  assert.deepEqual(validateEarningsWeekPayload(unavailable), []);
   assert.equal(unavailable.rows[0].outcome.interpretationDisposition.status, 'commentary_unavailable');
   assert.equal(unavailable.rows[0].outcome.guidanceDisposition.status, 'unverified');
   assert.equal(unavailable.rows[0].reaction.commentaryDisposition.status, 'commentary_unavailable');
@@ -1012,7 +1023,7 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     narrativeArtifact: 'generated/editorial/earnings_narrative.json'
   });
 
-  assert.deepEqual(validateEarningsWeekPayload(finalized, { requireNarrative: true }), []);
+  assert.deepEqual(validateEarningsWeekPayload(finalized), []);
 
   const pending = structuredClone(source.rows[0]);
   pending.outcome.overall = 'pending';
@@ -1390,7 +1401,7 @@ async function testNeedsReviewPromotesOfficialMetricsIndependently() {
     assert.equal(refreshedRow.sourceAudit.selectedSources[otherMetric].actual, usesFinnhub ? 'finnhub' : 'earningsApiCompany');
     assert.equal(refreshedRow.sourceAudit.companyReleaseResolution.status, 'needs_review');
     assert.equal(refreshed.payload.companyReleaseTasks.length, 1, 'A partial official resolution should remain retryable after provider recovery of the other metric.');
-    const refreshValidationErrors = validateEarningsWeekPayload(refreshed.payload, { now: new Date(`${task.reportDate}T23:00:00.000Z`) });
+    const refreshValidationErrors = validateEarningsWeekPayload(refreshed.payload);
     assert.deepEqual(refreshValidationErrors, [], `${metric}-only official provenance must survive provider retries: ${refreshValidationErrors.join(' ')}`);
   }
 }
@@ -1753,6 +1764,45 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
   assert.equal(merged.rows[1].outcome.interpretationDisposition.status, 'verified');
   assert.equal(merged.rows[2].outcome.interpretation, '', 'A new row cannot import verified narrative from deterministic staging.');
   assert.equal(merged.rows[2].outcome.interpretationDisposition, undefined);
+
+  const priorReleased = {
+    rows: [{
+      ...row('CCC'),
+      lifecycle: 'released_awaiting_close',
+      eps: { estimate: 1, actual: 1.2, surprisePercent: 20, result: 'beat', basis: 'adjusted', note: '' },
+      revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+      outcome: {
+        overall: 'beat',
+        guide: '',
+        guidanceDisposition: {
+          status: 'not_provided',
+          evidenceSource: 'official_company',
+          evidenceUrl: 'https://investors.example.test/earnings'
+        },
+        interpretation: 'EPS strength was the verified release takeaway.',
+        interpretationDisposition: { status: 'verified' }
+      },
+      reaction: { status: 'awaiting_close', note: '' }
+    }]
+  };
+  const closeArrived = structuredClone(priorReleased);
+  closeArrived.rows[0].lifecycle = 'close_available';
+  closeArrived.rows[0].reaction = {
+    status: 'computed',
+    basis: 'same_day_close',
+    percent: 2.5,
+    fromDate: '2026-07-14',
+    fromClose: 100,
+    toDate: '2026-07-14',
+    toClose: 102.5,
+    note: 'Deterministic staging copy must not be trusted.'
+  };
+  const mergedClose = mergeUnchangedEarningsNarrative(priorReleased, closeArrived);
+  assert.equal(mergedClose.rows[0].outcome.interpretation, 'EPS strength was the verified release takeaway.');
+  assert.equal(mergedClose.rows[0].outcome.interpretationDisposition.status, 'verified');
+  assert.equal(mergedClose.rows[0].outcome.guidanceDisposition.status, 'not_provided');
+  assert.equal(mergedClose.rows[0].reaction.note, '', 'A newly available close reaction must only invalidate reaction commentary.');
+  assert.equal(mergedClose.rows[0].reaction.commentaryDisposition, undefined);
 }
 
 

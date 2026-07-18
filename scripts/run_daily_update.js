@@ -26,6 +26,7 @@ const {
   buildEarningsPreparationFallback,
   combinedOutcome,
   computeEarningsWeekCounts,
+  isDisplayEligibleEarningsRow,
   narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
   earningsRowKey: earningsNarrativeRowKey
@@ -44,11 +45,11 @@ const {
   finalizeWeekAheadOutcomes,
   mergeWeekAheadPayload,
   normalizeMarketLensDecisions,
+  validateMarketLens,
   validateWeekAheadPayload
 } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
-  TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
   editorialTextEntries,
   reviewedTapeCommentary,
@@ -561,6 +562,7 @@ function prepareTapeCommentaryForEditorial(tape, previousTape) {
       if (previous?.noteDisposition?.quoteRevision === row?.noteDisposition?.quoteRevision) return row;
       return {
         ...row,
+        note: '',
         noteDisposition: {
           status: 'pending_review',
           quoteRevision: row.noteDisposition.quoteRevision
@@ -570,9 +572,18 @@ function prepareTapeCommentaryForEditorial(tape, previousTape) {
   };
 }
 
-function pendingNarrativeDisposition(current, verifiedText = '') {
-  if (current?.status === 'verified' && String(verifiedText || '').trim()) return structuredClone(current);
-  return { status: 'pending_review' };
+function verifiedNarrativeDisposition(current, text = '') {
+  return current?.status === 'verified' && Boolean(String(text || '').trim());
+}
+
+function markPendingNarrative(target, textField, dispositionField) {
+  if (verifiedNarrativeDisposition(target?.[dispositionField], target?.[textField])) return;
+  target[textField] = '';
+  target[dispositionField] = { status: 'pending_review' };
+}
+
+function earningsHasActual(row) {
+  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
 }
 
 function prepareEarningsForEditorial(earnings) {
@@ -581,35 +592,63 @@ function prepareEarningsForEditorial(earnings) {
   week.rows = (Array.isArray(week.rows) ? week.rows : []).map((row) => {
     if (!renderSafePublishedEarningsRow(row)) return row;
     const next = structuredClone(row);
-    const resultsAvailable = next.outcome?.overall !== 'pending';
-    next.outcome.interpretationDisposition = pendingNarrativeDisposition(
-      next.outcome?.interpretationDisposition,
-      next.outcome?.interpretation
-    );
+    const outcomeOverall = combinedOutcome(next.eps?.result, next.revenue?.result);
+    const resultsAvailable = earningsHasActual(next);
+    next.outcome.overall = outcomeOverall;
     if (resultsAvailable) {
+      markPendingNarrative(next.outcome, 'interpretation', 'interpretationDisposition');
       const guidance = next.outcome?.guidanceDisposition;
-      const guidanceComplete = (guidance?.status === 'verified' && String(next.outcome?.guide || '').trim())
+      const guidanceComplete = verifiedNarrativeDisposition(guidance, next.outcome?.guide)
         || guidance?.status === 'not_provided';
-      next.outcome.guidanceDisposition = guidanceComplete
-        ? structuredClone(guidance)
-        : { status: 'pending_review' };
+      if (!guidanceComplete) {
+        next.outcome.guide = '';
+        next.outcome.guidanceDisposition = { status: 'pending_review' };
+      }
     }
     if (next.lifecycle === 'close_available' && resultsAvailable) {
-      next.reaction.commentaryDisposition = pendingNarrativeDisposition(
-        next.reaction?.commentaryDisposition,
-        next.reaction?.note
-      );
+      markPendingNarrative(next.reaction, 'note', 'commentaryDisposition');
     }
     return next;
   });
   return { ...earnings, week };
 }
 
+function weekAheadDayHasReleasedActuals(day) {
+  return (Array.isArray(day?.events) ? day.events : [])
+    .some((event) => event?.status === 'released' && String(event.actual || '').trim());
+}
+
+function weekAheadHasCloseReactionRows(day) {
+  return Array.isArray(day?.marketReaction?.rows) && day.marketReaction.rows.length > 0;
+}
+
+function weekAheadHasCurrentMarketLens(day) {
+  return day?.marketLensSource === 'editorial' && validateMarketLens(day.marketLens).length === 0;
+}
+
+function weekAheadNeedsMarketLensEditorial(day) {
+  return ['released_awaiting_close', 'close_available'].includes(day?.lifecycle)
+    && weekAheadDayHasReleasedActuals(day)
+    && !weekAheadHasCurrentMarketLens(day);
+}
+
+function weekAheadMarketLensDecision(day) {
+  if (weekAheadHasCurrentMarketLens(day)) return { date: day.date, action: 'replace', marketLens: day.marketLens };
+  if (weekAheadNeedsMarketLensEditorial(day)) return { date: day.date, action: 'pending_review' };
+  return { date: day.date, action: 'retain-generated' };
+}
+
+function weekAheadNeedsOutcomeEditorial(day) {
+  return day?.lifecycle === 'close_available'
+    && weekAheadDayHasReleasedActuals(day)
+    && weekAheadHasCloseReactionRows(day);
+}
+
 function prepareWeekAheadForEditorial(weekAhead) {
   return {
     ...weekAhead,
     days: (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => {
-      if (day?.lifecycle !== 'close_available' || day?.outcome?.status === 'verified') return day;
+      if (!weekAheadNeedsOutcomeEditorial(day) || day?.outcome?.status === 'verified') return day;
       return { ...day, outcome: { status: 'pending_review' } };
     })
   };
@@ -717,7 +756,7 @@ function prepareEditorialWorkspace(args) {
   delete dashboardData.renesas;
   const marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
-    .map((day) => ({ date: day.date, action: 'pending_review' }));
+    .map(weekAheadMarketLensDecision);
   const preparedAt = scheduledNow();
   const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
@@ -1242,7 +1281,7 @@ function normalizeMarketLensReview(data, reviewManifest) {
     const day = eventDays.find((item) => item.date === decision.date);
     const submittedDecision = submittedByDate.get(decision.date);
     const released = ['released_awaiting_close', 'close_available'].includes(day?.lifecycle);
-    if (released && decision.action === 'retain-generated') {
+    if (released && weekAheadDayHasReleasedActuals(day) && decision.action === 'retain-generated') {
       if (Array.isArray(reviewManifest.systemFallbacks)) {
         reviewManifest.systemFallbacks.push({
           section: 'market-lens',
@@ -1526,12 +1565,6 @@ function readNewsCandidateSource(preparedAt) {
   return artifact;
 }
 
-function usableTapeCommentary(note) {
-  const text = String(note || '').trim();
-  return text !== TAPE_COMMENTARY_UNAVAILABLE_NOTE
-    && Boolean(text);
-}
-
 function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFallbacks = null, now = scheduledNow(), attemptThreshold = '') {
   const editorialByTicker = new Map((Array.isArray(editorialRows) ? editorialRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
   const previousByTicker = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
@@ -1549,11 +1582,10 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFall
     const quoteWasRefreshed = !previous
       || !candidateDispositionValid
       || quoteRevision !== previous?.noteDisposition?.quoteRevision;
-    const repeatsPriorCommentary = quoteWasRefreshed && text === String(previous?.note || '').trim();
 
     if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(previous);
 
-    if (editorial && usableTapeCommentary(text) && !repeatsPriorCommentary) {
+    if (editorial && text) {
       return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
     }
 
@@ -1647,6 +1679,7 @@ function normalizeEarningsForPublication(data) {
   if (!Array.isArray(week.rows)) week.rows = [];
   week.rows = week.rows
     .filter(renderSafePublishedEarningsRow)
+    .filter(isDisplayEligibleEarningsRow)
     .map((row) => normalizeEarningsCommentaryForPublication(row));
   week.secondaryRecoveryCandidates = [];
   week.companyReleaseTasks = [];

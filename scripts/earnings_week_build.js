@@ -763,10 +763,7 @@ function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirm
   const verifiedRows = [];
 
   for (const row of rows) {
-    if (!isDisplayEligibleEarningsRow(row)) {
-      verifiedRows.push(row);
-      continue;
-    }
+    if (!isDisplayEligibleEarningsRow(row)) continue;
     const secondaryDates = [...(secondaryDatesBySymbol.get(row.symbol) || new Set())].sort();
     const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     const datesAgree = secondaryDates.length === 1 && secondaryDates[0] === row.reportDate;
@@ -832,10 +829,7 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidat
   const review = [];
   const rowKeys = new Set(rows.map((row) => `${row.reportDate}:${row.symbol}`));
   for (const row of rows) {
-    if (!isDisplayEligibleEarningsRow(row)) {
-      verifiedRows.push(row);
-      continue;
-    }
+    if (!isDisplayEligibleEarningsRow(row)) continue;
     const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     if (confirmation && activeDates.has(confirmation.reportDate)) {
       verifiedRows.push({

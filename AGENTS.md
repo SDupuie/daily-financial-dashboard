@@ -42,6 +42,8 @@ Tape commentary explains market drivers; it does not restate quote values or con
 
 Prefer concise modern JavaScript and native browser APIs. Add helpers only for real duplication, a meaningful contract, or a clearer ownership boundary. Avoid framework-like abstractions and compatibility branches outside supported browsers.
 
+When Ponytail or "minimal/simple/lazy" implementation guidance applies, treat "simple" as the canonical simplest end state for this repo's contracts, not the smallest diff from the current implementation. Do not preserve accidental complexity, stale paths, compatibility branches, or speculative scaffolding merely because removing them is a larger change. Keep the change scoped to authorized files, preserve unrelated user work, and during audits/reviews make recommendations only unless implementation is explicitly authorized.
+
 For reviews and audits, report evidence-backed findings in severity order; identify what was inspected; distinguish new regressions from pre-existing issues; and include a concrete recommendation, affected files or contract, and verification for each actionable finding. Do not implement fixes unless authorized.
 
 ## Safety
