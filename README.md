@@ -25,12 +25,14 @@ Do not edit dashboard HTML, CSS, or JavaScript directly during a daily dashboard
 
 AI follows this section during normal updates.
 
+Default manual-update scope: when the user asks for a manual dashboard update, run the full manual workflow by default: Prepare, AI Editorial Work, Apply, validation, commit, and publish. Stop earlier only when the request explicitly says to stop at a named stage, such as Prepare only, through Apply, or before publication.
+
 ### Canonical two-command workflow
 
 | Run | 1. Prepare Handoff | 2. AI Editorial Work | 3. Apply Handoff |
 | --- | --- | --- | --- |
 | Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
-| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Complete the same single generated handoff | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
+| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
 
 ### Core guarantees
 
