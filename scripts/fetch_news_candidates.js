@@ -556,8 +556,10 @@ async function collectNewsCandidates({
   );
   // Futures selections follow the displayed session window, while the general
   // story pool keeps the normal News freshness dates.
-  const futuresDates = futuresWindow?.sessionDate ? new Set([futuresWindow.sessionDate]) : eligibleDates;
-  const generalAcquisitionDates = futuresWindow?.sessionDate
+  const futuresDates = Array.isArray(futuresWindow?.dates) && futuresWindow.dates.length
+    ? new Set(futuresWindow.dates)
+    : eligibleDates;
+  const generalAcquisitionDates = futuresWindow
     ? new Set([...eligibleDates, ...futuresDates])
     : eligibleDates;
   const attemptsByIndex = Array(acquisitionPaths.length).fill(null);

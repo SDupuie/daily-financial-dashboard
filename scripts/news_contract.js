@@ -63,26 +63,63 @@ function sharedFuturesDate(futures, field) {
   return new Set(dates).size === 1 ? dates[0] : '';
 }
 
-function sharedFuturesReferenceDate(futures) {
-  return sharedFuturesDate(futures, 'referenceDate');
-}
-
 function sharedFuturesSessionDate(futures) {
   return sharedFuturesDate(futures, 'sessionDate');
 }
 
+function addIsoDays(isoDate, days) {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function isoDateRange(startDate, endDate) {
+  if (!isIsoDate(startDate) || !isIsoDate(endDate) || startDate > endDate) return [];
+  const dates = [];
+  for (let date = startDate; date <= endDate; date = addIsoDays(date, 1)) {
+    dates.push(date);
+  }
+  return dates;
+}
+
 function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
-  const sessionDate = sharedFuturesSessionDate(futures);
-  if (!sessionDate || !['Pre-Market Futures', 'Session Futures'].includes(sectionTitle)) return null;
-  const [year, month, day] = sessionDate.split('-').map(Number);
-  // The displayed futures rows own sessionDate; a late Apply should not reshape
-  // story eligibility from wall-clock or edition timestamps.
-  return {
-    sessionDate,
-    start: zonedDateTime({ year, month, day, hour: 9, minute: 30 }, 'America/New_York'),
-    end: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
-    description: 'the displayed U.S. regular-session futures window'
-  };
+  const runAt = isIsoDateTime(editionId) ? new Date(editionId) : now;
+  if (sectionTitle === 'Pre-Market Futures') {
+    const runDate = chicagoDateParts(runAt).isoDate;
+    const startDate = addIsoDays(runDate, -1);
+    const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+    const start = zonedDateTime({ year: startYear, month: startMonth, day: startDay, hour: 17, minute: 0 }, 'America/Chicago');
+    const [endYear, endMonth, endDay] = runDate.split('-').map(Number);
+    const cashOpen = zonedDateTime({ year: endYear, month: endMonth, day: endDay, hour: 8, minute: 30 }, 'America/Chicago');
+    const end = new Date(Math.min(runAt.getTime(), cashOpen.getTime()));
+    const endDate = chicagoIsoDate(end);
+    return {
+      startDate,
+      endDate,
+      dates: isoDateRange(startDate, endDate),
+      start,
+      end,
+      description: 'the overnight futures open and the earlier of dashboard run time or the cash open'
+    };
+  }
+  if (sectionTitle === 'Session Futures') {
+    const sessionDate = sharedFuturesSessionDate(futures);
+    if (!sessionDate) return null;
+    const [year, month, day] = sessionDate.split('-').map(Number);
+    // The displayed futures rows own sessionDate; a late Apply should not reshape
+    // story eligibility from wall-clock or edition timestamps.
+    return {
+      sessionDate,
+      startDate: sessionDate,
+      endDate: sessionDate,
+      dates: [sessionDate],
+      start: zonedDateTime({ year, month, day, hour: 9, minute: 30 }, 'America/New_York'),
+      end: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
+      description: 'the displayed U.S. regular-session futures window'
+    };
+  }
+  return null;
 }
 
 function candidateInFuturesPublicationWindow(candidate, futuresWindow) {
@@ -325,7 +362,6 @@ module.exports = {
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,
   storyIdentity,
-  sharedFuturesReferenceDate,
   sharedFuturesSessionDate,
   validateNewsCoverageState
 };

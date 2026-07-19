@@ -108,6 +108,9 @@ function windowModeFromDashboard(data) {
   const edition = String(data?.masthead?.edition || '').trim();
   if (edition === 'Morning Edition') return 'morning';
   if (edition === 'Afternoon Edition') return 'afternoon';
+  const futuresTitle = String(data?.futuresModule?.sectionTitle || '').trim();
+  if (futuresTitle === 'Pre-Market Futures') return 'morning';
+  if (futuresTitle === 'Session Futures') return 'afternoon';
   return '';
 }
 
@@ -276,7 +279,7 @@ function chicagoEditionMetadata(windowMode, now = scheduledNow()) {
     date,
     compiledPrefix: `Compiled ${date} at ${value('hour')}:${value('minute')} ${value('dayPeriod')} ${value('timeZoneName')}`,
     ...(labels ? {
-      edition: windowMode === 'morning' ? 'Morning Edition' : 'Afternoon Edition',
+      edition: ['Sat', 'Sun'].includes(chicagoDateParts(now).weekday) ? 'Weekend Edition' : windowMode === 'morning' ? 'Morning Edition' : 'Afternoon Edition',
       sectionLabel: labels.sectionLabel,
       sectionTitle: labels.sectionTitle
     } : {})
@@ -713,7 +716,9 @@ function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
   );
   // Worker outages still need a Futures-specific pool; general freshness dates
   // can be newer than the displayed futures session after a weekend or late run.
-  const futuresDates = futuresWindow?.sessionDate ? new Set([futuresWindow.sessionDate]) : eligibleDates;
+  const futuresDates = Array.isArray(futuresWindow?.dates) && futuresWindow.dates.length
+    ? new Set(futuresWindow.dates)
+    : eligibleDates;
   const futuresPrior = futuresWindow ? priorNewsCandidates(dashboardData, futuresDates) : prior;
   return {
     schemaVersion: 2,
@@ -967,7 +972,7 @@ function commitDashboardCandidate(args, nextHtml, {
   const candidate = path.join(directory, `.${path.basename(args.dashboard)}.${process.pid}.${Date.now()}.tmp`);
   try {
     fs.writeFileSync(candidate, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), candidate];
+    const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'published', candidate];
     const result = spawnSync(process.execPath, validationArgs, {
       cwd: ROOT,
       stdio: 'inherit'
@@ -995,7 +1000,7 @@ function stageDashboardCandidate(args, nextHtml) {
   const temporary = `${args.candidate}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.writeFileSync(temporary, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), temporary], {
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'staged', temporary], {
       cwd: ROOT,
       stdio: 'inherit'
     });
@@ -1168,7 +1173,9 @@ function prepareCandidateNews(data, now = scheduledNow()) {
     now,
     data.futuresModule?.futures
   );
-  const retainedFuturesDates = new Set([sharedFuturesSessionDate(data.futuresModule?.futures)].filter(Boolean));
+  const retainedFuturesDates = Array.isArray(futuresWindow?.dates) && futuresWindow.dates.length
+    ? new Set(futuresWindow.dates)
+    : new Set([sharedFuturesSessionDate(data.futuresModule?.futures)].filter(Boolean));
   const retainedStoryIds = new Set();
   const retainedStoryUrls = new Set();
   const retainedStoryTitles = new Set();
@@ -1341,6 +1348,12 @@ function mergedChartAvailability(existingChartData, incomingChartData, series) {
 }
 
 function patchDashboard(args) {
+  const checkedAt = scheduledNow();
+  const weekendManual = args.windowMode !== 'afternoon' && !args.scheduled && ['Sat', 'Sun'].includes(chicagoDateParts(checkedAt).weekday);
+  if (weekendManual) {
+    args.windowMode = 'afternoon';
+    process.stderr.write('Weekend manual run detected; using latest regular-session futures path and Weekend Edition masthead.\n');
+  }
   const html = args.baseDashboardHtml || loadDashboardBase(args.dashboard).html;
   let dashboardData = readJsonBlock(html, 'dashboard-data');
   if (dashboardData.earnings?.week) delete dashboardData.earnings.week.outputPath;
@@ -2387,6 +2400,11 @@ function main() {
   const canonicalChartData = roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data'));
   const checkedAt = scheduledNow();
   const localDate = chicagoDateParts(checkedAt).isoDate;
+  const weekendManual = !args.scheduled && ['Sat', 'Sun'].includes(chicagoDateParts(checkedAt).weekday);
+  if (weekendManual) {
+    args.windowMode = 'afternoon';
+    process.stderr.write('Weekend manual run detected; using latest regular-session futures path and Weekend Edition masthead.\n');
+  }
 
   const futuresArgs = ['scripts/fetch_chart_data.js', 'futures'];
   if (args.windowMode === 'afternoon') futuresArgs.push('--session');

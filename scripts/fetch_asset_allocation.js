@@ -13,6 +13,7 @@ const DEFAULT_SUMMARY_OUTPUT = path.resolve(process.cwd(), 'generated', 'asset_a
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
 const DEFAULT_REFRESH_URL = 'http://127.0.0.1:2200/api/asset-market-data';
 const DEFAULT_EXPORT_PATH = '/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json';
+const DASHBOARD_TIME_ZONE = 'America/Chicago';
 
 // Staging helper only: computes instrument-level ETF data and imports one
 // sanitized portfolio summary. It never imports tactical allocation logic.
@@ -121,8 +122,29 @@ Options:
 `);
 }
 
+function dashboardDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: DASHBOARD_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date).reduce((memo, part) => {
+    memo[part.type] = part.value;
+    return memo;
+  }, {});
+  return {
+    isoDate: `${parts.year}-${parts.month}-${parts.day}`,
+    year: Number(parts.year),
+    monthIndex: Number(parts.month) - 1
+  };
+}
+
+function dashboardIsoDate(date) {
+  return dashboardDateParts(date).isoDate;
+}
+
 function monthKey(date) {
-  return date.toISOString().slice(0, 7);
+  return dashboardIsoDate(date).slice(0, 7);
 }
 
 function utcDate(year, monthIndex, day) {
@@ -329,7 +351,7 @@ function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookah
   const mtdBase = priorMonthRows[priorMonthRows.length - 1] || currentMonthRows[0] || previous;
   const dividendBuckets = bucketDividendEvents(
     dividendEventsInRange(result, monthStart, lookaheadEndExclusive),
-    dateText(now),
+    dashboardIsoDate(now),
     dateText(currentMonthEnd)
   );
   const dividends = dividendBuckets.current;
@@ -388,10 +410,11 @@ function readCanonicalPortfolio(input) {
 
 async function fetchPortfolioRows(args, dependencies = {}) {
   const now = dependencies.now instanceof Date ? dependencies.now : new Date();
-  const monthStart = utcDate(now.getUTCFullYear(), now.getUTCMonth(), 1);
-  const currentMonthEnd = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 1, 0);
-  const lookaheadEndExclusive = utcDate(now.getUTCFullYear(), now.getUTCMonth() + 2, 1);
-  const lookbackStart = utcDate(now.getUTCFullYear(), now.getUTCMonth() - 1, 20);
+  const calendar = dashboardDateParts(now);
+  const monthStart = utcDate(calendar.year, calendar.monthIndex, 1);
+  const currentMonthEnd = utcDate(calendar.year, calendar.monthIndex + 1, 0);
+  const lookaheadEndExclusive = utcDate(calendar.year, calendar.monthIndex + 2, 1);
+  const lookbackStart = utcDate(calendar.year, calendar.monthIndex - 1, 20);
   const period1 = Math.floor(lookbackStart.getTime() / 1000);
   const period2 = Math.floor(lookaheadEndExclusive.getTime() / 1000);
   const settled = await Promise.allSettled(
@@ -623,7 +646,7 @@ async function main() {
       summary = await fetchPortfolioSummary(args);
     } catch (error) {
       summary = {
-        asOf: dateText(new Date()),
+        asOf: dashboardIsoDate(new Date()),
         portfolioMtdReturnValue: null,
         status: 'unavailable',
         stale: false,

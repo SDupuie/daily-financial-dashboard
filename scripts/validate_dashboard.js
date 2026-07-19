@@ -18,6 +18,11 @@ const REQUIRED_YIELD_CURVE_COMPARISONS = [
   { label: '1M ago', minDays: 20, maxDays: 45 },
   { label: '6M ago', minDays: 150, maxDays: 215 }
 ];
+const DASHBOARD_VALIDATION_MODES = new Set(['staged', 'published']);
+
+function normalizedDashboardValidationMode(value) {
+  return DASHBOARD_VALIDATION_MODES.has(value) ? value : 'published';
+}
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
@@ -266,7 +271,12 @@ function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker
   void carriedTickers;
 }
 
-function validateQuoteRows(errors, payload, { expectedByTicker, expectedSectionByTicker, prefix }, seriesByTicker) {
+function validateQuoteRows(errors, warnings, payload, {
+  expectedByTicker,
+  expectedSectionByTicker,
+  prefix,
+  validationMode = 'published'
+}, seriesByTicker) {
   const tapeRows = Array.isArray(payload.quoteRows?.tape) ? payload.quoteRows.tape : [];
   const cryptoRows = Array.isArray(payload.quoteRows?.crypto) ? payload.quoteRows.crypto : [];
   const quoteRowsByTicker = new Map();
@@ -283,10 +293,16 @@ function validateQuoteRows(errors, payload, { expectedByTicker, expectedSectionB
       else if (section === 'tape' && row.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
       if (expectedSectionByTicker.get(ticker) !== section) errors.push(`${label} must be generated only for ${section} rows.`);
       const fields = section === 'tape'
-        ? ['name', 'last', 'delta', 'pct', 'dir', 'note', 'asOf']
+        ? ['name', 'last', 'delta', 'pct', 'dir', 'asOf']
         : ['name', 'price', 'delta', 'chg', 'dir', 'asOf'];
       for (const field of fields) {
         if (typeof row[field] !== 'string' || row[field].trim() === '') errors.push(`${label}.${field} must be populated.`);
+      }
+      if (section === 'tape') {
+        const note = String(row.note || '').trim();
+        if (!note && validationMode === 'published') {
+          warnings.push(`${label}.note is blank; editorial commentary is incomplete.`);
+        }
       }
       if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
       if (!isIsoDate(row.asOf)) errors.push(`${label}.asOf must be an ISO date.`);
@@ -320,6 +336,8 @@ function validateChartPayload(errors, payload, {
   expectedSectionByTicker,
   decodeSeries,
   label = '',
+  warnings = [],
+  validationMode = 'published',
   absentMessage = 'is not present in dashboard chartable rows.',
   duplicateMessage = 'Duplicate generated chart series for',
   missingMessage = 'Generated chart data is missing',
@@ -349,7 +367,12 @@ function validateChartPayload(errors, payload, {
   validateChartAvailabilityCorrespondence(errors, payload, result.seriesByTicker, prefix);
   return {
     ...result,
-    ...validateQuoteRows(errors, payload, { expectedByTicker, expectedSectionByTicker, prefix }, result.seriesByTicker)
+    ...validateQuoteRows(errors, warnings, payload, {
+      expectedByTicker,
+      expectedSectionByTicker,
+      prefix,
+      validationMode
+    }, result.seriesByTicker)
   };
 }
 
@@ -549,7 +572,8 @@ function runChartDataValidation(argv) {
   }
 }
 
-function validateDashboardHtml(html) {
+function validateDashboardHtml(html, options = {}) {
+const validationMode = normalizedDashboardValidationMode(options.validationMode);
 const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
 const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
 const runtimeScriptMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
@@ -682,6 +706,8 @@ if (!dashboardMatch) {
         expectedSectionByTicker,
         decodeSeries: decodeTupleSeries,
         label: 'chart-data',
+        warnings,
+        validationMode,
         absentMessage: 'is missing its embedded source mapping.',
         duplicateMessage: 'Duplicate embedded chart series for',
         missingMessage: 'Embedded chart data is missing',
@@ -697,8 +723,18 @@ return { errors, warnings };
 
 function runDashboardValidation(argv) {
   let inputFile = '';
-  for (const arg of argv) {
-    if (arg.startsWith('-')) {
+  let validationMode = 'published';
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--mode') {
+      const next = argv[index + 1] || '';
+      if (!DASHBOARD_VALIDATION_MODES.has(next)) {
+        console.error(`--mode must be one of: ${[...DASHBOARD_VALIDATION_MODES].join(', ')}`);
+        process.exit(1);
+      }
+      validationMode = next;
+      index += 1;
+    } else if (arg.startsWith('-')) {
       console.error(`Unknown argument: ${arg}`);
       process.exit(1);
     } else if (inputFile) {
@@ -715,7 +751,7 @@ function runDashboardValidation(argv) {
     console.error(`Refusing to validate a file outside this repository: ${inputFile}`);
     process.exit(1);
   }
-  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'));
+  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'), { validationMode });
 
   if (errors.length) {
     console.error('Dashboard validation failed:');
@@ -731,7 +767,7 @@ function runDashboardValidation(argv) {
 
 function main(argv = process.argv.slice(2)) {
   if (argv[0] === '--help' || argv[0] === '-h') {
-    process.stdout.write('Usage: node scripts/validate_dashboard.js [dashboard.html]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n');
+    process.stdout.write('Usage: node scripts/validate_dashboard.js [--mode staged|published] [dashboard.html]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n');
     return;
   }
   if (argv[0] === 'chart-data') return runChartDataValidation(argv.slice(1));
@@ -763,6 +799,7 @@ module.exports = {
   validateChartPayload,
   validateChartPayloadMetadata,
   validateDashboardHtml,
+  normalizedDashboardValidationMode,
   validateYieldCurveComparisons,
   validateYieldCurvePointSet
 };

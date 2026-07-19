@@ -15,6 +15,7 @@ const {
   buildChartDataFallback,
   buildUnavailableFuturesPayload,
   compactChartPayload,
+  parseFuture,
   parseArgs: parseFetchChartDataArgs,
   quoteRowFromSeries,
   roundChartPayload,
@@ -43,6 +44,7 @@ const {
   applyCryptoStats,
   applyEarningsWeek,
   applyEditorialEarningsNarrative,
+  applyEditionMetadata,
   commitDashboardCandidate,
   earningsCalendarBuildDecision,
   earningsTargetRange,
@@ -99,13 +101,17 @@ function fixtureFutures() {
   const symbols = ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'];
   const sessionOpen = Date.parse('2026-07-10T13:30:00Z') / 1000;
   const sessionClose = Date.parse('2026-07-10T20:00:00Z') / 1000;
+  const series = Array.from({ length: 12 }, (_item, pointIndex) => [
+    sessionOpen + ((sessionClose - sessionOpen) * pointIndex) / 11,
+    100 + pointIndex / 11
+  ]);
   return Array.from({ length: 4 }, (_item, index) => ({
     symbol: symbols[index],
     label: `Fixture future ${index + 1}`,
     value: '+1.00%',
     dir: 'up',
     body: 'Fixture index futures are one percent higher versus the prior 4 PM ET close after a constructive cash session.',
-    series: [[sessionOpen, 100], [sessionClose, 101]],
+    series: series.map((point) => point.slice()),
     raw: {
       previousClose: 100,
       referencePrice: 100,
@@ -935,6 +941,11 @@ async function testUpdaterModulePatches() {
   assert.equal(data.futuresModule.sectionTitle, 'Session Futures');
   assert.deepEqual(data.futuresModule.futures.map((row) => row.symbol), ['ES=F', 'NQ=F', 'YM=F', 'RTY=F']);
 
+  const weekendData = dashboardFixture();
+  applyEditionMetadata(weekendData, 'afternoon', new Date('2026-07-19T15:00:00.000Z'));
+  assert.equal(weekendData.masthead.edition, 'Weekend Edition');
+  assert.equal(weekendData.futuresModule.sectionTitle, 'Session Futures');
+
   applyAssetAllocationPortfolio(data, {
     compiledAt: '2026-07-06T13:00:00.000Z',
     source: 'fixture',
@@ -1006,6 +1017,31 @@ async function testUpdaterModulePatches() {
   assert.equal(dashboard.assetAllocationPortfolio.portfolioMtdReturnStatus, 'available');
   assert.equal(dashboard.assetAllocationPortfolio.portfolioMtdReturnStale, false);
   assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
+
+  const edgeObserved = [];
+  const edgeRows = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-08-01T04:30:00.000Z'),
+    fetchHolding: async (holding, _args, period1, period2, monthStart, _now, currentMonthEnd, lookaheadEndExclusive) => {
+      if (!edgeObserved.length) {
+        edgeObserved.push({
+          period1,
+          period2,
+          monthStart: monthStart.toISOString().slice(0, 10),
+          currentMonthEnd: currentMonthEnd.toISOString().slice(0, 10),
+          lookaheadEndExclusive: lookaheadEndExclusive.toISOString().slice(0, 10)
+        });
+      }
+      return structuredClone(rows.find((row) => row.ticker === holding.symbol));
+    }
+  });
+  assert.equal(edgeRows.month, '2026-07');
+  assert.deepEqual(edgeObserved[0], {
+    period1: Math.floor(Date.UTC(2026, 5, 20) / 1000),
+    period2: Math.floor(Date.UTC(2026, 8, 1) / 1000),
+    monthStart: '2026-07-01',
+    currentMonthEnd: '2026-07-31',
+    lookaheadEndExclusive: '2026-09-01'
+  });
 }
 
 async function testFuturesStagingPayloadContract() {
@@ -1045,6 +1081,45 @@ async function testFuturesStagingPayloadContract() {
   applyFuturesModule(fallbackDashboard, shortRoster, 'afternoon');
   assert.equal(fallbackDashboard.futuresModule.availability.status, 'unavailable');
   assert.deepEqual(fallbackDashboard.futuresModule.futures, []);
+
+  const chartPayload = (timestamps, closes, meta = {}) => ({
+    chart: {
+      result: [{
+        meta: {
+          chartPreviousClose: 100,
+          regularMarketPrice: 101,
+          regularMarketTime: Date.parse('2026-07-19T05:22:14.000Z') / 1000,
+          ...meta
+        },
+        timestamp: timestamps,
+        indicators: { quote: [{ close: closes }] }
+      }]
+    }
+  });
+  const sessionBars = (isoDate) => {
+    const open = Date.parse(`${isoDate}T13:30:00.000Z`) / 1000;
+    return Array.from({ length: 13 }, (_item, index) => open + index * 5 * 60);
+  };
+  const fallbackRow = parseFuture(
+    { symbol: 'ES=F', label: 'S&P Futures' },
+    chartPayload([], []),
+    { mode: 'premarket' },
+    chartPayload(
+      [
+        ...sessionBars('2026-07-16'),
+        ...sessionBars('2026-07-17')
+      ],
+      [
+        ...Array.from({ length: 13 }, (_item, index) => 99 + index / 12),
+        ...Array.from({ length: 13 }, (_item, index) => 100 + index / 12)
+      ]
+    ),
+    new Date('2026-07-19T05:22:14.000Z')
+  );
+  assert.equal(fallbackRow.raw.sessionDate, '2026-07-17');
+  assert.equal(fallbackRow.raw.referenceDate, '2026-07-16');
+  assert.equal(fallbackRow.raw.referenceLabel, '4 PM ET close');
+  assert.equal(fallbackRow.series.length, 13);
 
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-partial-');
   const output = path.join(dir, 'futures.json');
@@ -1300,6 +1375,24 @@ function testArchitecturePreparationLeavesCanonicalUnchanged() {
   assert.equal(candidateData.editionId, canonicalData.editionId, 'The staged candidate must retain the canonical base edition binding.');
   assert.equal(candidateData.editorialReview, undefined);
   assert.equal(candidateData.crypto.availability, undefined);
+
+  const weekendArgs = {
+    ...args,
+    windowMode: 'morning',
+    candidate: path.join(dir, 'weekend-dashboard-candidate.html')
+  };
+  const previousWeekendScheduledNow = process.env.SCHEDULED_NOW_ISO;
+  process.env.SCHEDULED_NOW_ISO = '2026-07-19T15:00:00.000Z';
+  let weekendHtml;
+  try {
+    weekendHtml = patchDashboard(weekendArgs);
+  } finally {
+    if (previousWeekendScheduledNow === undefined) delete process.env.SCHEDULED_NOW_ISO;
+    else process.env.SCHEDULED_NOW_ISO = previousWeekendScheduledNow;
+  }
+  const weekendData = readJsonBlock(weekendHtml, 'dashboard-data');
+  assert.equal(weekendData.masthead.edition, 'Weekend Edition');
+  assert.equal(weekendData.futuresModule.sectionTitle, 'Session Futures');
 
   const retainedCandidateFile = path.join(dir, 'retained-dashboard-candidate.html');
   const retainedCandidate = fs.readFileSync(candidateFile, 'utf8');
@@ -2903,8 +2996,8 @@ function validationResult(errors, warnings = []) {
   };
 }
 
-function dashboardValidationResult(html, now = FIXTURE_NOW) {
-  const result = validateDashboardHtml(html, { now: new Date(now) });
+function dashboardValidationResult(html, now = FIXTURE_NOW, validationMode = 'published') {
+  const result = validateDashboardHtml(html, { now: new Date(now), validationMode });
   return validationResult(result.errors, result.warnings);
 }
 
@@ -2928,6 +3021,20 @@ function testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover(
   });
   const staleWeekAheadResult = validateDashboardFixture(staleWeekAhead);
   assert.equal(staleWeekAheadResult.status, 0, 'A stale New-pill baseline must not block a renderable Week Ahead section.');
+}
+
+function testDashboardValidatorTapeNotesAreModeSpecific() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  chartData.quoteRows.tape[0].note = '';
+  const html = renderDashboardValidationFixture(dashboard, chartData);
+
+  const staged = dashboardValidationResult(html, FIXTURE_NOW, 'staged');
+  assert.equal(staged.status, 0);
+  assert.equal(staged.stdout, '');
+
+  const published = dashboardValidationResult(html, FIXTURE_NOW, 'published');
+  assert.equal(published.status, 0);
+  assert.match(published.stdout, /SPX\.note is blank; editorial commentary is incomplete\./);
 }
 
 
@@ -3533,6 +3640,7 @@ async function main() {
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,
     testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover,
+    testDashboardValidatorTapeNotesAreModeSpecific,
     testDashboardWriterNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,

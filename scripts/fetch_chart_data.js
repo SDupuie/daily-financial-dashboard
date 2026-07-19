@@ -51,6 +51,8 @@ const FUTURES = [
   { symbol: 'RTY=F', label: 'Russell Futures', body: 'Small-cap and domestic cyclicals read.' }
 ];
 const FUTURES_MODES = new Set(['premarket', 'session']);
+const MIN_FUTURES_CHART_POINTS = 12;
+const MIN_FUTURES_CHART_SPAN_MINUTES = 60;
 
 function isOffsetIsoTimestamp(value) {
   return typeof value === 'string'
@@ -107,8 +109,8 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
       if (typeof row[field] !== 'string' || !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
     }
     if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
-    if (!Array.isArray(row.series) || row.series.length < 2) {
-      errors.push(`${label}.series must contain at least two chart points.`);
+    if (!Array.isArray(row.series) || !isUsableFuturesChart(row.series)) {
+      errors.push(`${label}.series must contain at least ${MIN_FUTURES_CHART_POINTS} chart points spanning ${MIN_FUTURES_CHART_SPAN_MINUTES} minutes.`);
     } else if (row.series.some((point) => !Array.isArray(point) || point.length < 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || point[1] <= 0)) {
       errors.push(`${label}.series points must contain finite numeric times and positive prices.`);
     }
@@ -331,6 +333,24 @@ function isRegularSessionPoint(timestamp) {
   return minutes !== null && minutes >= 8 * 60 + 30 && minutes <= 15 * 60;
 }
 
+function chartSpanMinutes(points) {
+  return points.length < 2 ? 0 : (points.at(-1)[0] - points[0][0]) / 60;
+}
+
+function isUsableFuturesChart(points) {
+  return Array.isArray(points)
+    && points.length >= MIN_FUTURES_CHART_POINTS
+    && chartSpanMinutes(points) >= MIN_FUTURES_CHART_SPAN_MINUTES;
+}
+
+function isWeekendChicago(date) {
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    weekday: 'short'
+  }).format(date);
+  return weekday === 'Sat' || weekday === 'Sun';
+}
+
 function downsample(points, maxPoints = 72) {
   if (points.length <= maxPoints) return points;
   const step = (points.length - 1) / (maxPoints - 1);
@@ -428,16 +448,16 @@ function regularSessionComparison(points, symbol) {
     sessions.get(date).push(point);
   }
 
-  const sessionDates = [...sessions.keys()].sort().filter((date) => sessions.get(date).length >= 2);
+  const sessionDates = [...sessions.keys()].sort().filter((date) => isUsableFuturesChart(sessions.get(date)));
   if (sessionDates.length < 2) {
-    throw new Error(`${symbol} response did not include at least two regular-session windows`);
+    throw new Error(`${symbol} response did not include at least two usable regular-session windows`);
   }
 
   const sessionDate = sessionDates[sessionDates.length - 1];
   const referenceDate = sessionDates[sessionDates.length - 2];
   const sessionPoints = sessions.get(sessionDate);
   const referencePoint = sessions.get(referenceDate).at(-1);
-  if (!sessionPoints?.length || !referencePoint) {
+  if (!isUsableFuturesChart(sessionPoints) || !referencePoint) {
     throw new Error(`${symbol} response did not include usable regular-session comparison points`);
   }
 
@@ -493,28 +513,35 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
   }
 
   const pricePoints = parsePricePoints(payload);
+  const referencePoints = args.mode === 'premarket' ? parsePricePoints(referencePayload) : [];
   const sessionComparison = args.mode === 'session'
     ? regularSessionComparison(pricePoints, spec.symbol)
     : null;
   const cutoff = args.mode === 'premarket' ? premarketCutoff(runAt) : null;
   const premarketReference = args.mode === 'premarket'
-    ? latestRegularSessionClose(parsePricePoints(referencePayload), spec.symbol, cutoff?.getTime() / 1000, easternIsoDate(runAt))
+    ? latestRegularSessionClose(referencePoints, spec.symbol, cutoff?.getTime() / 1000, easternIsoDate(runAt))
     : null;
   const boundedPricePoints = cutoff
     ? pricePoints.filter(([timestamp]) => timestamp <= cutoff.getTime() / 1000)
     : pricePoints;
   const boundedQuoteTime = cutoff && quoteTime > cutoff.getTime() / 1000 ? null : quoteTime;
-  const comparisonPoints = sessionComparison
+  let fallbackSessionComparison = null;
+  let comparisonPoints = sessionComparison
     ? sessionComparison.sessionPoints
     : withLatestQuotePoint(boundedPricePoints, boundedQuoteTime, quotePrice);
-  if (comparisonPoints.length < 2) {
-    throw new Error(`${spec.symbol} response did not include at least two chart points`);
+  if (!sessionComparison && !isUsableFuturesChart(comparisonPoints) && isWeekendChicago(runAt) && referencePoints.length) {
+    fallbackSessionComparison = regularSessionComparison(referencePoints, spec.symbol);
+    comparisonPoints = fallbackSessionComparison.sessionPoints;
+  }
+  if (!isUsableFuturesChart(comparisonPoints)) {
+    throw new Error(`${spec.symbol} response did not include a usable futures chart`);
   }
 
-  const referencePrice = sessionComparison ? sessionComparison.referencePrice : previousClose;
+  const activeSessionComparison = sessionComparison || fallbackSessionComparison;
+  const referencePrice = activeSessionComparison ? activeSessionComparison.referencePrice : previousClose;
   const price = comparisonPoints.at(-1)[1];
   const regularMarketTime = comparisonPoints.at(-1)[0];
-  const referenceLabel = args.mode === 'session' ? '4 PM ET close' : 'prior close';
+  const referenceLabel = activeSessionComparison ? '4 PM ET close' : 'prior close';
   const delta = price - referencePrice;
   const pct = referencePrice ? (delta / referencePrice) * 100 : 0;
 
@@ -528,23 +555,23 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
     raw: {
       instrumentType: meta?.instrumentType || null,
       exchangeName: meta?.exchangeName || null,
-      ...(sessionComparison || premarketReference ? {
+      ...(activeSessionComparison || premarketReference ? {
         marketTimeZone: 'America/New_York'
       } : {}),
       price,
       regularMarketTime: Number(regularMarketTime) || null,
       referencePrice,
       referenceLabel,
-      ...(sessionComparison || premarketReference ? {
-        referenceDate: sessionComparison?.referenceDate || premarketReference.referenceDate,
-        referenceTime: sessionComparison?.referenceTime || premarketReference.referenceTime,
+      ...(activeSessionComparison || premarketReference ? {
+        referenceDate: activeSessionComparison?.referenceDate || premarketReference.referenceDate,
+        referenceTime: activeSessionComparison?.referenceTime || premarketReference.referenceTime,
         referenceCloseEastern: '4:00 PM ET'
       } : {}),
       quotePrice: price,
       quoteTime: Number.isFinite(regularMarketTime) ? regularMarketTime : null,
       previousClose,
-      ...(sessionComparison ? {
-        sessionDate: sessionComparison.sessionDate,
+      ...(activeSessionComparison ? {
+        sessionDate: activeSessionComparison.sessionDate,
         sessionStartEastern: '9:30 AM ET',
         sessionEndEastern: '4:00 PM ET',
         sessionOpen: comparisonPoints[0][1],

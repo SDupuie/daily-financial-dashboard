@@ -115,11 +115,11 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | `editorialReview.newsSelection.crypto` | Target 6 crypto-specific cards from the generated News inventory | candidate `url`, `kicker`, `title`, `body` |
 | `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
-- `editorialReview.newsSearch` is read-only source material. Stage 1 filters displayed-session Futures stories into `futuresCandidates`; when no shared Futures session date exists, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
+- `editorialReview.newsSearch` is read-only source material. Prepare Handoff filters displayed-session Futures stories into `futuresCandidates`: Pre-Market Futures use the overnight futures window from 5:00 PM CT on the prior Chicago calendar day through the prepared run time or 8:30 AM CT, whichever is earlier; Session Futures use the shared `raw.sessionDate` regular-session window. When no shared Futures story window can be proven, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
 - A selected URL must come from the generated candidate inventory.
 - Do not set or edit coverage/New-pill fields.
 - Resolve duplicate URLs/titles, wrong section category, and below-target counts during AI Editorial Work; Apply Handoff does not select replacement stories.
-- Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`; Stage 3 mirrors the Stage 1 Futures-window check defensively.
+- Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`; Apply Handoff mirrors the Prepare Handoff Futures-window check defensively.
 
 ### Story selection policy
 

@@ -294,6 +294,50 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
   const fallbackArtifact = await collect({ sectionTitle: 'Session Futures', futures: [], stories: [] });
   assert.deepEqual(fallbackArtifact.generalCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
   assert.deepEqual(fallbackArtifact.futuresCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
+
+  const premarketAsOf = new Date('2026-07-13T13:00:00.000Z');
+  const premarketArtifact = await collectNewsCandidates({
+    asOf: premarketAsOf,
+    dashboardData: {
+      stories: [],
+      futuresModule: {
+        sectionTitle: 'Pre-Market Futures',
+        futures: ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'].map((symbol) => ({ symbol, raw: { referenceDate: '2026-07-10' } })),
+        stories: []
+      },
+      crypto: { notes: [] }
+    },
+    acquisitionPaths: [{ id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }],
+    clock: () => premarketAsOf,
+    fetchPath: async () => ({ items: [{
+      publishedAt: '2026-07-12T21:30:00.000Z',
+      title: 'Sunday before futures open fixture',
+      url: 'https://www.cnbc.com/2026/07/12/sunday-before-open.html'
+    }, {
+      publishedAt: '2026-07-12T22:30:00.000Z',
+      title: 'Sunday after futures open fixture',
+      url: 'https://www.cnbc.com/2026/07/12/sunday-after-open.html'
+    }, {
+      publishedAt: '2026-07-13T12:55:00.000Z',
+      title: 'Monday premarket fixture',
+      url: 'https://www.cnbc.com/2026/07/13/monday-premarket.html'
+    }, {
+      publishedAt: '2026-07-13T13:05:00.000Z',
+      title: 'Monday after run fixture',
+      url: 'https://www.cnbc.com/2026/07/13/monday-after-run.html'
+    }] }),
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      description: 'Fixture description.',
+      excerpt: 'Fixture article content.',
+      publishedAt: new Date(candidate.publishedAt)
+    })
+  });
+  assert.deepEqual(
+    premarketArtifact.futuresCandidates.map((candidate) => candidate.title).sort(),
+    ['Monday premarket fixture', 'Sunday after futures open fixture']
+  );
 }
 
 async function testNewsCandidateReviewCapAndProgress() {
