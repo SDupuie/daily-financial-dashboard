@@ -147,7 +147,6 @@ async function testDeterministicNewsCandidateAcquisition() {
   };
   const artifact = await collectNewsCandidates({
     asOf,
-    windowMode: 'afternoon',
     dashboardData,
     acquisitionPaths,
     clock: () => asOf,
@@ -247,6 +246,54 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'coindesk').acceptedCount, 1);
   assert.equal(artifact.articleReview.status, 'complete');
+}
+
+async function testFuturesCandidatesUseDisplayedSessionWindow() {
+  const asOf = new Date('2026-07-19T17:00:00.000Z');
+  const sessionFuture = (symbol) => ({ symbol, raw: { sessionDate: '2026-07-17' } });
+  const dashboardData = {
+    stories: [],
+    futuresModule: {
+      sectionTitle: 'Session Futures',
+      futures: ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'].map(sessionFuture),
+      stories: []
+    },
+    crypto: { notes: [] }
+  };
+  const collect = (futuresModule = dashboardData.futuresModule) => collectNewsCandidates({
+    asOf,
+    dashboardData: { ...dashboardData, futuresModule },
+    acquisitionPaths: [{ id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({ items: [{
+      publishedAt: '2026-07-17T15:00:00.000Z',
+      title: 'Friday session futures fixture',
+      url: 'https://www.cnbc.com/2026/07/17/friday-session-futures.html'
+    }, {
+      publishedAt: '2026-07-17T21:00:00.000Z',
+      title: 'Friday after-close fixture',
+      url: 'https://www.cnbc.com/2026/07/17/friday-after-close.html'
+    }, {
+      publishedAt: '2026-07-18T15:00:00.000Z',
+      title: 'Saturday market fixture',
+      url: 'https://www.cnbc.com/2026/07/18/saturday-market.html'
+    }] }),
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      description: 'Fixture description.',
+      excerpt: 'Fixture article content.',
+      publishedAt: new Date(candidate.publishedAt)
+    })
+  });
+
+  const artifact = await collect();
+  assert.deepEqual(artifact.generalCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
+  assert.deepEqual(artifact.futuresCandidates.map((candidate) => candidate.title), ['Friday session futures fixture']);
+
+  const fallbackArtifact = await collect({ sectionTitle: 'Session Futures', futures: [], stories: [] });
+  assert.deepEqual(fallbackArtifact.generalCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
+  assert.deepEqual(fallbackArtifact.futuresCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
 }
 
 async function testNewsCandidateReviewCapAndProgress() {
@@ -565,7 +612,7 @@ function testScheduledBaselineTransition() {
       scheduledWindow: 'overnight',
       now: new Date('2026-07-06T12:00:00.000Z')
     }),
-    /requires --morning or --afternoon/
+    /requires a staged Morning Edition or Afternoon Edition dashboard/
   );
 }
 
@@ -625,6 +672,7 @@ async function main() {
   testArticleMetadataExtraction();
   testRssParsing();
   await testDeterministicNewsCandidateAcquisition();
+  await testFuturesCandidatesUseDisplayedSessionWindow();
   await testNewsCandidateReviewCapAndProgress();
   await testNewsCandidateCapAfterEligibilityAndDedupe();
   await testYahooOriginalPromotionValidation();

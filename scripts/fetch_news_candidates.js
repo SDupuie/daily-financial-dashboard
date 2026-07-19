@@ -2,7 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { allowedNewsDates, canonicalStoryUrl, normalizeStoryTitle } = require('./news_contract');
+const {
+  allowedNewsDates,
+  candidateInFuturesPublicationWindow,
+  canonicalStoryUrl,
+  futuresStoryPublicationWindow,
+  normalizeStoryTitle
+} = require('./news_contract');
 const { APPROVED_NEWS_SOURCES, newsAcquisitionPaths } = require('./news_sources');
 const { atomicWriteJson } = require('./staging_writer');
 
@@ -22,7 +28,6 @@ function parseArgs(argv) {
     input: DEFAULT_INPUT,
     output: DEFAULT_OUTPUT,
     asOf: new Date(),
-    windowMode: '',
     searchTimeoutMs: 20000,
     articleTimeoutMs: 10000
   };
@@ -39,11 +44,6 @@ function parseArgs(argv) {
       if (Number.isNaN(args.asOf.getTime())) throw new Error('--as-of must be a valid ISO timestamp.');
       continue;
     }
-    if (arg === '--morning' || arg === '--afternoon') {
-      if (args.windowMode) throw new Error('Use only one of --morning or --afternoon.');
-      args.windowMode = arg.slice(2);
-      continue;
-    }
     if (arg === '--search-timeout-ms' || arg === '--article-timeout-ms') {
       const value = Number(argv[++index]);
       if (!Number.isInteger(value) || value <= 0) throw new Error(`${arg} must be a positive integer.`);
@@ -51,7 +51,7 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--help' || arg === '-h') {
-      process.stdout.write(`Usage: node scripts/fetch_news_candidates.js [options]\n\nOptions:\n  --input PATH                 Dashboard or candidate HTML used for still-fresh prior cards\n  --output PATH                Staging output (default: generated/news_candidates.json)\n  --as-of TIMESTAMP            Fixed run timestamp used for News freshness\n  --morning|--afternoon        Match the active dashboard workflow window\n  --search-timeout-ms N        Per-feed/API timeout (default: 20000)\n  --article-timeout-ms N       Per-article timeout (default: 10000)\n`);
+      process.stdout.write(`Usage: node scripts/fetch_news_candidates.js [options]\n\nOptions:\n  --input PATH                 Dashboard or candidate HTML used for still-fresh prior cards\n  --output PATH                Staging output (default: generated/news_candidates.json)\n  --as-of TIMESTAMP            Fixed run timestamp used for News freshness\n  --search-timeout-ms N        Per-feed/API timeout (default: 20000)\n  --article-timeout-ms N       Per-article timeout (default: 10000)\n`);
       process.exit(0);
     }
     throw new Error(`Unknown argument: ${arg}`);
@@ -548,6 +548,18 @@ async function collectNewsCandidates({
   onProgress = null
 } = {}) {
   const eligibleDates = allowedNewsDates(asOf);
+  const futuresWindow = futuresStoryPublicationWindow(
+    dashboardData?.futuresModule?.sectionTitle,
+    asOf.toISOString(),
+    asOf,
+    dashboardData?.futuresModule?.futures
+  );
+  // Futures selections follow the displayed session window, while the general
+  // story pool keeps the normal News freshness dates.
+  const futuresDates = futuresWindow?.sessionDate ? new Set([futuresWindow.sessionDate]) : eligibleDates;
+  const generalAcquisitionDates = futuresWindow?.sessionDate
+    ? new Set([...eligibleDates, ...futuresDates])
+    : eligibleDates;
   const attemptsByIndex = Array(acquisitionPaths.length).fill(null);
   const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
   const reviewedDownloaded = [];
@@ -563,10 +575,14 @@ async function collectNewsCandidates({
   const downloadedCandidates = () => downloadedByIndex.flat();
   const buildArtifact = (status = articleReview.status) => {
     const prior = priorNewsCandidates(dashboardData, eligibleDates);
+    const futuresPrior = futuresWindow ? priorNewsCandidates(dashboardData, futuresDates) : prior;
+    // Prior Futures cards compete only inside the Futures pool; they should not
+    // stretch the broad-market freshness window after the displayed session rolls.
     const candidates = deduplicateCandidates([
       ...reviewedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
       ...prior.generalCandidates,
-      ...prior.cryptoCandidates
+      ...prior.cryptoCandidates,
+      ...futuresPrior.generalCandidates
     ]);
     return {
       schemaVersion: 2,
@@ -576,7 +592,14 @@ async function collectNewsCandidates({
       sourceCatalog: APPROVED_NEWS_SOURCES,
       attempts: attemptsByIndex.filter(Boolean),
       articleReview: { ...articleReview, status },
-      generalCandidates: candidates.filter((candidate) => candidate.pool === 'generalCandidates').sort(candidateOrder),
+      generalCandidates: candidates
+        .filter((candidate) => candidate.pool === 'generalCandidates' && eligibleDates.has(candidate.publishedOn))
+        .sort(candidateOrder),
+      futuresCandidates: candidates
+        .filter((candidate) => candidate.pool === 'generalCandidates'
+          && futuresDates.has(candidate.publishedOn)
+          && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow)))
+        .sort(candidateOrder),
       cryptoCandidates: candidates.filter((candidate) => candidate.pool === 'cryptoCandidates').sort(candidateOrder)
     };
   };
@@ -587,23 +610,24 @@ async function collectNewsCandidates({
   reportProgress('starting');
 
   async function fetchOnePath(acquisitionPath, index) {
+    const pathEligibleDates = acquisitionPath.pool === 'generalCandidates' ? generalAcquisitionDates : eligibleDates;
     const attempt = {
       id: acquisitionPath.id,
       provider: acquisitionPath.provider,
       pool: acquisitionPath.pool,
       attemptedAt: clock().toISOString(),
-      eligibleDates: [...eligibleDates].sort(),
+      eligibleDates: [...pathEligibleDates].sort(),
       resultCount: 0,
       acceptedCount: 0,
       error: null
     };
     try {
       if (offline) throw new Error('Network disabled for offline test.');
-      const result = await fetchPath(acquisitionPath, { eligibleDates, timeoutMs: searchTimeoutMs, env });
+      const result = await fetchPath(acquisitionPath, { eligibleDates: pathEligibleDates, timeoutMs: searchTimeoutMs, env });
       if (!Array.isArray(result?.items)) throw new Error(`${acquisitionPath.provider} result must contain items[].`);
       attempt.resultCount = result.items.length;
       for (const item of result.items) {
-        const candidate = normalizeProviderCandidate(item, acquisitionPath, eligibleDates);
+        const candidate = normalizeProviderCandidate(item, acquisitionPath, pathEligibleDates);
         if (!candidate) continue;
         downloadedByIndex[index].push(candidate);
         attempt.acceptedCount += 1;
@@ -640,7 +664,10 @@ async function collectNewsCandidates({
   reportProgress();
 
   await mapConcurrent(cappedReviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
-    eligibleDates, fetchArticle, articleTimeoutMs, clock
+    eligibleDates: candidate.pool === 'generalCandidates' ? generalAcquisitionDates : eligibleDates,
+    fetchArticle,
+    articleTimeoutMs,
+    clock
   }), (candidate) => {
     reviewedDownloaded.push(candidate);
     articleReview.reviewedCount += 1;
@@ -667,7 +694,7 @@ async function main() {
   });
   atomicWriteJson(args.output, artifact);
   const failures = artifact.attempts.filter((attempt) => attempt.error).length;
-  process.stdout.write(`News candidates staged: ${artifact.generalCandidates.length} general, ${artifact.cryptoCandidates.length} Crypto; ${failures} acquisition failure(s).\n`);
+  process.stdout.write(`News candidates staged: ${artifact.generalCandidates.length} general, ${artifact.futuresCandidates?.length || 0} Futures, ${artifact.cryptoCandidates.length} Crypto; ${failures} acquisition failure(s).\n`);
 }
 
 if (require.main === module) {

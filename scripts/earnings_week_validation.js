@@ -639,6 +639,21 @@ function validateRow(errors, rowRaw, index, range) {
     errors.push(`${label}.companyReleaseStatus must be a string.`);
   }
   validateReaction(errors, row, label);
+  // Source audit is part of the deterministic contract. This proves structured
+  // provenance for the row, not that the remote source is still reachable.
+  const audit = isObject(row.sourceAudit) ? row.sourceAudit : null;
+  const selected = audit?.selectedSources;
+  if (!audit) {
+    errors.push(`${label}.sourceAudit must be populated.`);
+  } else if (!isObject(selected)) {
+    errors.push(`${label}.sourceAudit.selectedSources must be populated.`);
+  } else if (selected.slate === 'finnhub') {
+    validateFinnhubRowSourceAudit(errors, row, audit, selected, label);
+  } else if (selected.slate === 'earningsApiCalendar') {
+    validateEarningsApiRowSourceAudit(errors, row, audit, selected, label);
+  } else {
+    errors.push(`${label}.sourceAudit.selectedSources.slate is invalid.`);
+  }
 }
 
 function validateSummary(errors, data) {

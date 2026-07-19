@@ -514,7 +514,7 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
   const referencePrice = sessionComparison ? sessionComparison.referencePrice : previousClose;
   const price = comparisonPoints.at(-1)[1];
   const regularMarketTime = comparisonPoints.at(-1)[0];
-  const referenceLabel = args.mode === 'session' ? 'prior 4 PM ET close' : 'prior close';
+  const referenceLabel = args.mode === 'session' ? '4 PM ET close' : 'prior close';
   const delta = price - referencePrice;
   const pct = referencePrice ? (delta / referencePrice) * 100 : 0;
 
@@ -698,7 +698,7 @@ Options:
   --output PATH       Unified chart JSON output path (default: generated/chart_data.json)
   --days 1826         Calendar days of daily history to request
   --timeout-ms 15000  HTTP timeout in ms per request
-  --as-of TIMESTAMP   Fixed run timestamp used as generatedAt and quoteRevision
+  --as-of TIMESTAMP   Fixed run timestamp used as generatedAt and chart cutoff
   --delay-ms 250      Delay between source requests
   --ticker SYMBOL     Fetch only this dashboard ticker (repeatable)
   --compact           Print one-line series summary
@@ -957,13 +957,18 @@ function compactChartPayload(payload) {
 
 function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
   const timestamp = new Date(checkedAt).toISOString();
+  const rounded = roundChartPayload(canonicalChartData);
+  // Mark the payload and each series stale so renderers and validators cannot
+  // treat carried-forward quote rows as freshly reviewed market data.
   return {
-    ...roundChartPayload(canonicalChartData),
+    ...rounded,
     availability: {
       status: 'carried_forward',
       reason: 'source_refresh_failed',
       checkedAt: timestamp
-    }
+    },
+    series: (Array.isArray(rounded.series) ? rounded.series : [])
+      .map((series) => carriedForwardChartSeries(series, timestamp))
   };
 }
 
@@ -1559,11 +1564,11 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
   return fetchYahooSeries(row, args, startDate, endDate);
 }
 
-function chartOutput({ args, series, failures, quoteRevision, startDate, endDate }) {
+function chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate }) {
   const quoteRows = deriveQuoteRowsFromSeries(series);
   return {
     schemaVersion: 1,
-    generatedAt: quoteRevision,
+    generatedAt,
     dashboardSource: path.relative(process.cwd(), args.input) || path.basename(args.input),
     range: {
       days: args.days,
@@ -1607,8 +1612,12 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   const requestedTickers = new Set(args.tickers.filter(Boolean));
   const inputRows = readChartableRows(args.input).filter((row) => !requestedTickers.size || requestedTickers.has(row.ticker));
   if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
-  const endDate = args.asOf || (dependencies.now instanceof Date ? dependencies.now : new Date());
-  const quoteRevision = endDate.toISOString();
+  const executionTime = dependencies.now instanceof Date ? dependencies.now : new Date();
+  const endDate = args.asOf || executionTime;
+  // generatedAt is the requested chart cutoff; quoteRevision is execution time
+  // so same-cutoff reruns can still force fresh editorial review.
+  const generatedAt = endDate.toISOString();
+  const quoteRevision = executionTime.toISOString();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
   const canonicalPayload = readEmbeddedChartPayload(args.input);
@@ -1628,7 +1637,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const series = seriesByIndex.filter(Boolean);
     if (series.length !== inputRows.length) return;
     const failures = [...failuresByTicker.values()];
-    const output = chartOutput({ args, series, failures, quoteRevision, startDate, endDate });
+    const output = chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate });
     validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
   };
   const processRow = async (index) => {
@@ -1665,7 +1674,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
   const series = seriesByIndex.filter(Boolean);
   const failures = [...failuresByTicker.values()];
-  const output = chartOutput({ args, series, failures, quoteRevision, startDate, endDate });
+  const output = chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate });
   validateAndWriteChartOutput(output, inputRows, writeJson, args.output);
 
   if (args.compact) {

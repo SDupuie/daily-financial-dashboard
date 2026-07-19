@@ -24,8 +24,10 @@ const {
 } = require('./fetch_asset_allocation');
 const {
   buildEarningsPreparationFallback,
+  applyEarningsLifecycle,
   combinedOutcome,
   computeEarningsWeekCounts,
+  earningsReactionBasis,
   isDisplayEligibleEarningsRow,
   narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
@@ -61,6 +63,7 @@ const {
   allowedNewsDates,
   applyNewsCoverageState,
   applyScheduledNewsBaseline,
+  candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   futuresStoryPublicationWindow,
   sharedFuturesSessionDate,
@@ -79,11 +82,12 @@ const DEFAULT_EDITORIAL_DASHBOARD_DATA = path.join(DEFAULT_EDITORIAL_DIR, 'dashb
 const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_good.html');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
+const EARNINGS_SCHEDULE_REVIEW_PATH = path.join(GENERATED_DIR, 'earnings_schedule_review.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const NEWS_COMMAND_TIMEOUT_MS = 10 * 60_000;
-const EARNINGS_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const EARNINGS_COMMAND_TIMEOUT_MS = 20 * 60_000;
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
   afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
@@ -99,6 +103,13 @@ const WINDOW_LABELS = {
   }
 };
 let preparationStatus = null;
+
+function windowModeFromDashboard(data) {
+  const edition = String(data?.masthead?.edition || '').trim();
+  if (edition === 'Morning Edition') return 'morning';
+  if (edition === 'Afternoon Edition') return 'afternoon';
+  return '';
+}
 
 function reportPreparationStatus(status, detail = '') {
   preparationStatus = status;
@@ -156,6 +167,41 @@ function calendarRolloverRange(windowMode, now = scheduledNow()) {
   return null;
 }
 
+function nearestRolloverDate(now, targetWeekday, direction) {
+  const weekdayIndex = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 0 };
+  const parts = chicagoDateParts(now);
+  const current = weekdayIndex[parts.weekday];
+  const target = weekdayIndex[targetWeekday];
+  if (!Number.isInteger(current) || !Number.isInteger(target)) return null;
+  const offset = direction === 'backward'
+    ? -((current - target + 7) % 7)
+    : (target - current + 7) % 7;
+  return addDays(parts.isoDate, offset);
+}
+
+function manualCalendarRolloverRange(windowMode, now = scheduledNow()) {
+  // Manual rollover is an explicit repair lever. Weekend runs infer the intended
+  // bridge from the calendar day; weekdays follow the requested edition.
+  const parts = chicagoDateParts(now);
+  if (parts.weekday === 'Sat') {
+    const friday = nearestRolloverDate(now, 'Fri', 'backward');
+    return friday ? { from: friday, to: addDays(friday, 6) } : null;
+  }
+  if (parts.weekday === 'Sun') {
+    const monday = nearestRolloverDate(now, 'Mon', 'forward');
+    return monday ? { from: monday, to: addDays(monday, 4) } : null;
+  }
+  if (windowMode === 'afternoon') {
+    const friday = nearestRolloverDate(now, 'Fri', 'backward');
+    return friday ? { from: friday, to: addDays(friday, 6) } : null;
+  }
+  if (windowMode === 'morning') {
+    const monday = nearestRolloverDate(now, 'Mon', 'forward');
+    return monday ? { from: monday, to: addDays(monday, 4) } : null;
+  }
+  return null;
+}
+
 function requiresUnavailableRolloverRetry(section) {
   return section?.availability?.status === 'unavailable';
 }
@@ -202,7 +248,7 @@ function validateScheduledStart(dashboard, windowMode, now = scheduledNow()) {
 }
 
 function validateScheduledFinalization(dashboard, windowMode, now = scheduledNow()) {
-  if (!SCHEDULED_WINDOWS[windowMode]) throw new Error('Scheduled runs require --morning or --afternoon.');
+  if (!SCHEDULED_WINDOWS[windowMode]) throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
   const parts = chicagoDateParts(now);
   if (!['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(parts.weekday)) {
     throw new Error('Scheduled runs only permit weekday finalization in America/Chicago.');
@@ -273,7 +319,7 @@ function parseArgs(argv) {
     applyChartDataJson: '',
     mergeChartDataJson: '',
     syncChartQuotes: false,
-    rebuildEarningsCalendar: false,
+    rolloverCalendar: false,
     scheduled: false
   };
 
@@ -337,8 +383,8 @@ function parseArgs(argv) {
       args.scheduled = true;
       continue;
     }
-    if (arg === '--rebuild-earnings-calendar') {
-      args.rebuildEarningsCalendar = true;
+    if (arg === '--rollover-calendar') {
+      args.rolloverCalendar = true;
       continue;
     }
     if (arg === '--help' || arg === '-h') {
@@ -353,16 +399,15 @@ function parseArgs(argv) {
   if (!args.windowMode && contentModeCount === 0) {
     throw new Error('You must pass prepare, apply, --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
-  const windowAwareContentMode = args.applyDashboardDataJson || args.prepareEditorialDir;
-  if (contentModeCount > 1 || (args.windowMode && contentModeCount && !windowAwareContentMode)) {
+  if (contentModeCount > 1 || (args.windowMode && contentModeCount)) {
     throw new Error('Use only one update mode: --morning, --afternoon, --prepare-editorial-dir, --apply-dashboard-data-json, --apply-earnings-week-json, --apply-chart-data-json, --merge-chart-data-json, or --sync-chart-quotes.');
   }
   const deterministicPreparation = Boolean(args.windowMode && contentModeCount === 0);
-  if (args.scheduled && (!args.windowMode || (!deterministicPreparation && !args.applyDashboardDataJson))) {
-    throw new Error('--scheduled is valid only with deterministic preparation or final editorial application using --morning or --afternoon.');
+  if (args.scheduled && !(deterministicPreparation || args.applyDashboardDataJson)) {
+    throw new Error('--scheduled is valid only with deterministic preparation or final editorial application.');
   }
-  if (args.rebuildEarningsCalendar && !deterministicPreparation) {
-    throw new Error('--rebuild-earnings-calendar is valid only with deterministic preparation.');
+  if (args.rolloverCalendar && !(dailyCommand === 'prepare' && deterministicPreparation && !args.scheduled)) {
+    throw new Error('--rollover-calendar is valid only with manual deterministic preparation.');
   }
   if (path.resolve(args.candidate) === path.resolve(args.dashboard)) {
     throw new Error('--candidate must not target the canonical dashboard.');
@@ -374,10 +419,10 @@ function parseArgs(argv) {
 function printHelp() {
   process.stdout.write(`Usage:
   node scripts/run_daily_update.js prepare (--morning | --afternoon) [--scheduled] [options]
-  node scripts/run_daily_update.js apply [--scheduled --morning|--afternoon] [options]
+  node scripts/run_daily_update.js apply [--scheduled] [options]
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
-  node scripts/run_daily_update.js --prepare-editorial-dir PATH [--morning|--afternoon]
-  node scripts/run_daily_update.js --apply-dashboard-data-json PATH [--scheduled --morning|--afternoon] [options]
+  node scripts/run_daily_update.js --prepare-editorial-dir PATH
+  node scripts/run_daily_update.js --apply-dashboard-data-json PATH [--scheduled] [options]
   node scripts/run_daily_update.js --apply-earnings-week-json PATH [options]
   node scripts/run_daily_update.js --apply-chart-data-json PATH [options]
   node scripts/run_daily_update.js --merge-chart-data-json PATH [options]
@@ -396,8 +441,8 @@ Options:
   --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
-  --scheduled                         Mark scheduler-driven preparation/finalization; enforce its start window and completion marker
-  --rebuild-earnings-calendar         Explicitly authorize a metered Earnings calendar rebuild during a manual preparation
+  --scheduled                         Mark scheduler-driven preparation/finalization; preparation enforces the start window, finalization derives the window from the staged candidate
+  --rollover-calendar                 Manually force the selected edition's calendar rollover during prepare
   --help                              Show this help
 
 Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
@@ -490,7 +535,7 @@ function readCurrentEarningsWeekArtifact(targetRange, checkedAt, filePath = EARN
 }
 
 function earningsTargetRange(args, canonicalWeek) {
-  const rolloverRange = args.scheduled || args.rebuildEarningsCalendar
+  const rolloverRange = args.scheduled || args.rolloverCalendar
     ? args.calendarRolloverRange
     : null;
   return rolloverRange || canonicalWeek?.range;
@@ -505,11 +550,14 @@ function earningsCalendarBuildDecision(args, {
   const unavailableRetry = requiresUnavailableRolloverRetry(canonicalWeek);
   const buildNeeded = unavailableRetry || invalidPersistedArtifact || calendarNeedsBuild;
   if (!buildNeeded) return { build: false, blocked: false, reason: '' };
-  if (args.rebuildEarningsCalendar) return { build: true, blocked: false, reason: 'explicit_manual_rebuild' };
-  if (!args.scheduled) return { build: false, blocked: true, reason: 'manual_build_not_authorized' };
-  if (args.calendarRolloverRange) return { build: true, blocked: false, reason: 'scheduled_rollover' };
+  // Only rollover paths are allowed to spend EarningsAPI budget. Schema repair
+  // rebuilds the active range from free primary sources instead.
+  if (args.rolloverCalendar) return { build: true, blocked: false, reason: 'explicit_manual_rollover', useEarningsApi: true };
+  if (args.calendarRolloverRange) return { build: true, blocked: false, reason: 'scheduled_rollover', useEarningsApi: true };
   if (unavailableRetry) return { build: true, blocked: false, reason: 'scheduled_unavailable_retry' };
   if (failedAttemptNeedsRetry) return { build: true, blocked: false, reason: 'scheduled_failed_attempt_retry' };
+  if (invalidPersistedArtifact) return { build: true, blocked: false, reason: 'schema_repair', skipEarningsApi: true };
+  if (!args.scheduled) return { build: false, blocked: true, reason: 'manual_build_not_authorized' };
   return { build: false, blocked: true, reason: 'scheduled_build_not_authorized' };
 }
 
@@ -657,6 +705,16 @@ function prepareWeekAheadForEditorial(weekAhead) {
 function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
   const eligibleDates = allowedNewsDates(asOf);
   const prior = priorNewsCandidates(dashboardData, eligibleDates);
+  const futuresWindow = futuresStoryPublicationWindow(
+    dashboardData?.futuresModule?.sectionTitle,
+    asOf.toISOString(),
+    asOf,
+    dashboardData?.futuresModule?.futures
+  );
+  // Worker outages still need a Futures-specific pool; general freshness dates
+  // can be newer than the displayed futures session after a weekend or late run.
+  const futuresDates = futuresWindow?.sessionDate ? new Set([futuresWindow.sessionDate]) : eligibleDates;
+  const futuresPrior = futuresWindow ? priorNewsCandidates(dashboardData, futuresDates) : prior;
   return {
     schemaVersion: 2,
     generatedAt: asOf.toISOString(),
@@ -674,6 +732,9 @@ function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
       error: String(error?.message || error || 'News worker failed.')
     }],
     generalCandidates: prior.generalCandidates,
+    futuresCandidates: futuresPrior.generalCandidates
+      .filter((candidate) => futuresDates.has(candidate.publishedOn)
+        && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow))),
     cryptoCandidates: prior.cryptoCandidates
   };
 }
@@ -683,6 +744,7 @@ function validNewsCandidateArtifact(artifact, asOf) {
     && artifact.generatedAt === asOf.toISOString()
     && Array.isArray(artifact.attempts)
     && Array.isArray(artifact.generalCandidates)
+    && Array.isArray(artifact.futuresCandidates)
     && Array.isArray(artifact.cryptoCandidates);
 }
 
@@ -723,8 +785,7 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
       'scripts/fetch_news_candidates.js',
       '--as-of', asOf.toISOString(),
       '--input', args.candidate,
-      '--output', NEWS_CANDIDATES_PATH,
-      ...(args.windowMode ? [`--${args.windowMode}`] : [])
+      '--output', NEWS_CANDIDATES_PATH
     ], { timeoutMs: NEWS_COMMAND_TIMEOUT_MS });
     const artifact = readJson(NEWS_CANDIDATES_PATH);
     if (!validNewsCandidateArtifact(artifact, asOf)) {
@@ -750,14 +811,15 @@ function prepareEditorialWorkspace(args) {
   const dashboardData = readJsonBlock(html, 'dashboard-data');
   const previousDashboardData = assertCandidateMatchesCanonical(args, dashboardData);
   const baseEditionId = dashboardData.editionId;
+  const preparedAt = scheduledNow();
+  const windowMode = windowModeFromDashboard(dashboardData);
   delete dashboardData.editorialReview;
-  if (args.windowMode) applyEditionMetadata(dashboardData, args.windowMode);
+  // The handoff edition timestamp owns review freshness; baseEditionId remains
+  // the guard that ties this handoff back to the staged deterministic candidate.
+  dashboardData.editionId = preparedAt.toISOString();
+  if (windowMode) applyEditionMetadata(dashboardData, windowMode, preparedAt);
   delete dashboardData.lede;
   delete dashboardData.renesas;
-  const marketLensDecisions = (dashboardData.weekAhead?.days || [])
-    .filter((day) => Array.isArray(day?.events) && day.events.length)
-    .map(weekAheadMarketLensDecision);
-  const preparedAt = scheduledNow();
   const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
     schemaVersion: 1,
@@ -768,7 +830,7 @@ function prepareEditorialWorkspace(args) {
     newsSearch,
     newsSelection: { futures: [], stories: [], crypto: [] },
     openingDecision: { action: null },
-    marketLensDecisions
+    marketLensDecisions: []
   };
   dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
   delete dashboardData.storiesCoverage;
@@ -779,6 +841,9 @@ function prepareEditorialWorkspace(args) {
   if (dashboardData.crypto) dashboardData.crypto.notes = [];
   dashboardData.earnings = prepareEarningsForEditorial(dashboardData.earnings);
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
+  reviewManifest.marketLensDecisions = (dashboardData.weekAhead?.days || [])
+    .filter((day) => Array.isArray(day?.events) && day.events.length)
+    .map(weekAheadMarketLensDecision);
   dashboardData.editorialReview = reviewManifest;
   fs.mkdirSync(args.prepareEditorialDir, { recursive: true });
   for (const staleName of ['editorial-review.json', 'earnings_narrative.json']) {
@@ -921,8 +986,8 @@ function commitDashboardCandidate(args, nextHtml, {
   }
 }
 
-function commitEditorialCandidate(args, nextHtml) {
-  commitDashboardCandidate(args, nextHtml);
+function commitEditorialCandidate(args, nextHtml, options = {}) {
+  commitDashboardCandidate(args, nextHtml, options);
 }
 
 function stageDashboardCandidate(args, nextHtml) {
@@ -1018,7 +1083,71 @@ function applyCryptoStats(data, payload) {
   else delete data.crypto.availability;
 }
 
-function applyEarningsWeek(data, earningsWeek, { requireNarrative = true } = {}) {
+function hasPublishedEarningsRows(week) {
+  return Array.isArray(week?.rows) && week.rows.length > 0;
+}
+
+function rangesMatch(left, right) {
+  return left?.from === right?.from && left?.to === right?.to;
+}
+
+function optionalJson(filePath) {
+  try {
+    return fs.existsSync(filePath) ? readJson(filePath) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function emptyEarningsContradicted(sourceWeek, { incomingRows = 0, evidenceRows = false, useSidecarEvidence = false } = {}) {
+  if (incomingRows > 0 || evidenceRows) return true;
+  if (!useSidecarEvidence) return false;
+  const range = sourceWeek?.range;
+  if (!range) return false;
+  const scheduleReview = optionalJson(EARNINGS_SCHEDULE_REVIEW_PATH);
+  if (rangesMatch(scheduleReview?.range, range) && Array.isArray(scheduleReview.rows) && scheduleReview.rows.length > 0) return true;
+  const narrative = optionalJson(EARNINGS_NARRATIVE_PATH);
+  return rangesMatch(narrative?.sourceRange, range) && Array.isArray(narrative.rows) && narrative.rows.length > 0;
+}
+
+function carriedForwardEarningsWeek(previousWeek, checkedAt = scheduledNow()) {
+  const asOf = new Date(checkedAt);
+  return {
+    ...structuredClone(previousWeek),
+    generatedAt: asOf.toISOString(),
+    availability: {
+      status: 'carried_forward',
+      reason: 'empty_earnings_recovery',
+      checkedAt: asOf.toISOString()
+    },
+    rows: (Array.isArray(previousWeek?.rows) ? previousWeek.rows : [])
+      .map((row) => applyEarningsLifecycle(row, asOf))
+  };
+}
+
+function recoverEmptyEarningsWeek(data, sourceWeek, previousWeek, options = {}) {
+  const week = data.earnings?.week;
+  if (hasPublishedEarningsRows(week) || !emptyEarningsContradicted(sourceWeek, options)) return false;
+  // If sidecar/review evidence proves the active slate had rows, publishing an
+  // empty monitor would hide a deterministic failure; carry forward last good.
+  if (!hasPublishedEarningsRows(previousWeek)) {
+    throw new Error('Earnings publication produced zero rows despite same-range row evidence, and no previous non-empty canonical week is available to carry forward.');
+  }
+  data.earnings.week = carriedForwardEarningsWeek(previousWeek, options.checkedAt);
+  normalizeEarningsForPublication(data);
+  if (!hasPublishedEarningsRows(data.earnings?.week)) {
+    throw new Error('Earnings empty-row recovery failed because the previous canonical week did not survive publication normalization.');
+  }
+  return true;
+}
+
+function isEmptyEarningsRecoveryWeek(week) {
+  return week?.availability?.status === 'carried_forward'
+    && week.availability.reason === 'empty_earnings_recovery';
+}
+
+function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previousWeek = data.earnings?.week, checkedAt = scheduledNow(), evidenceRows = false, useSidecarEvidence = false } = {}) {
+  const incomingRows = Array.isArray(earningsWeek?.rows) ? earningsWeek.rows.length : 0;
   const canonicalEarningsWeek = mergeUnchangedEarningsNarrative(data.earnings?.week, earningsWeek);
   delete canonicalEarningsWeek.policy;
   delete canonicalEarningsWeek.outputPath;
@@ -1028,6 +1157,7 @@ function applyEarningsWeek(data, earningsWeek, { requireNarrative = true } = {})
     week: canonicalEarningsWeek
   };
   normalizeEarningsForPublication(data);
+  recoverEmptyEarningsWeek(data, earningsWeek, { ...previousWeek }, { incomingRows, checkedAt, evidenceRows, useSidecarEvidence });
 }
 
 function prepareCandidateNews(data, now = scheduledNow()) {
@@ -1137,7 +1267,6 @@ function applyWeekAhead(data, weekAheadPayload) {
 }
 
 function syncDashboardPricesFromChartData(data, chartData, {
-  windowMode = '',
   now = scheduledNow(),
   resetCommentary = false,
   commentaryTickers = null,
@@ -1160,8 +1289,9 @@ function syncDashboardPricesFromChartData(data, chartData, {
     commentaryResetCount = resetTapeCommentary(data, quoteRevisionByTicker, { tickers: commentaryTickers, systemFallbacks });
   }
   if (data.weekAhead) {
-    data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { windowMode, now });
+    data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { now });
     normalizeWeekAheadReactionButtons(data, chartData);
+    data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead, { now });
   }
   return { commentaryResetCount };
 }
@@ -1221,7 +1351,6 @@ function patchDashboard(args) {
   chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
   // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
   syncDashboardPricesFromChartData(dashboardData, chartData, {
-    windowMode: args.windowMode,
     resetCommentary: true,
     commentaryTickers: acceptedFreshChartTickers(chartData)
   });
@@ -1240,20 +1369,22 @@ function patchDashboard(args) {
   applyAssetAllocationSummary(dashboardData, summaryPayload);
 
   applyWeekAhead(dashboardData, args.weekAheadPayload || args.weekAheadFallbackPayload || readJson(WEEK_AHEAD_PATH));
-  dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { windowMode: args.windowMode, now: scheduledNow() });
+  dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { now: scheduledNow() });
   normalizeWeekAheadReactionButtons(dashboardData, chartData);
+  dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead, { now: scheduledNow() });
 
+  const previousEarningsWeek = structuredClone(dashboardData.earnings?.week || null);
   if (args.earningsFallbackWeek) {
-    applyEarningsWeek(dashboardData, args.earningsFallbackWeek, { requireNarrative: false });
+    applyEarningsWeek(dashboardData, args.earningsFallbackWeek, { requireNarrative: false, previousWeek: previousEarningsWeek, useSidecarEvidence: true });
   } else {
-    applyEarningsWeek(dashboardData, args.earningsWeekPayload || readJson(EARNINGS_WEEK_PATH), { requireNarrative: false });
+    applyEarningsWeek(dashboardData, args.earningsWeekPayload || readJson(EARNINGS_WEEK_PATH), { requireNarrative: false, previousWeek: previousEarningsWeek, useSidecarEvidence: true });
   }
 
   applyEditionMetadata(dashboardData, args.windowMode);
   prepareCandidateNews(dashboardData);
   // Preparation never advances scheduled News state. Only a successful final
   // editorial application records completion and rotates the comparison set.
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: false, scheduledWindow: args.windowMode, now: scheduledNow() });
+  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: false, now: scheduledNow() });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, null, null, { stampEdition: false });
   return nextHtml;
 }
@@ -1352,11 +1483,27 @@ function preserveSafePriorEarningsNarrative(finalWeek, previousWeek) {
     .map((row) => [earningsNarrativeRowKey(row), row]));
   return {
     ...finalWeek,
-    rows: (Array.isArray(finalWeek?.rows) ? finalWeek.rows : []).map((row) => (
-      narrativeEditorialComplete(row, row)
-        ? row
-        : fallbackRowsByKey.get(earningsNarrativeRowKey(row)) || row
-    ))
+    rows: (Array.isArray(finalWeek?.rows) ? finalWeek.rows : []).map((row) => {
+      const fallback = fallbackRowsByKey.get(earningsNarrativeRowKey(row));
+      if (!fallback || narrativeEditorialComplete(row, row)) return row;
+      const output = structuredClone(row);
+      if (!validEarningsCommentaryDisposition(output.outcome?.interpretationDisposition, output.outcome?.interpretation)) {
+        output.outcome.interpretation = fallback.outcome?.interpretation || '';
+        if (fallback.outcome?.interpretationDisposition) output.outcome.interpretationDisposition = structuredClone(fallback.outcome.interpretationDisposition);
+        else delete output.outcome.interpretationDisposition;
+      }
+      if (!validEarningsGuidanceDisposition(output.outcome?.guidanceDisposition, output.outcome?.guide)) {
+        output.outcome.guide = fallback.outcome?.guide || '';
+        if (fallback.outcome?.guidanceDisposition) output.outcome.guidanceDisposition = structuredClone(fallback.outcome.guidanceDisposition);
+        else delete output.outcome.guidanceDisposition;
+      }
+      if (!validEarningsCommentaryDisposition(output.reaction?.commentaryDisposition, output.reaction?.note)) {
+        output.reaction.note = fallback.reaction?.note || '';
+        if (fallback.reaction?.commentaryDisposition) output.reaction.commentaryDisposition = structuredClone(fallback.reaction.commentaryDisposition);
+        else delete output.reaction.commentaryDisposition;
+      }
+      return output;
+    })
   };
 }
 
@@ -1392,6 +1539,13 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
   finalWeek = preserveSafePriorEarningsNarrative(finalWeek, previousDashboardData?.earnings?.week);
   const finalized = { earnings: { week: finalWeek } };
   normalizeEarningsForPublication(finalized);
+  recoverEmptyEarningsWeek(finalized, candidateWeek, previousDashboardData?.earnings?.week, {
+    incomingRows: Array.isArray(candidateWeek?.rows) ? candidateWeek.rows.length : 0,
+    checkedAt: scheduledNow(),
+    useSidecarEvidence: true
+  });
+  // Apply does not rebuild the slate here. The recovery above only prevents a
+  // same-range zero-row publish when staged sidecars prove rows existed.
   finalWeek = finalized.earnings.week;
   const errors = validateEarningsWeekPayload(finalWeek);
   if (errors.length) process.stderr.write(`Editorial Earnings narrative warning: ${errors.join(' ')}\n`);
@@ -1408,6 +1562,7 @@ function safeEditorialText(value, fallback) {
 }
 
 function sanitizeOpening(editorial) {
+  // Opening is a handoff-editing target; Apply Handoff salvages valid copy instead of blocking publication.
   const opening = {};
   const headline = typeof editorial?.headline === 'string' ? editorial.headline.trim() : '';
   const deck = typeof editorial?.deck === 'string' ? editorial.deck.trim() : '';
@@ -1469,9 +1624,10 @@ function sanitizeStoryList(editorial, options = {}) {
     if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'omitted', reason: 'editorial_content_unavailable' });
     return [];
   }
+  // Stage 3 does not search for replacements; candidate maps only prove the
+  // selected URLs came from Stage 1's generated inventory.
   const seenUrls = new Set();
   const candidateByUrl = options.candidateByUrl instanceof Map ? options.candidateByUrl : null;
-  const candidateUrls = options.candidateUrls instanceof Set ? options.candidateUrls : candidateByUrl ? new Set(candidateByUrl.keys()) : null;
   const blockedUrls = options.blockedUrls instanceof Set ? options.blockedUrls : new Set();
   const selected = [];
   editorial.forEach((item, index) => {
@@ -1486,10 +1642,6 @@ function sanitizeStoryList(editorial, options = {}) {
       return;
     }
     const url = canonicalStoryUrl(story.url);
-    if (candidateUrls && !candidateUrls.has(url)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
-      return;
-    }
     const duplicate = !url || seenUrls.has(url);
     const blockedDuplicate = blockedUrls.has(url);
     if (duplicate || blockedDuplicate) {
@@ -1525,11 +1677,7 @@ function candidateEligibleForNewsSection(candidate, options = {}) {
   if (!canonicalCandidateUrl(candidate)) return false;
   if (!candidatePublishedOnAllowed(candidate, options)) return false;
   if (options.futures) {
-    if (!options.futuresWindow) return false;
-    const publishedAt = Date.parse(candidate.publishedAt);
-    if (!Number.isFinite(publishedAt)) return false;
-    return publishedAt >= options.futuresWindow.start.getTime()
-      && publishedAt <= options.futuresWindow.end.getTime();
+    return !options.futuresWindow || candidateInFuturesPublicationWindow(candidate, options.futuresWindow);
   }
   return true;
 }
@@ -1576,6 +1724,8 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFall
     const note = safeEditorialText(editorial?.note, row.note);
     const text = String(note || '').trim();
     const candidateDispositionValid = validateTapeCommentaryDisposition(row).length === 0;
+    // Commentary is bound to the accepted quote revision; refreshed or invalid
+    // rows need new review instead of silently reusing prior copy.
     const quoteRevision = candidateDispositionValid
       ? row.noteDisposition.quoteRevision
       : previous?.noteDisposition?.quoteRevision || reviewedAt;
@@ -1678,6 +1828,7 @@ function normalizeEarningsForPublication(data) {
   if (!week || typeof week !== 'object' || Array.isArray(week)) return;
   if (!Array.isArray(week.rows)) week.rows = [];
   week.rows = week.rows
+    .map(repairPublishedEarningsReaction)
     .filter(renderSafePublishedEarningsRow)
     .filter(isDisplayEligibleEarningsRow)
     .map((row) => normalizeEarningsCommentaryForPublication(row));
@@ -1693,6 +1844,41 @@ function normalizeEarningsForPublication(data) {
 
 function objectRecord(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validComputedEarningsReaction(reaction) {
+  return objectRecord(reaction)
+    && reaction.status === 'computed'
+    && Number.isFinite(reaction.percent)
+    && isIsoDate(reaction.fromDate)
+    && isIsoDate(reaction.toDate)
+    && Number.isFinite(reaction.fromClose)
+    && Number.isFinite(reaction.toClose);
+}
+
+function repairPublishedEarningsReaction(row) {
+  if (!objectRecord(row)) return row;
+  const reaction = objectRecord(row.reaction) ? row.reaction : null;
+  if (validComputedEarningsReaction(reaction)) return row;
+  const hasActuals = earningsHasActual(row);
+  const status = !hasActuals
+    ? 'pending'
+    : row.reportTiming === 'unknown' ? 'unavailable' : 'awaiting_close';
+  return {
+    ...row,
+    reaction: {
+      ...(reaction || {}),
+      basis: earningsReactionBasis(row.reportTiming),
+      percent: null,
+      fromDate: '',
+      fromClose: null,
+      toDate: '',
+      toClose: null,
+      status,
+      note: typeof reaction?.note === 'string' ? reaction.note : '',
+      source: typeof reaction?.source === 'string' ? reaction.source : ''
+    }
+  };
 }
 
 function renderSafePublishedEarningsRow(row) {
@@ -1783,11 +1969,13 @@ function normalizeEarningsCommentaryForPublication(row) {
   return next;
 }
 
-function normalizePublicationDisplaySections(data, { windowMode = '', now = scheduledNow() } = {}) {
+function normalizePublicationDisplaySections(data, { now = scheduledNow() } = {}) {
+  // Publication normalization is render-safety only: keep the static dashboard
+  // bootable with explicit degraded sections, without fetching or selecting data.
   const checkedAt = new Date(now);
   const asOf = chicagoDateParts(checkedAt).isoDate;
   const month = asOf.slice(0, 7);
-  const safeWindowMode = WINDOW_LABELS[windowMode] ? windowMode : 'afternoon';
+  const safeWindowMode = windowModeFromDashboard(data) || 'afternoon';
 
   if (!Array.isArray(data.stories)) data.stories = [];
 
@@ -1829,25 +2017,29 @@ function applyDashboardDataJson(args) {
   const canonicalHtml = loadDashboardBase(args.dashboard).html;
   const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
   const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
-  if (args.scheduled) validateScheduledFinalization(args.dashboard, args.windowMode);
+  const windowMode = windowModeFromDashboard(candidateDashboardData);
+  if (args.scheduled) validateScheduledFinalization(args.dashboard, windowMode);
   const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
-  const canonicalChartData = roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data'));
   const candidateChartData = roundChartPayload(readJsonBlock(candidateHtml, 'chart-data'));
-  assertChartSeriesRevisions(
-    canonicalChartData,
-    candidateChartData,
-    'Staged dashboard candidate'
-  );
+  // Apply publishes staged chart-data as-is; Stage 1 and focused chart repairs
+  // own revision validation, quote derivation, and Week Ahead lifecycle updates.
   const editorialDashboardData = readJson(args.applyDashboardDataJson);
   let reviewManifest = { ...editorialDashboardData.editorialReview, reviewedAt: scheduledNow().toISOString() };
   reviewManifest.systemFallbacks = [];
-  if (editorialDashboardData.editionId !== candidateDashboardData.editionId) {
-    throw new Error('Editorial dashboard-data editionId must match the staged candidate; regenerate the editorial handoff.');
+  if (reviewManifest.baseEditionId !== candidateDashboardData.editionId) {
+    throw new Error('Editorial dashboard-data baseEditionId must match the staged candidate; regenerate the editorial handoff.');
+  }
+  if (!isIsoDateTime(editorialDashboardData.editionId)) {
+    throw new Error('Editorial dashboard-data editionId must be the prepared run edition timestamp; regenerate the editorial handoff.');
   }
   const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
   const dashboardData = structuredClone(candidateDashboardData);
-  const editorialNow = scheduledNow();
+  // The prepared edition timestamp owns editorial freshness and story windows;
+  // wall-clock apply time may drift outside the original handoff window.
+  const editorialNow = new Date(editorialDashboardData.editionId);
+  dashboardData.editionId = editorialDashboardData.editionId;
   const generalNewsCandidates = Array.isArray(newsSource?.generalCandidates) ? newsSource.generalCandidates : [];
+  const futuresNewsCandidates = Array.isArray(newsSource?.futuresCandidates) ? newsSource.futuresCandidates : [];
   const cryptoNewsCandidates = Array.isArray(newsSource?.cryptoCandidates) ? newsSource.cryptoCandidates : [];
   const futuresWindow = futuresStoryPublicationWindow(
     dashboardData.futuresModule?.sectionTitle,
@@ -1856,9 +2048,9 @@ function applyDashboardDataJson(args) {
     dashboardData.futuresModule?.futures
   );
   const newsCandidateSets = {
-    generalCandidateByUrl: newsSource ? candidateUrlMap(generalNewsCandidates) : null,
-    cryptoCandidateByUrl: newsSource ? candidateUrlMap(cryptoNewsCandidates) : null,
-    futuresCandidateByUrl: newsSource ? candidateUrlMap(generalNewsCandidates, { futures: true, futuresWindow }) : null
+    generalCandidateByUrl: candidateUrlMap(generalNewsCandidates),
+    cryptoCandidateByUrl: candidateUrlMap(cryptoNewsCandidates),
+    futuresCandidateByUrl: candidateUrlMap(futuresNewsCandidates, { futures: true, futuresWindow })
   };
   dashboardData.opening = sanitizeOpening(editorialDashboardData.opening);
   dashboardData.futuresModule = {
@@ -1938,17 +2130,6 @@ function applyDashboardDataJson(args) {
     for (const date of editorialWeekAheadDays.keys()) {
       if (!candidateWeekAheadDates.has(date)) reviewManifest.systemFallbacks.push({ section: 'market-lens', path: `weekAhead.days.${date}`, action: 'omitted', reason: 'stale_editorial_item' });
     }
-    dashboardData.weekAhead.days = dashboardData.weekAhead.days.map((day) => {
-      const editorialDay = editorialWeekAheadDays.get(day.date);
-      if (!editorialDay) {
-        return day;
-      }
-      const next = { ...day };
-      if (usableWeekAheadOutcome(editorialDay.outcome)) {
-        next.outcome = editorialDay.outcome;
-      }
-      return next;
-    });
   }
   const finalizedEarnings = applyEditorialEarningsNarrative(
     dashboardData,
@@ -1956,29 +2137,41 @@ function applyDashboardDataJson(args) {
     editorialDashboardData,
     previousDashboardData
   );
-  applyEditionMetadata(dashboardData, args.windowMode);
-  syncDashboardPricesFromChartData(dashboardData, candidateChartData, { windowMode: args.windowMode });
-  normalizePublicationDisplaySections(dashboardData, { windowMode: args.windowMode, now: editorialNow });
+  if (windowMode) applyEditionMetadata(dashboardData, windowMode, editorialNow);
+  normalizePublicationDisplaySections(dashboardData, { now: editorialNow });
   normalizeMarketLensReview(dashboardData, reviewManifest);
   normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
   const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
   if (reviewErrors.length) process.stderr.write(`Editorial review receipt will be best-effort: ${reviewErrors.join(' ')}\n`);
+  // Week Ahead facts and lifecycle already belong to the staged candidate; Apply
+  // merges only editorial decisions and verified Outcome copy onto that state.
   applyMarketLensDecisionsData(dashboardData, reviewManifest.marketLensDecisions);
-  normalizeWeekAheadReactionButtons(dashboardData, candidateChartData);
-  dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, candidateChartData, { windowMode: args.windowMode, now: scheduledNow() });
-  normalizeWeekAheadReactionButtons(dashboardData, candidateChartData);
+  if (Array.isArray(dashboardData.weekAhead?.days)) {
+    dashboardData.weekAhead.days = dashboardData.weekAhead.days.map((day) => {
+      const editorialDay = editorialWeekAheadDays.get(day.date);
+      return usableWeekAheadOutcome(editorialDay?.outcome) ? { ...day, outcome: editorialDay.outcome } : day;
+    });
+  }
   const reviewChartData = compactChartPayload(candidateChartData);
   let nextHtml = replaceJsonBlock(canonicalHtml, 'chart-data', JSON.stringify(reviewChartData));
-  dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead, { now: scheduledNow() });
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: args.windowMode, now: scheduledNow() });
-  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData);
-  commitEditorialCandidate(args, nextHtml);
-  if (finalizedEarnings && path.resolve(args.dashboard) === DEFAULT_DASHBOARD) {
+  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: windowMode, now: editorialNow });
+  nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData, { stampEdition: false });
+  const publishingDefaultDashboard = path.resolve(args.dashboard) === DEFAULT_DASHBOARD;
+  const recoveredEarningsPublication = isEmptyEarningsRecoveryWeek(finalizedEarnings?.week);
+  // A carried-forward Earnings monitor keeps the page safe, but it is not a new
+  // known-good deterministic baseline for future empty-row recovery.
+  commitEditorialCandidate(args, nextHtml, {
+    refreshLastGood: publishingDefaultDashboard && !recoveredEarningsPublication
+  });
+  if (finalizedEarnings && publishingDefaultDashboard) {
+    if (recoveredEarningsPublication) {
+      process.stderr.write('Earnings narrative synchronization skipped because the dashboard carried forward the previous non-empty week after empty-row recovery.\n');
+      return;
+    }
     try {
-      writeJson(EARNINGS_WEEK_PATH, finalizedEarnings.week);
       if (finalizedEarnings.narrativePayload) writeJson(EARNINGS_NARRATIVE_PATH, finalizedEarnings.narrativePayload);
     } catch (error) {
-      process.stderr.write(`Dashboard was committed, but Earnings staging synchronization failed and will retry later: ${error.message}\n`);
+      process.stderr.write(`Dashboard was committed, but Earnings narrative synchronization failed and will retry later: ${error.message}\n`);
     }
   }
 }
@@ -2033,7 +2226,6 @@ function applyChartDataJson(args) {
     chartData = buildChartDataFallback(currentChartData, scheduledNow());
   }
   syncDashboardPricesFromChartData(dashboardData, chartData, {
-    windowMode: args.windowMode,
     resetCommentary: true,
     commentaryTickers: acceptedFreshChartTickers(chartData)
   });
@@ -2050,7 +2242,7 @@ function applyEarningsWeekJson(args) {
   let earningsWeek;
   try {
     earningsWeek = readJson(args.applyEarningsWeekJson);
-    applyEarningsWeek(dashboardData, earningsWeek, { requireNarrative: false });
+    applyEarningsWeek(dashboardData, earningsWeek, { requireNarrative: false, previousWeek: dashboardData.earnings?.week, useSidecarEvidence: true });
   } catch (error) {
     reportPreparationStatus('skipped', `Earnings focused preparation input was unusable; candidate and canonical dashboard unchanged: ${error.message}`);
     return;
@@ -2108,7 +2300,6 @@ function mergeChartDataJson(args) {
     chartData = incomingChartData;
   }
   syncDashboardPricesFromChartData(dashboardData, chartData, {
-    windowMode: args.windowMode,
     resetCommentary: true,
     commentaryTickers: acceptedFreshChartTickers(incomingChartData)
   });
@@ -2123,7 +2314,7 @@ function mergeChartDataJson(args) {
 function syncChartQuotes(args) {
   const { html, dashboardData } = loadFocusedRepairBase(args);
   const chartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
-  syncDashboardPricesFromChartData(dashboardData, chartData, { windowMode: args.windowMode });
+  syncDashboardPricesFromChartData(dashboardData, chartData);
   prepareCandidateNews(dashboardData);
   const embeddedChartData = compactChartPayload(chartData);
   let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
@@ -2134,7 +2325,9 @@ function syncChartQuotes(args) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  args.calendarRolloverRange = calendarRolloverRange(args.windowMode);
+  args.calendarRolloverRange = args.rolloverCalendar
+    ? manualCalendarRolloverRange(args.windowMode)
+    : calendarRolloverRange(args.windowMode);
   if (!fs.existsSync(args.dashboard)) {
     throw new Error(`Dashboard file not found: ${args.dashboard}`);
   }
@@ -2335,16 +2528,19 @@ function main() {
       failedAttemptNeedsRetry
     });
     if (buildDecision.blocked) {
-      throw new Error('Earnings calendar rebuild is not authorized for this run; retaining the validated active-range section. Use --rebuild-earnings-calendar only for an intentional manual rebuild.');
+      throw new Error('Earnings calendar rebuild is not authorized for this run; retaining the validated active-range section.');
     }
     if (buildDecision.build) {
-      runCommand('node', [
+      const buildArgs = [
         'scripts/earnings_week.js',
         'build',
         '--from', earningsRange.from,
         '--to', earningsRange.to,
         '--as-of', checkedAt.toISOString()
-      ], { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS });
+      ];
+      if (buildDecision.useEarningsApi) buildArgs.push('--use-earningsapi');
+      if (buildDecision.skipEarningsApi) buildArgs.push('--skip-earningsapi');
+      runCommand('node', buildArgs, { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS });
     }
     reportPendingEarningsScheduleReviews(pendingEarningsScheduleReviews(undefined, earningsRange));
     runCommand('node', [
@@ -2401,6 +2597,8 @@ module.exports = {
   applyEditorialEarningsNarrative,
   applyMarketLensDecisionsData,
   applyChartDataJson,
+  chartSeriesRevisionErrors,
+  manualCalendarRolloverRange,
   mergeChartDataJson,
   mergedChartAvailability,
   applyCryptoQuoteRows,
@@ -2426,6 +2624,7 @@ module.exports = {
   readCurrentEarningsWeekArtifact,
   earningsTargetRange,
   earningsCalendarBuildDecision,
+  isEmptyEarningsRecoveryWeek,
   weekAheadStagingNeedsRebuild,
   runCommand,
   runWithSectionFallback,

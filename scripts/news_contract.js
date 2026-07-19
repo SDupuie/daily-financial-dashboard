@@ -72,30 +72,25 @@ function sharedFuturesSessionDate(futures) {
 }
 
 function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
-  const runAt = isIsoDateTime(editionId) ? new Date(editionId) : now;
   const sessionDate = sharedFuturesSessionDate(futures);
+  if (!sessionDate || !['Pre-Market Futures', 'Session Futures'].includes(sectionTitle)) return null;
   const [year, month, day] = sessionDate.split('-').map(Number);
-  const eastern = sessionDate ? { year, month, day } : zonedDateParts(runAt, 'America/New_York');
-  if (sectionTitle === 'Pre-Market Futures') {
-    const referenceDate = sharedFuturesReferenceDate(futures);
-    if (!referenceDate) return null;
-    const [year, month, day] = referenceDate.split('-').map(Number);
-    return {
-      start: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
-      end: runAt,
-      description: 'the fetched prior U.S. regular-session close and the dashboard run time'
-    };
-  }
-  if (sectionTitle === 'Session Futures') {
-    const start = zonedDateTime({ ...eastern, hour: 9, minute: 30 }, 'America/New_York');
-    const marketClose = zonedDateTime({ ...eastern, hour: 16, minute: 0 }, 'America/New_York');
-    return {
-      start,
-      end: new Date(Math.min(runAt.getTime(), marketClose.getTime())),
-      description: 'the current U.S. regular-session open and the earlier of the regular-session close or dashboard run time'
-    };
-  }
-  return null;
+  // The displayed futures rows own sessionDate; a late Apply should not reshape
+  // story eligibility from wall-clock or edition timestamps.
+  return {
+    sessionDate,
+    start: zonedDateTime({ year, month, day, hour: 9, minute: 30 }, 'America/New_York'),
+    end: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
+    description: 'the displayed U.S. regular-session futures window'
+  };
+}
+
+function candidateInFuturesPublicationWindow(candidate, futuresWindow) {
+  if (!futuresWindow) return false;
+  const publishedAt = Date.parse(candidate?.publishedAt);
+  return Number.isFinite(publishedAt)
+    && publishedAt >= futuresWindow.start.getTime()
+    && publishedAt <= futuresWindow.end.getTime();
 }
 
 function newsCoverageState(count, policy, now) {
@@ -301,7 +296,7 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false, sch
 
   if (scheduled) {
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
-      throw new Error('Scheduled finalization requires --morning or --afternoon to record the completed window.');
+      throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
     }
     data.newsBaseline = {
       lastScheduledUpdateAt: now.toISOString(),
@@ -321,6 +316,7 @@ module.exports = {
   allowedNewsDates,
   applyNewsCoverageState,
   applyScheduledNewsBaseline,
+  candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,
   futuresStoryPublicationWindow,

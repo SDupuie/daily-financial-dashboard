@@ -36,6 +36,7 @@ Commands:
   resolve           Resolve company-release tasks into the resolution sidecar
   apply-release     Apply company-release resolutions to the week artifact
   apply-narrative   Apply earnings narrative sidecar to the week artifact
+  repair-source-audit  Restore source audit metadata for a manual recovery artifact
   validate          Validate the earnings week artifact
   validate-release  Validate company-release resolution sidecar
 
@@ -49,6 +50,96 @@ Examples:
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+// Legacy manual-recovery rows may predate sourceAudit; only Finnhub-primary
+// rows can be repaired without inventing secondary-source provenance.
+function recoveredRowSourceAudit(row) {
+  if (row?.sourceAudit?.selectedSources) return row;
+  if (row?.sourceAudit) throw new Error(`${row.symbol || 'Earnings row'} has an incomplete sourceAudit; rebuild the artifact from its original sources.`);
+  if (row?.sourceSummary?.primary !== 'finnhub') {
+    throw new Error(`${row?.symbol || 'Earnings row'} has no sourceAudit and cannot be recovered without a Finnhub primary source.`);
+  }
+  const sourceFor = (value) => Number.isFinite(value) ? 'finnhub' : 'none';
+  return {
+    ...row,
+    sourceAudit: {
+      recoveredFrom: 'manual_schedule_review',
+      finnhubUsListing: null,
+      finnhubCalendar: {
+        reportDate: row.reportDate,
+        reportTiming: row.reportTiming,
+        fiscalQuarter: row.fiscalQuarter,
+        fiscalYear: row.fiscalYear,
+        eps: { estimate: row.eps?.estimate ?? null, actual: row.eps?.actual ?? null },
+        revenue: { estimate: row.revenue?.estimate ?? null, actual: row.revenue?.actual ?? null }
+      },
+      finnhubProfile: {
+        name: row.company,
+        ticker: row.symbol,
+        exchange: row.exchange,
+        country: row.country,
+        currency: row.currency,
+        marketCap: row.marketCap
+      },
+      finnhubMetric: null,
+      earningsApiCalendar: null,
+      providerDateConflict: null,
+      scheduleVerification: {
+        status: 'primary_only',
+        primaryDate: row.reportDate,
+        secondaryDates: [],
+        official: null
+      },
+      selectedSources: {
+        slate: 'finnhub',
+        company: 'finnhubProfile',
+        marketCap: Number.isFinite(row.marketCap) ? 'finnhubProfile' : 'none',
+        timing: row.reportTiming === 'unknown' ? 'none' : 'finnhub',
+        eps: { estimate: sourceFor(row.eps?.estimate), actual: sourceFor(row.eps?.actual) },
+        revenue: { estimate: sourceFor(row.revenue?.estimate), actual: sourceFor(row.revenue?.actual) },
+        reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
+      }
+    }
+  };
+}
+
+function repairRecoveredEarningsSourceAudit(source) {
+  return {
+    ...source,
+    rows: (source?.rows || []).map(recoveredRowSourceAudit)
+  };
+}
+
+function assertRefreshSourceAudit(source) {
+  for (const row of source?.rows || []) {
+    if (!row?.sourceAudit?.selectedSources) {
+      throw new Error(`${row?.symbol || 'Earnings row'} is missing sourceAudit.selectedSources. Run earnings_week.js repair-source-audit before refresh.`);
+    }
+  }
+}
+
+function parseRepairSourceAuditArgs(argv) {
+  const args = { input: DEFAULT_EARNINGS_WEEK, output: DEFAULT_EARNINGS_WEEK };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--input' || arg === '--output') {
+      args[arg.slice(2)] = path.resolve(process.cwd(), argv[index + 1] || '');
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown repair-source-audit option: ${arg}`);
+  }
+  return args;
+}
+
+function repairSourceAuditCommand(argv) {
+  const args = parseRepairSourceAuditArgs(argv);
+  const output = repairRecoveredEarningsSourceAudit(readJson(args.input));
+  const errors = validateEarningsWeekPayload(output);
+  if (errors.length) throw new Error(`Recovered earnings source audit is invalid: ${errors.join(' ')}`);
+  atomicWriteJson(args.output, output);
+  process.stdout.write(`Repaired source audit for ${output.rows.length} earnings row(s) at ${args.output}\n`);
 }
 
 function earningsApiCalendarAttemptFailed(week) {
@@ -499,6 +590,7 @@ function updateSummary(source) {
 }
 
 function applyCompanyReleaseResolutions(source, resolutionPayload) {
+  assertRefreshSourceAudit(source);
   const output = JSON.parse(JSON.stringify(source));
   delete output.policy;
   const taskMap = new Map((output.companyReleaseTasks || []).map((task) => [task.id, task]));
@@ -755,6 +847,7 @@ function parseArgs(argv) {
     earningsApiUsage: DEFAULT_EARNINGSAPI_USAGE,
     earningsApiDailyLimit: DEFAULT_EARNINGSAPI_DAILY_LIMIT,
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
+    useEarningsApi: false,
     compact: false
   };
 
@@ -795,6 +888,10 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--use-earningsapi') {
+      args.useEarningsApi = true;
+      continue;
+    }
     if (arg === '--compact') {
       args.compact = true;
       continue;
@@ -824,14 +921,15 @@ Options:
   --earningsapi-usage PATH    EarningsAPI daily usage ledger
   --earningsapi-daily-limit   Daily EarningsAPI call cap (default: 100)
   --earningsapi-reserve 0     Calls excluded from this result-refresh run
+  --use-earningsapi           Permit metered EarningsAPI usage for approved rollover/recovery only
   --compact                   Print compact refresh report
   --help                      Show this help
 
 Environment:
   FINNHUB_API_KEY             Used for Finnhub-covered row actuals; absence is
                                recorded on affected rows without aborting refresh
-  EARNINGSAPI_API_KEY         Used only for previously recovered rows; absence is
-                               recorded on affected rows without aborting refresh
+  EARNINGSAPI_API_KEY         Used only with --use-earningsapi for previously
+                               recovered rows
 
 This result-refresh path never calls the EarningsAPI calendar endpoint.
 `);
@@ -988,6 +1086,7 @@ function writeEarningsApiUsage(file, usage) {
 }
 
 function canUseEarningsApi(args, usage, token) {
+  if (!args.useEarningsApi) return false;
   if (!token) return false;
   return hasEarningsApiBudget(usage, args.earningsApiDailyLimit, args.earningsApiReserve);
 }
@@ -1334,6 +1433,11 @@ function refreshTargetRows(source, asOf) {
     .filter((row) => reportWindowArrived(row, asOf));
 }
 
+function needsYahooReactionFetch(row) {
+  return row?.reportTiming !== 'unknown'
+    && (Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual));
+}
+
 function applyResultRefreshDiagnostics(row, failures, checkedAt) {
   const output = structuredClone(row);
   output.sourceAudit = { ...output.sourceAudit };
@@ -1351,6 +1455,7 @@ function applyResultRefreshDiagnostics(row, failures, checkedAt) {
 }
 
 async function refreshEarningsResults(source, refreshData, options = {}) {
+  assertRefreshSourceAudit(source);
   const output = JSON.parse(JSON.stringify(source));
   delete output.policy;
   const asOf = options.asOf || new Date().toISOString();
@@ -1484,7 +1589,11 @@ async function collectRefreshData(source, args, dependencies = {}) {
 
   const earningsApiCompanyRowsBySymbol = {};
   let earningsApiUsage = null;
-  if (earningsApiTargets.length && !earningsApiToken) {
+  // Result refresh keeps prior EarningsAPI-sourced facts unless the caller
+  // explicitly opts into spending metered company-result requests.
+  if (earningsApiTargets.length && !args.useEarningsApi) {
+    addFailure(earningsApiTargets, refreshFailure('earningsApiCompany', 'budget_unavailable', 'EarningsAPI company refresh is opt-in; prior company-result facts were retained.'));
+  } else if (earningsApiTargets.length && !earningsApiToken) {
     addFailure(earningsApiTargets, refreshFailure('earningsApiCompany', 'missing_api_key', 'EarningsAPI key is unavailable; prior company-result facts were retained.'));
   } else if (earningsApiTargets.length) {
     try {
@@ -1523,25 +1632,41 @@ async function collectRefreshData(source, args, dependencies = {}) {
     }
   }
 
-  const yahooFetches = [];
-  for (const symbol of [...new Set(targetRows.map((row) => row.symbol))]) {
-    const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
-    try {
-      const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
-      if (result?.ok) {
-        yahooFetches.push(result);
-      } else {
-        addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
+  const yahooTargets = targetRows
+    .map((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub'
+      ? applyFinnhubRefresh(row, selectFinnhubRefreshRow(finnhubRows, row))
+      : row.sourceAudit?.selectedSources?.slate === 'earningsApiCalendar'
+        ? applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyRowsBySymbol[row.symbol] || [], row))
+        : row)
+    .filter(needsYahooReactionFetch);
+  // Reaction fetches run only after actual EPS or revenue exists; estimates-only
+  // rows keep their pending reaction state and avoid unnecessary Yahoo calls.
+  const yahooSymbols = [...new Set(yahooTargets.map((row) => row.symbol))];
+  const yahooFetches = new Array(yahooSymbols.length);
+  let nextYahoo = 0;
+  async function fetchNextYahoo() {
+    while (nextYahoo < yahooSymbols.length) {
+      const index = nextYahoo++;
+      const symbol = yahooSymbols[index];
+      const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
+      try {
+        const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
+        if (result?.ok) {
+          yahooFetches[index] = result;
+        } else {
+          addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
+        }
+      } catch (error) {
+        addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', error.message));
       }
-    } catch (error) {
-      addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', error.message));
     }
   }
+  await Promise.all(Array.from({ length: Math.min(4, yahooSymbols.length) }, fetchNextYahoo));
 
   return {
     finnhubRows,
     earningsApiCompanyRowsBySymbol,
-    yahooFetches,
+    yahooFetches: yahooFetches.filter(Boolean),
     rowDiagnosticsByKey: Object.fromEntries([...rowDiagnostics.entries()])
   };
 }
@@ -2205,6 +2330,7 @@ async function main() {
   if (command === 'validate-release') return runValidation(['release', ...argv]);
   if (command === 'apply-release') return applyReleaseCommand(argv);
   if (command === 'apply-narrative') return applyNarrativeCommand(argv);
+  if (command === 'repair-source-audit') return repairSourceAuditCommand(argv);
   if (command === 'embed') {
     throw new Error('Direct dashboard writes are not supported; use run_daily_update.js --apply-earnings-week-json.');
   }
@@ -2228,6 +2354,7 @@ module.exports = {
   earningsCalendarNeedsBuild,
   mergeFinnhubConflictCandidates: refreshCommand.mergeFinnhubConflictCandidates,
   pendingEarningsScheduleReviews,
+  repairRecoveredEarningsSourceAudit,
   refreshEarningsResults: refreshCommand.refreshEarningsResults,
   refreshTargetRows: refreshCommand.refreshTargetRows,
   removeStaleCompanyReleaseResolutionSidecar: refreshCommand.removeStaleCompanyReleaseResolutionSidecar,

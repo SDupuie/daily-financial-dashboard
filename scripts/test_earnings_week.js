@@ -26,10 +26,12 @@ const {
   buildSecondaryRecoveryCandidates,
   buildRows,
   calendarVerificationDates,
+  earningsApiUsageForBuild,
   ensureFinnhubPrimaryUsable,
   fetchEarningsApiCalendar,
   finnhubUsSymbolsFromResponse,
   finnhubCalendarFromResponse,
+  fetchYahooBarsForRows,
   readScheduleConfirmations,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows
@@ -37,9 +39,11 @@ const {
 const {
   applyCompanyReleaseResolutions,
   applyEarningsNarrative,
+  collectRefreshData,
   earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
   pendingEarningsScheduleReviews,
+  repairRecoveredEarningsSourceAudit,
   refreshEarningsResults,
   refreshTargetRows,
   validateEarningsWeekPayload
@@ -696,6 +700,55 @@ async function testEarningsApiCalendarStopsAfterQuotaResponse() {
   assert.equal(days.length, 1);
 }
 
+function testSkipEarningsApiDoesNotReadUsageLedger() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-earningsapi-skip-'));
+  const usageFile = path.join(dir, 'earningsapi_usage.json');
+  try {
+    fs.writeFileSync(usageFile, '{broken');
+    assert.deepEqual(
+      earningsApiUsageForBuild({ skipEarningsApi: true, earningsApiUsage: usageFile }),
+      emptyEarningsApiUsage()
+    );
+    assert.deepEqual(
+      earningsApiUsageForBuild({ earningsApiUsage: usageFile }),
+      emptyEarningsApiUsage()
+    );
+    assert.equal(fs.readFileSync(usageFile, 'utf8'), '{broken');
+    assert.throws(
+      () => earningsApiUsageForBuild({ useEarningsApi: true, skipEarningsApi: false, earningsApiUsage: usageFile }),
+      /EarningsAPI usage ledger is unreadable/
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function testRefreshEarningsApiIsOptIn() {
+  const source = deterministicVerifiedWeekFixture();
+  const row = source.rows[0];
+  row.sourceAudit.selectedSources.slate = 'earningsApiCalendar';
+  let calls = 0;
+  const data = await collectRefreshData(source, {
+    asOf: '2026-01-07T22:00:00.000Z',
+    timeoutMs: 1000,
+    earningsApiUsage: 'generated/earningsapi_usage.json',
+    earningsApiDailyLimit: 100,
+    earningsApiReserve: 0
+  }, {
+    env: { EARNINGSAPI_API_KEY: 'test' },
+    readEarningsApiUsage: () => {
+      throw new Error('usage ledger should not be read without opt-in');
+    },
+    fetchEarningsApiCompanyRows: async () => {
+      calls += 1;
+      throw new Error('EarningsAPI should not be called without opt-in');
+    },
+    fetchYahooBars: async (symbol) => ({ symbol, ok: true, status: 200, responseMs: 1, error: '', bars: [] })
+  });
+  assert.equal(calls, 0);
+  assert.equal(Object.values(data.rowDiagnosticsByKey)[0][0].code, 'budget_unavailable');
+}
+
 function testSecondaryRecoveryAndRevenueComparison() {
   const anchor = finnhubRow('ANCHOR');
   const recoveredFullCalendar = earningsApiRow('RECOVERFULL');
@@ -1259,6 +1312,107 @@ async function testResultRefreshFailuresAreRowScoped() {
   assert.equal(recovered.payload.rows[0].sourceStatus, 'verified');
 }
 
+async function testManualRecoverySourceAuditRepair() {
+  const recovered = deterministicVerifiedWeekFixture();
+  delete recovered.rows[0].sourceAudit;
+  assert.ok(validateEarningsWeekPayload(recovered).some((error) => error.includes('sourceAudit must be populated')));
+  await assert.rejects(
+    () => refreshEarningsResults(recovered, {}, { asOf: '2026-01-07T22:00:00.000Z' }),
+    /missing sourceAudit\.selectedSources/
+  );
+
+  const repaired = repairRecoveredEarningsSourceAudit(recovered);
+  assert.equal(repaired.rows[0].sourceAudit.recoveredFrom, 'manual_schedule_review');
+  assert.equal(repaired.rows[0].sourceAudit.selectedSources.slate, 'finnhub');
+  assert.deepEqual(validateEarningsWeekPayload(repaired), []);
+  const refreshed = await refreshEarningsResults(repaired, {
+    finnhubRows: [finnhubRow('VERIFY')],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [{
+      symbol: 'VERIFY', ok: true, status: 200, responseMs: 1, error: '',
+      bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 105 }]
+    }]
+  }, { asOf: '2026-01-07T22:00:00.000Z' });
+  assert.deepEqual(validateEarningsWeekPayload(refreshed.payload), []);
+}
+
+async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() {
+  const sourceRows = buildRows([
+    finnhubRow('SKIP', {
+      reportTiming: 'amc',
+      eps: { estimate: 1, actual: null },
+      revenue: { estimate: 1000000000, actual: null }
+    }),
+    finnhubRow('OLD', { reportTiming: 'amc' }),
+    finnhubRow('FRESH', {
+      reportTiming: 'amc',
+      eps: { estimate: 1, actual: null },
+      revenue: { estimate: 1000000000, actual: null }
+    })
+  ], [profile('SKIP'), profile('OLD'), profile('FRESH')], {
+    usListings: [usListing('SKIP'), usListing('OLD'), usListing('FRESH')]
+  });
+  const source = {
+    range: { from: '2026-01-06', to: '2026-01-10' },
+    rows: sourceRows
+  };
+  const yahooCalls = [];
+  const refreshData = await collectRefreshData(source, {
+    asOf: '2026-01-07T22:00:00.000Z',
+    timeoutMs: 1000,
+    earningsApiUsage: 'generated/earningsapi_usage.json',
+    earningsApiDailyLimit: 100,
+    earningsApiReserve: 0
+  }, {
+    env: { FINNHUB_API_KEY: 'test' },
+    fetchFinnhubCalendarRows: async () => [
+      finnhubRow('SKIP', {
+        reportTiming: 'amc',
+        eps: { estimate: 1, actual: null },
+        revenue: { estimate: 1000000000, actual: null }
+      }),
+      finnhubRow('OLD', { reportTiming: 'amc' }),
+      finnhubRow('FRESH', { reportTiming: 'amc' })
+    ],
+    fetchYahooBars: async (symbol) => {
+      yahooCalls.push(symbol);
+      if (symbol === 'OLD') await new Promise((resolve) => setTimeout(resolve, 20));
+      return { symbol, ok: true, status: 200, responseMs: 1, error: '', bars: [] };
+    }
+  });
+  assert.deepEqual(yahooCalls, ['OLD', 'FRESH']);
+  assert.deepEqual(refreshData.yahooFetches.map((item) => item.symbol), ['OLD', 'FRESH']);
+
+  let activeBuildFetches = 0;
+  let maxActiveBuildFetches = 0;
+  const buildRowsForFetch = ['SLOW', 'FAST1', 'FAST2', 'FAST3', 'FAST4', 'FAST5'].map((symbol) => ({ symbol }));
+  const buildFetches = await fetchYahooBarsForRows(buildRowsForFetch, { from: '2026-01-06', to: '2026-01-10', timeoutMs: 1000 }, async (url) => {
+    const symbol = new URL(url).pathname.split('/').pop();
+    activeBuildFetches += 1;
+    maxActiveBuildFetches = Math.max(maxActiveBuildFetches, activeBuildFetches);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, symbol === 'SLOW' ? 20 : 5));
+      return {
+        ok: true,
+        status: 200,
+        ms: 1,
+        data: {
+          chart: {
+            result: [{
+              timestamp: [1767657600],
+              indicators: { quote: [{ close: [100], open: [100], high: [100], low: [100], volume: [1] }] }
+            }]
+          }
+        }
+      };
+    } finally {
+      activeBuildFetches -= 1;
+    }
+  });
+  assert.equal(maxActiveBuildFetches, 4);
+  assert.deepEqual(buildFetches.map((item) => item.symbol), buildRowsForFetch.map((row) => row.symbol));
+}
+
 function testResultRefreshWaitsForReportWindow() {
   const source = deterministicVerifiedWeekFixture();
   const row = source.rows[0];
@@ -1813,6 +1967,8 @@ async function main() {
   testPrimaryScheduleVerification();
   testScheduleReviewAndPreparationFallbacks();
   await testEarningsApiCalendarStopsAfterQuotaResponse();
+  testSkipEarningsApiDoesNotReadUsageLedger();
+  await testRefreshEarningsApiIsOptIn();
   testSecondaryRecoveryAndRevenueComparison();
   testApplyCompanyReleaseResolution();
   testApplyEarningsNarrative();
@@ -1824,6 +1980,8 @@ async function main() {
   testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();
+  await testManualRecoverySourceAuditRepair();
+  await testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder();
   await testMixedResultRefreshAppliesSuccessfulRows();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();

@@ -91,11 +91,22 @@ async function fetchYahooBars(symbol, from, to, args, fetchJson) {
 }
 
 async function fetchYahooBarsForRows(rows, args, fetchJson) {
-  const output = [];
-  for (const row of rows) {
-    output.push(await fetchYahooBars(row.symbol, args.from, args.to, args, fetchJson));
+  const output = new Array(rows.length);
+  let next = 0;
+  async function run() {
+    while (next < rows.length) {
+      const index = next++;
+      const row = rows[index];
+      output[index] = await fetchYahooBars(row.symbol, args.from, args.to, args, fetchJson);
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, run));
   return output;
+}
+
+function needsYahooReactionFetch(row) {
+  return row?.reportTiming !== 'unknown'
+    && (Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual));
 }
 
 function parseArgs(argv) {
@@ -117,6 +128,7 @@ function parseArgs(argv) {
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
     scheduleConfirmations: DEFAULT_SCHEDULE_CONFIRMATIONS,
     scheduleReview: DEFAULT_SCHEDULE_REVIEW,
+    useEarningsApi: false,
     skipEarningsApi: false,
     compact: false
   };
@@ -208,6 +220,10 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--use-earningsapi') {
+      args.useEarningsApi = true;
+      continue;
+    }
     if (arg === '--skip-earningsapi') {
       args.skipEarningsApi = true;
       continue;
@@ -264,13 +280,14 @@ Options:
   --schedule-confirmations PATH
                                Event-scoped official IR dates for conflicts, complete-response omissions, outages, and recovery rows
   --schedule-review PATH       Generated review queue for rows requiring an official date confirmation
+  --use-earningsapi            Permit metered EarningsAPI usage for approved rollover/recovery only
   --skip-earningsapi           Disable secondary-source recovery
   --compact                    Print compact coverage report
   --help                       Show this help
 
 Environment:
   FINNHUB_API_KEY              Read from .env or current environment
-  EARNINGSAPI_API_KEY          Optional secondary source for Finnhub-missing rows
+  EARNINGSAPI_API_KEY          Used only with --use-earningsapi
 `);
 }
 
@@ -429,7 +446,19 @@ function writeEarningsApiUsage(file, usage) {
   atomicWriteJson(file, usage);
 }
 
+function earningsApiUsageForBuild(args) {
+  // Ordinary builds are Finnhub-primary. Touch the paid-source ledger only when
+  // the orchestrator has explicitly authorized secondary recovery.
+  if (!args.useEarningsApi || args.skipEarningsApi) return emptyEarningsApiUsage();
+  const usage = readEarningsApiUsage(args.earningsApiUsage);
+  // Persist schema migrations before deciding whether another metered request
+  // is permitted; an unreadable ledger must never become an unmetered retry.
+  writeEarningsApiUsage(args.earningsApiUsage, usage);
+  return usage;
+}
+
 function canUseEarningsApi(args, usage, token) {
+  if (!args.useEarningsApi) return false;
   if (args.skipEarningsApi) return false;
   if (!token) return false;
   return hasEarningsApiBudget(usage, args.earningsApiDailyLimit, args.earningsApiReserve);
@@ -1739,10 +1768,7 @@ async function runBuild(argv = process.argv.slice(2)) {
     throw new Error('FINNHUB_API_KEY is required in .env or the environment.');
   }
 
-  const earningsApiUsage = readEarningsApiUsage(args.earningsApiUsage);
-  // Persist schema migrations before deciding whether another metered request
-  // is permitted; an unreadable ledger must never become an unmetered retry.
-  writeEarningsApiUsage(args.earningsApiUsage, earningsApiUsage);
+  const earningsApiUsage = earningsApiUsageForBuild(args);
   const finnhubCalendar = await fetchFinnhubCalendar(args, token);
   ensureFinnhubPrimaryUsable(finnhubCalendar);
   const finnhubUsSymbols = await fetchFinnhubUsSymbols(args, token);
@@ -1812,7 +1838,7 @@ async function runBuild(argv = process.argv.slice(2)) {
     return left.symbol.localeCompare(right.symbol);
   });
   const generatedAt = new Date(args.asOf);
-  const yahooFetches = await fetchYahooBarsForRows(mergedRows, args, fetchJson);
+  const yahooFetches = await fetchYahooBarsForRows(mergedRows.filter(needsYahooReactionFetch), args, fetchJson);
   const rows = attachReactions(mergedRows, yahooFetches, { asOf: generatedAt });
   const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows);
   const earningsApiEntry = earningsApiDayEntry(earningsApiUsage, generatedAt);
@@ -1841,7 +1867,7 @@ async function runBuild(argv = process.argv.slice(2)) {
         dailyLimit: args.earningsApiDailyLimit,
         reserve: args.earningsApiReserve,
         callsAvailableForThisScript: Math.max(0, args.earningsApiDailyLimit - args.earningsApiReserve - earningsApiEntry.calls),
-        skipped: args.skipEarningsApi || !earningsApiToken
+        skipped: !args.useEarningsApi || args.skipEarningsApi || !earningsApiToken
       },
       yahooFetches
     }, secondaryRecoveryCandidates, companyReleaseTasks),
@@ -1864,6 +1890,7 @@ module.exports = {
   buildRows,
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
+  earningsApiUsageForBuild,
   fetchEarningsApiCalendar,
   fetchFinnhubUsSymbols,
   finnhubCalendarFromResponse,

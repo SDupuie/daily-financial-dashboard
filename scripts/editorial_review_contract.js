@@ -269,9 +269,6 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
 
 function buildEditorialReview(data, manifest, chartData) {
   const errors = validateReviewManifest(manifest, data);
-  if (isIsoTimestamp(manifest?.reviewedAt) && isIsoTimestamp(data?.editionId) && Date.parse(manifest.reviewedAt) > Date.parse(data.editionId)) {
-    errors.push('editorial review reviewedAt cannot be later than the edition created from it.');
-  }
   if (!chartData || typeof chartData !== 'object') errors.push('editorial review requires the chart-data payload being reviewed.');
   if (errors.length) throw new Error(errors.join(' '));
   const review = {

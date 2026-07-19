@@ -29,8 +29,8 @@ AI follows this section during normal updates.
 
 | Run | 1. Prepare Handoff | 2. AI Editorial Work | 3. Apply Handoff |
 | --- | --- | --- | --- |
-| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply --scheduled --morning` or `node scripts/run_daily_update.js apply --scheduled --afternoon`; then commit on `main` and run `./scripts/publish_main.sh` |
-| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Complete the same single generated handoff | Run `node scripts/run_daily_update.js apply --morning` or `node scripts/run_daily_update.js apply --afternoon`; commit and publish only when the manual update is intended to go live |
+| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
+| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Complete the same single generated handoff | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
 
 ### Core guarantees
 
@@ -40,34 +40,30 @@ AI follows this section during normal updates.
 
 ## AI Editorial Instructions
 
-Use this section during AI Editorial Work. It defines what to review, write, select, and leave alone.
+Use this section during AI Editorial Work. It is the canonical handoff-editing contract for `generated/editorial/dashboard-data.json`: review, write, and select only the editorial fields described here. Do not edit source code, dashboard HTML, generated market data, calendar facts, earnings facts, or deterministic section values as part of AI Editorial Work.
 
-### Opening editorial decision contract
+### AI Editorial Work contracts
 
-Opening is optional. When supportable, write the current edition's headline, deck, and catalysts. If no supported headline exists, leave it blank; incomplete Opening fields are AI Editorial Work guidance, not final publication blockers.
+- `opening`: write the current edition's `headline`, `deck`, and exactly 4 catalyst cards. Each catalyst must have a short `label` and a current, evidence-supported `body` summarizing one of the update's main market drivers.
+- `news`: use `editorialReview.newsSearch` as read-only source material. The only News field the AI edits is `editorialReview.newsSelection`; follow the News-card contract and Story selection policy below.
+- `tape`: leave generated quote fields unchanged. Each refreshed Tape row needs current reviewed commentary; failed quote downloads retain their prior quote and commentary.
+- `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
+- `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged. Complete every visible Earnings row under the Earnings editorial contract below.
+- `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions.
+- `footer`: preserve the generated compile prefix and maintain only concise non-derivable source-family or holiday context.
 
-### Market Lens editorial decision contract
+### AI Editorial Work checklist
 
-For each current event day, choose whether to keep generated commentary or replace it. Once an event has released, replace pre-release copy with current commentary.
-
-Reconsider every event day against the current Opening, Tape, and verified news. Do not treat carried-over copy as automatically reviewed.
-
-Before the close, the visible Market Lens remains forward-looking. At `close_available`, write verified `Outcome & Close Reaction` editorial copy interpreting the released facts and session response. Do not scan the Tape after the fact for the largest movers or imply that one release caused the entire session when several catalysts were active.
-
-The AI fills the Opening decision and one Market Lens decision for every current event day. Use the current handoff only; regenerate it if it becomes stale. Each refreshed Tape row needs current reviewed commentary; failed quote downloads retain prior quote and commentary.
-
-### Daily editorial checklist
-
-1. Verify the deterministic envelope before editorial work.
+1. Verify the handoff and deterministic envelope before editorial work.
+   - Use the current handoff only; regenerate it if it becomes stale.
    - Leave generated masthead date/edition, compile prefix, Futures labels, and Tape session label unchanged.
    - The AI owns only the key-driver portion of `tape.label` after the separator and non-derivable source or holiday context after the generated compile prefix.
    - The run date is always the current Chicago date, including prior-evening holiday context; explain a next-day closure in `weekAhead`, stories, or the editorial footer context rather than forward-dating the envelope.
-   - Friday afternoon shows current Friday plus next Monday-Thursday. Monday morning shows current Monday-Friday. Ordinary manual runs refresh the active Earnings range; Earnings rollover or rebuild requires scheduler authority or `--rebuild-earnings-calendar`.
+   - Friday afternoon shows current Friday plus next Monday-Thursday. Monday morning shows current Monday-Friday. Ordinary manual runs refresh the active Earnings range; manual calendar rollover requires `--rollover-calendar` and uses the local weekend day when run on Saturday or Sunday.
 
-2. Run the normal deterministic refresh before reading news.
+2. Confirm the normal deterministic refresh ran before reading news.
    - Use the matching canonical two-command workflow entry.
-   - Do not hand-edit generated market data, calendar facts, earnings facts, or deterministic section values. If they look stale or wrong, stop and use the Reference Appendix.
-   - Complete every visible Earnings row under the Earnings editorial contract below. Do not invent results, guidance, business drivers, or reaction context.
+   - If generated market data, calendar facts, earnings facts, or deterministic section values look stale or wrong, stop and use the Reference Appendix.
    - Do not name quote/news sources in visible copy. Keep the compact source-family attribution in `footer.compiled`; use chart source details for row-specific provenance.
    - Do not use source-verification phrasing such as `Reuters reported`, `Yahoo showed`, `fallback chain`, or similar process commentary in user-facing text.
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
@@ -85,27 +81,29 @@ The AI fills the Opening decision and one Market Lens decision for every current
 
 4. Editorialize the generated handoff in this order.
    - `masthead`: leave the generated edition and date unchanged.
-   - `opening`: when supportable, rewrite `headline`, `deck`, and catalyst items for the current edition; otherwise leave unsupported fields blank.
+   - `opening`: complete the Opening contract above.
    - `futuresModule`: leave the four generated futures rows and session labels unchanged; select the active window’s stories through `editorialReview.newsSelection.futures`. Use each story’s descriptive `tag` for its visible badge.
    - `tape`: leave generated quote fields unchanged; update the editorial roster only when intentionally changing coverage, and rewrite each refreshed Tape note. Each note must summarize the relevant market commentary or catalyst without carrying prior commentary forward or restating quote values. Before Apply Handoff, compare every refreshed Tape note against that row's generated direction, delta, and percent; rewrite any note that contradicts the displayed move. Every Crypto-group ticker needs its own current note for the collapsed Tape Crypto tab; do not reuse generic copy across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible Crypto tickers. Leave failed-download rows on their last validated quote and bound commentary.
    - `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
    - `stories`: select the broad-market news collection through `editorialReview.newsSelection.stories` per the News-card contract.
    - `crypto`: leave generated `crypto.stats[]` values unchanged and select only the crypto news collection through `editorialReview.newsSelection.crypto` per the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial.
-   - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged; edit only its narrative text and disposition fields in `generated/editorial/dashboard-data.json`.
-   - `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. Fill only the Week Ahead fields marked `pending_review`; Stage 1 marks Outcome only after released actuals and close-reaction rows are available.
-   - Evaluate each event day against the current Tape, opening, and verified news. Scheduled or awaiting days may retain generated Market Lens copy or use a valid replacement. Released days without actuals keep trying deterministic value recovery. Once released actuals are available, supply current Market Lens commentary if a valid current editorial lens is not already present. At `close_available`, supply verified Outcome copy only when Stage 1 marks it `pending_review`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
-   - Before Apply Handoff, confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape, Earnings, Week Ahead Outcome, or `editorialReview.marketLensDecisions[].action`.
-   - `footer`: preserve the generated compile prefix and maintain only concise non-derivable source-family or holiday context.
+   - `earnings.week`: complete the Earnings editorial contract below.
+   - `weekAhead`: complete the Week Ahead and Market Lens editorial contract below.
+   - `footer`: complete the Footer contract above.
 
-5. Copy and tone rules.
-   - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
-   - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
-   - Do not write tautological market-status copy that states routine facts without saying why they matter.
-   - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
-   - Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
-   - Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
-   - Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
-   - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises.
+5. Apply the copy and tone rules below.
+   - Before Apply Handoff, confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape or `editorialReview.marketLensDecisions[].action`. Complete every reviewable Earnings and Week Ahead Outcome field. Any remaining `pending_review` must be a system-provided carry-forward state left unchanged.
+
+### Copy and tone rules
+
+- Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
+- Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
+- Do not write tautological market-status copy that states routine facts without saying why they matter.
+- Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
+- Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
+- Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
+- Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
+- Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises.
 
 ### News-card contract
 
@@ -115,13 +113,13 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | --- | --- | --- |
 | `editorialReview.newsSelection.stories` | Target 9 broad-market cards from the generated News inventory | candidate `url`, `tag`, `title`, `body` |
 | `editorialReview.newsSelection.crypto` | Target 6 crypto-specific cards from the generated News inventory | candidate `url`, `kicker`, `title`, `body` |
-| `editorialReview.newsSelection.futures` | Target 3 current catalysts from the generated News inventory | candidate `url`, `tag`, `title`, `body` |
+| `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
-- `editorialReview.newsSearch` is read-only source material. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
+- `editorialReview.newsSearch` is read-only source material. Stage 1 filters displayed-session Futures stories into `futuresCandidates`; when no shared Futures session date exists, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
 - A selected URL must come from the generated candidate inventory.
 - Do not set or edit coverage/New-pill fields.
 - Resolve duplicate URLs/titles, wrong section category, and below-target counts during AI Editorial Work; Apply Handoff does not select replacement stories.
-- Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`.
+- Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`; Stage 3 mirrors the Stage 1 Futures-window check defensively.
 
 ### Story selection policy
 
@@ -180,6 +178,16 @@ Compact Earnings monitor writing rules:
 - Name at least one concrete business driver and explain why it matters to the earnings read.
 - When guidance is provided, summarize only the official company outlook and identify whether it is next-quarter or full-year guidance. If both are provided, lead with the quarterly outlook.
 - For stock-reaction notes, explain the earnings driver behind the move rather than repeating the displayed percentage change.
+
+### Week Ahead / Market Lens editorial contract
+
+For each current event day, choose whether to keep generated commentary or replace it. Once an event has released, replace pre-release copy with current commentary.
+
+Reconsider every event day against the current Opening, Tape, and verified news. Do not treat carried-over copy as automatically reviewed.
+
+Before the close, the visible Market Lens remains forward-looking. At `close_available`, write verified `Outcome & Close Reaction` editorial copy interpreting the released facts and session response. Prepare Handoff marks Outcome only after released actuals and close-reaction rows are available. Do not scan the Tape after the fact for the largest movers or imply that one release caused the entire session when several catalysts were active.
+
+Scheduled or awaiting days may retain generated Market Lens copy or use a valid replacement. Released days without actuals keep trying deterministic value recovery. Once released actuals are available, supply current Market Lens commentary if a valid current editorial lens is not already present. At `close_available`, supply verified Outcome copy only when Prepare Handoff marks it `pending_review`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
 
 ## Validation and Publish
 
@@ -286,7 +294,7 @@ Earnings rows use the shared lifecycle vocabulary; validation owns the full sche
 #### EarningsAPI budget policy
 
 - Treat the Free-plan daily quota (100 requests) as a scarce secondary-recovery budget, not a primary data source.
-- EarningsAPI calendar scans are authorized only by scheduler-marked Monday-morning and Friday-afternoon rollovers, an audited failed-rollover or unavailable-shell retry, or `--rebuild-earnings-calendar` on an intentional manual preparation. They never run during ordinary manual updates, development, validation, tests, source-code verification, focused repairs, or result refreshes.
+- EarningsAPI calendar scans are authorized only by scheduler-marked Monday-morning and Friday-afternoon rollovers or `--rollover-calendar` on an intentional manual preparation. They never run during ordinary manual updates, automatic retries, development, validation, tests, source-code verification, focused repairs, or result refreshes.
 - Query EarningsAPI company rows only for Finnhub-missing display candidates.
 - Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
 
@@ -299,7 +307,7 @@ Use focused repair commands only for explicit repairs. They update the current s
 - Asset Allocation fallback: refresh `http://127.0.0.1:2200/api/asset-market-data`, then use `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. If refresh fails but the export exists, use it as a stale fallback; never import tactical allocation/model logic.
 - Earnings-only repair: first complete deterministic preparation, then run `node scripts/earnings_week.js apply-narrative`, run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`.
 - Company-release earnings repair: when `companyReleaseTasks[]` exist, run `node scripts/earnings_week.js resolve`, `node scripts/earnings_week.js validate-release`, `node scripts/earnings_week.js apply-release`, then `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`.
-- Intentional Earnings calendar rebuild: use `node scripts/run_daily_update.js prepare --rebuild-earnings-calendar` with either `--morning` or `--afternoon`. This is a metered rebuild, not ordinary repair.
+- Manual calendar rollover: use `node scripts/run_daily_update.js prepare --afternoon --rollover-calendar` for the Friday-through-Thursday bridge, or `node scripts/run_daily_update.js prepare --morning --rollover-calendar` for Monday-through-Friday. On Saturday, either edition rolls to the Friday bridge; on Sunday, either edition rolls to Monday-Friday.
 
 ### Local Refresh Server
 
