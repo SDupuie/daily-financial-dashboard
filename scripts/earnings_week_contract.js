@@ -782,11 +782,7 @@ function attachReactions(rows, yahooFetches, { asOf = new Date() } = {}) {
   });
 }
 
-const DATE_CONFLICT_RELEASE_MIN_MARKET_CAP = 250000000;
-
 function companyReleaseReason(row) {
-  // Candidates omitted from the canonical slate stay in schedule review; a
-  // post-report release task is meaningful only for an admitted row.
   if (!row) return '';
   if (row.sourceAudit?.companyReleaseResolution?.status === 'needs_review') return 'company_release_needs_review';
   if (row.reportTiming === 'unknown') return 'missing_report_timing';
@@ -795,66 +791,12 @@ function companyReleaseReason(row) {
   return '';
 }
 
-function companyReleaseTaskFromRecovery(task, row, reason) {
-  return {
-    id: `${task.reportDate}:${task.symbol}:company-release`,
-    recoveryId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    trigger: 'secondary_recovery_requires_company_release',
-    reason,
-    priority: task.priority,
-    marketCap: task.marketCap,
-    marketCapDisplay: task.marketCapDisplay,
-    fiscalQuarterEnding: task.fiscalQuarterEnding || '',
-    neededFields: [
-      'reportTiming',
-      'fiscalPeriod',
-      'eps.actual',
-      'revenue.actual',
-      'companyReleaseUrl',
-      'secFilingUrl'
-    ],
-    preferredSources: [
-      'SEC 8-K Exhibit 99.1',
-      'Company investor relations earnings release'
-    ],
-    doNotUseForOverrides: ['finnhub_calendar_row'],
-    permittedUses: [
-      'official_actuals_resolution',
-      'timing_resolution',
-      'fiscal_period_resolution',
-      'eps_basis_resolution'
-    ],
-    instructions: 'Use SEC/company release only when a recovered EarningsAPI row is missing official timing or actuals. Do not override Finnhub rows.',
-    sourceAudit: {
-      ...task.sourceAudit,
-      recoveredRow: {
-        reportDate: row?.reportDate || task.reportDate,
-        reportTiming: row?.reportTiming || 'unknown',
-        eps: {
-          estimate: row?.eps?.estimate ?? null,
-          actual: row?.eps?.actual ?? null
-        },
-        revenue: {
-          estimate: row?.revenue?.estimate ?? null,
-          actual: row?.revenue?.actual ?? null
-        },
-        sourceStatus: row?.sourceStatus || 'missing'
-      }
-    }
-  };
-}
-
-function companyReleaseTaskFromDateConflict(row, reason) {
+function companyReleaseTask(row, reason) {
   return {
     id: `${row.reportDate}:${row.symbol}:company-release`,
-    recoveryId: '',
     symbol: row.symbol,
     company: row.company,
     reportDate: row.reportDate,
-    trigger: 'provider_date_conflict_requires_company_release',
     reason,
     priority: Number(row.marketCap) >= 10000000000 ? 'high' : 'normal',
     marketCap: row.marketCap,
@@ -879,29 +821,17 @@ function companyReleaseTaskFromDateConflict(row, reason) {
       'fiscal_period_resolution',
       'eps_basis_resolution'
     ],
-    instructions: 'Use SEC/company release only to resolve actuals and timing after a verified provider-date conflict or official IR-confirmed redate. Keep Finnhub estimates for comparison.',
+    instructions: 'Use an official company release to resolve missing timing or actuals. Keep the row\'s deterministic estimates for comparison.',
     sourceAudit: row.sourceAudit
   };
 }
 
-function buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows, options = {}) {
-  const rowsByKey = new Map(rows.map((row) => [`${row.reportDate}:${row.symbol}`, row]));
-  const recoveryTasks = secondaryRecoveryCandidates.flatMap((task) => {
-    const row = rowsByKey.get(`${task.reportDate}:${task.symbol}`);
+function buildCompanyReleaseTasks(rows, asOf = new Date()) {
+  return rows.flatMap((row) => {
+    if (!isDisplayEligibleEarningsRow(row) || !reportWindowArrived(row, asOf)) return [];
     const reason = companyReleaseReason(row);
-    return reason ? [companyReleaseTaskFromRecovery(task, row, reason)] : [];
+    return reason ? [companyReleaseTask(row, reason)] : [];
   });
-  const conflictTasks = rows.flatMap((row) => {
-    const officialSchedule = row.sourceAudit?.scheduleVerification;
-    const officiallyRedated = officialSchedule?.status === 'official_confirmed'
-      && officialSchedule.primaryDate !== row.reportDate;
-    if (!officiallyRedated) return [];
-    if (!Number.isFinite(row.marketCap) || row.marketCap < DATE_CONFLICT_RELEASE_MIN_MARKET_CAP) return [];
-    if (!options.shouldEscalateDateConflict?.(row)) return [];
-    const reason = companyReleaseReason(row);
-    return reason ? [companyReleaseTaskFromDateConflict(row, reason)] : [];
-  });
-  return [...recoveryTasks, ...conflictTasks];
 }
 
 module.exports = {

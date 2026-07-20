@@ -807,15 +807,18 @@ function validateCompanyReleaseResolutionReaction(errors, item, label, now) {
   }
 }
 
-function validateCompanyReleaseResolution(errors, itemRaw, taskMap, index, now) {
+function companyReleaseEstimateSource(row, metric) {
+  return row?.sourceAudit?.selectedSources?.[metric]?.estimate === 'finnhub'
+    ? 'finnhub'
+    : 'earningsapi_company';
+}
+
+function validateCompanyReleaseResolution(errors, itemRaw, taskMap, rowMap, index, now) {
   const item = isObject(itemRaw) ? itemRaw : {};
   const label = item.symbol || `companyReleaseResolutions[${index}]`;
   const task = taskMap.get(item.taskId);
   if (!task) errors.push(`${label}.taskId must map to companyReleaseTasks.`);
   if (task && item.symbol !== task.symbol) errors.push(`${label}.symbol must match company-release task.`);
-  if (task && item.reportDate !== task.reportDate && task.trigger !== 'provider_date_conflict_requires_company_release') {
-    errors.push(`${label}.reportDate must match company-release task.`);
-  }
   if (!RELEASE_RESOLUTION_STATUSES.has(item.status)) errors.push(`${label}.status is invalid.`);
   if (!RELEASE_RESOLUTION_CONFIDENCES.has(item.confidence)) errors.push(`${label}.confidence is invalid.`);
   if (!isObject(item.fields)) {
@@ -837,19 +840,21 @@ function validateCompanyReleaseResolution(errors, itemRaw, taskMap, index, now) 
   if (!nullableNumber(eps.gaapActual)) errors.push(`${label}.fields.eps.gaapActual must be numeric or null.`);
   if (!nullableNumber(eps.estimate)) errors.push(`${label}.fields.eps.estimate must be numeric or null.`);
   if (!nullableNumber(revenue.estimate)) errors.push(`${label}.fields.revenue.estimate must be numeric or null.`);
-  const estimateSource = task?.trigger === 'provider_date_conflict_requires_company_release' ? 'finnhub' : 'earningsapi_company';
-  if (eps.estimate !== null && eps.estimateSource !== estimateSource) {
-    errors.push(`${label}.fields.eps.estimateSource must be ${estimateSource} when eps.estimate is populated.`);
+  const row = rowMap.get(`${task?.reportDate || ''}:${task?.symbol || ''}`);
+  const epsEstimateSource = companyReleaseEstimateSource(row, 'eps');
+  const revenueEstimateSource = companyReleaseEstimateSource(row, 'revenue');
+  if (eps.estimate !== null && eps.estimateSource !== epsEstimateSource) {
+    errors.push(`${label}.fields.eps.estimateSource must be ${epsEstimateSource} when eps.estimate is populated.`);
   }
   if (eps.estimate === null && eps.estimateSource) {
     errors.push(`${label}.fields.eps.estimateSource must be blank when eps.estimate is null.`);
   }
-  if (revenue.estimate !== null && revenue.estimateSource !== estimateSource) {
-    errors.push(`${label}.fields.revenue.estimateSource must be ${estimateSource} when revenue.estimate is populated.`);
+  if (revenue.estimate !== null && revenue.estimateSource !== revenueEstimateSource) {
+    errors.push(`${label}.fields.revenue.estimateSource must be ${revenueEstimateSource} when revenue.estimate is populated.`);
   }
   validateCompanyReleaseResolutionEvidence(errors, item, label);
-  if (eps.comparisonSource === 'unreconciled_earningsapi_company' && eps.estimate !== null) {
-    errors.push(`${label}.fields.eps.estimate must not be used while EarningsAPI EPS actual is unreconciled.`);
+  if (String(eps.comparisonSource || '').startsWith('unreconciled_') && eps.estimate !== null) {
+    errors.push(`${label}.fields.eps.estimate must not be used while the retained EPS actual is unreconciled.`);
   }
   if (!Array.isArray(item.notes)) errors.push(`${label}.notes must be an array.`);
   validateCompanyReleaseResolutionReaction(errors, item, label, now);
@@ -890,6 +895,7 @@ function validateCompanyReleaseResolutionsPayload(data, week, options = {}) {
   // Integrated refresh now validates in-memory retry results, not a persistent
   // sidecar, so artifact metadata is optional and partial task coverage is OK.
   const taskMap = new Map((Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []).map((task) => [task.id, task]));
+  const rowMap = new Map((Array.isArray(week.rows) ? week.rows : []).map((row) => [`${row.reportDate}:${row.symbol}`, row]));
   const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
     ? options.now
     : isIsoDateTime(data.generatedAt) ? new Date(data.generatedAt) : new Date();
@@ -903,7 +909,7 @@ function validateCompanyReleaseResolutionsPayload(data, week, options = {}) {
     data.companyReleaseResolutions.forEach((item, index) => {
       if (seen.has(item?.taskId)) errors.push(`${item.taskId} appears more than once.`);
       seen.add(item?.taskId);
-      validateCompanyReleaseResolution(errors, item, taskMap, index, now);
+      validateCompanyReleaseResolution(errors, item, taskMap, rowMap, index, now);
     });
   }
 

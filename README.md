@@ -303,7 +303,7 @@ The richer earnings monitor uses this contract as the canonical deterministic me
 
 #### Company-release retry behavior
 
-During normal Prepare/refresh, Earnings retries active `companyReleaseTasks` once the row's report window has arrived and actuals are still missing. A failed retry is non-blocking: the staged row keeps the correct `awaiting_actual` lifecycle, and the task stays active for a later refresh.
+During normal Prepare/refresh, every visible row whose report window has arrived and whose actuals are still missing enters the same `companyReleaseTasks` recovery path. A failed retry is non-blocking: the staged row keeps the correct `awaiting_actual` lifecycle, and the task stays active for a later refresh.
 
 #### Canonical row contract
 

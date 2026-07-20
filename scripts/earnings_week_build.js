@@ -2057,7 +2057,7 @@ async function runBuild(argv = process.argv.slice(2)) {
   const generatedAt = new Date(args.asOf);
   const yahooFetches = await fetchYahooBarsForRows(mergedRows.filter(needsYahooReactionFetch), args, fetchJson);
   const rows = attachReactions(mergedRows, yahooFetches, { asOf: generatedAt });
-  const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, rows);
+  const companyReleaseTasks = buildCompanyReleaseTasks(rows, generatedAt);
   const earningsApiEntry = earningsApiDayEntry(earningsApiUsage, generatedAt);
 
   const payload = {

@@ -862,7 +862,7 @@ function testSecondaryRecoveryAndRevenueComparison() {
   ];
   const recoveredRows = buildEarningsApiRows(secondaryRecoveryCandidates, companyFetches);
   const enrichedSecondaryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidates, companyFetches);
-  const companyReleaseTasks = buildCompanyReleaseTasks(enrichedSecondaryCandidates, recoveredRows);
+  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-07T15:00:00.000Z');
   const full = recoveredRows.find((row) => row.symbol === 'RECOVERFULL');
   const epsOnly = recoveredRows.find((row) => row.symbol === 'RECOVEREPS');
 
@@ -894,12 +894,7 @@ function testSecondaryRecoveryAndRevenueComparison() {
   assert.equal(epsOnly.outcome.overall, 'eps_only_beat', 'EPS-only outcome should appear only when revenue estimate is unavailable.');
   assert.equal(companyReleaseTasks.length, 0, 'Complete recovered rows should not create company-release tasks.');
   assert.equal(
-    buildCompanyReleaseTasks([{
-      ...enrichedSecondaryCandidates[0],
-      symbol: 'OMITTED',
-      reportDate: '2026-01-08',
-      id: '2026-01-08:OMITTED:earningsapi-recovery'
-    }], recoveredRows).length,
+    buildCompanyReleaseTasks([], '2026-01-08T15:00:00.000Z').length,
     0,
     'An EarningsAPI-only candidate omitted from canonical rows must remain audit-only.'
   );
@@ -932,7 +927,7 @@ function testApplyCompanyReleaseResolution() {
   recoveredRows[0].outcome.interpretation = 'Pre-event margin expectations frame the setup.';
   recoveredRows[0].reaction = { note: 'The next-session response remains the confirmation test.' };
   recoveredRows[0].sourceStatus = 'partial';
-  const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, recoveredRows);
+  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-06T22:00:00.000Z');
   const task = companyReleaseTasks[0];
   const source = {
     rows: recoveredRows,
@@ -1628,6 +1623,58 @@ async function testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails(
   assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
 }
 
+async function testPrimaryFinnhubRefreshCreatesCompanyReleaseTask() {
+  const { source } = companyReleaseRefreshFixture('PRIMARYMISS');
+  const row = source.rows[0];
+  row.sourceAudit = {
+    ...row.sourceAudit,
+    finnhubCalendar: { present: true, reportDate: row.reportDate, reportTiming: row.reportTiming },
+    selectedSources: {
+      ...row.sourceAudit.selectedSources,
+      slate: 'finnhub',
+      eps: { estimate: 'finnhub', actual: 'none' },
+      revenue: { estimate: 'finnhub', actual: 'none' }
+    }
+  };
+  source.secondaryRecoveryCandidates = [];
+  source.companyReleaseTasks = [];
+  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
+  let retriedTask;
+
+  const result = await refreshEarningsResults(source, {
+    finnhubRows: [],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [],
+    rowDiagnosticsByKey: {
+      [earningsRowKey(row)]: [{
+        provider: 'finnhub',
+        code: 'provider_row_unavailable',
+        message: 'Finnhub returned no matching fixture row.'
+      }]
+    }
+  }, {
+    asOf: '2026-01-06T15:00:00.000Z',
+    loadTickerMap: async () => new Map([[row.symbol, { cik: 1, title: row.company }]]),
+    resolveCompanyReleaseTask: async (task) => {
+      retriedTask = task;
+      const resolution = companyReleaseResolvedFixture(task);
+      resolution.fields.eps.estimateSource = 'finnhub';
+      resolution.fields.eps.comparisonSource = '';
+      resolution.fields.revenue.estimateSource = 'finnhub';
+      resolution.notes = ['Finnhub supplied the retained consensus estimates for comparison.'];
+      return resolution;
+    }
+  });
+
+  const updated = result.payload.rows.find((item) => item.symbol === row.symbol);
+  assert.ok(retriedTask, 'A post-window Finnhub row with missing actuals must enter company-release recovery.');
+  assert.equal(retriedTask.reason, 'missing_eps_actual');
+  assert.equal(updated.eps.actual, 1.25);
+  assert.equal(updated.revenue.actual, 1200000000);
+  assert.deepEqual(result.payload.companyReleaseTasks, []);
+  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
+}
+
 async function testNeedsReviewPromotesOfficialMetricsIndependently() {
   for (const [metric, actual] of [['eps', 123.45], ['revenue', 987654321]]) {
     const source = embeddedWeekFixture();
@@ -1839,7 +1886,7 @@ function companyReleaseRefreshFixture(symbol) {
     source: 'Yahoo Finance Chart API'
   };
   row.sourceStatus = 'partial';
-  const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, recoveredRows);
+  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-06T15:00:00.000Z');
   assert.equal(companyReleaseTasks.length, 1);
   const source = {
     schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
@@ -1862,80 +1909,24 @@ function companyReleaseRefreshFixture(symbol) {
 }
 
 function companyReleaseTaskFixture(source) {
-  if (!source.secondaryRecoveryCandidates[0]) {
-    const row = source.rows.find((item) => item.sourceAudit?.finnhubProfile);
-    assert.ok(row, 'Embedded dashboard fixture must include at least one profiled row for synthetic company-release validation coverage.');
-    const recovery = {
-      id: `${row.reportDate}:${row.symbol}:earningsapi-recovery`,
-      symbol: row.symbol,
-      company: row.company,
-      reportDate: row.reportDate,
-      trigger: 'missing_from_finnhub_but_present_in_alphaVantageCalendar',
-      priority: 'normal',
-      marketCap: row.marketCap,
-      marketCapDisplay: row.marketCapDisplay,
-      fiscalQuarterEnding: row.fiscalQuarterEnding || '',
-      neededFields: ['earningsApiCompanyRow', 'reportTiming', 'eps.estimate', 'eps.actual', 'revenue.estimate', 'revenue.actual'],
-      preferredSources: ['EarningsAPI company earnings endpoint'],
-      doNotUseForOverrides: ['finnhub_calendar_row'],
-      instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub after the secondary calendar finds them. Do not override Finnhub rows.',
-      permittedUses: ['missing_row_discovery', 'eps_estimate_recovery', 'eps_actual_recovery', 'revenue_estimate_recovery', 'revenue_actual_recovery'],
-      sourceAudit: {
-        finnhubUsListing: row.sourceAudit.finnhubUsListing,
-        alphaVantageCalendar: {
-          reportDate: row.reportDate,
-          company: row.company,
-          reportTiming: row.reportTiming,
-          fiscalQuarterEnding: row.fiscalQuarterEnding || '',
-          epsEstimate: row.eps.estimate,
-          currency: row.currency || 'USD'
-        },
-        finnhubCalendar: {
-          present: false
-        },
-        finnhubProfile: row.sourceAudit.finnhubProfile,
-        earningsApiCompany: {
-          status: 200,
-          ok: true,
-          selectedRow: {
-            reportDate: row.reportDate,
-            reportTiming: row.reportTiming,
-            eps: {
-              estimate: row.eps.estimate,
-              actual: row.eps.actual
-            },
-            revenue: {
-              estimate: row.revenue.estimate,
-              actual: row.revenue.actual
-            }
-          },
-          rowCount: 1,
-          error: ''
-        }
-      }
-    };
-    source.secondaryRecoveryCandidates = [recovery];
-    source.summary.counts.secondaryRecoveryCandidates = 1;
-  }
-  const recovery = source.secondaryRecoveryCandidates[0];
+  const row = source.rows.find((item) => item.sourceAudit?.finnhubProfile);
+  assert.ok(row, 'Embedded dashboard fixture must include a profiled canonical row for company-release validation coverage.');
   return {
-    id: `${recovery.reportDate}:${recovery.symbol}:company-release`,
-    recoveryId: recovery.id,
-    symbol: recovery.symbol,
-    company: recovery.company,
-    reportDate: recovery.reportDate,
-    trigger: 'secondary_recovery_requires_company_release',
+    id: `${row.reportDate}:${row.symbol}:company-release`,
+    symbol: row.symbol,
+    company: row.company,
+    reportDate: row.reportDate,
     reason: 'missing_eps_actual',
-    priority: recovery.priority,
-    marketCap: recovery.marketCap,
-    marketCapDisplay: recovery.marketCapDisplay,
-    fiscalQuarterEnding: recovery.fiscalQuarterEnding || '',
+    priority: 'normal',
+    marketCap: row.marketCap,
+    marketCapDisplay: row.marketCapDisplay,
+    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
     neededFields: ['reportTiming', 'fiscalPeriod', 'eps.actual', 'revenue.actual', 'companyReleaseUrl', 'secFilingUrl'],
     preferredSources: ['SEC 8-K Exhibit 99.1', 'Company investor relations earnings release'],
     doNotUseForOverrides: ['finnhub_calendar_row'],
     permittedUses: ['official_actuals_resolution', 'timing_resolution', 'fiscal_period_resolution', 'eps_basis_resolution'],
-    instructions: 'Use SEC/company release only when a recovered EarningsAPI row is missing official timing or actuals. Do not override Finnhub rows.',
-    sourceAudit: recovery.sourceAudit
+    instructions: 'Use an official company release to resolve missing timing or actuals. Keep the row\'s deterministic estimates for comparison.',
+    sourceAudit: row.sourceAudit
   };
 }
 
@@ -1945,7 +1936,7 @@ function testTaskPolicyMetadataDoesNotBlockValidation() {
   source.companyReleaseTasks = [task];
   source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
 
-  for (const item of [source.secondaryRecoveryCandidates[0], source.companyReleaseTasks[0]]) {
+  for (const item of [source.companyReleaseTasks[0]]) {
     delete item.neededFields;
     delete item.preferredSources;
     delete item.doNotUseForOverrides;
@@ -2035,13 +2026,13 @@ function testCompanyReleaseResolutionValidatorRejectsCalendarEstimates() {
 
   assert.throws(
     () => validateCompanyReleasePayload(week, payload),
-    /estimateSource must be earningsapi_company/,
+    /estimateSource must be finnhub/,
     'Company-release resolution payload must not use EarningsAPI calendar as a metric source.'
   );
 
-  payload.companyReleaseResolutions[0].fields.eps.estimateSource = 'earningsapi_company';
-  payload.companyReleaseResolutions[0].fields.eps.comparisonSource = 'earningsapi_company_eps_estimate';
-  payload.companyReleaseResolutions[0].fields.revenue.estimateSource = 'earningsapi_company';
+  payload.companyReleaseResolutions[0].fields.eps.estimateSource = 'finnhub';
+  payload.companyReleaseResolutions[0].fields.eps.comparisonSource = 'finnhub_eps_estimate';
+  payload.companyReleaseResolutions[0].fields.revenue.estimateSource = 'finnhub';
   payload.generatedAt = '2026-07-01T19:59:00.000Z';
   assert.throws(
     () => validateCompanyReleasePayload(week, payload),
@@ -2233,6 +2224,7 @@ async function main() {
   await testMixedResultRefreshAppliesSuccessfulRows();
   await testResultRefreshRetriesPostWindowCompanyReleaseTasks();
   await testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails();
+  await testPrimaryFinnhubRefreshCreatesCompanyReleaseTask();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();
   console.log('Earnings week tests passed.');

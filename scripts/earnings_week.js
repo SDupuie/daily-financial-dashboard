@@ -547,9 +547,6 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
     const task = taskMap.get(resolution.taskId);
     if (!task) throw new Error(`${resolution.taskId} does not map to companyReleaseTasks.`);
     if (task.symbol !== resolution.symbol) throw new Error(`${resolution.taskId} symbol does not match resolution.`);
-    if (task.reportDate !== resolution.reportDate && task.trigger !== 'provider_date_conflict_requires_company_release') {
-      throw new Error(`${resolution.taskId} reportDate does not match resolution.`);
-    }
 
     const key = rowKey(resolution);
     const existing = rowsByKey.get(key) || rowsByKey.get(rowKey(task));
@@ -1527,9 +1524,7 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     ? applyResultRefreshDiagnostics(row, rowDiagnosticsByKey[rowKey(row)] || [], asOf)
     : row);
 
-  output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
-    shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
-  });
+  output.companyReleaseTasks = buildCompanyReleaseTasks(output.rows, asOf);
   const retrySnapshots = new Map(output.rows.map((row) => [rowKey(row), deterministicSnapshot(row)]));
   // Company-release retry reuses the existing promotion path so source audit,
   // narrative invalidation, and disposition handling stay in one place.
@@ -1539,9 +1534,7 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
       changedKeys.add(rowKey(row));
     }
   }
-  output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
-    shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
-  });
+  output.companyReleaseTasks = buildCompanyReleaseTasks(output.rows, asOf);
   const activeTaskIds = new Set(output.companyReleaseTasks.map((task) => task.id));
   output.rows = output.rows.map((row) => {
     const resolution = row.sourceAudit?.companyReleaseResolution;
@@ -1979,18 +1972,22 @@ function moneyText(value) {
   return Number.isFinite(value) ? `$${value.toFixed(2)}` : '';
 }
 
-function earningsApiBackup(task, row = {}) {
-  const useFinnhub = task.trigger === 'provider_date_conflict_requires_company_release';
-  const source = useFinnhub ? 'finnhub' : 'earningsapi_company';
+function retainedEstimateSource(row, metric) {
+  return row.sourceAudit?.selectedSources?.[metric]?.estimate === 'finnhub'
+    ? 'finnhub'
+    : 'earningsapi_company';
+}
+
+function earningsApiBackup(_task, row = {}) {
   return {
     eps: {
       estimate: numberOrNull(row.eps?.estimate),
       actual: numberOrNull(row.eps?.actual),
-      estimateSource: Number.isFinite(numberOrNull(row.eps?.estimate)) ? source : ''
+      estimateSource: Number.isFinite(numberOrNull(row.eps?.estimate)) ? retainedEstimateSource(row, 'eps') : ''
     },
     revenue: {
       estimate: numberOrNull(row.revenue?.estimate),
-      estimateSource: Number.isFinite(numberOrNull(row.revenue?.estimate)) ? source : ''
+      estimateSource: Number.isFinite(numberOrNull(row.revenue?.estimate)) ? retainedEstimateSource(row, 'revenue') : ''
     },
     fiscalQuarterEnding: String(row.fiscalQuarterEnding || '').trim()
   };
@@ -1998,6 +1995,9 @@ function earningsApiBackup(task, row = {}) {
 
 function resolveComparableEps(secEps, task, text, row) {
   const backup = earningsApiBackup(task, row);
+  const comparisonSource = backup.eps.estimateSource === 'finnhub'
+    ? 'finnhub_eps_estimate'
+    : 'earningsapi_company_eps_estimate';
   const adjustment = extractPerShareAdjustment(text, secEps.value);
   const result = {
     actual: secEps.value,
@@ -2015,17 +2015,17 @@ function resolveComparableEps(secEps, task, text, row) {
   if (nearlyEqual(secEps.value, backup.eps.actual)) {
     result.actual = secEps.value;
     result.actualSource = 'sec_company_release';
-    result.comparisonSource = 'earningsapi_company_eps_estimate';
+    result.comparisonSource = comparisonSource;
     return result;
   }
   if (adjustment && nearlyEqual(adjustment.comparableEps, backup.eps.actual)) {
     result.actual = adjustment.comparableEps;
     result.basis = 'comparable_adjusted';
     result.actualSource = 'sec_company_release_adjusted_to_earningsapi_basis';
-    result.comparisonSource = 'earningsapi_company_eps_estimate';
+    result.comparisonSource = comparisonSource;
     return result;
   }
-  result.comparisonSource = 'unreconciled_earningsapi_company';
+  result.comparisonSource = `unreconciled_${backup.eps.estimateSource}`;
   result.estimate = null;
   result.estimateSource = '';
   result.estimateCount = '';
@@ -2115,12 +2115,12 @@ async function resolveTask(task, tickerMap, args, row = {}) {
   const status = Number.isFinite(comparableEps.actual) && Number.isFinite(revenueActual) ? 'resolved' : 'needs_review';
   const notes = [
     Number.isFinite(comparableEps.estimate)
-      ? `${task.trigger === 'provider_date_conflict_requires_company_release' ? 'Finnhub' : 'EarningsAPI company endpoint'} supplied the retained consensus estimates for comparison.`
+      ? `${backup.eps.estimateSource === 'finnhub' ? 'Finnhub' : 'EarningsAPI company endpoint'} supplied the retained consensus estimates for comparison.`
       : 'Company release supplied reported actuals; consensus estimates remain unavailable unless supplied by another deterministic source.'
   ];
   if (comparableEps.adjustment?.note) notes.push(comparableEps.adjustment.note);
-  if (comparableEps.comparisonSource === 'unreconciled_earningsapi_company') {
-    notes.push('EarningsAPI EPS actual did not reconcile to the SEC/company-release EPS basis; avoid EPS beat/miss classification without review.');
+  if (comparableEps.comparisonSource.startsWith('unreconciled_')) {
+    notes.push('The retained provider EPS actual did not reconcile to the SEC/company-release EPS basis; avoid EPS beat/miss classification without review.');
   }
 
   return {
