@@ -283,6 +283,8 @@ function quoteRowsByTicker(derivedRows) {
 }
 
 function validateDerivedDashboardQuoteRows(errors, chartableRows, series, prefix) {
+  // This proves visible price fields are reproducible from chart-data.series;
+  // editorial tape notes remain owned by dashboard-data.tape.rows.
   if (!Array.isArray(chartableRows) || !chartableRows.length) return;
   let derivedRows;
   try {
@@ -414,6 +416,8 @@ function runCompleteTestSuite() {
   const testEnvironment = { ...process.env, DASHBOARD_TEST_NO_API_CREDENTIALS: '1' };
   delete testEnvironment.FINNHUB_API_KEY;
   delete testEnvironment.EARNINGSAPI_API_KEY;
+  // This aggregate command already runs test_dashboard.js; do not launch a
+  // second dashboard-test process beside it unless fixture isolation is added.
   for (const file of ['test_news.js', 'test_earnings_week.js', 'test_week_ahead.js', 'test_dashboard.js']) {
     runReadinessCommand(process.execPath, [path.join('scripts', file)], { env: testEnvironment });
   }

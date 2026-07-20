@@ -296,13 +296,6 @@ async function fetchChartPayload(args, startDate, endDate) {
   return { series, errors };
 }
 
-function sourceFamiliesFromCryptoStats(payload) {
-  const keys = ['fearGreed', 'altcoinSeason', 'totalMarketCap'];
-  return keys
-    .map((key) => String(payload?.[key]?.source || '').trim())
-    .filter(Boolean);
-}
-
 async function buildMarketRefresh(args) {
   const endDate = new Date();
   const range = refreshWindow(args, endDate);
@@ -339,11 +332,6 @@ async function buildMarketRefresh(args) {
       error: cryptoError
     }
   };
-  const sourceFamilies = Array.from(new Set([
-    ...chart.series.map((item) => item.source).filter(Boolean),
-    ...sourceFamiliesFromCryptoStats(crypto)
-  ]));
-
   const errors = [...chart.errors, ...sectionErrors];
   return {
     schemaVersion: 1,
@@ -356,7 +344,6 @@ async function buildMarketRefresh(args) {
       endDate: chartData.isoDateFromDate(range.endDate),
       latestEmbeddedDate: range.latestEmbeddedDate
     },
-    sourceFamilies,
     cryptoStats: crypto,
     series: chart.series,
     errors,

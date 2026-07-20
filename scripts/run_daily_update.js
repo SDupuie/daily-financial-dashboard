@@ -1619,6 +1619,8 @@ function structurallyUsableStory(item, options = {}) {
 
 function storyWithCandidateMetadata(item, candidate, options = {}) {
   const source = candidate || item;
+  // Carry source/candidate facts only; display badges are rebuilt from
+  // newsBaseline during rendering instead of being stored on story rows.
   const story = {
     ...(options.crypto ? { kicker: item?.kicker } : { tag: item?.tag }),
     ...(typeof item?.tone === 'string' ? { tone: item.tone } : {}),
@@ -1626,8 +1628,7 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
     body: item?.body,
     url: source?.url,
     publishedOn: source?.publishedOn,
-    ...(source?.publishedAt ? { publishedAt: source.publishedAt } : {}),
-    ...(typeof item?.isNewSinceScheduledUpdate === 'boolean' ? { isNewSinceScheduledUpdate: item.isNewSinceScheduledUpdate } : {})
+    ...(source?.publishedAt ? { publishedAt: source.publishedAt } : {})
   };
   return story;
 }
@@ -2203,6 +2204,12 @@ function assertValidChartStagingPayload(payload, expectedRows, label, { requireS
   return payload;
 }
 
+function readValidatedChartStagingPayload(file, expectedRows, label, options = {}) {
+  const payload = readJson(file);
+  assertValidChartStagingPayload(payload, expectedRows, label, options);
+  return roundChartPayload(payload);
+}
+
 function chartSeriesRevisionContent(series) {
   const content = roundChartPayload({ series: [series] }).series[0];
   delete content.quoteRevision;
@@ -2236,8 +2243,7 @@ function applyChartDataJson(args) {
   const currentChartData = roundChartPayload(readJsonBlock(html, 'chart-data'));
   let chartData;
   try {
-    chartData = roundChartPayload(readJson(args.applyChartDataJson));
-    assertValidChartStagingPayload(chartData, dashboardData.tape?.rows || [], 'Chart focused apply input', { requireSeries: true });
+    chartData = readValidatedChartStagingPayload(args.applyChartDataJson, dashboardData.tape?.rows || [], 'Chart focused apply input', { requireSeries: true });
     assertChartSeriesRevisions(currentChartData, chartData, 'Chart focused apply input');
   } catch (error) {
     process.stderr.write(`Chart focused apply input was unusable; carrying validated chart data: ${error.message}\n`);
@@ -2289,8 +2295,7 @@ function mergeChartDataJson(args) {
   let incomingChartData;
   let chartData;
   try {
-    incomingChartData = roundChartPayload(readJson(args.mergeChartDataJson));
-    assertValidChartStagingPayload(incomingChartData, [], 'Chart merge input', { requireSeries: true });
+    incomingChartData = readValidatedChartStagingPayload(args.mergeChartDataJson, [], 'Chart merge input', { requireSeries: true });
     const incomingByTicker = new Map(incomingChartData.series.map((series) => [String(series?.ticker || '').toUpperCase(), series]));
     const existingTickers = new Set();
     const series = existingChartData.series.map((series) => {
@@ -2304,7 +2309,6 @@ function mergeChartDataJson(args) {
     chartData = {
       ...existingChartData,
       generatedAt: incomingChartData.generatedAt || scheduledNow().toISOString(),
-      sourceFamilies: Array.from(new Set(series.map((item) => item?.source).filter(Boolean))),
       series
     };
     const availability = mergedChartAvailability(existingChartData, incomingChartData, series);

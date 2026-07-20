@@ -12,7 +12,6 @@ const {
   applyScheduledNewsBaseline,
   canonicalStoryUrl,
   dashboardNewsItems,
-  markNewsItemsNewSinceBaseline,
   normalizeStoryTitle,
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,
@@ -108,7 +107,7 @@ function testNewsCoverageState() {
   );
   assert.match(
     validateNewsCoverageState({ status: 'partial' }, 9, NEWS_COVERAGE_POLICIES.stories).join(' '),
-    /must be complete.*reason.*checkedAt/
+    /must not stay partial.*reason.*checkedAt/
   );
   assert.match(
     validateNewsCoverageState(undefined, 2, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
@@ -744,20 +743,6 @@ function testBaselineSanitization() {
   });
 }
 
-function testNewMarkerAssignment() {
-  const existing = story('Existing', 'https://example.com/existing', { isNewSinceScheduledUpdate: true });
-  const incoming = story('Incoming', 'https://example.com/incoming');
-  const original = [existing, incoming];
-  const marked = markNewsItemsNewSinceBaseline(original, new Set([storyIdentity(existing)]));
-  assert.equal(marked[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(marked[1].isNewSinceScheduledUpdate, true);
-  assert.equal(original[0].isNewSinceScheduledUpdate, true, 'Marker updates must not mutate source story objects.');
-
-  const withoutComparison = markNewsItemsNewSinceBaseline(original, new Set());
-  assert.equal(withoutComparison[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(withoutComparison[1].isNewSinceScheduledUpdate, undefined);
-}
-
 function testManualBaselineTransition() {
   const previousStory = story('Previous', 'https://example.com/previous');
   const currentStory = story('Current', 'https://example.com/current');
@@ -772,17 +757,14 @@ function testManualBaselineTransition() {
   };
   const data = { stories: [previousStory, currentStory, incomingStory], crypto: { notes: [] } };
   applyScheduledNewsBaseline(data, previousData);
-  assert.equal(data.stories[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(data.stories[1].isNewSinceScheduledUpdate, true);
-  assert.equal(data.stories[2].isNewSinceScheduledUpdate, true);
+  assert.equal(data.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
   assert.deepEqual(data.newsBaseline, previousData.newsBaseline);
 
   const currentFallbackData = { stories: [currentStory, incomingStory], crypto: { notes: [] } };
   applyScheduledNewsBaseline(currentFallbackData, {
     newsBaseline: { ...previousData.newsBaseline, previousScheduledStoryIds: [] }
   });
-  assert.equal(currentFallbackData.stories[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(currentFallbackData.stories[1].isNewSinceScheduledUpdate, true);
+  assert.equal(currentFallbackData.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
 }
 
 function testScheduledBaselineTransition() {
@@ -808,10 +790,8 @@ function testScheduledBaselineTransition() {
     scheduledWindow: 'morning',
     now: new Date('2026-07-06T12:00:00.000Z')
   });
-  assert.equal(data.stories[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(data.stories[1].isNewSinceScheduledUpdate, true);
-  assert.equal(data.crypto.notes[0].isNewSinceScheduledUpdate, undefined);
-  assert.equal(data.crypto.notes[1].isNewSinceScheduledUpdate, true);
+  assert.equal(data.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
+  assert.equal(data.crypto.notes.some((item) => 'isNewSinceScheduledUpdate' in item), false);
   assert.deepEqual(data.newsBaseline.previousScheduledStoryIds, previousIds);
   assert.deepEqual(data.newsBaseline.currentScheduledStoryIds, sortedDashboardNewsIds(data));
   assert.equal(data.newsBaseline.lastScheduledUpdateAt, '2026-07-06T12:00:00.000Z');
@@ -900,7 +880,6 @@ async function main() {
   await testNewsCandidateCapAfterEligibilityAndDedupe();
   await testYahooOriginalPromotionValidation();
   testBaselineSanitization();
-  testNewMarkerAssignment();
   testManualBaselineTransition();
   testScheduledBaselineTransition();
   testScheduledStartAndFinalizationGuards();

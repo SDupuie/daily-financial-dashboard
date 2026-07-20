@@ -131,7 +131,9 @@ function candidateInFuturesPublicationWindow(candidate, futuresWindow) {
 }
 
 function newsCoverageState(count, policy, now) {
-  if (count >= policy.minimum) return { status: 'complete' };
+  // Complete coverage is represented by absence; persist only partial coverage
+  // so generated JSON does not carry a redundant "all clear" object.
+  if (count >= policy.minimum) return undefined;
   return {
     status: 'partial',
     reason: NEWS_COVERAGE_REASON,
@@ -141,14 +143,20 @@ function newsCoverageState(count, policy, now) {
 
 function applyNewsCoverageState(data, { now = new Date() } = {}) {
   const storiesCount = Array.isArray(data?.stories) ? data.stories.length : 0;
-  data.storiesCoverage = newsCoverageState(storiesCount, NEWS_COVERAGE_POLICIES.stories, now);
+  const storiesCoverage = newsCoverageState(storiesCount, NEWS_COVERAGE_POLICIES.stories, now);
+  if (storiesCoverage) data.storiesCoverage = storiesCoverage;
+  else delete data.storiesCoverage;
   if (data?.crypto && typeof data.crypto === 'object' && !Array.isArray(data.crypto)) {
     const cryptoCount = Array.isArray(data.crypto.notes) ? data.crypto.notes.length : 0;
-    data.crypto.notesCoverage = newsCoverageState(cryptoCount, NEWS_COVERAGE_POLICIES.cryptoNotes, now);
+    const notesCoverage = newsCoverageState(cryptoCount, NEWS_COVERAGE_POLICIES.cryptoNotes, now);
+    if (notesCoverage) data.crypto.notesCoverage = notesCoverage;
+    else delete data.crypto.notesCoverage;
   }
   if (data?.futuresModule && typeof data.futuresModule === 'object' && !Array.isArray(data.futuresModule)) {
     const futuresCount = Array.isArray(data.futuresModule.stories) ? data.futuresModule.stories.length : 0;
-    data.futuresModule.storiesCoverage = newsCoverageState(futuresCount, NEWS_COVERAGE_POLICIES.futuresStories, now);
+    const futuresCoverage = newsCoverageState(futuresCount, NEWS_COVERAGE_POLICIES.futuresStories, now);
+    if (futuresCoverage) data.futuresModule.storiesCoverage = futuresCoverage;
+    else delete data.futuresModule.storiesCoverage;
   }
 }
 
@@ -162,7 +170,7 @@ function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = 
     return errors;
   }
   if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) {
-    errors.push(`${coverageLabel} must record complete or partial coverage.`);
+    errors.push(`${coverageLabel} must be a recognized coverage state when present.`);
     return errors;
   }
   if (coverage.status === 'complete') {
@@ -175,11 +183,11 @@ function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = 
     return errors;
   }
   if (coverage.status !== 'partial') {
-    errors.push(`${coverageLabel}.status must be complete or partial.`);
+    errors.push(`${coverageLabel}.status must be partial or a recognized complete marker.`);
     return errors;
   }
   if (count >= policy.minimum) {
-    errors.push(`${coverageLabel}.status must be complete once ${policy.label} reaches its target minimum of ${policy.minimum}.`);
+    errors.push(`${coverageLabel}.status must not stay partial once ${policy.label} reaches its target minimum of ${policy.minimum}.`);
   }
   if (coverage.reason !== NEWS_COVERAGE_REASON) {
     errors.push(`${coverageLabel}.reason must be ${NEWS_COVERAGE_REASON} when coverage is partial.`);
@@ -289,48 +297,13 @@ function sanitizeNewsBaseline(value) {
   };
 }
 
-function comparisonStoryIdsForManualRun(baseline) {
-  const previous = arrayStringSet(baseline.previousScheduledStoryIds);
-  return previous.size ? previous : arrayStringSet(baseline.currentScheduledStoryIds);
-}
-
-function markNewsItemsNewSinceBaseline(items, comparisonIds) {
-  const hasComparison = comparisonIds.size > 0;
-  return (Array.isArray(items) ? items : []).map((story) => {
-    const next = story && typeof story === 'object' ? { ...story } : {};
-    const id = storyIdentity(next);
-    if (hasComparison && id && !comparisonIds.has(id)) {
-      next.isNewSinceScheduledUpdate = true;
-    } else {
-      delete next.isNewSinceScheduledUpdate;
-    }
-    return next;
-  });
-}
-
-function markStoriesNewSinceBaseline(data, comparisonIds) {
-  data.stories = markNewsItemsNewSinceBaseline(data.stories, comparisonIds);
-  if (data.crypto && typeof data.crypto === 'object' && !Array.isArray(data.crypto)) {
-    data.crypto = {
-      ...data.crypto,
-      notes: markNewsItemsNewSinceBaseline(data.crypto.notes, comparisonIds)
-    };
-  }
-}
-
 function applyScheduledNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
+  // The baseline stores comparison identities only. Renderers derive the visible
+  // "New" badge so individual story rows stay source-shaped.
   const rawBaseline = previousData?.newsBaseline ?? data.newsBaseline;
   const previousBaseline = validNewsBaseline(rawBaseline)
     ? sanitizeNewsBaseline(rawBaseline)
     : sanitizeNewsBaseline(null);
-  // Manual runs can highlight stories that are new since the last scheduled run,
-  // but only scheduled runs advance the baseline used by tomorrow's comparison.
-  const comparisonIds = scheduled
-    ? arrayStringSet(previousBaseline.currentScheduledStoryIds)
-    : comparisonStoryIdsForManualRun(previousBaseline);
-
-  markStoriesNewSinceBaseline(data, comparisonIds);
-
   if (scheduled) {
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
       throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
@@ -357,7 +330,6 @@ module.exports = {
   canonicalStoryUrl,
   dashboardNewsItems,
   futuresStoryPublicationWindow,
-  markNewsItemsNewSinceBaseline,
   normalizeStoryTitle,
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,

@@ -206,7 +206,7 @@ Run the applicable checks after content, structural, layout, script, or contract
 - Avoid market-superlative claims unless directly verified during AI Editorial Work.
 - Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. After changing Market Lens or Outcome copy, reactions, or routing, check narrow mobile and desktop widths for readability and overflow; activate pre-close and post-close reaction controls with pointer and keyboard; verify the correct Tape group, ticker, and chart open; verify focus moves to the chart heading; and verify repeated activation leaves that chart open.
 - After changing an information tooltip, browser-check tap, hover, and keyboard activation at narrow mobile, tablet, and desktop widths. The tooltip must remain inside the viewport and each state must remain legible.
-- Run `node scripts/validate_dashboard.js test` after script or data-contract changes when publication is not the immediate next step. Run `node scripts/test_dashboard.js --local-refresh` only when changing local-refresh behavior.
+- Run `node scripts/validate_dashboard.js test` after script or data-contract changes when publication is not the immediate next step. It already runs `scripts/test_dashboard.js`, so keep those checks sequential rather than launching a parallel dashboard-test run. Run `node scripts/test_dashboard.js --local-refresh` only when changing local-refresh behavior.
 - Nonvisual data, contract, validation, and refactoring changes require no browser pass. For visible changes, exercise only the affected interactions and applicable breakpoints, including every specific tooltip or Week Ahead check listed above when that surface changed.
 
 ### Commit and publish

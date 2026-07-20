@@ -5,6 +5,8 @@ const ROOT = path.resolve(__dirname, '..');
 const PUBLISHED_ARTIFACTS = ['daily_financial_news.html', 'index.html'];
 
 function assertStagingWritePath(file, projectRoot = ROOT) {
+  // Fetchers may stage generated artifacts, but run_daily_update owns writes to
+  // the canonical dashboard and published entry point.
   const resolved = path.resolve(file);
   const root = path.resolve(projectRoot);
   if (PUBLISHED_ARTIFACTS.some((name) => resolved === path.join(root, name))) {

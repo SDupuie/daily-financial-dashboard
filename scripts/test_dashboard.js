@@ -93,8 +93,7 @@ function story(kind, index) {
     title: `${kind} fixture story ${index}`,
     body: `Fixture reporting item ${index} provides a concise, dated market-development summary for validator coverage.`,
     url,
-    publishedOn: '2026-07-10',
-    isNewSinceScheduledUpdate: false
+    publishedOn: '2026-07-10'
   };
 }
 
@@ -243,9 +242,7 @@ function createDashboardValidationFixture() {
   const chartData = compactChartPayload({
     schemaVersion: 1,
     generatedAt: quoteRevision,
-    dashboardSource: 'scripts/test_dashboard.js',
     range: { days: 1826, startDate: '2021-07-10', endDate: '2026-07-10' },
-    sourceFamilies: ['Yahoo Finance Chart API'],
     series: chartSeries
   });
   const stories = Array.from({ length: 9 }, (_item, index) => story('market', index + 1));
@@ -2178,7 +2175,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const shortSearchResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(shortSearchResult.status, 0, shortSearchResult.stderr);
   let shortSearchFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
-  assert.equal(shortSearchFinalized.storiesCoverage.status, 'complete', 'Candidate-pool size must not override the accepted final-card count.');
+  assert.equal(shortSearchFinalized.storiesCoverage, undefined, 'Candidate-pool size must not override the accepted final-card count.');
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
@@ -2214,7 +2211,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(mixedNewsFinalized.stories.length, 7);
   assert.equal(mixedNewsFinalized.storiesCoverage.status, 'partial');
   assert.equal(mixedNewsFinalized.crypto.notes.length, 6);
-  assert.equal(mixedNewsFinalized.crypto.notesCoverage.status, 'complete');
+  assert.equal(mixedNewsFinalized.crypto.notesCoverage, undefined);
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === 'https://outside.test/story'));
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.editorialReview.newsSelection.futures[0].url));
   assert.ok(mixedNewsFinalized.crypto.notes.some((story) => story.title === duplicateCryptoTitle));
@@ -2235,9 +2232,9 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.futuresModule.stories[0].title, 'Reviewed futures story');
   assert.equal(finalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
   assert.equal(finalized.crypto.notes[0].title, 'Reviewed crypto story');
-  assert.deepEqual(finalized.storiesCoverage, { status: 'complete' });
-  assert.deepEqual(finalized.futuresModule.storiesCoverage, { status: 'complete' });
-  assert.deepEqual(finalized.crypto.notesCoverage, { status: 'complete' });
+  assert.equal(finalized.storiesCoverage, undefined);
+  assert.equal(finalized.futuresModule.storiesCoverage, undefined);
+  assert.equal(finalized.crypto.notesCoverage, undefined);
   assert.deepEqual(finalized.tape.rows[0], dashboard.tape.rows[0], 'Editorial input cannot alter an unchanged quote bundle.');
   assert.match(finalized.tape.label, /^Friday After The Bell · Reviewed drivers$/);
   assert.match(finalized.footer.compiled, /^Compiled Friday, July 10, 2026 at 4:00 PM CDT · Holiday context: Reviewed\./);
@@ -2845,6 +2842,12 @@ function testChartRepairStagesMixedResultForEditorialReview() {
     originalChart.series.find((item) => item.ticker === 'SPX').bars,
     'A focused repair cannot stage changed series data under the prior quote revision.'
   );
+
+  fs.writeFileSync(candidateFile, stagedHtml);
+  fs.writeFileSync(payloadFile, JSON.stringify({ ...repairPayload, quoteRows: [{ ticker: 'SPX' }] }));
+  const staleFieldResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env: environment });
+  assert.equal(staleFieldResult.status, 0, staleFieldResult.stderr);
+  assert.match(staleFieldResult.stderr, /quoteRows is no longer stored/);
 
   fs.writeFileSync(candidateFile, stagedHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(repairPayload));

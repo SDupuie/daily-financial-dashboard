@@ -1597,13 +1597,11 @@ function chartOutput({ args, series, failures, generatedAt, quoteRevision, start
   return {
     schemaVersion: 1,
     generatedAt,
-    dashboardSource: path.relative(process.cwd(), args.input) || path.basename(args.input),
     range: {
       days: args.days,
       startDate: isoDateFromDate(startDate),
       endDate: isoDateFromDate(endDate)
     },
-    sourceFamilies: Array.from(new Set(chartSeries.map((item) => item.source).filter(Boolean))),
     ...(failures.length ? {
       availability: {
         status: 'partial',
