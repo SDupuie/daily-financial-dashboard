@@ -5,7 +5,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
-const { cryptoQuoteRowFromSeries, quoteRowFromSeries } = require('./fetch_chart_data');
+const { deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
 
 const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
@@ -271,62 +271,64 @@ function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker
   void carriedTickers;
 }
 
-function validateQuoteRows(errors, warnings, payload, {
-  expectedByTicker,
-  expectedSectionByTicker,
-  prefix,
-  validationMode = 'published'
-}, seriesByTicker) {
-  const tapeRows = Array.isArray(payload.quoteRows?.tape) ? payload.quoteRows.tape : [];
-  const cryptoRows = Array.isArray(payload.quoteRows?.crypto) ? payload.quoteRows.crypto : [];
-  const quoteRowsByTicker = new Map();
-  const validateRows = (rows, section) => {
-    for (const [index, rawRow] of rows.entries()) {
-      const row = rawRow && typeof rawRow === 'object' ? rawRow : {};
-      const ticker = String(row.ticker || row.sym || '').toUpperCase();
-      const label = ticker || `${prefix}quoteRows.${section}[${index}]`;
-      if (!ticker) errors.push(`${prefix}quoteRows.${section}[${index}].ticker must be populated.`);
-      if (quoteRowsByTicker.has(ticker)) errors.push(`Duplicate generated quote row for ${ticker}.`);
-      quoteRowsByTicker.set(ticker, row);
-      const expectedSource = expectedByTicker.get(ticker);
-      if (!expectedSource) errors.push(`${label} is not present in dashboard chartable rows.`);
-      else if (section === 'tape' && row.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
-      if (expectedSectionByTicker.get(ticker) !== section) errors.push(`${label} must be generated only for ${section} rows.`);
-      const fields = section === 'tape'
-        ? ['name', 'last', 'delta', 'pct', 'dir', 'asOf']
-        : ['name', 'price', 'delta', 'chg', 'dir', 'asOf'];
-      for (const field of fields) {
-        if (typeof row[field] !== 'string' || row[field].trim() === '') errors.push(`${label}.${field} must be populated.`);
-      }
-      if (section === 'tape') {
-        const note = String(row.note || '').trim();
-        if (!note && validationMode === 'published') {
-          warnings.push(`${label}.note is blank; editorial commentary is incomplete.`);
-        }
-      }
-      if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
-      if (!isIsoDate(row.asOf)) errors.push(`${label}.asOf must be an ISO date.`);
-      const item = seriesByTicker.get(ticker);
-      // Bar validation already reports malformed or truncated series; do not replace that diagnosis with a quote-derivation exception.
-      if (!Array.isArray(item?.bars) || item.bars.length < 2) continue;
-      const expected = item ? (section === 'tape' ? quoteRowFromSeries(item) : cryptoQuoteRowFromSeries(item)) : null;
-      if (!expected) continue;
-      const fieldsToMatch = section === 'tape'
-        ? [['last', 'last'], ['delta', 'delta'], ['pct', 'pct'], ['dir', 'dir'], ['asOf', 'asOf']]
-        : [['price', 'price'], ['delta', 'delta'], ['chg', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']];
-      for (const [field, expectedField] of fieldsToMatch) {
-        if (String(row[field] ?? '') !== String(expected[expectedField] ?? '')) {
-          errors.push(`${label}.${field} must match the latest generated ${section === 'crypto' ? 'crypto ' : ''}series bar-derived value "${expected[expectedField]}".`);
-        }
+function quoteRowsByTicker(derivedRows) {
+  const byTicker = new Map();
+  for (const row of derivedRows.tape || []) {
+    byTicker.set(String(row?.ticker || '').toUpperCase(), { section: 'tape', row });
+  }
+  for (const row of derivedRows.crypto || []) {
+    byTicker.set(String(row?.ticker || row?.sym || '').toUpperCase(), { section: 'crypto', row });
+  }
+  return byTicker;
+}
+
+function validateDerivedDashboardQuoteRows(errors, chartableRows, series, prefix) {
+  if (!Array.isArray(chartableRows) || !chartableRows.length) return;
+  let derivedRows;
+  try {
+    derivedRows = deriveQuoteRowsFromSeries(series);
+  } catch (error) {
+    errors.push(`${prefix}series cannot derive dashboard Tape prices: ${error.message}`);
+    return;
+  }
+  const byTicker = quoteRowsByTicker(derivedRows);
+  for (const [index, rowRaw] of chartableRows.entries()) {
+    const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+    const ticker = String(row?.ticker || '').toUpperCase();
+    const section = String(row?.section || 'tape');
+    const label = ticker || `dashboard tape.rows[${index}]`;
+    const derived = byTicker.get(ticker);
+    if (!derived) {
+      errors.push(`${label} is missing derived quote fields from ${prefix || 'chart-data.'}series.`);
+      continue;
+    }
+    if (derived.section !== section) {
+      errors.push(`${label} must derive from a ${section} chart series.`);
+      continue;
+    }
+    const fieldsToMatch = section === 'crypto'
+      ? [['last', 'price'], ['delta', 'delta'], ['pct', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']]
+      : [['last', 'last'], ['delta', 'delta'], ['pct', 'pct'], ['dir', 'dir'], ['asOf', 'asOf']];
+    for (const [dashboardField, derivedField] of fieldsToMatch) {
+      if (String(row[dashboardField] ?? '') !== String(derived.row[derivedField] ?? '')) {
+        errors.push(`${label}.${dashboardField} must match the latest ${prefix || 'chart-data.'}series-derived value "${derived.row[derivedField]}".`);
       }
     }
-  };
-  validateRows(tapeRows, 'tape');
-  validateRows(cryptoRows, 'crypto');
-  for (const [ticker, section] of expectedSectionByTicker.entries()) {
-    if (!quoteRowsByTicker.has(ticker)) errors.push(`Generated quote rows are missing ${section} ticker ${ticker}.`);
   }
-  return { quoteRowsByTicker, tapeRows, cryptoRows };
+}
+
+function validateDashboardTapeCommentary(errors, warnings, data, { validationMode = 'published' } = {}) {
+  for (const [index, rowRaw] of (Array.isArray(data?.tape?.rows) ? data.tape.rows : []).entries()) {
+    const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
+    const ticker = String(row?.ticker || '').toUpperCase();
+    const label = ticker || `tape.rows[${index}]`;
+    if (validationMode === 'published' && !String(row.note || '').trim()) {
+      warnings.push(`${label}.note is blank; editorial commentary is incomplete.`);
+    }
+    for (const error of validateTapeCommentaryDisposition(row)) {
+      errors.push(`${label}.${error}`);
+    }
+  }
 }
 
 // Staged fetch output and the compact published payload share this complete contract;
@@ -336,8 +338,7 @@ function validateChartPayload(errors, payload, {
   expectedSectionByTicker,
   decodeSeries,
   label = '',
-  warnings = [],
-  validationMode = 'published',
+  dashboardRows = [],
   absentMessage = 'is not present in dashboard chartable rows.',
   duplicateMessage = 'Duplicate generated chart series for',
   missingMessage = 'Generated chart data is missing',
@@ -346,12 +347,7 @@ function validateChartPayload(errors, payload, {
   const prefix = label ? `${label}.` : '';
   if (payload.schemaVersion !== 1) errors.push(`${prefix}schemaVersion must be 1.`);
   if (!Array.isArray(payload.series)) errors.push(`${prefix}series must be an array.`);
-  if (!payload.quoteRows || typeof payload.quoteRows !== 'object' || Array.isArray(payload.quoteRows)) {
-    errors.push(`${prefix}quoteRows must be an object with tape and crypto arrays.`);
-  } else {
-    if (!Array.isArray(payload.quoteRows.tape)) errors.push(`${prefix}quoteRows.tape must be an array.`);
-    if (!Array.isArray(payload.quoteRows.crypto)) errors.push(`${prefix}quoteRows.crypto must be an array.`);
-  }
+  if (payload.quoteRows !== undefined) errors.push(`${prefix}quoteRows is no longer published; derive quote rows from ${prefix}series.`);
   validateChartPayloadMetadata(errors, payload, { label });
   const series = Array.isArray(payload.series) ? payload.series : [];
   const result = validateSeries(errors, series, {
@@ -365,15 +361,9 @@ function validateChartPayload(errors, payload, {
     volumeDescription
   });
   validateChartAvailabilityCorrespondence(errors, payload, result.seriesByTicker, prefix);
-  return {
-    ...result,
-    ...validateQuoteRows(errors, warnings, payload, {
-      expectedByTicker,
-      expectedSectionByTicker,
-      prefix,
-      validationMode
-    }, result.seriesByTicker)
-  };
+  const roundedSeries = roundChartPayload({ series: result.decodedSeries }).series;
+  validateDerivedDashboardQuoteRows(errors, dashboardRows, roundedSeries, prefix);
+  return result;
 }
 
 
@@ -506,11 +496,8 @@ function parseChartDataArgs(argv) {
   return args;
 }
 
-function chartableRowsFromDashboardHtml(dashboardHtml) {
-  const match = dashboardHtml.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  if (!match) throw new Error('Could not find dashboard-data JSON block.');
-  const data = JSON.parse(match[1]);
-  // README Data Contracts make tape.rows the only chartable ticker source; section decides quoteRows shape.
+function chartableRowsFromDashboardData(data) {
+  // README Data Contracts make tape.rows the only chartable ticker source; section decides derived quote shape.
   const tapeRows = Array.isArray(data.tape?.rows)
     ? data.tape.rows
       .filter((row) => String(row?.group ?? '') !== 'Crypto')
@@ -524,9 +511,13 @@ function chartableRowsFromDashboardHtml(dashboardHtml) {
   return [...tapeRows, ...cryptoTickerRows];
 }
 
-function validateChartDataPayload(chartableRows, chartData) {
-  const errors = [];
-  // Generated chart data must track the dashboard's authoritative ticker-to-sourceSymbol map exactly.
+function chartableRowsFromDashboardHtml(dashboardHtml) {
+  const match = dashboardHtml.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
+  if (!match) throw new Error('Could not find dashboard-data JSON block.');
+  return chartableRowsFromDashboardData(JSON.parse(match[1]));
+}
+
+function chartExpectationsFromRows(errors, chartableRows) {
   const expectedByTicker = new Map(chartableRows.map((row) => [
     String(row?.ticker || '').toUpperCase(),
     String(row?.sourceSymbol || '')
@@ -545,10 +536,18 @@ function validateChartDataPayload(chartableRows, chartData) {
     }
     seenChartableTickers.add(ticker);
   }
+  return { expectedByTicker, expectedSectionByTicker };
+}
+
+function validateChartDataPayload(chartableRows, chartData) {
+  const errors = [];
+  // Generated chart data must track the dashboard's authoritative ticker-to-sourceSymbol map exactly.
+  const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
   const { decodedSeries: series } = validateChartPayload(errors, chartData, {
     expectedByTicker,
     expectedSectionByTicker,
-    decodeSeries: decodeObjectSeries
+    decodeSeries: decodeObjectSeries,
+    dashboardRows: chartableRows
   });
   return { errors, series };
 }
@@ -683,6 +682,8 @@ if (!dashboardMatch) {
 
   if (data) {
     let chartData = null;
+    const chartableRows = chartableRowsFromDashboardData(data);
+    validateDashboardTapeCommentary(errors, warnings, data, { validationMode });
 
     if (!chartDataMatch) {
       errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
@@ -695,19 +696,13 @@ if (!dashboardMatch) {
     }
 
     if (chartData) {
-      const expectedByTicker = new Map((Array.isArray(chartData.series) ? chartData.series : [])
-        .map((series) => [String(series?.ticker || '').toUpperCase(), series?.sourceSymbol])
-        .filter(([ticker, sourceSymbol]) => ticker && sourceSymbol));
-      const expectedSectionByTicker = new Map((Array.isArray(chartData.series) ? chartData.series : [])
-        .map((series) => [String(series?.ticker || '').toUpperCase(), String(series?.section || '')])
-        .filter(([ticker]) => ticker));
+      const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
       validateChartPayload(errors, chartData, {
         expectedByTicker,
         expectedSectionByTicker,
         decodeSeries: decodeTupleSeries,
         label: 'chart-data',
-        warnings,
-        validationMode,
+        dashboardRows: chartableRows,
         absentMessage: 'is missing its embedded source mapping.',
         duplicateMessage: 'Duplicate embedded chart series for',
         missingMessage: 'Embedded chart data is missing',
@@ -788,6 +783,7 @@ module.exports = {
   MIN_CHART_HISTORY_DAYS,
   REQUIRED_YIELD_CURVE_COMPARISONS,
   changedPaths,
+  chartableRowsFromDashboardData,
   chartableRowsFromDashboardHtml,
   decodeObjectSeries,
   decodeTupleSeries,

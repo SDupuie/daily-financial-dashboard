@@ -15,6 +15,7 @@ const {
   buildChartDataFallback,
   buildUnavailableFuturesPayload,
   compactChartPayload,
+  deriveQuoteRowsFromSeries,
   parseFuture,
   parseArgs: parseFetchChartDataArgs,
   quoteRowFromSeries,
@@ -222,13 +223,13 @@ function createDashboardValidationFixture() {
   // Keep validator mutations independent of the live edition while still exercising
   // the complete dashboard-to-chart and quote-row contracts.
   const quoteRevision = '2026-07-10T12:00:00.000Z';
+  const tapeNote = 'Fixture market positioning remains constructive as breadth improves and investors assess earnings, rates, growth, and liquidity conditions across sessions.';
   const chartSeries = ['SPX', 'VCR', 'UST10Y'].map((ticker, index) => ({
     ticker,
     name: `Fixture ${ticker}`,
     section: 'tape',
     sourceSymbol: ticker,
     quoteRevision,
-    note: 'Fixture market positioning remains constructive as breadth improves and investors assess earnings, rates, growth, and liquidity conditions across sessions.',
     source: 'Yahoo Finance Chart API',
     dataKind: 'ohlc',
     priceOnly: false,
@@ -245,7 +246,6 @@ function createDashboardValidationFixture() {
     dashboardSource: 'scripts/test_dashboard.js',
     range: { days: 1826, startDate: '2021-07-10', endDate: '2026-07-10' },
     sourceFamilies: ['Yahoo Finance Chart API'],
-    quoteRows: { tape: quotes, crypto: [] },
     series: chartSeries
   });
   const stories = Array.from({ length: 9 }, (_item, index) => story('market', index + 1));
@@ -271,7 +271,7 @@ function createDashboardValidationFixture() {
         label: 'Friday After The Bell · Fixture drivers',
         rows: quotes.map((quote) => reviewedTapeCommentary(
           { ...quote, group: quote.ticker === 'VCR' ? 'Sectors' : quote.ticker === 'UST10Y' ? 'Rates & Credit' : 'Equities' },
-          quote.note,
+          tapeNote,
           quoteRevision,
           '2026-07-10T12:30:00.000Z'
         ))
@@ -1938,19 +1938,17 @@ function testChartSeriesOwnsDerivedQuoteViews() {
         { time: '2026-07-03', open: 60000, high: 60000, low: 60000, close: 60000 },
         { time: '2026-07-06', open: 61000, high: 61000, low: 61000, close: 61000 }
       ]
-    }],
-    quoteRows: {
-      tape: [{ ticker: 'SPX', last: 'bad', delta: 'bad', pct: 'bad', dir: 'down', asOf: '2026-07-01' }],
-      crypto: [{ ticker: 'BTC', sym: 'BTC', price: 'bad', delta: 'bad', chg: 'bad', dir: 'down', asOf: '2026-07-01' }]
-    }
+    }]
   };
 
   syncDashboardPricesFromChartData(data, chartData);
 
-  assert.equal(chartData.quoteRows.tape[0].last, '6,123.45');
-  assert.equal(chartData.quoteRows.tape[0].asOf, '2026-07-06');
-  assert.equal(chartData.quoteRows.crypto[0].price, '$61,000');
-  assert.equal(chartData.quoteRows.crypto[0].asOf, '2026-07-06');
+  const derived = deriveQuoteRowsFromSeries(chartData.series);
+  assert.equal(chartData.quoteRows, undefined);
+  assert.equal(derived.tape[0].last, '6,123.45');
+  assert.equal(derived.tape[0].asOf, '2026-07-06');
+  assert.equal(derived.crypto[0].price, '$61,000');
+  assert.equal(derived.crypto[0].asOf, '2026-07-06');
   assert.equal(data.tape.rows[0].last, '6,123.45');
   assert.equal(data.tape.rows[0].pct, '+2.06%');
   assert.equal(data.tape.rows[1].last, '$61,000');
@@ -2111,19 +2109,17 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
 
   const stagedChart = structuredClone(chartData);
   stagedChart.series[0].bars.at(-1)[4] += 1;
+  stagedChart.series[0].quoteRevision = '2026-07-10T13:00:00.000Z';
   const stagedQuoteRow = quoteRowFromSeries(roundChartPayload(stagedChart).series[0]);
-  stagedChart.quoteRows.tape = stagedChart.quoteRows.tape.map((row) => (
-    row.ticker === stagedQuoteRow.ticker ? stagedQuoteRow : row
-  ));
   const stagedDashboard = structuredClone(dashboard);
-  stagedDashboard.tape.rows[0] = {
+  stagedDashboard.tape.rows[0] = unavailableTapeCommentary({
     ...stagedDashboard.tape.rows[0],
     last: stagedQuoteRow.last,
     delta: stagedQuoteRow.delta,
     pct: stagedQuoteRow.pct,
     dir: stagedQuoteRow.dir,
     asOf: stagedQuoteRow.asOf
-  };
+  }, stagedChart.series[0].quoteRevision);
   fs.writeFileSync(candidateFile, renderDashboardValidationFixture(stagedDashboard, stagedChart));
   const stagedEditorialPayload = structuredClone(stagedDashboard);
   stagedEditorialPayload.opening = structuredClone(pendingOpeningPayload.opening);
@@ -2143,8 +2139,8 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const stagedPublishedDashboard = readJsonBlock(stagedHtml, 'dashboard-data');
   assert.equal(
     stagedPublishedDashboard.tape.rows[0].last,
-    dashboard.tape.rows[0].last,
-    'Apply must not rebuild dashboard Tape fields from chart-data; Stage 1 owns quote synchronization.'
+    stagedQuoteRow.last,
+    'Apply must preserve the staged dashboard Tape fields produced by Stage 1 quote synchronization.'
   );
   assert.deepEqual(stagedPublishedDashboard.earnings.week.range, dashboard.earnings.week.range);
   assert.deepEqual(stagedPublishedDashboard.weekAhead.range, dashboard.weekAhead.range);
@@ -2629,7 +2625,6 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
         name: row.name,
         section: row.section,
         sourceSymbol: row.sourceSymbol,
-        note: row.note,
         source: 'Yahoo Finance Chart API',
         dataKind: 'ohlc',
         priceOnly: false,
@@ -2683,7 +2678,6 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
       name: row.name,
       section: row.section,
       sourceSymbol: row.sourceSymbol,
-      note: row.note,
       source: 'Yahoo Finance Chart API',
       dataKind: 'ohlc',
       priceOnly: false,
@@ -2730,7 +2724,6 @@ async function testChartRerunUsesExecutionRevision() {
         name: row.name,
         section: row.section,
         sourceSymbol: row.sourceSymbol,
-        note: row.note,
         source: 'Yahoo Finance Chart API',
         dataKind: 'ohlc',
         priceOnly: false,
@@ -3060,7 +3053,10 @@ function testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover(
 
 function testDashboardValidatorTapeNotesAreModeSpecific() {
   const { dashboard, chartData } = createDashboardValidationFixture();
-  chartData.quoteRows.tape[0].note = '';
+  dashboard.tape.rows[0] = unavailableTapeCommentary(
+    dashboard.tape.rows[0],
+    dashboard.tape.rows[0].noteDisposition.quoteRevision
+  );
   const html = renderDashboardValidationFixture(dashboard, chartData);
 
   const staged = dashboardValidationResult(html, FIXTURE_NOW, 'staged');

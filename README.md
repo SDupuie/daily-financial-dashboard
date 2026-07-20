@@ -276,7 +276,7 @@ Manual fallback work never goes directly into `daily_financial_news.html`. Put t
 - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2` first, then the Alternative.me page if the API fails.
 - Asset Allocation Portfolio rows: instrument-level ETF market data only. Do not import or recreate tactical allocation/model logic from the separate Asset Allocation Dashboard.
 
-For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or footer. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows` or `chart-data.quoteRows`.
+For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or footer. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows`.
 
 ### Earnings Deterministic Method
 

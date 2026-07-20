@@ -293,15 +293,7 @@ async function fetchChartPayload(args, startDate, endDate) {
     }
   });
   const series = results.filter(Boolean);
-  let quoteRows = { tape: [], crypto: [] };
-  try {
-    // The local-refresh payload mirrors production: prices are derived from refreshed series
-    // so preview data cannot invent a second market-data truth alongside chart history.
-    quoteRows = chartData.deriveQuoteRowsFromSeries(series);
-  } catch (error) {
-    errors.push({ section: 'chart', ticker: 'quoteRows', message: error.message });
-  }
-  return { series, quoteRows, errors };
+  return { series, errors };
 }
 
 function sourceFamiliesFromCryptoStats(payload) {
@@ -314,7 +306,7 @@ function sourceFamiliesFromCryptoStats(payload) {
 async function buildMarketRefresh(args) {
   const endDate = new Date();
   const range = refreshWindow(args, endDate);
-  // Refresh quote rows, chart bars, and crypto stat cards as one logical snapshot, but keep section failures isolated.
+  // Refresh chart bars and crypto stat cards as one logical snapshot, but keep section failures isolated.
   // The browser overlay receives explicit section status and may retain embedded
   // canonical data for a failed section; this payload never mutates dashboard HTML.
   const [chartResult, cryptoResult] = await Promise.allSettled([
@@ -325,7 +317,6 @@ async function buildMarketRefresh(args) {
     ? chartResult.value
     : {
       series: [],
-      quoteRows: { tape: [], crypto: [] },
       errors: []
     };
   const crypto = cryptoResult.status === 'fulfilled' ? cryptoResult.value : null;
@@ -366,7 +357,6 @@ async function buildMarketRefresh(args) {
       latestEmbeddedDate: range.latestEmbeddedDate
     },
     sourceFamilies,
-    quoteRows: chart.quoteRows,
     cryptoStats: crypto,
     series: chart.series,
     errors,
@@ -436,8 +426,6 @@ function createServer(args) {
       const payload = await inFlight;
       // A partial snapshot is still useful locally: keep quote/chart refreshes live even when a secondary section fails.
       const successCount = payload.series.length +
-        payload.quoteRows.tape.length +
-        payload.quoteRows.crypto.length +
         (Array.isArray(payload.cryptoStats?.stats) ? payload.cryptoStats.stats.length : 0);
       // Fresh and cached responses share this normalized shape; only the per-request cached flag changes.
       const responsePayload = {

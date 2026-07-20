@@ -766,7 +766,6 @@ function readTapeRows(input) {
     throw new Error('dashboard-data tape.rows is empty or missing');
   }
   // sourceSymbol is the single dashboard-owned routing key for quote refreshes and embedded chart history.
-  // Crypto tickers share the canonical tape.rows contract, but keep their crypto quoteRows shape below.
   return rows.map((row, index) => ({
     index,
     section: 'tape',
@@ -774,15 +773,13 @@ function readTapeRows(input) {
     group: String(row?.group || '').trim(),
     name: String(row?.name || '').trim(),
     ticker: String(row?.ticker || '').trim().toUpperCase(),
-    sourceSymbol: String(row?.sourceSymbol || '').trim(),
-    note: String(row?.note || '').trim()
+    sourceSymbol: String(row?.sourceSymbol || '').trim()
   })).filter((row) => row.ticker && row.sourceSymbol && row.group !== 'Crypto');
 }
 
 function readCryptoRows(input) {
   const data = readDashboardData(input);
   const rows = Array.isArray(data.tape?.rows) ? data.tape.rows : [];
-  // chart-data.quoteRows.crypto uses price/chg because the crypto refresh formatter predates the Tape merge.
   return rows.map((row, index) => {
     const ticker = String(row?.ticker || '').trim().toUpperCase();
     return {
@@ -792,8 +789,7 @@ function readCryptoRows(input) {
       group: String(row?.group || '').trim(),
       name: String(row?.name || ticker).trim(),
       ticker,
-      sourceSymbol: String(row?.sourceSymbol || '').trim(),
-      note: String(row?.note || '').trim()
+      sourceSymbol: String(row?.sourceSymbol || '').trim()
     };
   }).filter((row) => row.ticker && row.sourceSymbol && row.group === 'Crypto');
 }
@@ -951,22 +947,26 @@ function compactChartBar(rawBar) {
 }
 
 function roundChartPayload(payload) {
+  const { quoteRows: _quoteRows, ...rest } = payload || {};
   return {
-    ...payload,
-    series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => ({
-      ...series,
-      bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
-        const bar = objectBar(rawBar);
-        return {
-          time: String(bar.time || ''),
-          open: fourDecimalNumber(bar.open),
-          high: fourDecimalNumber(bar.high),
-          low: fourDecimalNumber(bar.low),
-          close: fourDecimalNumber(bar.close),
-          ...(Number.isFinite(Number(bar.volume)) ? { volume: Math.round(Number(bar.volume)) } : {})
-        };
-      })
-    }))
+    ...rest,
+    series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => {
+      const { note: _note, ...seriesFields } = series || {};
+      return {
+        ...seriesFields,
+        bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
+          const bar = objectBar(rawBar);
+          return {
+            time: String(bar.time || ''),
+            open: fourDecimalNumber(bar.open),
+            high: fourDecimalNumber(bar.high),
+            low: fourDecimalNumber(bar.low),
+            close: fourDecimalNumber(bar.close),
+            ...(Number.isFinite(Number(bar.volume)) ? { volume: Math.round(Number(bar.volume)) } : {})
+          };
+        })
+      };
+    })
   };
 }
 
@@ -986,7 +986,7 @@ function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
   const timestamp = new Date(checkedAt).toISOString();
   const rounded = roundChartPayload(canonicalChartData);
   // Mark the payload and each series stale so renderers and validators cannot
-  // treat carried-forward quote rows as freshly reviewed market data.
+  // treat carried-forward chart history as freshly reviewed market data.
   return {
     ...rounded,
     availability: {
@@ -1028,6 +1028,7 @@ function validateChartStagingPayload(payload, expectedRows = []) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
   if (payload.schemaVersion !== 1) errors.push('Chart staging schemaVersion must be 1.');
+  if (payload.quoteRows !== undefined) errors.push('Chart staging quoteRows is no longer stored; derive quote rows from series.');
   if (!Array.isArray(payload.series)) return [...errors, 'Chart staging series must be an array.'];
   const byTicker = new Map();
   for (const [index, item] of payload.series.entries()) {
@@ -1301,7 +1302,6 @@ function quoteRowFromSeries(item) {
       delta: Number.isFinite(deltaBp) ? signedBasisPoints(deltaBp) : 'n/a',
       pct: item.curveSpread.comparison || '1D',
       dir: Number.isFinite(deltaBp) ? direction(deltaBp) : 'flat',
-      note: item.note,
       sourceSymbol: item.sourceSymbol,
       asOf: latest.time
     };
@@ -1313,7 +1313,6 @@ function quoteRowFromSeries(item) {
     delta: signedNumber(delta),
     pct: signedPct(pct),
     dir: direction(pct),
-    note: item.note,
     sourceSymbol: item.sourceSymbol,
     asOf: latest.time
   };
@@ -1344,7 +1343,7 @@ function cryptoQuoteRowFromSeries(item) {
 
 function deriveQuoteRowsFromSeries(series) {
   // Keep every downstream price view reproducible from the canonical series payload rather than
-  // letting quoteRows drift into a separately maintained market-data store.
+  // letting derived quote rows drift into a separately maintained market-data store.
   const tape = [];
   const crypto = [];
   for (const item of Array.isArray(series) ? series : []) {
@@ -1579,8 +1578,7 @@ function seriesBase(row) {
     ticker: row.ticker,
     name: row.name,
     section: row.section || 'tape',
-    sourceSymbol: row.sourceSymbol,
-    note: row.note
+    sourceSymbol: row.sourceSymbol
   };
 }
 
@@ -1592,7 +1590,10 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
 }
 
 function chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate }) {
-  const quoteRows = deriveQuoteRowsFromSeries(series);
+  const chartSeries = series.map((item) => {
+    const { note: _note, ...chartItem } = item || {};
+    return chartItem;
+  });
   return {
     schemaVersion: 1,
     generatedAt,
@@ -1602,7 +1603,7 @@ function chartOutput({ args, series, failures, generatedAt, quoteRevision, start
       startDate: isoDateFromDate(startDate),
       endDate: isoDateFromDate(endDate)
     },
-    sourceFamilies: Array.from(new Set(series.map((item) => item.source).filter(Boolean))),
+    sourceFamilies: Array.from(new Set(chartSeries.map((item) => item.source).filter(Boolean))),
     ...(failures.length ? {
       availability: {
         status: 'partial',
@@ -1611,9 +1612,7 @@ function chartOutput({ args, series, failures, generatedAt, quoteRevision, start
         failures
       }
     } : {}),
-    // quoteRows are staging output for daily updates; the published dashboard still renders quotes from dashboard-data.
-    quoteRows,
-    series
+    series: chartSeries
   };
 }
 

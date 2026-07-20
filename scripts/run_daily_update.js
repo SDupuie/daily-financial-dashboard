@@ -441,7 +441,7 @@ Options:
   --apply-earnings-week-json PATH     Stage a validated earnings-week payload in the complete candidate
   --apply-chart-data-json PATH        Stage chart history and derive matching Tape prices from JSON
   --merge-chart-data-json PATH        Stage selected chart series while preserving all other series
-  --sync-chart-quotes                 Rebuild embedded chart quote rows and visible Tape prices from rounded chart history
+  --sync-chart-quotes                 Rebuild visible Tape prices from rounded chart history
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
   --scheduled                         Mark scheduler-driven preparation/finalization; preparation enforces the start window, finalization derives the window from the staged candidate
@@ -1282,7 +1282,6 @@ function syncDashboardPricesFromChartData(data, chartData, {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
   const derivedQuoteRows = deriveQuoteRowsFromSeries(Array.isArray(chartData?.series) ? chartData.series : []);
-  chartData.quoteRows = derivedQuoteRows;
   applyTapeQuoteRows(data, derivedQuoteRows.tape);
   applyCryptoQuoteRows(data, derivedQuoteRows.crypto);
   let commentaryResetCount = 0;
@@ -1362,7 +1361,7 @@ function patchDashboard(args) {
   let nextHtml = html;
 
   chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
-  // chart-data.series is the canonical price history; quoteRows and dashboard tape prices are derived views.
+  // chart-data.series is the canonical price history; dashboard tape prices are derived from it.
   syncDashboardPricesFromChartData(dashboardData, chartData, {
     resetCommentary: true,
     commentaryTickers: acceptedFreshChartTickers(chartData)
