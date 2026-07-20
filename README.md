@@ -285,9 +285,10 @@ The richer earnings monitor uses this contract as the canonical deterministic me
 #### Source hierarchy
 
 1. Finnhub primary: calendar slate, company profile, timing, estimates, and actuals when Finnhub has the row.
-2. EarningsAPI secondary: date corroboration during authorized weekly builds and row-level recovery only for Finnhub-missing display candidates.
-3. Official company IR or SEC fallback: schedule confirmation and official-result resolution when provider data is incomplete or conflicting.
-4. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
+2. Alpha Vantage secondary calendar: one full-calendar CSV pull per build for date corroboration and Finnhub-missing candidate discovery. Alpha-only rows are candidates, not published rows.
+3. EarningsAPI company recovery: row-level EPS/revenue recovery only for Alpha-found, Finnhub-missing display candidates that pass the U.S. listing and $10B market-cap gates.
+4. Official company IR or SEC fallback: schedule confirmation and official-result resolution when provider data is incomplete or conflicting.
+5. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
 
 #### Canonical row contract
 
@@ -295,9 +296,9 @@ Earnings rows use the shared lifecycle vocabulary; validation owns the full sche
 
 #### EarningsAPI budget policy
 
-- Treat the Free-plan daily quota (100 requests) as a scarce secondary-recovery budget, not a primary data source.
-- EarningsAPI calendar scans are authorized only by scheduler-marked Monday-morning and Friday-afternoon rollovers or `--rollover-calendar` on an intentional manual preparation. They never run during ordinary manual updates, automatic retries, development, validation, tests, source-code verification, focused repairs, or result refreshes.
-- Query EarningsAPI company rows only for Finnhub-missing display candidates.
+- Treat the Free-plan daily quota (100 requests) as a scarce company-recovery budget, not a primary data source.
+- The active earnings build uses Alpha Vantage for the secondary calendar check and must not sweep EarningsAPI calendar days during rollover builds.
+- Query EarningsAPI company rows only for Alpha-found Finnhub-missing display candidates that meet the $10B display-scale market-cap floor.
 - Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
 
 ### Focused Repair Commands

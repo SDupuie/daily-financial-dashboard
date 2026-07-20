@@ -5,6 +5,7 @@ const {
 } = require('./calendar_contract');
 
 const EARNINGS_WEEK_SCHEMA_VERSION = 2;
+const DISPLAY_MIN_MARKET_CAP = 10000000000;
 const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
 const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const EDITORIAL_UNAVAILABLE_REASON = 'not_verified_for_current_run';
@@ -579,18 +580,12 @@ function isDisplayEligibleEarningsRow(row) {
     if (!listing || listing.market !== 'US' || listing.symbol !== row?.symbol) return false;
     if (!listing.mic || /OTC|PIN[XML]/i.test(listing.mic)) return false;
     if ((row?.sourceAudit?.finnhubProfile?.industry || '').toUpperCase() === 'N/A') return false;
-    return Number.isFinite(row?.marketCap) && row.marketCap >= 1000000000;
+    return Number.isFinite(row?.marketCap) && row.marketCap >= DISPLAY_MIN_MARKET_CAP;
   }
-  // Profile-recovered rows have audited company/market-cap sources but no listing fields.
-  // Retain the legacy rule only for schema-v2 rows published before U.S.-listing
-  // evidence was embedded. Every newly built row carries finnhubUsListing.
-  const hasProfileRecovery = row?.sourceAudit?.selectedSources?.company === 'earningsApiCalendar'
-    && row?.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric';
-  if (hasProfileRecovery) return Number.isFinite(row?.marketCap) && row.marketCap >= 1000000000;
   if (row?.country && row.country !== 'US') return false;
   if (/OTC/i.test(row?.exchange || '')) return false;
   if ((row?.sourceAudit?.finnhubProfile?.industry || '').toUpperCase() === 'N/A') return false;
-  return Number.isFinite(row?.marketCap) && row.marketCap >= 1000000000;
+  return Number.isFinite(row?.marketCap) && row.marketCap >= DISPLAY_MIN_MARKET_CAP;
 }
 
 const EARNINGS_API_USAGE_SCHEMA_VERSION = 2;
@@ -915,6 +910,7 @@ module.exports = {
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  DISPLAY_MIN_MARKET_CAP,
   earningsApiDayEntry,
   earningsApiUsageDay,
   earningsCalendarRangeNeedsBuild,

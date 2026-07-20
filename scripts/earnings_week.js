@@ -26,6 +26,16 @@ const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.jso
 const DEFAULT_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 const DEFAULT_NARRATIVE = path.resolve(root, 'generated', 'earnings_narrative.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(root, 'generated', 'earnings_schedule_review.json');
+const SECONDARY_CALENDAR_SLATES = new Set(['alphaVantageCalendar']);
+
+function isSecondaryCalendarSlate(value) {
+  return SECONDARY_CALENDAR_SLATES.has(value);
+}
+
+function recoveryCalendarSlateFromTask(task) {
+  if (task?.sourceAudit?.alphaVantageCalendar) return 'alphaVantageCalendar';
+  throw new Error(`${task?.symbol || 'Secondary recovery task'} is missing Alpha Vantage calendar provenance.`);
+}
 
 function printHelp() {
   process.stdout.write(`Usage: node scripts/earnings_week.js <command> [options]
@@ -83,7 +93,7 @@ function recoveredRowSourceAudit(row) {
         marketCap: row.marketCap
       },
       finnhubMetric: null,
-      earningsApiCalendar: null,
+      alphaVantageCalendar: null,
       providerDateConflict: null,
       scheduleVerification: {
         status: 'primary_only',
@@ -142,8 +152,8 @@ function repairSourceAuditCommand(argv) {
   process.stdout.write(`Repaired source audit for ${output.rows.length} earnings row(s) at ${args.output}\n`);
 }
 
-function earningsApiCalendarAttemptFailed(week) {
-  const attempt = week?.summary?.fetches?.earningsApiCalendar;
+function secondaryCalendarAttemptFailed(week) {
+  const attempt = week?.summary?.fetches?.secondaryCalendar;
   if (!attempt || typeof attempt !== 'object') return false;
   const requests = Number(attempt.requests) || 0;
   const ok = Number(attempt.ok) || 0;
@@ -172,7 +182,7 @@ function earningsCalendarFailedAttemptNeedsRetry(range, earningsWeekPath = DEFAU
     const primaryOnly = (week.rows || []).some((row) => isDisplayEligibleEarningsRow(row)
       && row.sourceAudit?.scheduleVerification?.status === 'primary_only');
     return primaryOnly
-      && earningsApiCalendarAttemptFailed(week)
+      && secondaryCalendarAttemptFailed(week)
       && earningsApiUsageDay(week.generatedAt) !== earningsApiUsageDay(now);
   } catch (_error) {
     return false;
@@ -370,6 +380,7 @@ function preserveAppliedNarrative(row, prior) {
 
 function rowFromTask(task, resolution) {
   const profile = task.sourceAudit?.finnhubProfile || null;
+  const calendarSlate = recoveryCalendarSlateFromTask(task);
   return {
     symbol: resolution.symbol,
     company: profile?.name || resolution.company || task.company || resolution.symbol,
@@ -396,10 +407,10 @@ function rowFromTask(task, resolution) {
     sourceAudit: {
       finnhubCalendar: { present: false },
       finnhubProfile: profile,
-      earningsApiCalendar: task.sourceAudit?.earningsApiCalendar || null,
+      alphaVantageCalendar: task.sourceAudit?.alphaVantageCalendar || null,
       earningsApiCompany: task.sourceAudit?.earningsApiCompany || null,
       selectedSources: {
-        slate: 'earningsApiCalendar',
+        slate: calendarSlate,
         company: profile?.name ? 'finnhubProfile' : 'earningsApiCompany',
         marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : 'none',
         timing: 'none',
@@ -1470,7 +1481,7 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     const selectedSlate = row.sourceAudit?.selectedSources?.slate;
     if (selectedSlate === 'finnhub') {
       next = applyFinnhubRefresh(row, selectFinnhubRefreshRow(refreshData.finnhubRows || [], row));
-    } else if (selectedSlate === 'earningsApiCalendar') {
+    } else if (isSecondaryCalendarSlate(selectedSlate)) {
       next = applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyBySymbol.get(row.symbol) || [], row));
     }
     if (deterministicSnapshot(next) !== before) changedKeys.add(rowKey(row));
@@ -1552,7 +1563,7 @@ async function collectRefreshData(source, args, dependencies = {}) {
   const targetRows = refreshTargetRows(source, args.asOf);
   const finnhubTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub');
   const earningsApiTargets = targetRows
-    .filter((row) => row.sourceAudit?.selectedSources?.slate === 'earningsApiCalendar')
+    .filter((row) => isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate))
     .filter((row) => row.sourceAudit?.companyReleaseResolution?.status !== 'resolved');
   const environment = dependencies.env || process.env;
   const finnhubToken = environment.FINNHUB_API_KEY;
@@ -1635,7 +1646,7 @@ async function collectRefreshData(source, args, dependencies = {}) {
   const yahooTargets = targetRows
     .map((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub'
       ? applyFinnhubRefresh(row, selectFinnhubRefreshRow(finnhubRows, row))
-      : row.sourceAudit?.selectedSources?.slate === 'earningsApiCalendar'
+      : isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate)
         ? applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyRowsBySymbol[row.symbol] || [], row))
         : row)
     .filter(needsYahooReactionFetch);
@@ -2209,7 +2220,7 @@ async function resolveTask(task, tickerMap, args, row = {}) {
       secCompanyTitle: ticker.title,
       filing,
       exhibitName,
-      earningsApiCalendar: task.sourceAudit?.earningsApiCalendar || null,
+      alphaVantageCalendar: task.sourceAudit?.alphaVantageCalendar || null,
       extractedTextPreview: text.slice(0, 800)
     }
   };

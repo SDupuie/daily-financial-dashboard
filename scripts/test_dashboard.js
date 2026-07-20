@@ -1215,11 +1215,26 @@ function testEarningsCommentaryPublicationNormalization() {
             companyReleaseResolution: { status: 'needs_review' }
           }
         }, {
+          symbol: 'ADR',
+          company: 'ADR Fixture PLC',
+          exchange: 'LONDON STOCK EXCHANGE',
+          country: 'GB',
+          marketCap: 20000000000,
+          reportDate: '2026-07-10',
+          eps: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', basis: 'gaap', note: '' },
+          revenue: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', note: '' },
+          outcome: { overall: 'beat' },
+          reaction: { status: 'computed', percent: 1, note: '' },
+          sourceAudit: {
+            finnhubUsListing: { market: 'US', symbol: 'ADR', mic: 'XNYS' },
+            finnhubProfile: { industry: 'Industrials' }
+          }
+        }, {
           symbol: 'SMALL',
           company: 'Small Fixture Inc',
           exchange: 'NYSE',
           country: 'US',
-          marketCap: 999999999,
+          marketCap: 9999999999,
           reportDate: '2026-07-10',
           eps: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', basis: 'gaap', note: '' },
           revenue: { estimate: 1, actual: 2, surprisePercent: 100, result: 'beat', note: '' },
@@ -1239,14 +1254,17 @@ function testEarningsCommentaryPublicationNormalization() {
   };
 
   const html = '<script type="application/json" id="dashboard-data">{}</script>';
-  const centrallyPublished = readJsonBlock(patchDashboardDataBlock(html, data, null, null, { stampEdition: false }), 'dashboard-data');
-  assert.equal(centrallyPublished.earnings.week.rows.length, 1);
+  const centrallyPublished = readJsonBlock(patchDashboardDataBlock(html, data, null, null, {
+    stampEdition: false,
+    selectEarningsRows: true
+  }), 'dashboard-data');
+  assert.equal(centrallyPublished.earnings.week.rows.length, 2);
   assert.equal(centrallyPublished.earnings.week.rows[0].symbol, 'BAD');
-
-  normalizePublicationDisplaySections(data, { now: new Date(FIXTURE_NOW) });
-
-  assert.equal(data.earnings.week.rows.length, 1);
-  const row = data.earnings.week.rows[0];
+  assert.equal(centrallyPublished.earnings.week.rows[1].symbol, 'ADR');
+  assert.equal(centrallyPublished.earnings.week.rows[1].sourceAudit, undefined);
+  normalizePublicationDisplaySections(centrallyPublished, { now: new Date(FIXTURE_NOW) });
+  assert.equal(centrallyPublished.earnings.week.rows.length, 2);
+  const row = centrallyPublished.earnings.week.rows[0];
   assert.equal(row.symbol, 'BAD');
   const outcome = row.outcome;
   assert.equal(row.scheduleVerificationStatus, 'primary_only');
@@ -1256,10 +1274,27 @@ function testEarningsCommentaryPublicationNormalization() {
   assert.equal(outcome.interpretationDisposition, undefined);
   assert.equal(outcome.guidanceDisposition, undefined);
 
-  const published = readJsonBlock(patchDashboardDataBlock(html, data, null, null, { stampEdition: false }), 'dashboard-data');
+  const published = readJsonBlock(patchDashboardDataBlock(html, data, null, null, {
+    stampEdition: false,
+    selectEarningsRows: true
+  }), 'dashboard-data');
   assert.equal(published.earnings.week.rows[0].sourceAudit, undefined);
   assert.equal(published.earnings.week.rows[0].scheduleVerificationStatus, 'primary_only');
   assert.equal(published.earnings.week.rows[0].companyReleaseStatus, 'needs_review');
+  assert.equal(published.earnings.week.rows[1].symbol, 'ADR');
+
+  const applied = {};
+  applyEditorialEarningsNarrative(
+    applied,
+    { earnings: { week: published.earnings.week } },
+    { earnings: { week: { rows: published.earnings.week.rows } } },
+    null
+  );
+  assert.equal(applied.earnings.week.rows.length, 2);
+  assert.equal(applied.earnings.week.rows[1].symbol, 'ADR');
+  const republished = readJsonBlock(patchDashboardDataBlock(html, applied, null, null, { stampEdition: false }), 'dashboard-data');
+  assert.equal(republished.earnings.week.rows.length, 2);
+  assert.equal(republished.earnings.week.rows[1].symbol, 'ADR');
 }
 
 function testEditorialReviewContract() {

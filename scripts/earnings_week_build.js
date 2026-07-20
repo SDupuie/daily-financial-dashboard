@@ -11,6 +11,7 @@ const {
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
+  DISPLAY_MIN_MARKET_CAP,
   earningsApiDayEntry,
   earningsApiUsageDay,
   emptyEarningsApiUsage,
@@ -50,11 +51,12 @@ const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
 const DEFAULT_EARNINGSAPI_RESERVE = 20;
 const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
-const SECONDARY_RECOVERY_MIN_MARKET_CAP = 1000000000;
+const SECONDARY_RECOVERY_MIN_MARKET_CAP = DISPLAY_MIN_MARKET_CAP;
 const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
 const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 14;
 const REACTION_LOOKBACK_DAYS = 5;
 const REACTION_LOOKAHEAD_DAYS = 5;
+const ALPHA_VANTAGE_CALENDAR_AUDIT = 'alphaVantageCalendar';
 
 function yahooPeriodSeconds(isoDate) {
   return Math.floor(dateFromIso(isoDate).getTime() / 1000);
@@ -287,6 +289,7 @@ Options:
 
 Environment:
   FINNHUB_API_KEY              Read from .env or current environment
+  ALPHA_VANTAGE_API_KEY        Used for the free secondary calendar check
   EARNINGSAPI_API_KEY          Used only with --use-earningsapi
 `);
 }
@@ -352,6 +355,45 @@ function fetchJson(url, args, headers = {}) {
         data: null,
         parseError: error.message,
         bodyPreview: ''
+      });
+    });
+    req.setTimeout(args.timeoutMs, () => req.destroy(new Error('request timeout')));
+  });
+}
+
+function fetchText(url, args, headers = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const req = https.get(url, {
+      timeout: args.timeoutMs,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Daily-Financial-Dashboard/earnings-week',
+        Accept: 'text/csv,text/plain,*/*',
+        ...headers
+      }
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => {
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          ms: Date.now() - started,
+          headers: res.headers || {},
+          body,
+          error: res.statusCode >= 200 && res.statusCode < 300 ? '' : body.slice(0, 240)
+        });
+      });
+    });
+    req.on('error', (error) => {
+      resolve({
+        ok: false,
+        status: 0,
+        ms: Date.now() - started,
+        headers: {},
+        body: '',
+        error: error.message
       });
     });
     req.setTimeout(args.timeoutMs, () => req.destroy(new Error('request timeout')));
@@ -426,6 +468,140 @@ function finnhubCalendarFromResponse(result, args) {
 async function fetchFinnhubCalendar(args, token) {
   const url = `https://finnhub.io/api/v1/calendar/earnings?from=${encodeURIComponent(args.from)}&to=${encodeURIComponent(args.to)}&token=${encodeURIComponent(token)}`;
   return finnhubCalendarFromResponse(await fetchJson(url, args), args);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"' && text[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(field);
+      field = '';
+    } else if (char === '\n' || char === '\r') {
+      row.push(field);
+      field = '';
+      if (row.some((item) => item !== '')) rows.push(row);
+      row = [];
+      if (char === '\r' && text[index + 1] === '\n') index += 1;
+    } else {
+      field += char;
+    }
+  }
+  row.push(field);
+  if (row.some((item) => item !== '')) rows.push(row);
+  return rows;
+}
+
+function csvObjects(text) {
+  const rows = parseCsv(String(text || '').trim());
+  if (!rows.length) return [];
+  const headers = rows[0].map((header) => String(header || '').trim());
+  return rows.slice(1).map((row) => Object.fromEntries(headers.map((header, index) => [header, String(row[index] || '').trim()])));
+}
+
+function normalizeAlphaVantageTiming(row) {
+  const raw = String(row?.timeOfDay || row?.timeOfTheDay || row?.time || row?.hour || '').trim().toLowerCase();
+  if (['bmo', 'before market open', 'before-open', 'pre', 'pre-market', 'premarket'].includes(raw)) return 'bmo';
+  if (['amc', 'after market close', 'after-close', 'after', 'after-hours', 'post-market', 'postmarket'].includes(raw)) return 'amc';
+  if (['dmh', 'during market hours', 'during-market'].includes(raw)) return 'dmh';
+  return 'unknown';
+}
+
+function normalizeAlphaVantageCalendarRow(row) {
+  const fiscalQuarterEnding = String(row?.fiscalDateEnding || '').trim();
+  const fiscalMonth = isIsoDate(fiscalQuarterEnding) ? Number(fiscalQuarterEnding.slice(5, 7)) : null;
+  return {
+    symbol: String(row?.symbol || '').trim().toUpperCase(),
+    company: String(row?.name || '').trim(),
+    reportDate: String(row?.reportDate || '').trim(),
+    reportTiming: normalizeAlphaVantageTiming(row),
+    fiscalQuarterEnding,
+    fiscalQuarter: Number.isFinite(fiscalMonth) ? Math.ceil(fiscalMonth / 3) : null,
+    fiscalYear: isIsoDate(fiscalQuarterEnding) ? Number(fiscalQuarterEnding.slice(0, 4)) : null,
+    eps: {
+      estimate: numberOrNull(row?.estimate),
+      actual: null
+    },
+    revenue: {
+      estimate: null,
+      actual: null
+    },
+    source: {
+      provider: 'alpha_vantage',
+      row
+    }
+  };
+}
+
+function alphaVantageCalendarFromResponse(result, args, dates = calendarVerificationDates(args)) {
+  const dateSet = new Set(dates);
+  const rows = result.ok
+    ? dedupeCalendarRows(csvObjects(result.body)
+      .map(normalizeAlphaVantageCalendarRow)
+      .filter((row) => row.symbol && isIsoDate(row.reportDate) && dateSet.has(row.reportDate)))
+    : [];
+  const rowsByDate = new Map();
+  for (const row of rows) {
+    if (!rowsByDate.has(row.reportDate)) rowsByDate.set(row.reportDate, []);
+    rowsByDate.get(row.reportDate).push(row);
+  }
+  const usable = result.ok && (rows.length > 0 || csvObjects(result.body).some((row) => row.reportDate || row.symbol));
+  const error = usable
+    ? ''
+    : result.ok
+      ? String(result.body || '').trim().slice(0, 240) || 'Alpha Vantage response is missing usable EARNINGS_CALENDAR CSV rows.'
+      : result.error || `HTTP ${result.status}`;
+  return dates.map((date) => {
+    const dayRows = rowsByDate.get(date) || [];
+    return {
+      date,
+      ok: usable,
+      skipped: false,
+      status: result.status,
+      responseMs: result.ms,
+      provider: 'alpha_vantage',
+      rowCount: dayRows.length,
+      rows: dayRows,
+      error
+    };
+  });
+}
+
+async function fetchAlphaVantageCalendar(args, token, dates = calendarVerificationDates(args)) {
+  if (!token) {
+    return dates.map((date) => ({
+      date,
+      ok: false,
+      skipped: true,
+      status: 0,
+      responseMs: 0,
+      provider: 'alpha_vantage',
+      rowCount: 0,
+      rows: [],
+      error: 'ALPHA_VANTAGE_API_KEY is not configured.'
+    }));
+  }
+  const url = new URL('https://www.alphavantage.co/query');
+  url.searchParams.set('function', 'EARNINGS_CALENDAR');
+  url.searchParams.set('horizon', '3month');
+  url.searchParams.set('apikey', token);
+  return alphaVantageCalendarFromResponse(await fetchText(url.toString(), args), args, dates);
 }
 
 function readEarningsApiUsage(file) {
@@ -634,6 +810,25 @@ function compactCalendarSnapshot(row) {
   };
 }
 
+function secondaryCalendarAuditKey(row) {
+  if (row?.source?.provider !== 'alpha_vantage') {
+    throw new Error('Secondary calendar rows must come from Alpha Vantage.');
+  }
+  return ALPHA_VANTAGE_CALENDAR_AUDIT;
+}
+
+function compactSecondaryCalendarAudit(row) {
+  if (!row) return null;
+  return {
+    reportDate: row.reportDate,
+    company: row.company,
+    reportTiming: row.reportTiming,
+    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
+    epsEstimate: row.eps?.estimate ?? null,
+    currency: row.source?.row?.currency || ''
+  };
+}
+
 function cloneCalendarDay(day, rows) {
   return {
     ...day,
@@ -642,7 +837,8 @@ function cloneCalendarDay(day, rows) {
   };
 }
 
-function providerDateConflictAudit(symbol, finnhubRows, earningsApiRows, selectedDate) {
+function providerDateConflictAudit(symbol, finnhubRows, secondaryRows, selectedDate) {
+  const secondaryKey = secondaryCalendarAuditKey(secondaryRows[0]);
   return {
     symbol,
     status: 'fallback',
@@ -652,51 +848,59 @@ function providerDateConflictAudit(symbol, finnhubRows, earningsApiRows, selecte
     reason: 'provider_date_conflict_finnhub_retained',
     candidates: {
       finnhub: finnhubRows.map(compactCalendarSnapshot),
-      earningsApiCalendar: earningsApiRows.map(compactCalendarSnapshot)
+      [secondaryKey]: secondaryRows.map(compactCalendarSnapshot)
     }
   };
 }
 
-function resolveProviderDateConflicts(finnhubRows, earningsApiCalendarDays) {
+function resolveProviderDateConflicts(finnhubRows, secondaryCalendarDays) {
   const originalFinnhubRowsBySymbol = new Map();
   for (const row of finnhubRows) {
     if (!originalFinnhubRowsBySymbol.has(row.symbol)) originalFinnhubRowsBySymbol.set(row.symbol, []);
     originalFinnhubRowsBySymbol.get(row.symbol).push({ ...row });
   }
 
-  const earningsApiRowsBySymbol = new Map();
-  for (const row of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
-    if (!earningsApiRowsBySymbol.has(row.symbol)) earningsApiRowsBySymbol.set(row.symbol, []);
-    earningsApiRowsBySymbol.get(row.symbol).push(row);
+  const secondaryRowsBySymbol = new Map();
+  for (const row of secondaryCalendarDays.flatMap((day) => day.rows || [])) {
+    if (!secondaryRowsBySymbol.has(row.symbol)) secondaryRowsBySymbol.set(row.symbol, []);
+    secondaryRowsBySymbol.get(row.symbol).push(row);
   }
 
   const conflictsBySymbol = new Map();
   const resolvedFinnhubRows = finnhubRows.map((row) => ({ ...row }));
   for (const row of resolvedFinnhubRows) {
-    const earningsApiRows = earningsApiRowsBySymbol.get(row.symbol) || [];
-    const conflictingEarningsApiRows = earningsApiRows.filter((item) => item.reportDate !== row.reportDate);
-    if (!conflictingEarningsApiRows.length) continue;
+    const secondaryRows = secondaryRowsBySymbol.get(row.symbol) || [];
+    const conflictingSecondaryRows = secondaryRows.filter((item) => item.reportDate !== row.reportDate);
+    if (conflictingSecondaryRows.length) {
+      const finnhubRowsForSymbol = resolvedFinnhubRows.filter((item) => item.symbol === row.symbol);
+      const originalFinnhubRowsForSymbol = originalFinnhubRowsBySymbol.get(row.symbol) || finnhubRowsForSymbol;
+      const audit = providerDateConflictAudit(
+        row.symbol,
+        originalFinnhubRowsForSymbol,
+        conflictingSecondaryRows,
+        row.reportDate
+      );
+      for (const item of finnhubRowsForSymbol) item.providerDateConflict = audit;
+      conflictsBySymbol.set(row.symbol, audit);
+      continue;
+    }
 
-    const finnhubRowsForSymbol = resolvedFinnhubRows.filter((item) => item.symbol === row.symbol);
-    const originalFinnhubRowsForSymbol = originalFinnhubRowsBySymbol.get(row.symbol) || finnhubRowsForSymbol;
-    const audit = providerDateConflictAudit(
-      row.symbol,
-      originalFinnhubRowsForSymbol,
-      conflictingEarningsApiRows,
-      row.reportDate
+    const timingFallback = secondaryRows.find((item) =>
+      item.reportDate === row.reportDate
+      && row.reportTiming === 'unknown'
+      && item.reportTiming !== 'unknown'
     );
-    for (const item of finnhubRowsForSymbol) item.providerDateConflict = audit;
-    conflictsBySymbol.set(row.symbol, audit);
+    if (timingFallback) row.secondaryCalendarTimingFallback = timingFallback;
   }
 
-  const resolvedEarningsApiCalendarDays = earningsApiCalendarDays.map((day) => {
+  const resolvedSecondaryCalendarDays = secondaryCalendarDays.map((day) => {
     const rows = (day.rows || []).filter((row) => !conflictsBySymbol.has(row.symbol));
     return cloneCalendarDay(day, rows);
   });
 
   return {
     finnhubRows: dedupeCalendarRows(resolvedFinnhubRows),
-    earningsApiCalendarDays: resolvedEarningsApiCalendarDays,
+    secondaryCalendarDays: resolvedSecondaryCalendarDays,
     providerDateConflicts: [...conflictsBySymbol.values()]
   };
 }
@@ -776,14 +980,14 @@ function officialScheduleReview(row, secondaryDates, reason) {
   };
 }
 
-function verifyFinnhubScheduleRows(rows, earningsApiCalendarDays, range, confirmations = []) {
+function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range, confirmations = []) {
   const activeDates = new Set(displayDatesForRange(range.from, range.to));
   const secondaryCalendarComplete = [...activeDates].every((date) =>
-    earningsApiCalendarDays.some((day) => day.date === date && day.ok)
+    secondaryCalendarDays.some((day) => day.date === date && day.ok)
   );
-  const secondaryCalendarUnavailable = earningsApiCalendarDays.some((day) => day?.ok === false);
+  const secondaryCalendarUnavailable = secondaryCalendarDays.some((day) => day?.ok === false);
   const secondaryDatesBySymbol = new Map();
-  for (const candidate of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
+  for (const candidate of secondaryCalendarDays.flatMap((day) => day.rows || [])) {
     if (!secondaryDatesBySymbol.has(candidate.symbol)) secondaryDatesBySymbol.set(candidate.symbol, new Set());
     secondaryDatesBySymbol.get(candidate.symbol).add(candidate.reportDate);
   }
@@ -882,7 +1086,7 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidat
         scheduleVerification: scheduleAudit('secondary_only', row, [])
       }
     });
-    review.push(officialScheduleReview(row, [], 'uncorroborated_earningsapi_recovery_date'));
+    review.push(officialScheduleReview(row, [], 'uncorroborated_secondary_recovery_date'));
   }
   for (const candidate of candidates) {
     const key = `${candidate.reportDate}:${candidate.symbol}`;
@@ -901,13 +1105,13 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidat
   return { rows: verifiedRows, review };
 }
 
-function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, profiles, usListings = []) {
+function buildSecondaryRecoveryCandidates(finnhubRows, secondaryCalendarDays, profiles, usListings = []) {
   const finnhubKeys = new Set(finnhubRows.map((row) => `${row.reportDate}:${row.symbol}`));
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
   const usListingsBySymbol = new Map(usListings.map((listing) => [listing.symbol, listing]));
   const seen = new Set();
   const tasks = [];
-  for (const row of earningsApiCalendarDays.flatMap((day) => day.rows)) {
+  for (const row of secondaryCalendarDays.flatMap((day) => day.rows)) {
     const key = `${row.reportDate}:${row.symbol}`;
     if (finnhubKeys.has(key)) continue;
     if (seen.has(key)) continue;
@@ -915,16 +1119,17 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
     const finnhubUsListing = usListingsBySymbol.get(row.symbol) || null;
     if (!profileIsDisplayEligible(profile, finnhubUsListing)) continue;
     seen.add(key);
+    const calendarAuditKey = secondaryCalendarAuditKey(row);
     tasks.push({
       id: `${row.reportDate}:${row.symbol}:earningsapi-recovery`,
       symbol: row.symbol,
       company: profile?.name || row.company || row.symbol,
       reportDate: row.reportDate,
-      trigger: 'missing_from_finnhub_but_present_in_earningsapi',
+      trigger: `missing_from_finnhub_but_present_in_${calendarAuditKey}`,
       priority: secondaryRecoveryPriority(row, profile),
       marketCap: profile.marketCap,
       marketCapDisplay: marketCapDisplay(profile.marketCap),
-      fiscalQuarterEnding: '',
+      fiscalQuarterEnding: row.fiscalQuarterEnding || '',
       neededFields: [
         'earningsApiCompanyRow',
         'reportTiming',
@@ -937,7 +1142,7 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
         'EarningsAPI company earnings endpoint'
       ],
       doNotUseForOverrides: ['finnhub_calendar_row'],
-      instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub. Do not override Finnhub rows.',
+      instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub after the secondary calendar finds them. Do not override Finnhub rows.',
       permittedUses: [
         'missing_row_discovery',
         'eps_estimate_recovery',
@@ -947,12 +1152,7 @@ function buildSecondaryRecoveryCandidates(finnhubRows, earningsApiCalendarDays, 
       ],
       sourceAudit: {
         finnhubUsListing,
-        earningsApiCalendar: {
-          reportDate: row.reportDate,
-          company: row.company,
-          reportTiming: row.reportTiming,
-          bucket: row.source.bucket
-        },
+        [calendarAuditKey]: compactSecondaryCalendarAudit(row),
         finnhubCalendar: {
           present: false
         },
@@ -1344,12 +1544,12 @@ async function fetchFinnhubMetric(symbol, args, token, cache) {
   return metric;
 }
 
-async function fetchFinnhubMetrics(rows, profiles, earningsApiCalendarDays, args, token) {
+async function fetchFinnhubMetrics(rows, profiles, secondaryCalendarDays, args, token) {
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
-  const earningsApiByKey = earningsApiRowsByKey(earningsApiCalendarDays);
+  const secondaryCalendarByKey = secondaryCalendarRowsByKey(secondaryCalendarDays);
   const symbols = [...new Set(rows
     .filter((row) => !profileHasIdentity(profilesBySymbol.get(row.symbol)))
-    .filter((row) => earningsApiByKey.get(`${row.reportDate}:${row.symbol}`)?.company)
+    .filter((row) => secondaryCalendarByKey.get(`${row.reportDate}:${row.symbol}`)?.company)
     .map((row) => row.symbol))];
   const metrics = [];
   const cache = readFinnhubMetricCache(args.finnhubMetricCache);
@@ -1387,9 +1587,9 @@ function sourceSummary(primary, fallbacks = []) {
   };
 }
 
-function earningsApiRowsByKey(earningsApiCalendarDays) {
+function secondaryCalendarRowsByKey(secondaryCalendarDays) {
   const byKey = new Map();
-  for (const row of earningsApiCalendarDays.flatMap((day) => day.rows || [])) {
+  for (const row of secondaryCalendarDays.flatMap((day) => day.rows || [])) {
     const key = `${row.reportDate}:${row.symbol}`;
     const current = byKey.get(key);
     if (!current || rowCompletenessScore(row) > rowCompletenessScore(current)) byKey.set(key, row);
@@ -1397,22 +1597,23 @@ function earningsApiRowsByKey(earningsApiCalendarDays) {
   return byKey;
 }
 
-function profileRecoveryForRow(calendarRow, profile, metricsBySymbol, earningsApiByKey) {
+function profileRecoveryForRow(calendarRow, profile, metricsBySymbol, secondaryCalendarByKey) {
   if (profileHasIdentity(profile)) return null;
   const metric = metricsBySymbol.get(calendarRow.symbol);
-  const earningsApiRow = earningsApiByKey.get(`${calendarRow.reportDate}:${calendarRow.symbol}`);
+  const secondaryCalendarRow = secondaryCalendarByKey.get(`${calendarRow.reportDate}:${calendarRow.symbol}`);
   if (!Number.isFinite(metric?.marketCap) || metric.marketCap < SECONDARY_RECOVERY_MIN_MARKET_CAP) return null;
-  if (!earningsApiRow?.company) return null;
+  if (!secondaryCalendarRow?.company) return null;
   // Identity-only recovery: Finnhub remains the source for the earnings row.
   // These fallback fields only decide whether a profile-empty row can be displayed.
   return {
-    company: earningsApiRow.company,
+    company: secondaryCalendarRow.company,
     country: '',
     exchange: '',
     currency: '',
     marketCap: metric.marketCap,
     marketCapDisplay: marketCapDisplay(metric.marketCap),
-    earningsApiCalendar: earningsApiRow,
+    secondaryCalendar: secondaryCalendarRow,
+    calendarAuditKey: secondaryCalendarAuditKey(secondaryCalendarRow),
     finnhubMetric: metric
   };
 }
@@ -1421,15 +1622,21 @@ function buildRows(calendarRows, profiles, options = {}) {
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
   const usListingsBySymbol = new Map((options.usListings || []).map((listing) => [listing.symbol, listing]));
   const metricsBySymbol = new Map((options.finnhubMetrics || []).map((metric) => [metric.symbol, metric]));
-  const earningsApiByKey = earningsApiRowsByKey(options.earningsApiCalendarDays || []);
+  const secondaryCalendarByKey = secondaryCalendarRowsByKey(options.secondaryCalendarDays || []);
   return calendarRows.map((calendarRow) => {
     const profile = profilesBySymbol.get(calendarRow.symbol);
-    const profileRecovery = profileRecoveryForRow(calendarRow, profile, metricsBySymbol, earningsApiByKey);
+    const profileRecovery = profileRecoveryForRow(calendarRow, profile, metricsBySymbol, secondaryCalendarByKey);
     const providerDateConflict = calendarRow.providerDateConflict || null;
     const auditedFinnhubCalendar = providerDateConflict?.candidates?.finnhub?.[0] || calendarRow;
     const company = profile?.name || profileRecovery?.company || calendarRow.symbol;
     const marketCap = profile?.marketCap ?? profileRecovery?.marketCap ?? null;
-    const fallbacks = profileRecovery ? ['earningsApiCalendar', 'finnhubMetric'] : [];
+    const timingFallback = calendarRow.secondaryCalendarTimingFallback || null;
+    const timingFallbackKey = timingFallback ? secondaryCalendarAuditKey(timingFallback) : null;
+    const calendarAuditKey = profileRecovery?.calendarAuditKey || timingFallbackKey || null;
+    const fallbacks = [
+      ...(profileRecovery ? [profileRecovery.calendarAuditKey, 'finnhubMetric'] : []),
+      ...(timingFallback && (!profileRecovery || profileRecovery.calendarAuditKey !== timingFallbackKey) ? [timingFallbackKey] : [])
+    ];
     const eps = metricPayload('eps', calendarRow.eps.estimate, calendarRow.eps.actual, {
       basis: '',
       note: ''
@@ -1447,7 +1654,7 @@ function buildRows(calendarRows, profiles, options = {}) {
       marketCap,
       marketCapDisplay: marketCapDisplay(marketCap),
       reportDate: calendarRow.reportDate,
-      reportTiming: calendarRow.reportTiming,
+      reportTiming: timingFallback?.reportTiming || calendarRow.reportTiming,
       fiscalQuarterEnding: '',
       fiscalQuarter: calendarRow.fiscalQuarter,
       fiscalYear: calendarRow.fiscalYear,
@@ -1493,18 +1700,15 @@ function buildRows(calendarRows, profiles, options = {}) {
           marketCapMillions: profileRecovery.finnhubMetric.marketCapMillions,
           error: profileRecovery.finnhubMetric.error
         } : null,
-        earningsApiCalendar: profileRecovery ? {
-          reportDate: profileRecovery.earningsApiCalendar.reportDate,
-          company: profileRecovery.earningsApiCalendar.company,
-          reportTiming: profileRecovery.earningsApiCalendar.reportTiming,
-          bucket: profileRecovery.earningsApiCalendar.source.bucket
-        } : null,
+        alphaVantageCalendar: calendarAuditKey === ALPHA_VANTAGE_CALENDAR_AUDIT
+          ? compactSecondaryCalendarAudit(profileRecovery?.secondaryCalendar || timingFallback)
+          : null,
         providerDateConflict,
         selectedSources: {
           slate: 'finnhub',
-          company: profile?.name ? 'finnhubProfile' : profileRecovery?.company ? 'earningsApiCalendar' : 'symbol',
+          company: profile?.name ? 'finnhubProfile' : profileRecovery?.company ? profileRecovery.calendarAuditKey : 'symbol',
           marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : Number.isFinite(profileRecovery?.marketCap) ? 'finnhubMetric' : 'none',
-          timing: calendarRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
+          timing: timingFallback ? timingFallbackKey : calendarRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
           eps: {
             estimate: calendarRow.eps.estimate === null ? 'none' : 'finnhub',
             actual: calendarRow.eps.actual === null ? 'none' : 'finnhub'
@@ -1564,6 +1768,13 @@ function attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(tasks, compa
   });
 }
 
+function recoveryCalendarAuditKey(task) {
+  if (!task?.sourceAudit?.alphaVantageCalendar) {
+    throw new Error(`${task?.symbol || 'Secondary recovery candidate'} is missing Alpha Vantage calendar provenance.`);
+  }
+  return ALPHA_VANTAGE_CALENDAR_AUDIT;
+}
+
 function buildEarningsApiRows(tasks, companyFetches) {
   const fetchesBySymbol = new Map(companyFetches.map((item) => [item.symbol, item]));
   return tasks.map((task) => {
@@ -1571,6 +1782,7 @@ function buildEarningsApiRows(tasks, companyFetches) {
     const companyRow = selectEarningsApiCompanyRow(fetch, task);
     if (!companyRow) return null;
     const profile = task.sourceAudit.finnhubProfile;
+    const calendarAuditKey = recoveryCalendarAuditKey(task);
     const eps = metricPayload('eps', companyRow.eps.estimate, companyRow.eps.actual, {
       basis: '',
       note: ''
@@ -1606,17 +1818,17 @@ function buildEarningsApiRows(tasks, companyFetches) {
       },
       reaction: null,
       sourceStatus: computeEarningsSourceStatus(sourceRow, { requireComputedReaction: false }),
-      sourceSummary: sourceSummary('earningsApiCompany', ['earningsApiCalendar', 'finnhubProfile']),
+      sourceSummary: sourceSummary('earningsApiCompany', [calendarAuditKey, 'finnhubProfile']),
       sourceAudit: {
         finnhubUsListing: task.sourceAudit.finnhubUsListing,
         finnhubCalendar: {
           present: false
         },
         finnhubProfile: profile || null,
-        earningsApiCalendar: task.sourceAudit.earningsApiCalendar,
+        alphaVantageCalendar: task.sourceAudit.alphaVantageCalendar,
         earningsApiCompany: task.sourceAudit.earningsApiCompany || earningsApiCompanyAudit(fetch, companyRow),
         selectedSources: {
-          slate: 'earningsApiCalendar',
+          slate: calendarAuditKey,
           company: profile?.name ? 'finnhubProfile' : 'earningsApiCompany',
           marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : 'none',
           timing: companyRow.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
@@ -1678,12 +1890,13 @@ function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTas
           error: item.error
         }))
       },
-      earningsApiCalendar: {
-        requests: fetches.earningsApiCalendarDays.length,
-        ok: fetches.earningsApiCalendarDays.filter((item) => item.ok).length,
-        skipped: fetches.earningsApiCalendarDays.filter((item) => item.skipped).length,
-        rows: fetches.earningsApiCalendarDays.reduce((sum, item) => sum + item.rowCount, 0),
-        errors: fetches.earningsApiCalendarDays.filter((item) => !item.ok && !item.skipped).map((item) => ({
+      secondaryCalendar: {
+        provider: 'alpha_vantage',
+        requests: fetches.secondaryCalendarDays.length ? 1 : 0,
+        ok: fetches.secondaryCalendarDays.some((item) => item.ok) ? 1 : 0,
+        skipped: fetches.secondaryCalendarDays.some((item) => item.skipped) ? 1 : 0,
+        rows: fetches.secondaryCalendarDays.reduce((sum, item) => sum + item.rowCount, 0),
+        errors: fetches.secondaryCalendarDays.filter((item) => !item.ok && !item.skipped).map((item) => ({
           date: item.date,
           status: item.status,
           error: item.error
@@ -1763,6 +1976,7 @@ async function runBuild(argv = process.argv.slice(2)) {
   loadEnv();
   const args = parseArgs(argv);
   const token = process.env.FINNHUB_API_KEY;
+  const alphaVantageToken = process.env.ALPHA_VANTAGE_API_KEY;
   const earningsApiToken = process.env.EARNINGSAPI_API_KEY;
   if (!token) {
     throw new Error('FINNHUB_API_KEY is required in .env or the environment.');
@@ -1776,30 +1990,29 @@ async function runBuild(argv = process.argv.slice(2)) {
     throw new Error(`Finnhub U.S. symbol directory is unavailable. ${finnhubUsSymbols.error || ''}`.trim());
   }
 
-  // The 26-date production window catches surrounding-date conflicts while
-  // discovery remains limited to the five visible trading dates. Official
-  // company IR, then SEC, is the fallback when this secondary check is
-  // unavailable or does not corroborate the primary date.
-  const earningsApiCalendarDays = await fetchEarningsApiCalendar(
+  // The surrounding-date production window catches conflicts while discovery
+  // remains limited to the five visible trading dates. Official company IR,
+  // then SEC, is the fallback when this secondary check is unavailable or does
+  // not corroborate the primary date.
+  const secondaryCalendarDays = await fetchAlphaVantageCalendar(
     args,
-    earningsApiToken,
-    earningsApiUsage,
+    alphaVantageToken,
     calendarVerificationDates(args)
   );
-  const activeEarningsApiCalendarDays = earningsApiCalendarDays.filter((day) => args.displayDates.includes(day.date));
+  const activeSecondaryCalendarDays = secondaryCalendarDays.filter((day) => args.displayDates.includes(day.date));
   const calendarResolution = resolveProviderDateConflicts(
     finnhubCalendar.rows,
-    activeEarningsApiCalendarDays
+    activeSecondaryCalendarDays
   );
-  const earningsApiCandidateRows = calendarResolution.earningsApiCalendarDays
+  const secondaryCandidateRows = calendarResolution.secondaryCalendarDays
     .flatMap((day) => day.rows)
     .filter((row) => !calendarResolution.finnhubRows.some((finnhubRow) => finnhubRow.symbol === row.symbol && finnhubRow.reportDate === row.reportDate));
-  const profileRows = [...earningsApiCandidateRows, ...calendarResolution.finnhubRows];
+  const profileRows = [...secondaryCandidateRows, ...calendarResolution.finnhubRows];
   const finnhubProfiles = await fetchFinnhubProfiles(profileRows, args, token);
-  const finnhubMetrics = await fetchFinnhubMetrics(calendarResolution.finnhubRows, finnhubProfiles, calendarResolution.earningsApiCalendarDays, args, token);
+  const finnhubMetrics = await fetchFinnhubMetrics(calendarResolution.finnhubRows, finnhubProfiles, calendarResolution.secondaryCalendarDays, args, token);
   const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
     calendarResolution.finnhubRows,
-    calendarResolution.earningsApiCalendarDays,
+    calendarResolution.secondaryCalendarDays,
     finnhubProfiles,
     finnhubUsSymbols.listings
   );
@@ -1807,13 +2020,13 @@ async function runBuild(argv = process.argv.slice(2)) {
   const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, earningsApiCompanyFetches);
   const finnhubRows = buildRows(calendarResolution.finnhubRows, finnhubProfiles, {
     finnhubMetrics,
-    earningsApiCalendarDays: calendarResolution.earningsApiCalendarDays,
+    secondaryCalendarDays: calendarResolution.secondaryCalendarDays,
     usListings: finnhubUsSymbols.listings
   });
   const scheduleConfirmationInput = readScheduleConfirmations(args.scheduleConfirmations);
   const scheduleVerification = verifyFinnhubScheduleRows(
     finnhubRows,
-    earningsApiCalendarDays,
+    secondaryCalendarDays,
     { from: args.from, to: args.to },
     scheduleConfirmationInput.rows
   );
@@ -1858,7 +2071,7 @@ async function runBuild(argv = process.argv.slice(2)) {
       finnhubUsSymbols,
       finnhubProfiles,
       finnhubMetrics,
-      earningsApiCalendarDays,
+      secondaryCalendarDays,
       earningsApiCompanyFetches,
       earningsApiBudget: {
         usageFile: path.relative(process.cwd(), args.earningsApiUsage),
@@ -1891,6 +2104,8 @@ module.exports = {
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
   earningsApiUsageForBuild,
+  alphaVantageCalendarFromResponse,
+  fetchAlphaVantageCalendar,
   fetchEarningsApiCalendar,
   fetchFinnhubUsSymbols,
   finnhubCalendarFromResponse,

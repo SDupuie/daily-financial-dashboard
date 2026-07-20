@@ -919,14 +919,14 @@ function normalizeTapeCommentaryForPublication(data, chartData) {
   });
 }
 
-function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, reviewChartData = null, { stampEdition = true } = {}) {
+function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, reviewChartData = null, { stampEdition = true, selectEarningsRows = false } = {}) {
   const stampedData = structuredClone(stampEdition ? stampDashboardEdition(dashboardData) : dashboardData);
   try {
     normalizeTapeCommentaryForPublication(stampedData, readJsonBlock(html, 'chart-data'));
   } catch (_error) {
     // Broken/missing chart-data is still caught by final validation.
   }
-  normalizeEarningsForPublication(stampedData);
+  if (selectEarningsRows) prepareEarningsRowsForPublication(stampedData);
   stripPublishedEarningsSourceAudit(stampedData);
   delete stampedData.editorialReview;
   if (reviewManifest) {
@@ -1139,9 +1139,9 @@ function recoverEmptyEarningsWeek(data, sourceWeek, previousWeek, options = {}) 
     throw new Error('Earnings publication produced zero rows despite same-range row evidence, and no previous non-empty canonical week is available to carry forward.');
   }
   data.earnings.week = carriedForwardEarningsWeek(previousWeek, options.checkedAt);
-  normalizeEarningsForPublication(data);
+  clearEarningsInternalQueues(data.earnings.week);
   if (!hasPublishedEarningsRows(data.earnings?.week)) {
-    throw new Error('Earnings empty-row recovery failed because the previous canonical week did not survive publication normalization.');
+    throw new Error('Earnings empty-row recovery failed because the previous canonical week did not survive publication handoff.');
   }
   return true;
 }
@@ -1161,7 +1161,7 @@ function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previo
     label: 'Earnings · Week Monitor',
     week: canonicalEarningsWeek
   };
-  normalizeEarningsForPublication(data);
+  prepareEarningsRowsForPublication(data);
   recoverEmptyEarningsWeek(data, earningsWeek, { ...previousWeek }, { incomingRows, checkedAt, evidenceRows, useSidecarEvidence });
 }
 
@@ -1551,7 +1551,6 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
     : structuredClone(candidateWeek);
   finalWeek = preserveSafePriorEarningsNarrative(finalWeek, previousDashboardData?.earnings?.week);
   const finalized = { earnings: { week: finalWeek } };
-  normalizeEarningsForPublication(finalized);
   recoverEmptyEarningsWeek(finalized, candidateWeek, previousDashboardData?.earnings?.week, {
     incomingRows: Array.isArray(candidateWeek?.rows) ? candidateWeek.rows.length : 0,
     checkedAt: scheduledNow(),
@@ -1560,8 +1559,10 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
   // Apply does not rebuild the slate here. The recovery above only prevents a
   // same-range zero-row publish when staged sidecars prove rows existed.
   finalWeek = finalized.earnings.week;
-  const errors = validateEarningsWeekPayload(finalWeek);
-  if (errors.length) process.stderr.write(`Editorial Earnings narrative warning: ${errors.join(' ')}\n`);
+  if ((finalWeek.rows || []).some((row) => row?.sourceAudit)) {
+    const errors = validateEarningsWeekPayload(finalWeek);
+    if (errors.length) process.stderr.write(`Editorial Earnings narrative warning: ${errors.join(' ')}\n`);
+  }
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
@@ -1836,15 +1837,9 @@ function normalizePublishedStorySections(data) {
   });
 }
 
-function normalizeEarningsForPublication(data) {
-  const week = data.earnings?.week;
+function clearEarningsInternalQueues(week) {
   if (!week || typeof week !== 'object' || Array.isArray(week)) return;
   if (!Array.isArray(week.rows)) week.rows = [];
-  week.rows = week.rows
-    .map(repairPublishedEarningsReaction)
-    .filter(renderSafePublishedEarningsRow)
-    .filter(isDisplayEligibleEarningsRow)
-    .map((row) => normalizeEarningsCommentaryForPublication(row));
   week.secondaryRecoveryCandidates = [];
   week.companyReleaseTasks = [];
   week.summary = {
@@ -1853,6 +1848,18 @@ function normalizeEarningsForPublication(data) {
   };
   delete week.narrativeApply;
   delete week.companyReleaseApply;
+}
+
+function prepareEarningsRowsForPublication(data) {
+  const week = data.earnings?.week;
+  if (!week || typeof week !== 'object' || Array.isArray(week)) return;
+  if (!Array.isArray(week.rows)) week.rows = [];
+  week.rows = week.rows
+    .map(repairPublishedEarningsReaction)
+    .filter(renderSafePublishedEarningsRow)
+    .filter(isDisplayEligibleEarningsRow)
+    .map((row) => normalizeEarningsCommentaryForPublication(row));
+  clearEarningsInternalQueues(week);
 }
 
 function objectRecord(value) {
@@ -2021,7 +2028,6 @@ function normalizePublicationDisplaySections(data, { now = scheduledNow() } = {}
   }
 
   normalizePublishedStorySections(data);
-  normalizeEarningsForPublication(data);
   applyNewsCoverageState(data, { now: checkedAt });
   return data;
 }

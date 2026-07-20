@@ -44,6 +44,7 @@ const REACTION_BASES = new Set([
 const REACTION_STATUSES = new Set(['computed', 'awaiting_close', 'unavailable', 'pending']);
 const LIFECYCLES = new Set(['scheduled', 'awaiting_actual', 'released_awaiting_close', 'close_available']);
 const SOURCE_SUMMARY_PRIMARIES = new Set(['finnhub', 'earningsApiCompany', 'sec_company_release']);
+const SECONDARY_CALENDAR_SOURCES = new Set(['alphaVantageCalendar']);
 const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
 const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
 const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
@@ -280,6 +281,15 @@ function arraysEqual(left, right) {
     && left.every((item, index) => item === right[index]);
 }
 
+function secondaryCalendarAuditSource(value) {
+  return SECONDARY_CALENDAR_SOURCES.has(value) ? value : '';
+}
+
+function secondaryCalendarAuditForSelected(audit, selectedSource) {
+  const source = secondaryCalendarAuditSource(selectedSource);
+  return source && isObject(audit?.[source]) ? audit[source] : null;
+}
+
 function validateMetric(errors, metric, label, options = {}) {
   if (!isObject(metric)) {
     errors.push(`${label} must be an object.`);
@@ -426,7 +436,10 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
       if (conflict.selectedDateSource !== 'finnhub_fallback') errors.push(`${label}.providerDateConflict.selectedDateSource must be finnhub_fallback.`);
       if (conflict.reason !== 'provider_date_conflict_finnhub_retained') errors.push(`${label}.providerDateConflict.reason must be provider_date_conflict_finnhub_retained.`);
       const candidateKeys = isObject(conflict.candidates) ? Object.keys(conflict.candidates).sort() : [];
-      if (!arraysEqual(candidateKeys, ['earningsApiCalendar', 'finnhub'])) errors.push(`${label}.providerDateConflict.candidates must contain exactly earningsApiCalendar and finnhub.`);
+      const secondaryCandidateKeys = candidateKeys.filter((item) => item !== 'finnhub');
+      if (!candidateKeys.includes('finnhub') || secondaryCandidateKeys.length !== 1 || !SECONDARY_CALENDAR_SOURCES.has(secondaryCandidateKeys[0])) {
+        errors.push(`${label}.providerDateConflict.candidates must contain finnhub and exactly one supported secondary calendar provider.`);
+      }
       if (conflictSelectedDate !== calendar.reportDate) errors.push(`${label}.providerDateConflict.selectedDate must match the retained Finnhub calendar date.`);
       if (!conflictFinnhubDates.includes(calendar.reportDate)) errors.push(`${label}.finnhubCalendar.reportDate must match a providerDateConflict Finnhub candidate.`);
     } else if (scheduleVerification?.status === 'official_confirmed') {
@@ -434,26 +447,34 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
     } else if (calendar.reportDate !== row.reportDate) {
       errors.push(`${label}.finnhubCalendar.reportDate must match row.reportDate.`);
     }
-    if (!conflict && calendar.reportTiming !== row.reportTiming) errors.push(`${label}.finnhubCalendar.reportTiming must match row.reportTiming.`);
+    const timingFallbackAudit = secondaryCalendarAuditForSelected(audit, selected.timing);
+    if (!conflict && !timingFallbackAudit && calendar.reportTiming !== row.reportTiming) errors.push(`${label}.finnhubCalendar.reportTiming must match row.reportTiming.`);
+    if (timingFallbackAudit) {
+      if (calendar.reportTiming !== 'unknown') errors.push(`${label}.sourceAudit.selectedSources.timing must use Finnhub unless Finnhub timing is unknown.`);
+      if (timingFallbackAudit.reportTiming !== row.reportTiming) errors.push(`${label}.sourceAudit.${selected.timing}.reportTiming must match row.reportTiming when selected.`);
+    }
   }
   const profileName = audit.finnhubProfile?.name || '';
   const hasMetricMarketCap = isObject(audit.finnhubMetric) && isFiniteNumber(audit.finnhubMetric.marketCap);
-  const hasEarningsApiCompany = isObject(audit.earningsApiCalendar) && typeof audit.earningsApiCalendar.company === 'string' && audit.earningsApiCalendar.company.trim();
-  if (selected.company === 'earningsApiCalendar') {
-    if (!hasEarningsApiCompany) errors.push(`${label}.sourceAudit.earningsApiCalendar.company must be populated for company-name recovery.`);
-    if (row.company !== audit.earningsApiCalendar?.company) errors.push(`${label}.company must match EarningsAPI calendar company when selected.`);
+  const selectedCompanyCalendarSource = secondaryCalendarAuditSource(selected.company);
+  const selectedCompanyCalendarAudit = secondaryCalendarAuditForSelected(audit, selected.company);
+  const hasSecondaryCalendarCompany = Boolean(selectedCompanyCalendarAudit?.company);
+  if (selectedCompanyCalendarSource) {
+    if (!hasSecondaryCalendarCompany) errors.push(`${label}.sourceAudit.${selected.company}.company must be populated for company-name recovery.`);
+    if (row.company !== selectedCompanyCalendarAudit?.company) errors.push(`${label}.company must match the selected secondary calendar company.`);
   }
   if (selected.marketCap === 'finnhubMetric') {
     if (!hasMetricMarketCap) errors.push(`${label}.sourceAudit.finnhubMetric.marketCap must be populated for market-cap recovery.`);
     if (!nearlyEqualNullable(audit.finnhubMetric?.marketCap, row.marketCap)) errors.push(`${label}.marketCap must match Finnhub metric marketCap.`);
   }
+  const timingFallbackSource = secondaryCalendarAuditSource(selected.timing);
   // Mirror buildRows source precedence exactly; this keeps identity recovery
   // explicit instead of accepting broad legacy aliases or oldName || newName drift.
   let expectedSources = {
     slate: 'finnhub',
-    company: profileName ? 'finnhubProfile' : hasEarningsApiCompany ? 'earningsApiCalendar' : 'symbol',
+    company: profileName ? 'finnhubProfile' : hasSecondaryCalendarCompany ? selected.company : 'symbol',
     marketCap: isFiniteNumber(audit.finnhubProfile?.marketCap) ? 'finnhubProfile' : hasMetricMarketCap ? 'finnhubMetric' : 'none',
-    timing: row.reportTiming === 'unknown' ? 'none' : 'finnhub',
+    timing: timingFallbackSource || (row.reportTiming === 'unknown' ? 'none' : 'finnhub'),
     eps: {
       estimate: expectedSource(row.eps?.estimate, 'finnhub'),
       actual: expectedSource(row.eps?.actual, 'finnhub')
@@ -496,6 +517,11 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
 }
 
 function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) {
+  const calendarAuditSource = secondaryCalendarAuditSource(selected.slate);
+  const calendarAudit = secondaryCalendarAuditForSelected(audit, selected.slate);
+  if (!calendarAuditSource) {
+    errors.push(`${label}.sourceAudit.selectedSources.slate is invalid.`);
+  }
   const scheduleVerification = isObject(audit.scheduleVerification) ? audit.scheduleVerification : null;
   if (scheduleVerification) {
     const official = scheduleVerification.official;
@@ -526,8 +552,8 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   if (audit.finnhubCalendar?.present !== false) {
     errors.push(`${label}.sourceAudit.finnhubCalendar.present must be false for EarningsAPI-recovered rows.`);
   }
-  if (!isObject(audit.earningsApiCalendar)) {
-    errors.push(`${label}.sourceAudit.earningsApiCalendar must be populated for EarningsAPI-recovered rows.`);
+  if (!calendarAudit) {
+    errors.push(`${label}.sourceAudit.${selected.slate} must be populated for EarningsAPI-recovered rows.`);
   }
   if (!isObject(audit.earningsApiCompany?.selectedRow)) {
     errors.push(`${label}.sourceAudit.earningsApiCompany.selectedRow must be populated for EarningsAPI-recovered rows.`);
@@ -545,7 +571,7 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   if (companyReleaseResolution?.status === 'resolved') {
     validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
     expectedSources = {
-      slate: 'earningsApiCalendar',
+      slate: calendarAuditSource,
       company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
       marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
       timing: row.reportTiming === 'unknown' ? 'none' : 'sec_company_release',
@@ -563,7 +589,7 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
     validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
     if (companyRow.reportTiming !== row.reportTiming) errors.push(`${label}.earningsApiCompany.reportTiming must match row.reportTiming.`);
     expectedSources = {
-      slate: 'earningsApiCalendar',
+      slate: calendarAuditSource,
       company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
       marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
       timing: row.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
@@ -584,7 +610,7 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   } else {
     if (companyRow.reportTiming !== row.reportTiming) errors.push(`${label}.earningsApiCompany.reportTiming must match row.reportTiming.`);
     expectedSources = {
-      slate: 'earningsApiCalendar',
+      slate: calendarAuditSource,
       company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
       marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
       timing: row.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
@@ -649,7 +675,7 @@ function validateRow(errors, rowRaw, index, range) {
     errors.push(`${label}.sourceAudit.selectedSources must be populated.`);
   } else if (selected.slate === 'finnhub') {
     validateFinnhubRowSourceAudit(errors, row, audit, selected, label);
-  } else if (selected.slate === 'earningsApiCalendar') {
+  } else if (SECONDARY_CALENDAR_SOURCES.has(selected.slate)) {
     validateEarningsApiRowSourceAudit(errors, row, audit, selected, label);
   } else {
     errors.push(`${label}.sourceAudit.selectedSources.slate is invalid.`);

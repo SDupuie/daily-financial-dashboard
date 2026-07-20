@@ -22,6 +22,7 @@ const {
 const { addDays, displayDatesForRange } = require('./calendar_contract');
 const {
   attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates,
+  alphaVantageCalendarFromResponse,
   buildEarningsApiRows,
   buildSecondaryRecoveryCandidates,
   buildRows,
@@ -33,6 +34,7 @@ const {
   finnhubCalendarFromResponse,
   fetchYahooBarsForRows,
   readScheduleConfirmations,
+  resolveProviderDateConflicts,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows
 } = require('./earnings_week_build');
@@ -51,7 +53,7 @@ const {
 const { validateEarningsWeekReleasePayload } = require('./earnings_week_validation');
 const root = path.resolve(__dirname, '..');
 
-function profile(symbol, marketCap = 5000000000) {
+function profile(symbol, marketCap = 50000000000) {
   return {
     symbol,
     ok: true,
@@ -121,6 +123,38 @@ function earningsApiRow(symbol, overrides = {}) {
       provider: 'earningsapi',
       bucket: 'after',
       row: {}
+    },
+    ...overrides
+  };
+}
+
+function alphaVantageRow(symbol, overrides = {}) {
+  return {
+    symbol,
+    company: `${symbol} Corp`,
+    reportDate: '2026-01-06',
+    reportTiming: 'unknown',
+    fiscalQuarterEnding: '2025-12-31',
+    fiscalQuarter: 4,
+    fiscalYear: 2025,
+    eps: {
+      estimate: 1,
+      actual: null
+    },
+    revenue: {
+      estimate: null,
+      actual: null
+    },
+    source: {
+      provider: 'alpha_vantage',
+      row: {
+        symbol,
+        name: `${symbol} Corp`,
+        reportDate: '2026-01-06',
+        fiscalDateEnding: '2025-12-31',
+        estimate: '1',
+        currency: 'USD'
+      }
     },
     ...overrides
   };
@@ -303,7 +337,7 @@ function testUsListingEligibilityUsesExactDirectorySymbol() {
 
   const candidates = buildSecondaryRecoveryCandidates(
     [],
-    [{ date: '2026-01-06', rows: [earningsApiRow('ADR')] }],
+    [{ date: '2026-01-06', rows: [alphaVantageRow('ADR')] }],
     [foreignProfile],
     directory.listings
   );
@@ -321,8 +355,8 @@ function testUsListingEligibilityUsesExactDirectorySymbol() {
   const [otc] = buildRows([finnhubRow('OTCADR')], [profile('OTCADR')], { usListings: directory.listings });
   assert.equal(isDisplayEligibleEarningsRow(otc), false, 'An exact OTC directory match must remain ineligible.');
 
-  const [smallCap] = buildRows([finnhubRow('SMALL')], [profile('SMALL', 999999999)], { usListings: [usListing('SMALL')] });
-  assert.equal(isDisplayEligibleEarningsRow(smallCap), false, 'A sub-$1B market-cap row must remain ineligible.');
+  const [smallCap] = buildRows([finnhubRow('SMALL')], [profile('SMALL', 9999999999)], { usListings: [usListing('SMALL')] });
+  assert.equal(isDisplayEligibleEarningsRow(smallCap), false, 'A sub-$10B market-cap row must remain ineligible.');
   assert.equal(verifyFinnhubScheduleRows([smallCap], [], {
     from: '2026-01-05',
     to: '2026-01-09'
@@ -523,15 +557,15 @@ function testPrimaryScheduleVerification() {
     company: 'Recovery Corp',
     country: 'US',
     exchange: 'NASDAQ NMS - GLOBAL MARKET',
-    marketCap: 2000000000,
+    marketCap: 20000000000,
     reportDate: '2026-01-06',
-    sourceAudit: { selectedSources: { slate: 'earningsApiCalendar' } }
+    sourceAudit: { selectedSources: { slate: 'alphaVantageCalendar' } }
   };
   const recovery = verifyEarningsApiRecoveryRows([recoveryRow], range);
   assert.equal(recovery.rows.length, 1);
   assert.equal(recovery.rows[0].sourceAudit.scheduleVerification.status, 'secondary_only');
   assert.equal(recovery.rows[0].sourceStatus, 'partial');
-  assert.deepEqual(recovery.review.map((row) => row.reason), ['uncorroborated_earningsapi_recovery_date']);
+  assert.deepEqual(recovery.review.map((row) => row.reason), ['uncorroborated_secondary_recovery_date']);
   const staleRecoveryConfirmation = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
     symbol: 'RECOVERY',
     primaryDate: '2025-10-06',
@@ -541,7 +575,7 @@ function testPrimaryScheduleVerification() {
   }]);
   assert.equal(staleRecoveryConfirmation.rows.length, 1);
   assert.equal(staleRecoveryConfirmation.rows[0].sourceAudit.scheduleVerification.status, 'secondary_only');
-  assert.deepEqual(staleRecoveryConfirmation.review.map((row) => row.reason), ['uncorroborated_earningsapi_recovery_date']);
+  assert.deepEqual(staleRecoveryConfirmation.review.map((row) => row.reason), ['uncorroborated_secondary_recovery_date']);
   const officialRecovery = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
     symbol: 'RECOVERY',
     primaryDate: '2026-01-06',
@@ -571,7 +605,7 @@ function testPrimaryScheduleVerification() {
     ...missingCandidate,
     sourceAudit: {
       finnhubProfile: profile('MISSING'),
-      earningsApiCalendar: earningsApiRow('MISSING')
+      alphaVantageCalendar: alphaVantageRow('MISSING')
     }
   }], [{
     symbol: 'MISSING',
@@ -607,9 +641,10 @@ function testScheduleReviewAndPreparationFallbacks() {
     official: null
   };
   retryWeek.summary.fetches = {
-    earningsApiCalendar: {
-      requests: 26,
-      ok: 26,
+    secondaryCalendar: {
+      provider: 'alpha_vantage',
+      requests: 1,
+      ok: 1,
       skipped: 0,
       rows: 400,
       errors: []
@@ -621,12 +656,13 @@ function testScheduleReviewAndPreparationFallbacks() {
     fs.writeFileSync(retryPath, JSON.stringify(retryWeek));
     assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), false, 'A successful rollover scan must not repeat solely because primary-only rows remain.');
 
-    retryWeek.summary.fetches.earningsApiCalendar.rows = 0;
+    retryWeek.summary.fetches.secondaryCalendar.rows = 0;
     fs.writeFileSync(retryPath, JSON.stringify(retryWeek));
     assert.equal(earningsCalendarNeedsBuild(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true, 'A rollover scan that returned no rows may retry on the next Central-time day.');
     assert.equal(earningsCalendarFailedAttemptNeedsRetry(retryWeek.range, retryPath, new Date('2026-01-06T12:00:00.000Z')), true);
 
-    retryWeek.summary.fetches.earningsApiCalendar = {
+    retryWeek.summary.fetches.secondaryCalendar = {
+      provider: 'alpha_vantage',
       requests: 1,
       ok: 0,
       skipped: 0,
@@ -700,6 +736,55 @@ async function testEarningsApiCalendarStopsAfterQuotaResponse() {
   assert.equal(days.length, 1);
 }
 
+function testAlphaVantageCalendarBackupFlow() {
+  const dates = ['2026-01-06', '2026-01-07'];
+  const args = { from: '2026-01-05', to: '2026-01-09', displayDates: displayDatesForRange('2026-01-05', '2026-01-09') };
+  const days = alphaVantageCalendarFromResponse({
+    ok: true,
+    status: 200,
+    ms: 12,
+    body: [
+      'symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfDay',
+      'RECOVERAV,"Recover, Alpha Inc",2026-01-06,2025-12-31,1.23,USD,post-market',
+      'TIMEFALL,Timing Fallback Inc,2026-01-06,2025-12-31,0.50,USD,post-market',
+      'OUTSIDE,Outside Corp,2026-02-01,2025-12-31,0.10,USD,'
+    ].join('\n')
+  }, args, dates);
+  assert.equal(days.length, 2);
+  assert.equal(days[0].ok, true);
+  assert.equal(days[0].rowCount, 2);
+  const parsedRow = days[0].rows.find((row) => row.symbol === 'RECOVERAV');
+  assert.equal(parsedRow.company, 'Recover, Alpha Inc');
+  assert.equal(parsedRow.reportTiming, 'amc');
+  assert.equal(parsedRow.fiscalQuarter, 4);
+  assert.equal(parsedRow.fiscalYear, 2025);
+  assert.equal(parsedRow.eps.estimate, 1.23);
+
+  const recoveryCandidates = buildSecondaryRecoveryCandidates(
+    [finnhubRow('ANCHOR')],
+    days,
+    [profile('ANCHOR'), profile('RECOVERAV'), profile('TIMEFALL')],
+    [usListing('ANCHOR'), usListing('RECOVERAV'), usListing('TIMEFALL')]
+  );
+  const recovery = recoveryCandidates.find((task) => task.symbol === 'RECOVERAV');
+  assert.ok(recovery, 'Alpha-only display candidates should be queued for EarningsAPI company recovery.');
+  assert.equal(recovery.sourceAudit.alphaVantageCalendar.company, 'Recover, Alpha Inc');
+  assert.equal(recovery.trigger, 'missing_from_finnhub_but_present_in_alphaVantageCalendar');
+
+  const resolution = resolveProviderDateConflicts(
+    [finnhubRow('TIMEFALL', { reportTiming: 'unknown' })],
+    days
+  );
+  const builtRows = buildRows(resolution.finnhubRows, [profile('TIMEFALL')], {
+    secondaryCalendarDays: resolution.secondaryCalendarDays,
+    usListings: [usListing('TIMEFALL')]
+  });
+  assert.equal(builtRows[0].reportTiming, 'amc');
+  assert.equal(builtRows[0].sourceAudit.selectedSources.slate, 'finnhub');
+  assert.equal(builtRows[0].sourceAudit.selectedSources.timing, 'alphaVantageCalendar');
+  assert.equal(builtRows[0].sourceAudit.alphaVantageCalendar.reportTiming, 'amc');
+}
+
 function testSkipEarningsApiDoesNotReadUsageLedger() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-earningsapi-skip-'));
   const usageFile = path.join(dir, 'earningsapi_usage.json');
@@ -726,7 +811,7 @@ function testSkipEarningsApiDoesNotReadUsageLedger() {
 async function testRefreshEarningsApiIsOptIn() {
   const source = deterministicVerifiedWeekFixture();
   const row = source.rows[0];
-  row.sourceAudit.selectedSources.slate = 'earningsApiCalendar';
+  row.sourceAudit.selectedSources.slate = 'alphaVantageCalendar';
   let calls = 0;
   const data = await collectRefreshData(source, {
     asOf: '2026-01-07T22:00:00.000Z',
@@ -751,13 +836,8 @@ async function testRefreshEarningsApiIsOptIn() {
 
 function testSecondaryRecoveryAndRevenueComparison() {
   const anchor = finnhubRow('ANCHOR');
-  const recoveredFullCalendar = earningsApiRow('RECOVERFULL');
-  const recoveredEpsOnlyCalendar = earningsApiRow('RECOVEREPS', {
-    revenue: {
-      estimate: null,
-      actual: 500000000
-    }
-  });
+  const recoveredFullCalendar = alphaVantageRow('RECOVERFULL');
+  const recoveredEpsOnlyCalendar = alphaVantageRow('RECOVEREPS');
   const profiles = [profile('ANCHOR'), profile('RECOVERFULL'), profile('RECOVEREPS')];
   const secondaryRecoveryCandidates = buildSecondaryRecoveryCandidates(
     [anchor],
@@ -795,8 +875,8 @@ function testSecondaryRecoveryAndRevenueComparison() {
     ['RECOVEREPS', 'RECOVERFULL'],
     'Finnhub-missing display candidates should be selected for secondary recovery.'
   );
-  assert.equal(full.sourceAudit.selectedSources.slate, 'earningsApiCalendar');
-  assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCalendar.eps, undefined);
+  assert.equal(full.sourceAudit.selectedSources.slate, 'alphaVantageCalendar');
+  assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.alphaVantageCalendar.eps, undefined);
   assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').neededFields.includes('eps.estimate'), true);
   assert.equal(secondaryRecoveryCandidates.find((task) => task.symbol === 'RECOVERFULL').neededFields.includes('epsEstimate'), false);
   assert.deepEqual(enrichedSecondaryCandidates.find((task) => task.symbol === 'RECOVERFULL').sourceAudit.earningsApiCompany.selectedRow, {
@@ -832,7 +912,7 @@ function testSecondaryRecoveryAndRevenueComparison() {
 function testApplyCompanyReleaseResolution() {
   const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
     [],
-    [{ date: '2026-01-06', rows: [earningsApiRow('RECOVERFULL')] }],
+    [{ date: '2026-01-06', rows: [alphaVantageRow('RECOVERFULL')] }],
     [profile('RECOVERFULL')],
     [usListing('RECOVERFULL')]
   );
@@ -1616,7 +1696,7 @@ function companyReleaseTaskFixture(source) {
       symbol: row.symbol,
       company: row.company,
       reportDate: row.reportDate,
-      trigger: 'missing_from_finnhub_but_present_in_earningsapi',
+      trigger: 'missing_from_finnhub_but_present_in_alphaVantageCalendar',
       priority: 'normal',
       marketCap: row.marketCap,
       marketCapDisplay: row.marketCapDisplay,
@@ -1624,23 +1704,17 @@ function companyReleaseTaskFixture(source) {
       neededFields: ['earningsApiCompanyRow', 'reportTiming', 'eps.estimate', 'eps.actual', 'revenue.estimate', 'revenue.actual'],
       preferredSources: ['EarningsAPI company earnings endpoint'],
       doNotUseForOverrides: ['finnhub_calendar_row'],
-      instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub. Do not override Finnhub rows.',
+      instructions: 'Use EarningsAPI only to recover display-scale events missing from Finnhub after the secondary calendar finds them. Do not override Finnhub rows.',
       permittedUses: ['missing_row_discovery', 'eps_estimate_recovery', 'eps_actual_recovery', 'revenue_estimate_recovery', 'revenue_actual_recovery'],
       sourceAudit: {
         finnhubUsListing: row.sourceAudit.finnhubUsListing,
-        earningsApiCalendar: {
+        alphaVantageCalendar: {
           reportDate: row.reportDate,
           company: row.company,
-          eps: {
-            estimate: row.eps.estimate,
-            actual: row.eps.actual
-          },
-          revenue: {
-            estimate: row.revenue.estimate,
-            actual: row.revenue.actual
-          },
           reportTiming: row.reportTiming,
-          bucket: row.reportTiming === 'amc' ? 'after' : row.reportTiming === 'bmo' ? 'pre' : 'notSupplied'
+          fiscalQuarterEnding: row.fiscalQuarterEnding || '',
+          epsEstimate: row.eps.estimate,
+          currency: row.currency || 'USD'
         },
         finnhubCalendar: {
           present: false
@@ -1812,7 +1886,7 @@ function testNewEarningsNarrativeRowsStagePendingEditorialCompletion() {
       reportDate: '2026-07-09',
       country: 'US',
       exchange: 'NASDAQ',
-      marketCap: 2000000000,
+      marketCap: 20000000000,
       sourceAudit: { finnhubProfile: { industry: 'Technology' } },
       lifecycle: 'close_available',
       outcome: { overall: 'beat' },
@@ -1967,6 +2041,7 @@ async function main() {
   testPrimaryScheduleVerification();
   testScheduleReviewAndPreparationFallbacks();
   await testEarningsApiCalendarStopsAfterQuotaResponse();
+  testAlphaVantageCalendarBackupFlow();
   testSkipEarningsApiDoesNotReadUsageLedger();
   await testRefreshEarningsApiIsOptIn();
   testSecondaryRecoveryAndRevenueComparison();
