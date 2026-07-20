@@ -230,7 +230,7 @@ function decodeTupleSeries(errors, sourceItem, label) {
   return { ...sourceItem, bars };
 }
 
-function validateBars(errors, label, item, volumeDescription) {
+function validateBars(errors, warnings, label, item, volumeDescription, { closeOnlyPlaceholderSeverity = 'error' } = {}) {
   if (!Array.isArray(item.bars) || item.bars.length < 2) {
     errors.push(`${label}.bars must contain at least two daily bars.`);
     return;
@@ -255,7 +255,9 @@ function validateBars(errors, label, item, volumeDescription) {
       errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
     }
     if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
-      errors.push(`${barLabel} must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
+      const message = `${barLabel} contains a latest quote-only placeholder in an OHLC series; row tooltip discloses unavailable open/high/low data.`;
+      if (closeOnlyPlaceholderSeverity === 'warning') warnings.push(message);
+      else errors.push(message);
     }
   }
   const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
@@ -265,6 +267,7 @@ function validateBars(errors, label, item, volumeDescription) {
 }
 
 function validateSeries(errors, series, {
+  warnings = errors,
   expectedByTicker,
   expectedSectionByTicker,
   decodeSeries,
@@ -272,7 +275,8 @@ function validateSeries(errors, series, {
   absentMessage,
   duplicateMessage,
   missingMessage,
-  volumeDescription
+  volumeDescription,
+  closeOnlyPlaceholderSeverity = 'error'
 }) {
   const seriesByTicker = new Map();
   const decodedSeries = [];
@@ -309,7 +313,7 @@ function validateSeries(errors, series, {
       if (curveSpread.label !== '2s10s') errors.push(`${label}.curveSpread.label must be 2s10s.`);
       if (!isFiniteNumber(curveSpread.valueBp)) errors.push(`${label}.curveSpread.valueBp must be numeric.`);
     }
-    validateBars(errors, label, item, volumeDescription);
+    validateBars(errors, warnings, label, item, volumeDescription, { closeOnlyPlaceholderSeverity });
   }
   for (const ticker of expectedByTicker.keys()) {
     if (!seriesByTicker.has(ticker)) errors.push(`${missingMessage} ${ticker}.`);
@@ -402,6 +406,7 @@ function validateDashboardTapeCommentary(errors, warnings, data, { validationMod
 // Staged fetch output and the compact published payload share this complete contract;
 // callers provide only their storage decoder and dashboard roster boundary.
 function validateChartPayload(errors, payload, {
+  warnings = errors,
   expectedByTicker,
   expectedSectionByTicker,
   decodeSeries,
@@ -410,7 +415,8 @@ function validateChartPayload(errors, payload, {
   absentMessage = 'is not present in dashboard chartable rows.',
   duplicateMessage = 'Duplicate generated chart series for',
   missingMessage = 'Generated chart data is missing',
-  volumeDescription = 'generated'
+  volumeDescription = 'generated',
+  closeOnlyPlaceholderSeverity = 'error'
 }) {
   const prefix = label ? `${label}.` : '';
   if (payload.schemaVersion !== 1) errors.push(`${prefix}schemaVersion must be 1.`);
@@ -419,6 +425,7 @@ function validateChartPayload(errors, payload, {
   validateChartPayloadMetadata(errors, payload, { label });
   const series = Array.isArray(payload.series) ? payload.series : [];
   const result = validateSeries(errors, series, {
+    warnings,
     expectedByTicker,
     expectedSectionByTicker,
     decodeSeries,
@@ -426,7 +433,8 @@ function validateChartPayload(errors, payload, {
     absentMessage,
     duplicateMessage,
     missingMessage,
-    volumeDescription
+    volumeDescription,
+    closeOnlyPlaceholderSeverity
   });
   validateChartAvailabilityCorrespondence(errors, payload, result.seriesByTicker, prefix);
   const roundedSeries = roundChartPayload({ series: result.decodedSeries }).series;
@@ -770,6 +778,7 @@ if (!dashboardMatch) {
     if (chartData) {
       const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
       validateChartPayload(errors, chartData, {
+        warnings,
         expectedByTicker,
         expectedSectionByTicker,
         decodeSeries: decodeTupleSeries,
@@ -778,7 +787,8 @@ if (!dashboardMatch) {
         absentMessage: 'is missing its embedded source mapping.',
         duplicateMessage: 'Duplicate embedded chart series for',
         missingMessage: 'Embedded chart data is missing',
-        volumeDescription: 'embedded'
+        volumeDescription: 'embedded',
+        closeOnlyPlaceholderSeverity: validationMode === 'published' ? 'warning' : 'error'
       });
     }
 

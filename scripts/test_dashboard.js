@@ -2807,6 +2807,35 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
 }
 
+function testChartStagingRejectsLatestCloseOnlyPlaceholder() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const payload = roundChartPayload(chartData);
+  const series = payload.series[0];
+  series.dataKind = 'ohlc';
+  series.priceOnly = false;
+  const latestIndex = series.bars.length - 1;
+  delete series.bars[latestIndex].volume;
+  const close = series.bars[latestIndex].close;
+  series.bars[latestIndex] = { time: series.bars[latestIndex].time, open: close, high: close, low: close, close };
+
+  assert.match(
+    validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'),
+    new RegExp(`${series.ticker}\\.bars\\[\\d+\\] must contain real OHLC data`)
+  );
+}
+
+function chartDataWithLatestCloseOnlyPlaceholder(chartData) {
+  const payload = structuredClone(chartData);
+  const series = payload.series[0];
+  series.dataKind = 'ohlc';
+  series.priceOnly = false;
+  const latestIndex = series.bars.length - 1;
+  const latest = series.bars[latestIndex];
+  const close = latest[4];
+  series.bars[latestIndex] = [latest[0], close, close, close, close, null];
+  return payload;
+}
+
 async function testChartRerunUsesExecutionRevision() {
   const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-chart-revision-');
   const input = path.join(dir, 'input.html');
@@ -3216,6 +3245,18 @@ function testDashboardValidatorTapeNotesAreModeSpecific() {
   assert.match(published.stdout, /SPX\.note is blank; editorial commentary is incomplete\./);
 }
 
+function testDashboardValidatorCloseOnlyPlaceholderIsPublishedWarning() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const html = renderDashboardValidationFixture(dashboard, chartDataWithLatestCloseOnlyPlaceholder(chartData));
+
+  const staged = dashboardValidationResult(html, FIXTURE_NOW, 'staged');
+  assert.equal(staged.status, 1);
+  assert.match(staged.stderr, /SPX\.bars\[1\] contains a latest quote-only placeholder/);
+
+  const published = dashboardValidationResult(html, FIXTURE_NOW, 'published');
+  assert.equal(published.status, 0);
+  assert.match(published.stdout, /SPX\.bars\[1\] contains a latest quote-only placeholder/);
+}
 
 function testDashboardWriterNormalizesStaleTapeCommentary() {
   const { dashboard, chartData } = createDashboardValidationFixture();
@@ -3512,15 +3553,25 @@ function testTouchTooltipControls() {
   const tapeStaleRuntime = Function('esc', `
     const STALE_CHART_WARNING_BUSINESS_DAYS = 2;
     let chartDataReferenceDate = '2026-07-14';
+    const isFiniteValue = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
     const chartLatestDate = (series) => series?.bars?.at(-1)?.time || '';
     const chartDateLabel = (value) => value;
     ${tapeStaleSource}
-    return { chartBusinessDayGap, tapeSeriesIsStale, tapeStaleInfo, tapeCommentaryUnavailableInfo };
+    return { chartBusinessDayGap, tapeSeriesIsStale, tapeSeriesHasLatestCloseOnlyPlaceholder, tapeStaleInfo, tapeCommentaryUnavailableInfo };
   `)((value) => String(value));
   const moveSeries = { ticker: 'MOVE', bars: [{ time: '2026-07-10' }] };
+  const moveQuoteOnlySeries = {
+    ticker: 'MOVE',
+    dataKind: 'ohlc',
+    priceOnly: false,
+    bars: [['2026-07-14', 70.8777, 70.8777, 70.8777, 70.8777, null]]
+  };
   assert.equal(tapeStaleRuntime.chartBusinessDayGap('2026-07-10', '2026-07-13'), 1);
   assert.equal(tapeStaleRuntime.chartBusinessDayGap('2026-07-10', '2026-07-14'), 2);
   assert.equal(tapeStaleRuntime.tapeSeriesIsStale(moveSeries), true);
+  assert.equal(tapeStaleRuntime.tapeSeriesHasLatestCloseOnlyPlaceholder(moveQuoteOnlySeries), true);
+  assert.match(tapeStaleRuntime.tapeStaleInfo(moveQuoteOnlySeries, { ticker: 'MOVE' }), /MOVE data issue/);
+  assert.match(tapeStaleRuntime.tapeStaleInfo(moveQuoteOnlySeries, { ticker: 'MOVE' }), /open\/high\/low data for that date was unavailable/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /MOVE data is stale/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /Last valid quote: 2026-07-10\./);
   assert.doesNotMatch(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /not updated/);
@@ -3812,6 +3863,7 @@ async function main() {
     testChartSeriesOwnsDerivedQuoteViews,
     testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking,
     testChartFetcherTickerFilterAndPartialFailure,
+    testChartStagingRejectsLatestCloseOnlyPlaceholder,
     testChartRerunUsesExecutionRevision,
     testMergedChartAvailabilityFollowsFinalSeries,
     testChartRepairStagesMixedResultForEditorialReview,
@@ -3821,6 +3873,7 @@ async function main() {
     testMarketLensReactionOpensChartBelowDay,
     testDashboardValidatorRejectsCalendarRangeDivergence,
     testDashboardValidatorTapeNotesAreModeSpecific,
+    testDashboardValidatorCloseOnlyPlaceholderIsPublishedWarning,
     testDashboardWriterNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,

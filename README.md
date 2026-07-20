@@ -17,6 +17,7 @@ Do not edit dashboard HTML, CSS, or JavaScript directly during a daily dashboard
 ## Scheduled and manual execution
 
 - `--scheduled` identifies only a scheduler-driven Prepare or Apply run. Manual/on-demand and development runs omit it.
+- Before beginning any manual or scheduled dashboard update, read the current `README.md` Daily Runbook from disk and use it as the workflow authority before running Prepare Handoff or making editorial changes.
 - In `America/Chicago`, the scheduled morning start window is 7:45–9:00 AM and the scheduled afternoon start window is 3:45–5:00 PM on weekdays.
 - Scheduled preparation checks the weekday/time window and completion marker before fetching; scheduled Apply/finalization rechecks only the weekday/completion marker and may finish after the start window.
 - Select the scheduled edition from Chicago time and keep the dashboard date and compile date on the local run date. Do not use the masthead, compiled timestamp, Git history, or a run lock as scheduler state.

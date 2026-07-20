@@ -1047,7 +1047,11 @@ function validateChartStagingPayload(payload, expectedRows = []) {
         if (item.availability.failures !== undefined) errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.failures is not allowed.`);
       }
     }
-    if (!Array.isArray(item?.bars) || item.bars.length < 2) errors.push(`Chart staging ${ticker || `series[${index}]`} must contain at least two bars.`);
+    if (!Array.isArray(item?.bars) || item.bars.length < 2) {
+      errors.push(`Chart staging ${ticker || `series[${index}]`} must contain at least two bars.`);
+    } else if (!item.priceOnly && item.dataKind === 'ohlc' && isCloseOnlyPlaceholderBar(item.bars.at(-1))) {
+      errors.push(`Chart staging ${ticker || `series[${index}]`}.bars[${item.bars.length - 1}] must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
+    }
   }
   for (const row of expectedRows) {
     const ticker = String(row?.ticker || '').trim().toUpperCase();
@@ -1111,6 +1115,15 @@ function uniqueBars(bars) {
 
 function closeOnlyBar(time, close) {
   return { time, open: close, high: close, low: close, close };
+}
+
+function isCloseOnlyPlaceholderBar(rawBar) {
+  const bar = objectBar(rawBar);
+  return bar?.volume === undefined
+    && Number.isFinite(Number(bar?.open))
+    && Number(bar.open) === Number(bar.high)
+    && Number(bar.high) === Number(bar.low)
+    && Number(bar.low) === Number(bar.close);
 }
 
 function isUsableOhlc(open, high, low, close) {
