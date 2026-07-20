@@ -21,7 +21,7 @@ const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const ALPHA_VANTAGE_PACING_MS = 1250;
-const PROVENANCE_PRIORITY = Object.freeze({ rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const PROVENANCE_PRIORITY = Object.freeze({ 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 
 function parseArgs(argv) {
   const args = {
@@ -174,10 +174,26 @@ async function fetchRss(acquisitionPath, { timeoutMs }) {
   return { items };
 }
 
+async function fetchApPublic(acquisitionPath, { timeoutMs }) {
+  const response = await fetchResponse(acquisitionPath.feedUrl, {
+    timeoutMs,
+    headers: {
+      Accept: 'application/xml,text/xml;q=0.9,*/*;q=0.5',
+      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+    }
+  });
+  const xml = await response.text();
+  if (!/<urlset\b/i.test(xml)) throw new Error('AP news sitemap response is not a urlset document.');
+  const items = parseApNewsSitemap(xml);
+  if (!items.length) throw new Error('AP news sitemap contains no English article items.');
+  return { items };
+}
+
 async function fetchAcquisitionPath(acquisitionPath, options) {
   if (acquisitionPath.provider === 'alpha-vantage') return fetchAlphaVantage(acquisitionPath, options);
   if (acquisitionPath.provider === 'stockfit') return fetchStockfit(acquisitionPath, options);
   if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
+  if (acquisitionPath.provider === 'ap-public') return fetchApPublic(acquisitionPath, options);
   throw new Error(`Unsupported News provider ${acquisitionPath.provider}.`);
 }
 
@@ -215,13 +231,32 @@ function parseNewsFeed(xml) {
   const atomItems = [...String(xml).matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)].map((match) => match[1]);
   return [...rssItems, ...atomItems].map((block) => {
     const atomLink = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i)?.[1];
+    const publishedAt = xmlValue(block, 'pubDate') || xmlValue(block, 'dc:date') || xmlValue(block, 'published');
     return {
       title: xmlValue(block, 'title'),
       url: xmlValue(block, 'link') || decodeHtml(atomLink || ''),
-      publishedAt: xmlValue(block, 'pubDate') || xmlValue(block, 'dc:date') || xmlValue(block, 'published') || xmlValue(block, 'updated'),
+      publishedAt,
       summary: xmlValue(block, 'description') || xmlValue(block, 'summary') || xmlValue(block, 'content:encoded')
     };
   });
+}
+
+function parseApNewsSitemap(xml) {
+  const urlBlocks = [...String(xml).matchAll(/<url\b[^>]*>([\s\S]*?)<\/url>/gi)].map((match) => match[1]);
+  return urlBlocks.map((block) => {
+    const url = canonicalStoryUrl(xmlValue(block, 'loc'));
+    const publishedAt = firstValidDate([xmlValue(block, 'news:publication_date')]);
+    return {
+      title: xmlValue(block, 'news:title'),
+      url,
+      publishedAt: publishedAt ? publishedAt.toISOString() : '',
+      language: xmlValue(block, 'news:language'),
+      publishedAtVerified: true
+    };
+  }).filter((item) => item.language === 'eng'
+    && /^https:\/\/apnews\.com\/article\//.test(item.url)
+    && item.title
+    && item.publishedAt);
 }
 
 function sourceForUrl(value) {
@@ -251,6 +286,7 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     publishedOn,
     publishedAt: publishedAt.toISOString(),
     dateSource: 'provider_published',
+    ...(item.publishedAtVerified === true ? { publishedAtVerified: true } : {}),
     sourceId: source.id,
     sourceDomain: new URL(url).hostname.toLowerCase(),
     provider: acquisitionPath.provider,
@@ -364,6 +400,7 @@ function priorCandidate(item, pool, eligibleDates) {
     publishedOn,
     ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
     dateSource: 'prior_validated_card',
+    publishedAtVerified: true,
     origin: 'prior_card',
     priorCard: true,
     priorCollection: pool,
@@ -479,6 +516,7 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
         candidate.publishedAt = candidate.pagePublishedAt;
         candidate.publishedOn = publishedOn;
         candidate.dateSource = 'article_page';
+        candidate.publishedAtVerified = true;
       }
     }
   } catch (error) {
@@ -523,6 +561,7 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       candidate.publishedAt = candidate.pagePublishedAt;
       candidate.publishedOn = originalPublishedOn;
       candidate.dateSource = 'article_page';
+      candidate.publishedAtVerified = true;
       candidate.syndication.status = 'original_validated';
       candidate.syndication.originalUrl = candidate.url;
       candidate.syndication.validatedAt = clock().toISOString();
@@ -564,6 +603,7 @@ async function collectNewsCandidates({
     : eligibleDates;
   const attemptsByIndex = Array(acquisitionPaths.length).fill(null);
   const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
+  const verifiedDownloaded = [];
   const reviewedDownloaded = [];
   const articleReview = {
     candidateLimit: ARTICLE_REVIEW_CANDIDATE_LIMIT,
@@ -581,6 +621,7 @@ async function collectNewsCandidates({
     // Prior Futures cards compete only inside the Futures pool; they should not
     // stretch the broad-market freshness window after the displayed session rolls.
     const candidates = deduplicateCandidates([
+      ...verifiedDownloaded,
       ...reviewedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
       ...prior.generalCandidates,
       ...prior.cryptoCandidates,
@@ -658,10 +699,13 @@ async function collectNewsCandidates({
   }));
 
   const reviewCandidates = deduplicateCandidates(downloadedCandidates()).sort(candidateOrder);
-  const cappedReviewCandidates = reviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  const verifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified === true);
+  const unverifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified !== true);
+  verifiedDownloaded.push(...verifiedReviewCandidates);
+  const cappedReviewCandidates = unverifiedReviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   articleReview.eligibleDownloadedCount = reviewCandidates.length;
   articleReview.reviewCandidateCount = cappedReviewCandidates.length;
-  articleReview.skippedCount = Math.max(0, reviewCandidates.length - cappedReviewCandidates.length);
+  articleReview.skippedCount = Math.max(0, unverifiedReviewCandidates.length - cappedReviewCandidates.length);
   articleReview.status = 'reviewing';
   reportProgress();
 
@@ -714,6 +758,7 @@ module.exports = {
   fetchAcquisitionPath,
   fetchArticlePage,
   normalizeProviderCandidate,
+  parseApNewsSitemap,
   parseArgs,
   parseNewsFeed,
   priorNewsCandidates,

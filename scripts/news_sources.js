@@ -65,6 +65,7 @@ const STOCKFIT_NEWS_PATHS = Object.freeze([
 ].map((entry) => Object.freeze(entry)));
 
 const DIRECT_NEWS_FEEDS = Object.freeze([
+  { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates', feedUrl: 'https://apnews.com/news-sitemap-content.xml' },
   { id: 'investing-market', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_25.rss' },
   { id: 'investing-economy', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_14.rss' },
   { id: 'investing-indicators', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_95.rss' },

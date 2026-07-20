@@ -36,9 +36,9 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 
 ### Core guarantees
 
-- **Deterministic:** preparation leaves the canonical dashboard unchanged.
-- **Commentary:** fresh quotes require reviewed commentary. Failed quote downloads retain their prior validated quote and commentary together.
-- **Publish:** Apply Handoff validates and atomically updates the local canonical dashboard; `publish_main.sh` publishes after commit.
+- **Prepare Handoff:** validates staging and writes the handoff/candidate while leaving the canonical dashboard unchanged.
+- **AI Editorial Work:** happens only in `generated/editorial/dashboard-data.json`; refreshed quotes need reviewed commentary, while failed quote downloads retain their prior validated quote and commentary together.
+- **Apply Handoff:** validates and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
 
 ## AI Editorial Instructions
 

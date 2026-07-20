@@ -23,6 +23,8 @@ const {
   ARTICLE_REVIEW_CANDIDATE_LIMIT,
   collectNewsCandidates,
   extractArticleMetadata,
+  fetchAcquisitionPath,
+  parseApNewsSitemap,
   parseNewsFeed
 } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
@@ -229,6 +231,7 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
   const cnbc = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc');
   assert.equal(cnbc.provider, 'rss', 'A direct feed must win deterministic provenance deduplication over an aggregator copy.');
+  assert.equal(cnbc.publishedAtVerified, true, 'Article-page review must mark provider timestamps verified after confirmation.');
   assert.deepEqual(cnbc.searchPathIds, ['cnbc', 'alpha-financial-markets']);
   const marketwatch = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'marketwatch');
   assert.equal(marketwatch.provider, 'rss');
@@ -547,6 +550,178 @@ function testRssParsing() {
   assert.equal(item.title, 'Markets & fixture');
   assert.equal(item.url, 'https://www.cnbc.com/2026/07/10/rss-fixture.html?utm_source=rss');
   assert.equal(item.summary, 'Fixture summary.');
+
+  const [atomItem] = parseNewsFeed(`<?xml version="1.0"?><feed><entry>
+    <title>Atom fixture</title>
+    <link href="https://www.cnbc.com/2026/07/10/atom-fixture.html" />
+    <published>2026-07-10T14:00:00Z</published>
+    <updated>2026-07-10T20:00:00Z</updated>
+    <summary>Atom summary.</summary>
+  </entry></feed>`);
+  assert.equal(atomItem.publishedAt, '2026-07-10T14:00:00Z');
+
+  const [updatedOnly] = parseNewsFeed(`<?xml version="1.0"?><feed><entry>
+    <title>Updated-only fixture</title>
+    <link href="https://www.cnbc.com/2026/07/10/updated-only-fixture.html" />
+    <updated>2026-07-10T20:00:00Z</updated>
+  </entry></feed>`);
+  assert.equal(updatedOnly.publishedAt, '');
+}
+
+function testApNewsSitemapParsing() {
+  const items = parseApNewsSitemap(`<?xml version="1.0"?>
+    <urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+      <url>
+        <lastmod>2026-07-10T20:00:00-04:00</lastmod>
+        <loc>https://apnews.com/article/markets-fixture-123</loc>
+        <news:news>
+          <news:publication>
+            <news:name>Associated Press</news:name>
+            <news:language>eng</news:language>
+          </news:publication>
+          <news:publication_date>2026-07-10T14:30:00-04:00</news:publication_date>
+          <news:title>Markets &amp; AP fixture</news:title>
+        </news:news>
+      </url>
+      <url>
+        <loc>https://apnews.com/article/mercados-fixture-456</loc>
+        <news:news>
+          <news:publication><news:name>Associated Press</news:name><news:language>spa</news:language></news:publication>
+          <news:publication_date>2026-07-10T14:45:00-04:00</news:publication_date>
+          <news:title>Spanish fixture</news:title>
+        </news:news>
+      </url>
+      <url>
+        <loc>https://apnews.com/live/markets-live-fixture</loc>
+        <news:news>
+          <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+          <news:publication_date>2026-07-10T15:00:00-04:00</news:publication_date>
+          <news:title>Live fixture</news:title>
+        </news:news>
+      </url>
+      <url>
+        <loc>https://apnews.com/article/missing-date-fixture-789</loc>
+        <news:news>
+          <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+          <news:title>Missing date fixture</news:title>
+        </news:news>
+      </url>
+    </urlset>`);
+  assert.deepEqual(items, [{
+    title: 'Markets & AP fixture',
+    url: 'https://apnews.com/article/markets-fixture-123',
+    publishedAt: '2026-07-10T18:30:00.000Z',
+    language: 'eng',
+    publishedAtVerified: true
+  }]);
+}
+
+async function testApPublicAcquisitionUsesOneSitemapFetch() {
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(`<?xml version="1.0"?>
+      <urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+        <url>
+          <loc>https://apnews.com/article/markets-fixture-123</loc>
+          <news:news>
+            <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+            <news:publication_date>2026-07-10T14:30:00-04:00</news:publication_date>
+            <news:title>Markets fixture</news:title>
+          </news:news>
+        </url>
+      </urlset>`, {
+      status: 200,
+      headers: { 'content-type': 'text/xml' }
+    });
+  };
+  try {
+    const result = await fetchAcquisitionPath({
+      id: 'ap-public',
+      provider: 'ap-public',
+      pool: 'generalCandidates',
+      feedUrl: 'https://apnews.com/news-sitemap-content.xml'
+    }, { timeoutMs: 1000 });
+    assert.equal(calls.length, 1, 'AP public acquisition should fetch only the sitemap.');
+    assert.deepEqual(result.items, [{
+      title: 'Markets fixture',
+      url: 'https://apnews.com/article/markets-fixture-123',
+      publishedAt: '2026-07-10T18:30:00.000Z',
+      language: 'eng',
+      publishedAtVerified: true
+    }]);
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
+
+async function testVerifiedPublishedAtCandidatesBypassReviewCap() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const unverifiedCount = ARTICLE_REVIEW_CANDIDATE_LIMIT + 10;
+  const unverifiedItems = Array.from({ length: unverifiedCount }, (_unused, index) => ({
+    publishedAt: new Date(Date.parse('2026-07-10T13:00:00.000Z') + index * 1000).toISOString(),
+    title: `Unverified cap fixture ${String(index).padStart(3, '0')}`,
+    url: `https://www.cnbc.com/2026/07/10/unverified-cap-fixture-${String(index).padStart(3, '0')}.html`
+  }));
+  const verifiedItems = [0, 1].map((index) => ({
+    publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
+    title: `Verified AP fixture ${index}`,
+    url: `https://apnews.com/article/verified-ap-fixture-${index}`,
+    publishedAtVerified: true
+  }));
+  const reviewed = [];
+
+  const artifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [
+      { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates' },
+      { id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }
+    ],
+    clock: () => asOf,
+    fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'ap-public' ? verifiedItems : unverifiedItems }),
+    fetchArticle: async (candidate) => {
+      assert.equal(candidate.sourceId, 'cnbc', 'AP candidates with verified provider timestamps must not spend article-review slots.');
+      reviewed.push(candidate.title);
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: new Date(candidate.publishedAt)
+      };
+    }
+  });
+
+  assert.equal(reviewed.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.eligibleDownloadedCount, unverifiedCount + verifiedItems.length);
+  assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(artifact.articleReview.skippedCount, 10);
+  assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT + verifiedItems.length);
+  const apCandidates = artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'ap');
+  assert.equal(apCandidates.length, verifiedItems.length);
+  assert.ok(apCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
+  assert.ok(apCandidates.every((candidate) => candidate.publishedAtVerified === true));
+}
+
+async function testUpdatedOnlyFeedsDoNotCreatePublishedCandidates() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const artifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [{ id: 'fixture-rss', provider: 'rss', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({ items: parseNewsFeed(`<?xml version="1.0"?><feed><entry>
+      <title>Updated-only fixture</title>
+      <link href="https://www.cnbc.com/2026/07/10/updated-only-fixture.html" />
+      <updated>2026-07-10T20:00:00Z</updated>
+    </entry></feed>`) }),
+    fetchArticle: async () => {
+      throw new Error('updated-only candidate should not reach article review');
+    }
+  });
+  assert.equal(artifact.generalCandidates.length, 0, 'Feed updated timestamps must not masquerade as original publication time.');
 }
 
 function testBaselineSanitization() {
@@ -715,6 +890,10 @@ async function main() {
   testMondayMorningFreshnessWindow();
   testArticleMetadataExtraction();
   testRssParsing();
+  testApNewsSitemapParsing();
+  await testApPublicAcquisitionUsesOneSitemapFetch();
+  await testVerifiedPublishedAtCandidatesBypassReviewCap();
+  await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();
   await testFuturesCandidatesUseDisplayedSessionWindow();
   await testNewsCandidateReviewCapAndProgress();
