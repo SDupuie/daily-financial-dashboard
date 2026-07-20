@@ -8,6 +8,8 @@ This is a personal static financial dashboard. Optimize for a reliable daily upd
 
 At the start of every new Codex task in this repository, read `AGENTS.md` and `README.md` before making recommendations, running update workflows, editing files, or performing reviews.
 
+After any context compaction, model switch, resume, or interrupted turn, reread `AGENTS.md` and `README.md` before continuing work or answering repository-specific questions. Treat the reread as mandatory even if a summary of prior context is present.
+
 ## Sources of Authority
 
 Use each repository artifact only for the scope it owns:
@@ -23,6 +25,7 @@ Use each repository artifact only for the scope it owns:
 - Treat current working files as authoritative when the worktree is dirty. Preserve unrelated user changes.
 - A dashboard data refresh authorizes changes only to staging and canonical generated data through the README workflow.
 - Source code, tests, documentation, configuration, policy, visible UI, and repository structure require explicit user authorization.
+- When the user asks a question about a possible change, answer the question only; do not edit files, run update workflows, commit, or publish unless the user explicitly authorizes that action.
 - If an update exposes a source defect or contract gap, stop the update before changing source files, report the blocker, and get explicit approval for that source change.
 - Re-read the exact current ranges immediately before applying a narrow patch.
 - Do not use stale full-file snapshots, broad replacements, or carried-forward diffs that could restore rejected or unrelated changes.

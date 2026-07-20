@@ -81,7 +81,17 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
    - For selected News cards, add one entry to `editorialReview.newsSelection.futures`, `.stories`, or `.crypto` with the candidate `url` plus only `tag`/`kicker`, `title`, and `body`; do not hand-build final card arrays.
    - Follow the News-card contract and Story selection policy below for required fields, source choice, carry-forward decisions, and link rules.
 
-4. Editorialize the generated handoff in this order.
+4. Apply these copy and tone rules throughout AI Editorial Work.
+   - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
+   - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
+   - Do not write tautological market-status copy that states routine facts without saying why they matter.
+   - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
+   - Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
+   - Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
+   - Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
+   - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises.
+
+5. Editorialize the generated handoff in this order.
    - `masthead`: leave the generated edition and date unchanged.
    - `opening`: complete the Opening contract above.
    - `futuresModule`: leave the four generated futures rows and session labels unchanged; select the active window’s stories through `editorialReview.newsSelection.futures`. Use each story’s descriptive `tag` for its visible badge.
@@ -93,19 +103,15 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
    - `weekAhead`: complete the Week Ahead and Market Lens editorial contract below.
    - `footer`: complete the Footer contract above.
 
-5. Apply the copy and tone rules below.
-   - Before Apply Handoff, confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape or `editorialReview.marketLensDecisions[].action`. Complete every reviewable Earnings and Week Ahead Outcome field. Any remaining `pending_review` must be a system-provided carry-forward state left unchanged.
-
-### Copy and tone rules
-
-- Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
-- Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
-- Do not write tautological market-status copy that states routine facts without saying why they matter.
-- Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
-- Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
-- Crypto notes should add current news context such as ETF flows, regulation, sentiment, market structure, security events, protocol updates, exchange/issuer developments, or proxy-equity interpretation.
-- Do not merely restate quote rows in ticker notes, crypto notes, or story bodies.
-- Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises.
+6. Run the final pre-Apply editorial gate.
+   - Confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape or `editorialReview.marketLensDecisions[].action`. Complete every reviewable Earnings and Week Ahead Outcome field. Any remaining `pending_review` must be a system-provided carry-forward state left unchanged.
+   - Every `editorialReview.newsSelection.futures[].url` must appear in `editorialReview.newsSearch.futuresCandidates`.
+   - Every `editorialReview.newsSelection.stories[].url` must appear in `editorialReview.newsSearch.generalCandidates`.
+   - Every `editorialReview.newsSelection.crypto[].url` must appear in `editorialReview.newsSearch.cryptoCandidates`.
+   - No selected URL may appear twice within a section or across Futures, Stories, and Crypto.
+   - Futures selections must satisfy the Futures catalyst rule below.
+   - If a selected URL fails any check, fix `editorialReview.newsSelection` before Apply Handoff. Do not rely on Apply Handoff to omit or replace it.
+   - If the section remains below target after all eligible reviewed candidates are exhausted, leave it below target rather than inventing filler.
 
 ### News-card contract
 
@@ -118,14 +124,17 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
 - `editorialReview.newsSearch` is read-only source material. Prepare Handoff filters displayed-session Futures stories into `futuresCandidates`: Pre-Market Futures use the overnight futures window from 5:00 PM CT on the prior Chicago calendar day through the prepared run time or 8:30 AM CT, whichever is earlier; Session Futures use the shared `raw.sessionDate` regular-session window. When no shared Futures story window can be proven, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
+- Futures selections must be major, current catalysts for the displayed futures session. Prefer stories that plausibly explain index-futures direction or broad cross-asset risk: macro data, rates, central banks, inflation, jobs, commodities, geopolitics, trade policy, credit/liquidity stress, global equity moves, or mega-cap earnings only when the article clearly ties the news to index-level market action.
+- Do not use single-company product, partnership, analyst, executive, customer, or routine earnings-preview stories as Futures cards unless the article itself makes a clear index-futures or broad-market impact case. Put those stories in broad-market News instead.
 - A selected URL must come from the generated candidate inventory.
 - Do not set or edit coverage/New-pill fields.
-- Resolve duplicate URLs/titles, wrong section category, and below-target counts during AI Editorial Work; Apply Handoff does not select replacement stories.
+- Resolve duplicate URLs/titles, wrong section category, missing-inventory URLs, and below-target counts during AI Editorial Work before Apply Handoff; Apply Handoff does not select replacement stories.
 - Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`; Apply Handoff mirrors the Prepare Handoff Futures-window check defensively.
 
 ### Story selection policy
 
 - Fresh enough to keep is not the same as worthy to keep. Review and rank the generated surplus candidate pool before choosing the final collection; select for relevance, explanatory value, freshness, source quality, and distinct angles rather than taking the first qualifying links found.
+- Before selecting a Futures card, answer: why does this matter for index futures before the open or during the active session? If the answer is mainly "this is an interesting company story," it is not a Futures card.
 - A prior card may enter the candidate pool only when it is still fresh, relevant, and source-faithful; it then competes directly with current candidates.
 - Keep a prior-run link only when it remains among the best available candidates after direct comparison. Prefer the newer candidate when reporting quality and price relevance are materially similar; do not churn a link merely because the scheduled window changed.
 - Replace a link when it is stale in angle, too narrow for the card's claim, materially weaker than current reporting, or no longer the best explanation for market action. If a carried-forward link remains, rewrite its copy only as needed to stay faithful to that article.
