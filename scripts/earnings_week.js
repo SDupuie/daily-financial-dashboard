@@ -20,10 +20,13 @@ const {
   reportWindowArrived
 } = require('./earnings_week_contract');
 const { fetchYahooBars, runBuild } = require('./earnings_week_build');
-const { runValidation, validateEarningsWeekPayload } = require('./earnings_week_validation');
+const {
+  runValidation,
+  validateCompanyReleaseResolutionsPayload,
+  validateEarningsWeekPayload
+} = require('./earnings_week_validation');
 const root = path.resolve(__dirname, '..');
 const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.json');
-const DEFAULT_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 const DEFAULT_NARRATIVE = path.resolve(root, 'generated', 'earnings_narrative.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(root, 'generated', 'earnings_schedule_review.json');
 const SECONDARY_CALENDAR_SLATES = new Set(['alphaVantageCalendar']);
@@ -43,12 +46,9 @@ function printHelp() {
 Commands:
   build             Build generated/earnings_week.json
   refresh           Refresh arrived earnings rows in the existing week artifact
-  resolve           Resolve company-release tasks into the resolution sidecar
-  apply-release     Apply company-release resolutions to the week artifact
   apply-narrative   Apply earnings narrative sidecar to the week artifact
   repair-source-audit  Restore source audit metadata for a manual recovery artifact
   validate          Validate the earnings week artifact
-  validate-release  Validate company-release resolution sidecar
 
 Run node scripts/earnings_week.js <command> --help for command-specific options.
 Examples:
@@ -233,45 +233,6 @@ function writeJson(file, payload) {
   atomicWriteJson(file, payload);
 }
 
-function parseApplyReleaseArgs(argv) {
-  const args = {
-    input: DEFAULT_EARNINGS_WEEK,
-    resolutions: DEFAULT_RESOLUTIONS,
-    output: ''
-  };
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_EARNINGS_WEEK);
-      i += 1;
-      continue;
-    }
-    if (arg === '--resolutions') {
-      args.resolutions = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_RESOLUTIONS);
-      i += 1;
-      continue;
-    }
-    if (arg === '--output') {
-      args.output = path.resolve(process.cwd(), argv[i + 1] || '');
-      i += 1;
-      continue;
-    }
-    if (arg === '--help' || arg === '-h') {
-      process.stdout.write(`Usage: node scripts/earnings_week.js apply-release [options]
-
-Options:
-  --input PATH        Earnings week JSON to update (default: generated/earnings_week.json)
-  --resolutions PATH  Company-release resolutions JSON (default: generated/earnings_company_release_resolutions.json)
-  --output PATH       Output earnings week JSON (default: overwrite --input)
-`);
-      process.exit(0);
-    }
-    throw new Error(`Unknown argument: ${arg}`);
-  }
-  if (!args.output) args.output = args.input;
-  return args;
-}
-
 function parseApplyNarrativeArgs(argv) {
   const args = {
     input: DEFAULT_EARNINGS_WEEK,
@@ -348,30 +309,6 @@ function clearAppliedNarrative(row) {
   }
   if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
     output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
-  } else {
-    delete output.reaction.commentaryDisposition;
-  }
-  return output;
-}
-
-function preserveAppliedNarrative(row, prior) {
-  const output = {
-    ...row,
-    eps: { ...row.eps, note: prior.eps?.note || '' },
-    revenue: { ...row.revenue, note: prior.revenue?.note || '' },
-    outcome: {
-      ...row.outcome,
-      guide: prior.outcome?.guide || '',
-      interpretation: prior.outcome?.interpretation || ''
-    },
-    reaction: { ...row.reaction, note: prior.reaction?.note || '' }
-  };
-  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
-    if (Object.prototype.hasOwnProperty.call(prior.outcome || {}, field)) output.outcome[field] = structuredClone(prior.outcome[field]);
-    else delete output.outcome[field];
-  }
-  if (Object.prototype.hasOwnProperty.call(prior.reaction || {}, 'commentaryDisposition')) {
-    output.reaction.commentaryDisposition = structuredClone(prior.reaction.commentaryDisposition);
   } else {
     delete output.reaction.commentaryDisposition;
   }
@@ -501,13 +438,7 @@ function applyResolution(row, task, resolution) {
     }
   };
   delete updated.sourceAudit.resultRefresh;
-  const resolved = applyEarningsLifecycle(updated);
-  // Official actuals preserve the preview while the market response is still
-  // pending. The lifecycle transition to close_available clears it instead.
-  if (resolved.lifecycle === 'released_awaiting_close' && resolved.reaction?.status === 'awaiting_close') {
-    return preserveAppliedNarrative(resolved, row);
-  }
-  return resolved;
+  return applyEarningsLifecycle(updated);
 }
 
 function applyPartialResolutionMetrics(row, resolution) {
@@ -602,12 +533,14 @@ function updateSummary(source) {
 
 function applyCompanyReleaseResolutions(source, resolutionPayload) {
   assertRefreshSourceAudit(source);
+  const resolutionErrors = validateCompanyReleaseResolutionsPayload(resolutionPayload, source);
+  if (resolutionErrors.length) {
+    throw new Error(`Company-release resolution payload is invalid: ${resolutionErrors.join(' ')}`);
+  }
   const output = JSON.parse(JSON.stringify(source));
   delete output.policy;
   const taskMap = new Map((output.companyReleaseTasks || []).map((task) => [task.id, task]));
   const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
-  const applied = [];
-  const dispositions = [];
   let deterministicFactsChanged = false;
 
   for (const resolution of resolutionPayload.companyReleaseResolutions || []) {
@@ -620,12 +553,6 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
 
     const key = rowKey(resolution);
     const existing = rowsByKey.get(key) || rowsByKey.get(rowKey(task));
-    dispositions.push({
-      taskId: resolution.taskId,
-      symbol: resolution.symbol,
-      status: resolution.status,
-      reason: resolution.status === 'resolved' ? '' : String(resolution.notes?.[0] || resolution.status || 'unresolved')
-    });
     if (resolution.status !== 'resolved') {
       if (!existing) throw new Error(`${resolution.taskId} non-resolved disposition has no admitted canonical row.`);
       const partial = resolution.status === 'needs_review'
@@ -655,7 +582,6 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
       output.rows.push(updated);
       rowsByKey.set(key, { row: updated, index: output.rows.length - 1 });
     }
-    applied.push({ taskId: resolution.taskId, symbol: resolution.symbol });
   }
 
   if (deterministicFactsChanged) delete output.narrativeApply;
@@ -665,12 +591,6 @@ function applyCompanyReleaseResolutions(source, resolutionPayload) {
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
   });
-  output.companyReleaseApply = {
-    generatedAt: new Date().toISOString(),
-    resolutionArtifact: resolutionPayload.outputPath || '',
-    applied,
-    dispositions
-  };
   updateSummary(output);
   return output;
 }
@@ -778,27 +698,6 @@ function validateWeek(file) {
   runValidation(['--input', file]);
 }
 
-function validateResolutions(input, resolutions) {
-  runValidation([
-    'release',
-    '--input',
-    resolutions,
-    '--week',
-    input
-  ]);
-}
-
-function applyReleaseCommand(argv) {
-  const args = parseApplyReleaseArgs(argv);
-  validateWeek(args.input);
-  validateResolutions(args.input, args.resolutions);
-  const output = applyCompanyReleaseResolutions(readJson(args.input), readJson(args.resolutions));
-  const outputErrors = validateEarningsWeekPayload(output);
-  if (outputErrors.length) throw new Error(`Applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
-  writeJson(args.output, output);
-  process.stdout.write(`Recorded ${output.companyReleaseApply.dispositions.length} company-release disposition(s); applied ${output.companyReleaseApply.applied.length} resolved result(s) to ${args.output}\n`);
-}
-
 function applyNarrativeCommand(argv) {
   const args = parseApplyNarrativeArgs(argv);
   const output = applyEarningsNarrative(readJson(args.input), readJson(args.narrative), {
@@ -841,7 +740,6 @@ const { compareIsoDate, displayDatesForRange, isIsoDate } = require('./calendar_
 
 const root = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
-const DEFAULT_COMPANY_RELEASE_RESOLUTIONS = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(root, 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
 // The slate build holds back 20 calls. Result refresh may use that remaining
@@ -966,13 +864,6 @@ function readJson(file) {
 
 function writeJson(file, data) {
   atomicWriteJson(file, data);
-}
-
-function removeStaleCompanyReleaseResolutionSidecar(week, resolutionPath) {
-  if (Array.isArray(week.companyReleaseTasks) && week.companyReleaseTasks.length > 0) return false;
-  if (!fs.existsSync(resolutionPath)) return false;
-  fs.rmSync(resolutionPath);
-  return true;
 }
 
 function isObject(value) {
@@ -1444,6 +1335,118 @@ function refreshTargetRows(source, asOf) {
     .filter((row) => reportWindowArrived(row, asOf));
 }
 
+function missingCompanyReleaseActual(row) {
+  return !Number.isFinite(row?.eps?.actual) || !Number.isFinite(row?.revenue?.actual);
+}
+
+function unresolvedCompanyReleaseRetry(task, reason, error = '') {
+  // Integrated refresh must never block publication; resolver outages become the
+  // row-level unresolved audit that keeps the task active for a later retry.
+  return {
+    taskId: task.id,
+    symbol: task.symbol,
+    company: task.company,
+    reportDate: task.reportDate,
+    status: 'unresolved',
+    sourceType: '',
+    sourceUrl: '',
+    secFilingUrl: '',
+    confidence: 'low',
+    fields: {
+      company: task.company,
+      fiscalPeriod: '',
+      reportTiming: 'unknown',
+      eps: {
+        actual: null,
+        basis: '',
+        gaapActual: null,
+        gaapBasis: '',
+        adjustment: null,
+        actualSource: '',
+        estimate: null,
+        estimateSource: '',
+        estimateCount: '',
+        comparisonSource: ''
+      },
+      revenue: {
+        actual: null,
+        estimate: null,
+        estimateSource: ''
+      }
+    },
+    reaction: {
+      basis: 'unavailable',
+      percent: null,
+      fromDate: '',
+      fromClose: null,
+      toDate: '',
+      toClose: null,
+      status: 'unavailable',
+      note: '',
+      source: '',
+      sourceAudit: {}
+    },
+    notes: [reason],
+    sourceAudit: error ? { error: String(error).slice(0, 240) } : {}
+  };
+}
+
+function companyReleaseRetryRows(output, asOf) {
+  const rowsByKey = new Map((Array.isArray(output.rows) ? output.rows : []).map((row) => [rowKey(row), row]));
+  return (Array.isArray(output.companyReleaseTasks) ? output.companyReleaseTasks : [])
+    .map((task) => ({ task, row: rowsByKey.get(rowKey(task)) }))
+    .filter(({ task, row }) => {
+      const status = row?.sourceAudit?.companyReleaseResolution?.status || '';
+      // Retry only when the report window now matters and provider actuals are
+      // still incomplete; scheduled pre-window tasks remain cheap metadata.
+      return row
+        && isDisplayEligibleEarningsRow(row)
+        && reportWindowArrived(row, asOf)
+        && missingCompanyReleaseActual(row)
+        && status !== 'resolved'
+        && task?.id;
+    });
+}
+
+async function retryCompanyReleaseTasks(output, asOf, options = {}) {
+  if (options.retryCompanyReleaseTasks === false) return output;
+  const retryRows = companyReleaseRetryRows(output, asOf);
+  if (!retryRows.length) return output;
+
+  const loadTickerMap = options.loadTickerMap;
+  const resolveCompanyReleaseTask = options.resolveCompanyReleaseTask;
+  const requestArgs = options.companyReleaseRequestArgs || options;
+  let tickerMap = null;
+  if (loadTickerMap && resolveCompanyReleaseTask) {
+    try {
+      tickerMap = await loadTickerMap(requestArgs);
+    } catch (error) {
+      const companyReleaseResolutions = retryRows.map(({ task }) => unresolvedCompanyReleaseRetry(task, 'company_release_retry_unavailable', error.message));
+      return applyCompanyReleaseResolutions(output, {
+        schemaVersion: 1,
+        generatedAt: new Date(asOf).toISOString(),
+        companyReleaseResolutions
+      });
+    }
+  } else {
+    return output;
+  }
+
+  const companyReleaseResolutions = [];
+  for (const { task, row } of retryRows) {
+    try {
+      companyReleaseResolutions.push(await resolveCompanyReleaseTask(task, tickerMap, requestArgs, row));
+    } catch (error) {
+      companyReleaseResolutions.push(unresolvedCompanyReleaseRetry(task, 'company_release_retry_unavailable', error.message));
+    }
+  }
+  return applyCompanyReleaseResolutions(output, {
+    schemaVersion: 1,
+    generatedAt: new Date(asOf).toISOString(),
+    companyReleaseResolutions
+  });
+}
+
 function needsYahooReactionFetch(row) {
   return row?.reportTiming !== 'unknown'
     && (Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual));
@@ -1467,7 +1470,7 @@ function applyResultRefreshDiagnostics(row, failures, checkedAt) {
 
 async function refreshEarningsResults(source, refreshData, options = {}) {
   assertRefreshSourceAudit(source);
-  const output = JSON.parse(JSON.stringify(source));
+  let output = JSON.parse(JSON.stringify(source));
   delete output.policy;
   const asOf = options.asOf || new Date().toISOString();
   const targetKeys = new Set(refreshTargetRows(output, asOf).map(rowKey));
@@ -1527,6 +1530,18 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
   output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
     shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
   });
+  const retrySnapshots = new Map(output.rows.map((row) => [rowKey(row), deterministicSnapshot(row)]));
+  // Company-release retry reuses the existing promotion path so source audit,
+  // narrative invalidation, and disposition handling stay in one place.
+  output = await retryCompanyReleaseTasks(output, asOf, options);
+  for (const row of output.rows) {
+    if (deterministicSnapshot(row) !== retrySnapshots.get(rowKey(row))) {
+      changedKeys.add(rowKey(row));
+    }
+  }
+  output.companyReleaseTasks = buildCompanyReleaseTasks(output.secondaryRecoveryCandidates || [], output.rows, {
+    shouldEscalateDateConflict: (row) => reportWindowArrived(row, asOf)
+  });
   const activeTaskIds = new Set(output.companyReleaseTasks.map((task) => task.id));
   output.rows = output.rows.map((row) => {
     const resolution = row.sourceAudit?.companyReleaseResolution;
@@ -1536,10 +1551,11 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     next.sourceStatus = computeEarningsSourceStatus(next);
     return next;
   });
-  const recordedTaskIds = new Set((output.companyReleaseApply?.dispositions || []).map((item) => item?.taskId).filter(Boolean));
-  if (activeTaskIds.size === 0 || activeTaskIds.size !== recordedTaskIds.size || [...activeTaskIds].some((id) => !recordedTaskIds.has(id))) {
-    delete output.companyReleaseApply;
-  }
+  // Even when every provider/release retry misses, post-window rows must move
+  // from scheduled to awaiting_actual so the dashboard state stays truthful.
+  output.rows = output.rows.map((row) => targetKeys.has(rowKey(row))
+    ? applyEarningsLifecycle(row, asOf)
+    : row);
   updateSummary(output);
   output.generatedAt = new Date(asOf).toISOString();
   output.outputPath = options.outputPath || output.outputPath;
@@ -1707,14 +1723,14 @@ async function run(argv) {
   const refreshData = await collectRefreshData(source, args);
   const result = await refreshEarningsResults(source, refreshData, {
     asOf: args.asOf,
-    outputPath: args.output
+    outputPath: args.output,
+    companyReleaseRequestArgs: args,
+    loadTickerMap: companyReleaseResolver.loadTickerMap,
+    resolveCompanyReleaseTask: companyReleaseResolver.resolveTask
   });
   const outputErrors = validateEarningsWeekPayload(result.payload);
   if (outputErrors.length) throw new Error(`Refreshed earnings week payload is invalid: ${outputErrors.join(' ')}`);
   writeJson(args.output, result.payload);
-  if (args.output === DEFAULT_INPUT && removeStaleCompanyReleaseResolutionSidecar(result.payload, DEFAULT_COMPANY_RELEASE_RESOLUTIONS)) {
-    process.stdout.write('Removed stale company-release resolution sidecar because the refreshed week has no active tasks.\n');
-  }
   printReport(result, args.output, args.compact);
 }
 
@@ -1727,7 +1743,6 @@ return {
   mergeFinnhubConflictCandidates,
   refreshEarningsResults,
   refreshTargetRows,
-  removeStaleCompanyReleaseResolutionSidecar,
   reportWindowArrived,
   selectFinnhubRefreshRow
 };
@@ -1735,84 +1750,11 @@ return {
 
 const refreshCommand = createRefreshCommand();
 
-function createResolveCommand() {
+function createCompanyReleaseResolver() {
 
-const fs = require('fs');
-const path = require('path');
 const https = require('https');
 const { earningsCloseAvailable, numberOrNull, pctChange, reactionWindow } = require('./earnings_week_contract');
 const { dateFromIso } = require('./calendar_contract');
-
-const root = path.resolve(__dirname, '..');
-const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
-const DEFAULT_OUTPUT = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
-const REQUEST_TIMEOUT_MS = 20000;
-
-function parseArgs(argv) {
-  const args = {
-    input: DEFAULT_INPUT,
-    output: DEFAULT_OUTPUT,
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    compact: false
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_INPUT);
-      i += 1;
-      continue;
-    }
-    if (arg === '--output') {
-      args.output = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_OUTPUT);
-      i += 1;
-      continue;
-    }
-    if (arg === '--timeout-ms') {
-      args.timeoutMs = Math.max(1000, Number(argv[i + 1] || REQUEST_TIMEOUT_MS));
-      i += 1;
-      continue;
-    }
-    if (arg === '--compact') {
-      args.compact = true;
-      continue;
-    }
-    if (arg === '--help' || arg === '-h') {
-      printHelp();
-      process.exit(0);
-    }
-    throw new Error(`Unknown argument: ${arg}`);
-  }
-
-  return args;
-}
-
-function printHelp() {
-  process.stdout.write(`Usage: node scripts/earnings_week.js resolve [options]
-
-Options:
-  --input PATH        Earnings week JSON with companyReleaseTasks (default: generated/earnings_week.json)
-  --output PATH       Company-release resolution JSON output (default: generated/earnings_company_release_resolutions.json)
-  --timeout-ms 20000  HTTP timeout in ms per request
-  --compact           Print compact report
-  --help              Show this help
-`);
-}
-
-function loadEnv(file = path.resolve(process.cwd(), '.env')) {
-  if (process.env.DASHBOARD_TEST_NO_API_CREDENTIALS === '1') return;
-  if (!fs.existsSync(file)) return;
-  const text = fs.readFileSync(file, 'utf8');
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const index = trimmed.indexOf('=');
-    if (index === -1) continue;
-    const key = trimmed.slice(0, index).trim();
-    const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, '');
-    if (key && process.env[key] === undefined) process.env[key] = value;
-  }
-}
 
 function requestHeaders(headers = {}) {
   const userAgent = String(process.env.SEC_USER_AGENT || '').trim();
@@ -2276,56 +2218,10 @@ function unresolved(task, reason, audit = {}) {
   };
 }
 
-async function run(argv) {
-  loadEnv();
-  const args = parseArgs(argv);
-  const source = readJson(args.input);
-  const companyReleaseTasks = Array.isArray(source.companyReleaseTasks) ? source.companyReleaseTasks : [];
-  const rowsByKey = new Map((Array.isArray(source.rows) ? source.rows : []).map((row) => [rowKey(row), row]));
-  const tickerMap = await loadTickerMap(args);
-  const companyReleaseResolutions = [];
-  for (const task of companyReleaseTasks) {
-    companyReleaseResolutions.push(await resolveTask(task, tickerMap, args, rowsByKey.get(rowKey(task)) || {}));
-  }
-
-  const payload = {
-    schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
-    sourceGeneratedAt: source.generatedAt,
-    sourceArtifact: path.relative(root, args.input),
-    sourceRange: source.range,
-    companyReleaseResolutions,
-    summary: {
-      total: companyReleaseResolutions.length,
-      resolved: companyReleaseResolutions.filter((item) => item.status === 'resolved').length,
-      needsReview: companyReleaseResolutions.filter((item) => item.status === 'needs_review').length,
-      unresolved: companyReleaseResolutions.filter((item) => item.status === 'unresolved').length
-    },
-    outputPath: args.output
-  };
-
-  atomicWriteJson(args.output, payload);
-
-  process.stdout.write(`Earnings Company-Release Resolution Summary
-===========================================
-Tasks: ${payload.summary.total}
-Resolved: ${payload.summary.resolved}
-Needs review: ${payload.summary.needsReview}
-Unresolved: ${payload.summary.unresolved}
-Output: ${args.output}
-`);
-  if (!args.compact) {
-    for (const item of companyReleaseResolutions) {
-      process.stdout.write(`${item.symbol} ${item.status} EPS ${item.fields.eps?.actual ?? 'n/a'} revenue ${item.fields.revenue?.actual ?? 'n/a'} ${item.sourceUrl}\n`);
-    }
-  }
+return { loadTickerMap, resolveTask };
 }
 
-
-return { run };
-}
-
-const resolveCommand = createResolveCommand();
+const companyReleaseResolver = createCompanyReleaseResolver();
 
 
 async function main() {
@@ -2336,10 +2232,7 @@ async function main() {
   }
   if (command === 'build') return runBuild(argv);
   if (command === 'refresh') return refreshCommand.run(argv);
-  if (command === 'resolve') return resolveCommand.run(argv);
   if (command === 'validate') return runValidation(argv);
-  if (command === 'validate-release') return runValidation(['release', ...argv]);
-  if (command === 'apply-release') return applyReleaseCommand(argv);
   if (command === 'apply-narrative') return applyNarrativeCommand(argv);
   if (command === 'repair-source-audit') return repairSourceAuditCommand(argv);
   if (command === 'embed') {
@@ -2368,7 +2261,6 @@ module.exports = {
   repairRecoveredEarningsSourceAudit,
   refreshEarningsResults: refreshCommand.refreshEarningsResults,
   refreshTargetRows: refreshCommand.refreshTargetRows,
-  removeStaleCompanyReleaseResolutionSidecar: refreshCommand.removeStaleCompanyReleaseResolutionSidecar,
   reportWindowArrived: refreshCommand.reportWindowArrived,
   selectFinnhubRefreshRow: refreshCommand.selectFinnhubRefreshRow,
   validateEarningsWeekPayload

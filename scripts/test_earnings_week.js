@@ -50,7 +50,7 @@ const {
   refreshTargetRows,
   validateEarningsWeekPayload
 } = require('./earnings_week');
-const { validateEarningsWeekReleasePayload } = require('./earnings_week_validation');
+const { validateCompanyReleaseResolutionsPayload } = require('./earnings_week_validation');
 const root = path.resolve(__dirname, '..');
 
 function profile(symbol, marketCap = 50000000000) {
@@ -169,12 +169,8 @@ function validateWeekPayload(payload) {
   if (errors.length) throw new Error(errors.join(' '));
 }
 
-function validateCompanyReleasePayload(week, sidecar) {
-  const sourceArtifact = 'generated/earnings_week.json';
-  const errors = validateEarningsWeekReleasePayload({
-    ...sidecar,
-    sourceArtifact
-  }, week, { sourceArtifact });
+function validateCompanyReleasePayload(week, payload) {
+  const errors = validateCompanyReleaseResolutionsPayload(payload, week);
   if (errors.length) throw new Error(errors.join(' '));
 }
 
@@ -952,6 +948,9 @@ function testApplyCompanyReleaseResolution() {
     company: task.company,
     reportDate: task.reportDate,
     status: 'resolved',
+    sourceType: 'sec_8k_exhibit_99_1',
+    sourceUrl: 'https://www.sec.gov/Archives/edgar/data/1/ex99-1.htm',
+    secFilingUrl: 'https://www.sec.gov/Archives/edgar/data/1/filing.htm',
     confidence: 'high',
     fields: {
       company: task.company,
@@ -1012,8 +1011,7 @@ function testApplyCompanyReleaseResolution() {
   assert.equal(output.summary.counts.verified, 0);
   assert.equal(output.summary.counts.partial, 1);
   assert.equal(output.summary.counts.companyReleaseTasks, 1);
-  assert.deepEqual(output.companyReleaseApply.applied, [{ taskId: task.id, symbol: task.symbol }]);
-  assert.deepEqual(output.companyReleaseApply.dispositions, [{ taskId: task.id, symbol: task.symbol, status: 'resolved', reason: '' }]);
+  assert.equal(Object.prototype.hasOwnProperty.call(output, 'companyReleaseApply'), false);
 
   const awaitingResolution = structuredClone(resolution);
   awaitingResolution.reaction = {
@@ -1033,8 +1031,8 @@ function testApplyCompanyReleaseResolution() {
   });
   const awaitingRow = awaitingOutput.rows.find((item) => item.symbol === 'RECOVERFULL');
   assert.equal(awaitingRow.lifecycle, 'released_awaiting_close');
-  assert.equal(awaitingRow.outcome.interpretation, 'Pre-event margin expectations frame the setup.');
-  assert.equal(awaitingRow.reaction.note, 'The next-session response remains the confirmation test.');
+  assert.equal(awaitingRow.outcome.interpretation, '', 'Official actuals must invalidate preview commentary even while the row awaits close reaction.');
+  assert.equal(awaitingRow.reaction.note, '', 'Reaction commentary must wait for the verified close response.');
 }
 
 function testApplyEarningsNarrative() {
@@ -1566,6 +1564,70 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
   assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
 }
 
+async function testResultRefreshRetriesPostWindowCompanyReleaseTasks() {
+  const { source, task } = companyReleaseRefreshFixture('AUTORETRY');
+  let loadCalls = 0;
+  const result = await refreshEarningsResults(source, {
+    finnhubRows: [],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [],
+    rowDiagnosticsByKey: {}
+  }, {
+    asOf: '2026-01-06T15:00:00.000Z',
+    outputPath: 'generated/earnings_week.json',
+    loadTickerMap: async () => {
+      loadCalls += 1;
+      return new Map([[task.symbol, { cik: 1, title: task.company }]]);
+    },
+    resolveCompanyReleaseTask: async (retryTask, _tickerMap, _args, row) => {
+      assert.equal(retryTask.id, task.id);
+      assert.equal(row.symbol, task.symbol);
+      return companyReleaseResolvedFixture(retryTask);
+    }
+  });
+  const row = result.payload.rows.find((item) => item.symbol === task.symbol);
+
+  assert.equal(loadCalls, 1, 'Refresh should load the company-release resolver dependencies once for retryable rows.');
+  assert.equal(row.eps.actual, 1.25);
+  assert.equal(row.revenue.actual, 1200000000);
+  assert.equal(row.lifecycle, 'released_awaiting_close');
+  assert.equal(row.outcome.interpretation, '', 'Official actuals must clear pre-release outcome commentary even before close reaction is available.');
+  assert.equal(row.outcome.guide, '', 'Official actuals must clear stale guidance text for post-release review.');
+  assert.equal(row.outcome.interpretationDisposition, undefined);
+  assert.equal(row.outcome.guidanceDisposition, undefined);
+  assert.equal(row.reaction.status, 'awaiting_close', 'Market reaction commentary can still wait for the verified close.');
+  assert.equal(row.reaction.note, '');
+  assert.equal(row.sourceAudit.companyReleaseResolution.status, 'resolved');
+  assert.deepEqual(result.payload.companyReleaseTasks, [], 'A resolved retry should clear the completed company-release task.');
+  assert.equal(Object.prototype.hasOwnProperty.call(result.payload, 'companyReleaseApply'), false, 'Integrated retry should not retain a sidecar apply receipt after all tasks resolve.');
+  assert.equal(result.changedRows, 1);
+  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
+}
+
+async function testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails() {
+  const { source, task } = companyReleaseRefreshFixture('AUTOMISS');
+  const result = await refreshEarningsResults(source, {
+    finnhubRows: [],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [],
+    rowDiagnosticsByKey: {}
+  }, {
+    asOf: '2026-01-06T15:00:00.000Z',
+    loadTickerMap: async () => new Map([[task.symbol, { cik: 1, title: task.company }]]),
+    resolveCompanyReleaseTask: async (retryTask) => companyReleaseNonResolvedFixture(retryTask, 'unresolved')
+  });
+  const row = result.payload.rows.find((item) => item.symbol === task.symbol);
+
+  assert.equal(row.eps.actual, null);
+  assert.equal(row.revenue.actual, null);
+  assert.equal(row.lifecycle, 'awaiting_actual', 'A post-window BMO row with missing actuals must not remain scheduled.');
+  assert.equal(row.sourceAudit.companyReleaseResolution.status, 'unresolved');
+  assert.equal(Object.prototype.hasOwnProperty.call(result.payload, 'companyReleaseApply'), false);
+  assert.equal(result.payload.companyReleaseTasks.length, 1, 'Unresolved automatic retry should keep the active task available for the next refresh.');
+  assert.equal(result.payload.companyReleaseTasks[0].id, task.id);
+  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
+}
+
 async function testNeedsReviewPromotesOfficialMetricsIndependently() {
   for (const [metric, actual] of [['eps', 123.45], ['revenue', 987654321]]) {
     const source = embeddedWeekFixture();
@@ -1582,7 +1644,6 @@ async function testNeedsReviewPromotesOfficialMetricsIndependently() {
       resolution.fields.eps.actualSource = 'sec_company_release';
     }
     const output = applyCompanyReleaseResolutions(source, {
-      outputPath: 'generated/earnings_company_release_resolutions.json',
       companyReleaseResolutions: [resolution]
     });
     const row = output.rows.find((item) => item.symbol === task.symbol && item.reportDate === task.reportDate);
@@ -1596,7 +1657,7 @@ async function testNeedsReviewPromotesOfficialMetricsIndependently() {
     assert.deepEqual(row.sourceSummary.fallbacks, [...original.sourceSummary.fallbacks, 'sec_company_release']);
     assert.equal(row.sourceStatus, 'partial');
     assert.equal(row.sourceAudit.companyReleaseResolution.status, 'needs_review');
-    assert.deepEqual(output.companyReleaseApply.applied, []);
+    assert.equal(Object.prototype.hasOwnProperty.call(output, 'companyReleaseApply'), false);
     const validationErrors = validateEarningsWeekPayload(output);
     assert.deepEqual(validationErrors, [], `${metric}-only official promotion must remain valid staging data: ${validationErrors.join(' ')}`);
     assert.equal(output.narrativeApply, undefined, 'A newly promoted official actual must invalidate the prior narrative receipt.');
@@ -1685,6 +1746,119 @@ function companyReleaseNonResolvedFixture(task, status) {
     notes: [`${status}_fixture`],
     sourceAudit: {}
   };
+}
+
+function companyReleaseResolvedFixture(task) {
+  return {
+    taskId: task.id,
+    symbol: task.symbol,
+    company: task.company,
+    reportDate: task.reportDate,
+    status: 'resolved',
+    sourceType: 'sec_8k_exhibit_99_1',
+    sourceUrl: 'https://www.sec.gov/Archives/edgar/data/1/ex99-1.htm',
+    secFilingUrl: 'https://www.sec.gov/Archives/edgar/data/1/filing.htm',
+    confidence: 'high',
+    fields: {
+      company: task.company,
+      fiscalPeriod: 'Fiscal Q4 2025',
+      reportTiming: 'bmo',
+      eps: {
+        estimate: 1,
+        actual: 1.25,
+        basis: 'adjusted_non_gaap',
+        gaapActual: null,
+        gaapBasis: '',
+        adjustment: null,
+        actualSource: 'sec_company_release',
+        estimateSource: 'earningsapi_company',
+        estimateCount: '',
+        comparisonSource: 'earningsapi_company_eps_estimate'
+      },
+      revenue: {
+        estimate: 1000000000,
+        actual: 1200000000,
+        estimateSource: 'earningsapi_company'
+      }
+    },
+    reaction: {
+      basis: 'same_day_close',
+      percent: null,
+      fromDate: '',
+      fromClose: null,
+      toDate: '',
+      toClose: null,
+      status: 'awaiting_close',
+      note: '',
+      source: 'Yahoo Finance Chart API',
+      sourceAudit: {
+        status: 200,
+        rowCount: 1,
+        error: ''
+      }
+    },
+    notes: ['EarningsAPI company endpoint supplied the retained consensus estimates for comparison.'],
+    sourceAudit: {}
+  };
+}
+
+function companyReleaseRefreshFixture(symbol) {
+  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
+    [],
+    [{ date: '2026-01-06', rows: [alphaVantageRow(symbol, { reportTiming: 'bmo' })] }],
+    [profile(symbol)],
+    [usListing(symbol)]
+  );
+  const companyFetch = {
+    symbol,
+    ok: true,
+    status: 200,
+    rows: [earningsApiRow(symbol, {
+      reportTiming: 'bmo',
+      eps: { estimate: 1, actual: null },
+      revenue: { estimate: 1000000000, actual: null }
+    })]
+  };
+  const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, [companyFetch]);
+  const recoveredRows = buildEarningsApiRows(secondaryRecoveryCandidates, [companyFetch]);
+  const row = recoveredRows[0];
+  row.lifecycle = 'scheduled';
+  row.outcome.interpretation = 'Pre-report fare and fuel setup.';
+  row.outcome.guide = 'Pre-report capacity outlook.';
+  row.outcome.interpretationDisposition = { status: 'verified' };
+  row.outcome.guidanceDisposition = { status: 'verified' };
+  row.reaction = {
+    basis: 'same_day_close',
+    percent: null,
+    fromDate: '',
+    fromClose: null,
+    toDate: '',
+    toClose: null,
+    status: 'pending',
+    note: '',
+    source: 'Yahoo Finance Chart API'
+  };
+  row.sourceStatus = 'partial';
+  const companyReleaseTasks = buildCompanyReleaseTasks(secondaryRecoveryCandidates, recoveredRows);
+  assert.equal(companyReleaseTasks.length, 1);
+  const source = {
+    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+    generatedAt: '2026-01-06T13:00:00.000Z',
+    range: { from: '2026-01-05', to: '2026-01-09' },
+    rows: recoveredRows,
+    secondaryRecoveryCandidates,
+    companyReleaseTasks,
+    summary: {
+      counts: computeEarningsWeekCounts(recoveredRows, secondaryRecoveryCandidates, companyReleaseTasks),
+      fetches: {}
+    },
+    narrativeApply: {
+      generatedAt: '2026-01-06T13:05:00.000Z',
+      narrativeArtifact: 'generated/earnings_narrative.json',
+      applied: [{ symbol, reportDate: '2026-01-06' }]
+    }
+  };
+  return { source, task: companyReleaseTasks[0] };
 }
 
 function companyReleaseTaskFixture(source) {
@@ -1797,16 +1971,21 @@ function testWeekValidatorAcceptsDeterministicVerifiedRow() {
   validateWeekPayload(source);
 }
 
-function testCompanyReleaseValidatorRejectsCalendarEstimates() {
+function testCompanyReleaseResolutionValidatorRejectsCalendarEstimates() {
   const week = embeddedWeekFixture();
   const task = companyReleaseTaskFixture(week);
   week.companyReleaseTasks = [task];
   week.summary.counts.companyReleaseTasks = 1;
-  const sidecar = {
+  const weekWithReceipt = structuredClone(week);
+  weekWithReceipt.companyReleaseApply = { generatedAt: '2026-01-06T22:00:00.000Z' };
+  assert.match(
+    validateEarningsWeekPayload(weekWithReceipt).join(' '),
+    /companyReleaseApply is not part of the canonical Earnings week contract/,
+    'Canonical week validation must reject the retired company-release apply receipt.'
+  );
+  const payload = {
     schemaVersion: 1,
     generatedAt: '2026-01-06T22:00:00.000Z',
-    sourceGeneratedAt: week.generatedAt,
-    sourceRange: week.range,
     companyReleaseResolutions: [{
       taskId: task.id,
       symbol: task.symbol,
@@ -1851,27 +2030,21 @@ function testCompanyReleaseValidatorRejectsCalendarEstimates() {
         source: 'Yahoo Finance Chart API'
       },
       notes: []
-    }],
-    summary: {
-      total: 1,
-      resolved: 1,
-      needsReview: 0,
-      unresolved: 0
-    }
+    }]
   };
 
   assert.throws(
-    () => validateCompanyReleasePayload(week, sidecar),
+    () => validateCompanyReleasePayload(week, payload),
     /estimateSource must be earningsapi_company/,
-    'Company-release sidecar must not use EarningsAPI calendar as a metric source.'
+    'Company-release resolution payload must not use EarningsAPI calendar as a metric source.'
   );
 
-  sidecar.companyReleaseResolutions[0].fields.eps.estimateSource = 'earningsapi_company';
-  sidecar.companyReleaseResolutions[0].fields.eps.comparisonSource = 'earningsapi_company_eps_estimate';
-  sidecar.companyReleaseResolutions[0].fields.revenue.estimateSource = 'earningsapi_company';
-  sidecar.generatedAt = '2026-07-01T19:59:00.000Z';
+  payload.companyReleaseResolutions[0].fields.eps.estimateSource = 'earningsapi_company';
+  payload.companyReleaseResolutions[0].fields.eps.comparisonSource = 'earningsapi_company_eps_estimate';
+  payload.companyReleaseResolutions[0].fields.revenue.estimateSource = 'earningsapi_company';
+  payload.generatedAt = '2026-07-01T19:59:00.000Z';
   assert.throws(
-    () => validateCompanyReleasePayload(week, sidecar),
+    () => validateCompanyReleasePayload(week, payload),
     /cannot be computed before the required closing response/,
     'Company-release reaction validation must not accept a future closing response.'
   );
@@ -2051,13 +2224,15 @@ async function main() {
   await testNeedsReviewPromotesOfficialMetricsIndependently();
   testTaskPolicyMetadataDoesNotBlockValidation();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
-  testCompanyReleaseValidatorRejectsCalendarEstimates();
+  testCompanyReleaseResolutionValidatorRejectsCalendarEstimates();
   testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();
   await testManualRecoverySourceAuditRepair();
   await testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder();
   await testMixedResultRefreshAppliesSuccessfulRows();
+  await testResultRefreshRetriesPostWindowCompanyReleaseTasks();
+  await testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();
   console.log('Earnings week tests passed.');

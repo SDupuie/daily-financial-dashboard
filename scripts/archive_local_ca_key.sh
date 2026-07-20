@@ -28,6 +28,8 @@ cleanup_on_exit() {
   trap - EXIT
   unset CA_ARCHIVE_PASSWORD archive_password
   if [[ "$status" -ne 0 ]]; then
+    # Keep the live CA key unless both encrypted archive and keychain secret
+    # were written and verified as a matching pair.
     rm -f "$ARCHIVE_KEY"
     if [[ "$keychain_updated" == true ]]; then
       security delete-generic-password -a "$USER" -s "$KEYCHAIN_SERVICE" "$LOGIN_KEYCHAIN" >/dev/null 2>&1 || true

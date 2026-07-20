@@ -95,7 +95,8 @@ function story(kind, index) {
     title: `${kind} fixture story ${index}`,
     body: `Fixture reporting item ${index} provides a concise, dated market-development summary for validator coverage.`,
     url,
-    publishedOn: '2026-07-10'
+    publishedOn: '2026-07-10',
+    sourceLabel: 'Fixture News'
   };
 }
 
@@ -326,27 +327,30 @@ function createDashboardValidationFixture() {
 
 function fixtureNewsSearch(dashboard) {
   const futuresCandidates = dashboard.futuresModule.stories
-    .map(({ title, url, publishedOn, publishedAt }) => ({
+    .map(({ title, url, publishedOn, publishedAt, sourceLabel }) => ({
       title,
       url,
       publishedOn,
+      sourceLabel,
       ...(publishedAt ? { publishedAt } : {})
     }));
   const generalCandidates = [...dashboard.stories, ...dashboard.futuresModule.stories]
-    .map(({ title, url, publishedOn, publishedAt }) => ({
+    .map(({ title, url, publishedOn, publishedAt, sourceLabel }) => ({
       title,
       url,
       publishedOn,
+      sourceLabel,
       ...(publishedAt ? { publishedAt } : {})
     }));
   const cryptoCandidates = dashboard.crypto.notes
-    .map(({ title, url, publishedOn }) => ({ title, url, publishedOn }));
+    .map(({ title, url, publishedOn, sourceLabel }) => ({ title, url, publishedOn, sourceLabel }));
   while (generalCandidates.length < 36) {
     const index = generalCandidates.length + 1;
     generalCandidates.push({
       title: `General candidate ${index}`,
       url: `https://candidate.test/general-${index}`,
-      publishedOn: '2026-07-10'
+      publishedOn: '2026-07-10',
+      sourceLabel: 'Fixture News'
     });
   }
   while (cryptoCandidates.length < 12) {
@@ -354,7 +358,8 @@ function fixtureNewsSearch(dashboard) {
     cryptoCandidates.push({
       title: `Crypto candidate ${index}`,
       url: `https://candidate.test/crypto-${index}`,
-      publishedOn: '2026-07-10'
+      publishedOn: '2026-07-10',
+      sourceLabel: 'Fixture News'
     });
   }
   return { generalCandidates, futuresCandidates, cryptoCandidates };
@@ -1236,6 +1241,13 @@ function testPublicationDisplaySectionNormalization() {
     now: new Date(FIXTURE_NOW)
   });
   assert.deepEqual(result.errors, []);
+
+  const missingSourceLabelDashboard = createDashboardValidationFixture().dashboard;
+  delete missingSourceLabelDashboard.stories[0].sourceLabel;
+  const missingSourceResult = validateDashboardHtml(renderDashboardValidationFixture(missingSourceLabelDashboard, chartData), {
+    now: new Date(FIXTURE_NOW)
+  });
+  assert.match(missingSourceResult.errors.join('\n'), /stories\[0\]\.sourceLabel must be populated/);
 }
 
 function testEarningsCommentaryPublicationNormalization() {
@@ -1723,7 +1735,8 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.equal(handoffEarningsNeedsReview.reaction.note, '');
   assert.equal(handoffEarningsNeedsReview.reaction.commentaryDisposition.status, 'pending_review');
   const handoffEarningsAwaitingResults = handoff.earnings.week.rows.find((row) => row.symbol === 'WAIT');
-  assert.equal(handoffEarningsAwaitingResults.outcome.interpretationDisposition, undefined);
+  assert.equal(handoffEarningsAwaitingResults.outcome.interpretation, '');
+  assert.equal(handoffEarningsAwaitingResults.outcome.interpretationDisposition.status, 'pending_review');
   assert.equal(handoffEarningsAwaitingResults.outcome.guidanceDisposition, undefined);
   assert.equal(handoffEarningsAwaitingResults.reaction.commentaryDisposition, undefined);
   const handoffEarningsOneActual = handoff.earnings.week.rows.find((row) => row.symbol === 'ONEACT');
@@ -2279,6 +2292,21 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
+  const newsCandidatesPath = path.join(root, 'generated', 'news_candidates.json');
+  const missingCandidateSource = JSON.parse(fs.readFileSync(newsCandidatesPath, 'utf8'));
+  delete missingCandidateSource.generalCandidates[0].sourceLabel;
+  fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(missingCandidateSource, null, 2)}\n`);
+  const missingCandidateSourceResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(missingCandidateSourceResult.status, 0, missingCandidateSourceResult.stderr);
+  const missingCandidateSourceFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.equal(missingCandidateSourceFinalized.stories.length, 8, 'Apply must not infer sourceLabel when the prepared candidate omits it.');
+  assert.ok(!missingCandidateSourceFinalized.stories.some((story) => story.url === dashboard.stories[0].url));
+  assert.ok(missingCandidateSourceFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'invalid_editorial_item'));
+  writeFixtureNewsCandidates(dashboard);
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
   const validResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(validResult.status, 0, validResult.stderr);
   const finalizedHtml = fs.readFileSync(dashboardFile, 'utf8');
@@ -2287,9 +2315,12 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.editorialReview.reviewedEditionId, finalized.editionId);
   assert.equal(finalized.opening.headline, 'Reviewed fixture headline');
   assert.equal(finalized.stories[0].title, 'Reviewed market story');
+  assert.equal(finalized.stories[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.futuresModule.stories[0].title, 'Reviewed futures story');
   assert.equal(finalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
+  assert.equal(finalized.futuresModule.stories[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.crypto.notes[0].title, 'Reviewed crypto story');
+  assert.equal(finalized.crypto.notes[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.storiesCoverage, undefined);
   assert.equal(finalized.futuresModule.storiesCoverage, undefined);
   assert.equal(finalized.crypto.notesCoverage, undefined);
@@ -2332,6 +2363,26 @@ function testEarningsFinalizationPreservesOnlySafePriorNarrative() {
     companyReleaseTasks: [],
     summary: { counts: {} }
   });
+
+  const preActualPending = structuredClone(prior);
+  preActualPending.eps = { ...preActualPending.eps, actual: null, surprisePercent: null, result: 'pending' };
+  preActualPending.revenue = { ...preActualPending.revenue, actual: null, surprisePercent: null, result: 'pending' };
+  preActualPending.outcome = {
+    overall: 'pending',
+    guide: '',
+    interpretation: '',
+    interpretationDisposition: { status: 'pending_review' }
+  };
+  preActualPending.reaction = { ...preActualPending.reaction, percent: null, status: 'pending', note: '' };
+  preActualPending.lifecycle = 'awaiting_actual';
+  const preActualResult = {};
+  applyEditorialEarningsNarrative(
+    preActualResult,
+    { earnings: { week: week(preActualPending) } },
+    { earnings: { week: { rows: [preActualPending] } } }
+  );
+  assert.equal(preActualResult.earnings.week.rows[0].outcome.interpretation, '');
+  assert.equal(preActualResult.earnings.week.rows[0].outcome.interpretationDisposition.status, 'pending_review');
 
   const unchanged = {};
   applyEditorialEarningsNarrative(

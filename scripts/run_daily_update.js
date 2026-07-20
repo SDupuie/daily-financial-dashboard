@@ -499,6 +499,8 @@ function runWithSectionFallback(runFresh, buildFallback, options = {}) {
         // Continue to the section fallback when the latest staged artifact is absent or invalid.
       }
     }
+    // Fallbacks must validate like fresh payloads because Apply consumes both
+    // paths through the same staged-data contract.
     const fallback = buildFallback(error);
     const fallbackErrors = options.validateFallback ? options.validateFallback(fallback) : [];
     if (fallbackErrors?.length) {
@@ -688,8 +690,8 @@ function prepareEarningsForEditorial(earnings) {
     const outcomeOverall = combinedOutcome(next.eps?.result, next.revenue?.result);
     const resultsAvailable = earningsHasActual(next);
     next.outcome.overall = outcomeOverall;
+    markPendingNarrative(next.outcome, 'interpretation', 'interpretationDisposition');
     if (resultsAvailable) {
-      markPendingNarrative(next.outcome, 'interpretation', 'interpretationDisposition');
       const guidance = next.outcome?.guidanceDisposition;
       const guidanceComplete = verifiedNarrativeDisposition(guidance, next.outcome?.guide)
         || guidance?.status === 'not_provided';
@@ -1345,6 +1347,8 @@ function syncDashboardPricesFromChartData(data, chartData, {
 }
 
 function mergedChartAvailability(existingChartData, incomingChartData, series) {
+  // Preserve whole-payload carry-forward diagnostics until a replacement
+  // payload proves it covers every prior ticker.
   if (incomingChartData.availability?.status === 'carried_forward') {
     return incomingChartData.availability;
   }
@@ -1640,6 +1644,7 @@ function structurallyUsableStory(item, options = {}) {
   if (!item || typeof item !== 'object' || Array.isArray(item) || item.referencePage !== undefined) return false;
   const label = crypto ? item.kicker : item.tag;
   if (typeof label !== 'string' || !label.trim() || typeof item.title !== 'string' || !item.title.trim() || typeof item.body !== 'string' || !item.body.trim()) return false;
+  if (options.requireSourceLabel && (typeof item.sourceLabel !== 'string' || !item.sourceLabel.trim())) return false;
   if (!isIsoDate(item.publishedOn)) return false;
   if (options.requirePublishedAt && !isIsoDateTime(item.publishedAt)) return false;
   if (options.allowedDates instanceof Set
@@ -1670,6 +1675,7 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
     body: item?.body,
     url: source?.url,
     publishedOn: source?.publishedOn,
+    sourceLabel: storySourceLabel(item, candidate),
     ...(source?.publishedAt ? { publishedAt: source.publishedAt } : {})
   };
   return story;
@@ -1744,6 +1750,20 @@ function candidateUrlMap(candidates, options = {}) {
     .map((candidate) => [canonicalCandidateUrl(candidate), candidate])
     .filter(([url]) => url);
   return new Map(entries);
+}
+
+function storySourceLabel(item, candidate = null) {
+  // Candidate inventory owns provenance after Prepare. During Apply, an
+  // inventory match with no label must fail validation instead of falling back
+  // to editorial text or guessing from the URL.
+  if (typeof candidate?.sourceLabel === 'string' && candidate.sourceLabel.trim()) {
+    return candidate.sourceLabel.trim();
+  }
+  if (candidate) return '';
+  if (typeof item?.sourceLabel === 'string' && item.sourceLabel.trim()) {
+    return item.sourceLabel.trim();
+  }
+  return '';
 }
 
 function newsSelection(manifest, key) {
@@ -1862,11 +1882,13 @@ function normalizePublishedStorySections(data) {
   const futuresStories = sanitizeStoryList(data.futuresModule?.stories, {
     futures: true,
     requirePublishedAt: true,
+    requireSourceLabel: true,
     path: 'futuresModule.stories'
   });
   data.futuresModule.stories = futuresStories;
 
   const stories = sanitizeStoryList(data.stories, {
+    requireSourceLabel: true,
     path: 'stories',
     ...storyBlockSets(futuresStories)
   });
@@ -1874,6 +1896,7 @@ function normalizePublishedStorySections(data) {
 
   data.crypto.notes = sanitizeStoryList(data.crypto?.notes, {
     crypto: true,
+    requireSourceLabel: true,
     path: 'crypto.notes',
     ...storyBlockSets(futuresStories, stories)
   });
@@ -1889,7 +1912,6 @@ function clearEarningsInternalQueues(week) {
     counts: computeEarningsWeekCounts(week.rows, week.secondaryRecoveryCandidates, week.companyReleaseTasks)
   };
   delete week.narrativeApply;
-  delete week.companyReleaseApply;
 }
 
 function prepareEarningsRowsForPublication(data) {
@@ -2118,6 +2140,7 @@ function applyDashboardDataJson(args) {
     ...dashboardData.futuresModule,
     stories: sanitizeStoryList(newsSelection(reviewManifest, 'futures'), {
       futures: true,
+      requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'futures-news',
       path: 'editorialReview.newsSelection.futures',
@@ -2126,6 +2149,7 @@ function applyDashboardDataJson(args) {
     })
   };
   dashboardData.stories = sanitizeStoryList(newsSelection(reviewManifest, 'stories'), {
+    requireSourceLabel: true,
     systemFallbacks: reviewManifest.systemFallbacks,
     section: 'stories',
     path: 'editorialReview.newsSelection.stories',
@@ -2137,6 +2161,7 @@ function applyDashboardDataJson(args) {
     ...dashboardData.crypto,
     notes: sanitizeStoryList(newsSelection(reviewManifest, 'crypto'), {
       crypto: true,
+      requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'crypto',
       path: 'editorialReview.newsSelection.crypto',

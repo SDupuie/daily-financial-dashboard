@@ -435,6 +435,8 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
     failures.push({ provider: task.key, message: result.reason?.message || 'source unavailable' });
     const prior = priorBySymbol.get(task.sym);
     const lastValidatedAt = String(prior?.availability?.lastValidatedAt || canonical.lastValidatedAt).trim();
+    // Partial refresh keeps independent cards fresh while marking only the
+    // failed provider's prior card as carried-forward or unavailable.
     const stat = prior
       ? {
         ...prior,
@@ -503,6 +505,8 @@ async function fetchCryptoStats(options = {}) {
 function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reason = 'source_refresh_failed', legacyLastValidatedAt = '') {
   const timestamp = new Date(checkedAt).toISOString();
   const canonicalLastValidatedAt = String(canonicalCrypto?.statsFetchedAt || legacyLastValidatedAt || '').trim();
+  // Whole-section fallback is used by preparation orchestration after the
+  // partial fetcher itself cannot run or validate.
   const stats = Array.isArray(canonicalCrypto?.stats)
     ? structuredClone(canonicalCrypto.stats).map((row) => row?.availability?.status === 'unavailable'
       ? row

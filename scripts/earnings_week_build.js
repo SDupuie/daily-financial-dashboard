@@ -314,6 +314,8 @@ function sleep(ms) {
 }
 
 function fetchJson(url, args, headers = {}) {
+  // Provider fetches resolve diagnostic objects instead of rejecting so one
+  // bad source can become row-level audit rather than aborting the whole slate.
   return new Promise((resolve) => {
     const started = Date.now();
     const req = https.get(url, {
@@ -659,6 +661,8 @@ async function fetchEarningsApiJson(pathname, args, token, usage, requestType) {
     path: url.pathname,
     queryKeys: url.searchParams.keys()
   });
+  // Persist the debit intent before the network call; a crash or timeout must
+  // not turn a metered request into an unaudited retry.
   writeEarningsApiUsage(args.earningsApiUsage, usage);
   const result = await fetchJson(url.toString(), args);
   recordEarningsApiResponse(request, result);

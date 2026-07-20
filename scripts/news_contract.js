@@ -308,6 +308,8 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false, sch
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
       throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
     }
+    // Scheduled runs advance the comparison window; manual/on-demand applies
+    // retain the prior baseline so ad hoc repairs do not churn New badges.
     data.newsBaseline = {
       lastScheduledUpdateAt: now.toISOString(),
       lastScheduledWindow: `${chicagoIsoDate(now)}:${scheduledWindow}`,

@@ -288,6 +288,7 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     dateSource: 'provider_published',
     ...(item.publishedAtVerified === true ? { publishedAtVerified: true } : {}),
     sourceId: source.id,
+    sourceLabel: source.displayName,
     sourceDomain: new URL(url).hostname.toLowerCase(),
     provider: acquisitionPath.provider,
     ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
@@ -388,7 +389,10 @@ function priorCandidate(item, pool, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
   const title = String(item?.title || '').trim();
   const publishedOn = String(item?.publishedOn || '');
-  if (!url || !title || !eligibleDates.has(publishedOn)) return null;
+  const sourceLabel = String(item?.sourceLabel || '').trim();
+  // Prior cards re-enter review only with their already-validated source label;
+  // Stage 1 should not retroactively assign attribution to old published cards.
+  if (!url || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   try {
     if (new URL(url).protocol !== 'https:') return null;
   } catch (_error) {
@@ -398,6 +402,7 @@ function priorCandidate(item, pool, eligibleDates) {
     title,
     url,
     publishedOn,
+    sourceLabel,
     ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
     dateSource: 'prior_validated_card',
     publishedAtVerified: true,
@@ -553,6 +558,7 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       if (!validatedSource || validatedSource.id === 'yahoo-finance' || !articlePathUrl(validatedUrl)) continue;
       candidate.url = validatedUrl;
       candidate.sourceId = validatedSource.id;
+      candidate.sourceLabel = validatedSource.displayName;
       candidate.sourceDomain = new URL(candidate.url).hostname.toLowerCase();
       candidate.article = articleRecord(originalPage);
       candidate.pagePublishedAt = originalPublishedAt.toISOString();

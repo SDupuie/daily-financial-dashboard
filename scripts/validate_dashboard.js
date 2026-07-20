@@ -50,6 +50,45 @@ function validateCalendarSectionRanges(errors, data) {
   }
 }
 
+function validatePublishedNewsCardMetadata(errors, label, cards, options = {}) {
+  if (!Array.isArray(cards)) return;
+  // Publication validation proves the final embedded cards kept immutable
+  // provenance from Prepare/Apply; it does not re-rank or replace stories.
+  cards.forEach((card, index) => {
+    const itemLabel = `${label}[${index}]`;
+    if (!card || typeof card !== 'object' || Array.isArray(card)) {
+      errors.push(`${itemLabel} must be an object.`);
+      return;
+    }
+    if (typeof card.url !== 'string') {
+      errors.push(`${itemLabel}.url must be a string.`);
+    } else {
+      try {
+        if (new URL(card.url).protocol !== 'https:') {
+          errors.push(`${itemLabel}.url must be an HTTPS reader-facing URL.`);
+        }
+      } catch (_error) {
+        errors.push(`${itemLabel}.url must be a valid URL.`);
+      }
+    }
+    if (!isIsoDate(card.publishedOn)) {
+      errors.push(`${itemLabel}.publishedOn must be an ISO date.`);
+    }
+    if (options.requirePublishedAt && !isIsoDateTime(card.publishedAt)) {
+      errors.push(`${itemLabel}.publishedAt must be an offset-bearing ISO timestamp.`);
+    }
+    if (typeof card.sourceLabel !== 'string' || !card.sourceLabel.trim()) {
+      errors.push(`${itemLabel}.sourceLabel must be populated.`);
+    }
+  });
+}
+
+function validatePublishedNewsMetadata(errors, data) {
+  validatePublishedNewsCardMetadata(errors, 'stories', data?.stories);
+  validatePublishedNewsCardMetadata(errors, 'futuresModule.stories', data?.futuresModule?.stories, { requirePublishedAt: true });
+  validatePublishedNewsCardMetadata(errors, 'crypto.notes', data?.crypto?.notes);
+}
+
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
@@ -715,6 +754,7 @@ if (!dashboardMatch) {
     let chartData = null;
     const chartableRows = chartableRowsFromDashboardData(data);
     validateCalendarSectionRanges(errors, data);
+    validatePublishedNewsMetadata(errors, data);
     validateDashboardTapeCommentary(errors, warnings, data, { validationMode });
 
     if (!chartDataMatch) {

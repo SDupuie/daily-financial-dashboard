@@ -349,6 +349,8 @@ function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookah
   const priorMonthRows = prices.filter((row) => row.date < monthStartKey);
   const currentMonthRows = prices.filter((row) => row.date >= monthStartKey);
   const mtdBase = priorMonthRows[priorMonthRows.length - 1] || currentMonthRows[0] || previous;
+  // Fetch one month ahead so upcoming dividend cards can show context, but
+  // only ex-dates through observationDate enter current MTD dividend totals.
   const dividendBuckets = bucketDividendEvents(
     dividendEventsInRange(result, monthStart, lookaheadEndExclusive),
     dashboardIsoDate(now),
@@ -444,6 +446,8 @@ async function fetchPortfolioRows(args, dependencies = {}) {
     const prior = priorByTicker.get(holding.symbol);
     if (prior) {
       const lastValidatedAt = String(prior.availability?.lastValidatedAt || canonicalLastValidatedAt).trim();
+      // Row-level carry-forward is month-scoped; a new month without a fresh
+      // fetch publishes explicit unavailable fields instead of stale MTD math.
       return {
         ...prior,
         availability: {

@@ -66,7 +66,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 2. Confirm the normal deterministic refresh ran before reading news.
    - Use the matching canonical two-command workflow entry.
    - If generated market data, calendar facts, earnings facts, or deterministic section values look stale or wrong, stop and use the Reference Appendix.
-   - Do not name quote/news sources in visible copy. Keep the compact source-family attribution in `footer.compiled`; use chart source details for row-specific provenance.
+   - Do not name quote/news sources in narrative copy. News cards may show the deterministic card-level `sourceLabel`; keep broader source-family attribution in `footer.compiled` and use chart source details for row-specific provenance.
    - Do not use source-verification phrasing such as `Reuters reported`, `Yahoo showed`, `fallback chain`, or similar process commentary in user-facing text.
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
 
@@ -83,7 +83,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 
 4. Apply these copy and tone rules throughout AI Editorial Work.
    - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
-   - Keep publisher attribution out of story titles and bodies. Put source attribution only in `footer.compiled`.
+   - Keep publisher attribution out of story titles and bodies. News-card provenance belongs only in the generated `sourceLabel` metadata and footer source-family context.
    - Do not write tautological market-status copy that states routine facts without saying why they matter.
    - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
    - Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
@@ -124,6 +124,7 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
 - `editorialReview.newsSearch` is read-only source material. Prepare Handoff filters displayed-session Futures stories into `futuresCandidates`: Pre-Market Futures use the overnight futures window from 5:00 PM CT on the prior Chicago calendar day through the prepared run time or 8:30 AM CT, whichever is earlier; Session Futures use the shared `raw.sessionDate` regular-session window. When no shared Futures story window can be proven, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
+- Prepare Handoff gives each candidate a `sourceLabel`: downloaded candidates use approved source-catalog display names, and still-fresh prior-card candidates preserve their validated published `sourceLabel`. Apply Handoff copies `sourceLabel`, `publishedOn`, and `publishedAt` from the selected candidate into the published card. The AI must not type, edit, or override `sourceLabel` in `editorialReview.newsSelection`.
 - Futures selections must be major, current catalysts for the displayed futures session. Prefer stories that plausibly explain index-futures direction or broad cross-asset risk: macro data, rates, central banks, inflation, jobs, commodities, geopolitics, trade policy, credit/liquidity stress, global equity moves, or mega-cap earnings only when the article clearly ties the news to index-level market action.
 - Do not use single-company product, partnership, analyst, executive, customer, or routine earnings-preview stories as Futures cards unless the article itself makes a clear index-futures or broad-market impact case. Put those stories in broad-market News instead.
 - A selected URL must come from the generated candidate inventory.
@@ -299,6 +300,10 @@ The richer earnings monitor uses this contract as the canonical deterministic me
 4. Official company IR or SEC fallback: schedule confirmation and official-result resolution when provider data is incomplete or conflicting.
 5. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
 
+#### Company-release retry behavior
+
+During normal Prepare/refresh, Earnings retries active `companyReleaseTasks` once the row's report window has arrived and actuals are still missing. A failed retry is non-blocking: the staged row keeps the correct `awaiting_actual` lifecycle, and the task stays active for a later refresh.
+
 #### Canonical row contract
 
 Earnings rows use the shared lifecycle vocabulary; validation owns the full schema. Dashboard-visible provenance stays compact, while detailed source audit remains build/debug data.
@@ -318,7 +323,6 @@ Use focused repair commands only for explicit repairs. They update the current s
 - Chart-only correction: start with a current complete candidate, then use `node scripts/run_daily_update.js --apply-chart-data-json PATH`, `node scripts/run_daily_update.js --merge-chart-data-json PATH`, or `node scripts/run_daily_update.js --sync-chart-quotes`. Regenerate the editorial handoff afterward; successful quote changes require reviewed commentary.
 - Asset Allocation fallback: refresh `http://127.0.0.1:2200/api/asset-market-data`, then use `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. If refresh fails but the export exists, use it as a stale fallback; never import tactical allocation/model logic.
 - Earnings-only repair: first complete deterministic preparation, then run `node scripts/earnings_week.js apply-narrative`, run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`.
-- Company-release earnings repair: when `companyReleaseTasks[]` exist, run `node scripts/earnings_week.js resolve`, `node scripts/earnings_week.js validate-release`, `node scripts/earnings_week.js apply-release`, then `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`.
 - Manual calendar rollover: use `node scripts/run_daily_update.js prepare --afternoon --rollover-calendar` for the Friday-through-Thursday bridge, or `node scripts/run_daily_update.js prepare --morning --rollover-calendar` for Monday-through-Friday. On Saturday, either edition rolls to the Friday bridge; on Sunday, either edition rolls to Monday-Friday.
 
 ### Local Refresh Server

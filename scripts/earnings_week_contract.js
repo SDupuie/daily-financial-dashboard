@@ -230,6 +230,8 @@ function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
     rows: (Array.isArray(nextWeek?.rows) ? nextWeek.rows : []).map((row) => {
       const prior = previousByKey.get(earningsRowKey(row));
       if (!prior) return clearEarningsNarrative(row);
+      // A scheduled -> awaiting_actual transition has no new company facts, so
+      // pre-release commentary can carry while actuals remain missing.
       const sameUnreportedFacts = prior.outcome?.overall === 'pending'
         && row.outcome?.overall === 'pending'
         && earningsResultNarrativeFingerprint({ ...prior, lifecycle: '' }) === earningsResultNarrativeFingerprint({ ...row, lifecycle: '' });
@@ -341,6 +343,8 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
   const sameRange = canonicalWeek?.range?.from === targetRange?.from
     && canonicalWeek?.range?.to === targetRange?.to;
   if (sameRange) {
+    // Same-range fallback preserves the visible slate and advances lifecycle;
+    // cross-range failure publishes an explicit unavailable week instead.
     const rows = (canonicalWeek.rows || []).map((row) => applyEarningsLifecycle(row, new Date(checkedAt)));
     const secondaryRecoveryCandidates = canonicalWeek.secondaryRecoveryCandidates || [];
     const companyReleaseTasks = canonicalWeek.companyReleaseTasks || [];

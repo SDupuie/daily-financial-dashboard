@@ -134,6 +134,7 @@ async function testDeterministicNewsCandidateAcquisition() {
       title: 'Still-fresh prior market card',
       url: 'https://example.com/prior-market',
       publishedOn: '2026-07-10',
+      sourceLabel: 'Fixture News',
       tag: 'Prior',
       body: 'Previously reviewed market copy.'
     }],
@@ -142,6 +143,7 @@ async function testDeterministicNewsCandidateAcquisition() {
       title: 'Still-fresh prior crypto card',
       url: 'https://example.com/prior-crypto',
       publishedOn: '2026-07-10',
+      sourceLabel: 'Fixture News',
       kicker: 'Prior',
       body: 'Previously reviewed crypto copy.'
     }] }
@@ -230,21 +232,27 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
   const cnbc = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc');
   assert.equal(cnbc.provider, 'rss', 'A direct feed must win deterministic provenance deduplication over an aggregator copy.');
+  assert.equal(cnbc.sourceLabel, 'CNBC');
   assert.equal(cnbc.publishedAtVerified, true, 'Article-page review must mark provider timestamps verified after confirmation.');
   assert.deepEqual(cnbc.searchPathIds, ['cnbc', 'alpha-financial-markets']);
   const marketwatch = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'marketwatch');
   assert.equal(marketwatch.provider, 'rss');
+  assert.equal(marketwatch.sourceLabel, 'MarketWatch');
   assert.deepEqual(marketwatch.searchPathIds, ['marketwatch', 'stockfit-market']);
   const resolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'original_validated');
   assert.equal(resolvedYahoo.url, 'https://www.reuters.com/markets/validated-fixture');
+  assert.equal(resolvedYahoo.sourceLabel, 'Reuters');
   assert.equal(resolvedYahoo.syndication.hostedUrl, 'https://finance.yahoo.com/news/validated-fixture.html');
   assert.equal(resolvedYahoo.syndication.publisherName, 'Reuters');
   assert.equal(resolvedYahoo.publishedAt, '2026-07-10T18:45:00.000Z', 'A promoted story must use the original page publication time.');
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale provider fixture'), false);
   const unresolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'yahoo_hosted');
   assert.equal(unresolvedYahoo.url, 'https://finance.yahoo.com/news/unresolved-fixture.html');
+  assert.equal(unresolvedYahoo.sourceLabel, 'Yahoo Finance');
   assert.equal(unresolvedYahoo.syndication.publisherName, undefined, 'StockFit Yahoo Finance attribution is the host, not a syndicated publisher.');
-  assert.equal(artifact.generalCandidates.find((candidate) => candidate.priorCard).priorCopy.tag, 'Prior');
+  const priorMarket = artifact.generalCandidates.find((candidate) => candidate.priorCard);
+  assert.equal(priorMarket.sourceLabel, 'Fixture News');
+  assert.equal(priorMarket.priorCopy.tag, 'Prior');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'coindesk').acceptedCount, 1);
   assert.equal(artifact.articleReview.status, 'complete');
@@ -516,6 +524,7 @@ async function testYahooOriginalPromotionValidation() {
 
   assert.equal(artifact.generalCandidates.length, cases.length);
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceId === 'yahoo-finance'));
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceLabel === 'Yahoo Finance'));
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.syndication?.status === 'yahoo_hosted'));
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.url.startsWith('https://finance.yahoo.com/news/')));
   assert.equal(
@@ -700,6 +709,7 @@ async function testVerifiedPublishedAtCandidatesBypassReviewCap() {
   assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT + verifiedItems.length);
   const apCandidates = artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'ap');
   assert.equal(apCandidates.length, verifiedItems.length);
+  assert.ok(apCandidates.every((candidate) => candidate.sourceLabel === 'AP'));
   assert.ok(apCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
   assert.ok(apCandidates.every((candidate) => candidate.publishedAtVerified === true));
 }

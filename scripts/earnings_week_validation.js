@@ -20,7 +20,6 @@ const {
 
 const root = path.resolve(__dirname, '..');
 const defaultEarningsInput = path.resolve(root, 'generated', 'earnings_week.json');
-const defaultCompanyReleaseInput = path.resolve(root, 'generated', 'earnings_company_release_resolutions.json');
 
 const TIMINGS = new Set(['bmo', 'amc', 'dmh', 'unknown']);
 const OUTCOMES = new Set([
@@ -74,24 +73,7 @@ const TOP_LEVEL_FIELDS = new Set([
   'companyReleaseTasks',
   'summary',
   'outputPath',
-  'companyReleaseApply',
   'narrativeApply'
-]);
-const RELEASE_TOP_LEVEL_FIELDS = new Set([
-  'schemaVersion',
-  'generatedAt',
-  'sourceArtifact',
-  'sourceGeneratedAt',
-  'sourceRange',
-  'companyReleaseResolutions',
-  'summary',
-  'outputPath'
-]);
-const COMPANY_RELEASE_APPLY_FIELDS = new Set([
-  'generatedAt',
-  'resolutionArtifact',
-  'applied',
-  'dispositions'
 ]);
 const ROW_FIELDS = new Set([
   'symbol',
@@ -130,12 +112,10 @@ const FORBIDDEN_ROW_FIELDS = [
 ];
 
 function parseArgs(argv) {
-  const mode = argv[0] === 'release' ? 'release' : 'week';
-  const offset = mode === 'release' || argv[0] === 'week' ? 1 : 0;
+  const offset = argv[0] === 'week' ? 1 : 0;
   const args = {
-    mode,
-    input: mode === 'release' ? defaultCompanyReleaseInput : defaultEarningsInput,
-    week: defaultEarningsInput
+    mode: 'week',
+    input: defaultEarningsInput
   };
 
   for (let i = offset; i < argv.length; i += 1) {
@@ -145,13 +125,8 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
-    if (arg === '--week') {
-      args.week = path.resolve(process.cwd(), argv[i + 1] || defaultEarningsInput);
-      i += 1;
-      continue;
-    }
     if (arg === '--help' || arg === '-h') {
-      printHelp(mode);
+      printHelp();
       process.exit(0);
     }
     throw new Error(`Unknown argument: ${arg}`);
@@ -161,17 +136,6 @@ function parseArgs(argv) {
 }
 
 function printHelp(mode = 'week') {
-  if (mode === 'release') {
-    process.stdout.write(`Usage: node scripts/earnings_week.js validate-release [options]
-
-Options:
-  --input PATH      Company-release resolutions JSON (default: generated/earnings_company_release_resolutions.json)
-  --week PATH       Earnings week JSON with companyReleaseTasks (default: generated/earnings_week.json)
-  --help            Show this help
-`);
-    return;
-  }
-
   process.stdout.write(`Usage: node scripts/earnings_week.js validate [options]
 
 Options:
@@ -707,77 +671,6 @@ function validateAvailability(errors, data) {
   if (!['carried_forward', 'unavailable'].includes(status)) errors.push('availability.status is invalid.');
 }
 
-function validateCompanyReleaseApply(errors, data, options = {}) {
-  const tasks = Array.isArray(data.companyReleaseTasks) ? data.companyReleaseTasks : [];
-  if (tasks.length === 0) return;
-  if (!isObject(data.companyReleaseApply)) {
-    if (options.required) errors.push('companyReleaseApply must be populated when companyReleaseTasks exist.');
-    return;
-  }
-  const apply = data.companyReleaseApply;
-  for (const field of Object.keys(apply)) {
-    if (!COMPANY_RELEASE_APPLY_FIELDS.has(field)) errors.push(`companyReleaseApply.${field} is not part of the canonical apply contract.`);
-  }
-  if (!isIsoDateTime(apply.generatedAt)) errors.push('companyReleaseApply.generatedAt must be an ISO timestamp.');
-  if (typeof apply.resolutionArtifact !== 'string' || !/earnings_company_release_resolutions\.json$/.test(apply.resolutionArtifact)) {
-    errors.push('companyReleaseApply.resolutionArtifact must identify earnings_company_release_resolutions.json.');
-  }
-  if (!Array.isArray(apply.applied)) errors.push('companyReleaseApply.applied must be an array.');
-  if (!Array.isArray(apply.dispositions)) errors.push('companyReleaseApply.dispositions must be an array.');
-  const applied = Array.isArray(apply.applied) ? apply.applied : [];
-  const dispositions = Array.isArray(apply.dispositions) ? apply.dispositions : [];
-  const taskIds = new Set(tasks.map((task) => task.id));
-  const rowsByKey = new Map((Array.isArray(data.rows) ? data.rows : []).map((row) => [rowKey(row), row]));
-  const appliedIds = new Set();
-  for (const item of applied) {
-    if (!isObject(item)) {
-      errors.push('companyReleaseApply.applied entries must be objects.');
-      continue;
-    }
-    if (typeof item.taskId !== 'string' || !item.taskId.trim()) errors.push('companyReleaseApply.applied.taskId must be populated.');
-    if (typeof item.symbol !== 'string' || !/^[A-Z0-9.-]+$/.test(item.symbol)) errors.push('companyReleaseApply.applied.symbol must be uppercase.');
-    if (!taskIds.has(item.taskId)) errors.push(`${item.taskId || 'companyReleaseApply.applied'} must map to companyReleaseTasks.`);
-    if (appliedIds.has(item.taskId)) errors.push(`companyReleaseApply.applied contains duplicate ${item.taskId}.`);
-    appliedIds.add(item.taskId);
-  }
-  const dispositionByTaskId = new Map();
-  for (const item of dispositions) {
-    if (!isObject(item)) {
-      errors.push('companyReleaseApply.dispositions entries must be objects.');
-      continue;
-    }
-    if (typeof item.taskId !== 'string' || !item.taskId.trim()) errors.push('companyReleaseApply.dispositions.taskId must be populated.');
-    if (typeof item.symbol !== 'string' || !/^[A-Z0-9.-]+$/.test(item.symbol)) errors.push('companyReleaseApply.dispositions.symbol must be uppercase.');
-    if (!RELEASE_RESOLUTION_STATUSES.has(item.status)) errors.push(`${item.taskId || 'companyReleaseApply.dispositions'}.status is invalid.`);
-    if (typeof item.reason !== 'string') errors.push(`${item.taskId || 'companyReleaseApply.dispositions'}.reason must be a string.`);
-    if (item.status !== 'resolved' && !String(item.reason || '').trim()) errors.push(`${item.taskId || 'companyReleaseApply.dispositions'}.reason is required for a non-resolved disposition.`);
-    if (!taskIds.has(item.taskId)) errors.push(`${item.taskId || 'companyReleaseApply.dispositions'} must map to companyReleaseTasks.`);
-    if (dispositionByTaskId.has(item.taskId)) errors.push(`companyReleaseApply.dispositions contains duplicate ${item.taskId}.`);
-    dispositionByTaskId.set(item.taskId, item);
-  }
-  for (const task of tasks) {
-    const disposition = dispositionByTaskId.get(task.id);
-    if (!disposition) errors.push(`${task.id} must be present in companyReleaseApply.dispositions.`);
-    if (disposition && disposition.symbol !== task.symbol) errors.push(`${task.id} disposition symbol must match companyReleaseTasks.`);
-    if (disposition?.status === 'resolved' && !appliedIds.has(task.id)) errors.push(`${task.id} resolved disposition must be present in companyReleaseApply.applied.`);
-    if (disposition && disposition.status !== 'resolved' && appliedIds.has(task.id)) errors.push(`${task.id} non-resolved disposition must not be present in companyReleaseApply.applied.`);
-    const row = [...rowsByKey.values()].find((item) => item.sourceAudit?.companyReleaseResolution?.taskId === task.id)
-      || rowsByKey.get(rowKey(task));
-    if (!row) {
-      errors.push(`${task.id} must have a canonical row for its recorded disposition.`);
-    } else if (row.sourceAudit?.companyReleaseResolution?.taskId !== task.id) {
-      errors.push(`${task.id} must be reflected in row.sourceAudit.companyReleaseResolution.`);
-    } else if (disposition && row.sourceAudit.companyReleaseResolution.status !== disposition.status) {
-      errors.push(`${task.id} row company-release status must match its recorded disposition.`);
-    } else if (disposition && disposition.status !== 'resolved' && row.sourceStatus !== 'partial') {
-      errors.push(`${task.id} non-resolved disposition must retain a partial canonical row.`);
-    }
-  }
-  for (const taskId of appliedIds) {
-    if (dispositionByTaskId.get(taskId)?.status !== 'resolved') errors.push(`${taskId} may be applied only with a resolved disposition.`);
-  }
-}
-
 function validateEditorialDisposition(errors, disposition, label, allowedStatuses, copy, unavailableStatuses) {
   const text = String(copy || '').trim();
   if (disposition === undefined) return text ? 'verified' : '';
@@ -868,39 +761,7 @@ function validateCompanyReleaseTasks(errors, data) {
   }
 }
 
-function validateReleaseSidecarMetadata(errors, data, week, options = {}) {
-  for (const field of Object.keys(data)) {
-    if (!RELEASE_TOP_LEVEL_FIELDS.has(field)) errors.push(`${field} is not a valid top-level company-release sidecar field.`);
-  }
-
-  const expectedSourceArtifact = options.sourceArtifact || path.relative(root, options.weekPath || defaultEarningsInput);
-  if (data.sourceArtifact !== expectedSourceArtifact) {
-    errors.push(`sourceArtifact must be ${expectedSourceArtifact}.`);
-  }
-  if (!isIsoDateTime(data.sourceGeneratedAt)) {
-    errors.push('sourceGeneratedAt must be an ISO timestamp.');
-  } else if (data.sourceGeneratedAt !== week.generatedAt) {
-    errors.push('sourceGeneratedAt must match the source earnings week generatedAt.');
-  }
-
-  if (!isObject(data.sourceRange)) {
-    errors.push('sourceRange must be populated.');
-  } else {
-    if (!isIsoDate(data.sourceRange.from)) errors.push('sourceRange.from must be an ISO date.');
-    if (!isIsoDate(data.sourceRange.to)) errors.push('sourceRange.to must be an ISO date.');
-    if (isIsoDate(data.sourceRange.from) && isIsoDate(data.sourceRange.to) && compareIsoDate(data.sourceRange.from, data.sourceRange.to) > 0) {
-      errors.push('sourceRange.from must be on or before sourceRange.to.');
-    }
-    if (data.sourceRange.from !== week.range?.from) errors.push('sourceRange.from must match the source earnings week range.from.');
-    if (data.sourceRange.to !== week.range?.to) errors.push('sourceRange.to must match the source earnings week range.to.');
-  }
-
-  if (typeof data.outputPath !== 'string' || !data.outputPath.trim()) {
-    errors.push('outputPath must be populated.');
-  }
-}
-
-function validateReleaseReaction(errors, item, label, now) {
+function validateCompanyReleaseResolutionReaction(errors, item, label, now) {
   const reaction = item.reaction;
   if (!isObject(reaction)) {
     errors.push(`${label}.reaction must be an object.`);
@@ -927,8 +788,8 @@ function validateReleaseReaction(errors, item, label, now) {
   for (const field of ['fromClose', 'toClose']) {
     if (!isFiniteNumber(reaction[field])) errors.push(`${label}.reaction.${field} must be numeric.`);
   }
-  // Apply the same ordering boundary to the persistent resolution sidecar so
-  // it cannot bypass the canonical row validator on a later apply step.
+  // Resolution retry may run before the reaction window closes; computed close
+  // fields are accepted only once the canonical close boundary has arrived.
   const reportTiming = item.fields?.reportTiming;
   if (reportTiming === 'amc') {
     if (isIsoDate(reaction.fromDate) && compareIsoDate(reaction.fromDate, item.reportDate) < 0) errors.push(`${label}.reaction.fromDate must be on or after reportDate for amc reports.`);
@@ -946,7 +807,7 @@ function validateReleaseReaction(errors, item, label, now) {
   }
 }
 
-function validateReleaseResolution(errors, itemRaw, taskMap, index, now) {
+function validateCompanyReleaseResolution(errors, itemRaw, taskMap, index, now) {
   const item = isObject(itemRaw) ? itemRaw : {};
   const label = item.symbol || `companyReleaseResolutions[${index}]`;
   const task = taskMap.get(item.taskId);
@@ -991,29 +852,15 @@ function validateReleaseResolution(errors, itemRaw, taskMap, index, now) {
     errors.push(`${label}.fields.eps.estimate must not be used while EarningsAPI EPS actual is unreconciled.`);
   }
   if (!Array.isArray(item.notes)) errors.push(`${label}.notes must be an array.`);
-  validateReleaseReaction(errors, item, label, now);
-}
-
-function validateReleaseSummary(errors, data) {
-  const companyReleaseResolutions = Array.isArray(data.companyReleaseResolutions) ? data.companyReleaseResolutions : [];
-  const expected = {
-    total: companyReleaseResolutions.length,
-    resolved: companyReleaseResolutions.filter((item) => item.status === 'resolved').length,
-    needsReview: companyReleaseResolutions.filter((item) => item.status === 'needs_review').length,
-    unresolved: companyReleaseResolutions.filter((item) => item.status === 'unresolved').length
-  };
-  if (!isObject(data.summary)) {
-    errors.push('summary must be an object.');
-    return;
-  }
-  for (const [field, value] of Object.entries(expected)) {
-    if (data.summary[field] !== value) errors.push(`summary.${field} must be ${value}.`);
-  }
+  validateCompanyReleaseResolutionReaction(errors, item, label, now);
 }
 
 function validateEarningsWeekPayload(data) {
   const errors = [];
 
+  for (const field of Object.keys(data || {})) {
+    if (!TOP_LEVEL_FIELDS.has(field)) errors.push(`${field} is not part of the canonical Earnings week contract.`);
+  }
   validateRange(errors, data.range);
   validateAvailability(errors, data);
 
@@ -1034,16 +881,21 @@ function validateEarningsWeekPayload(data) {
   return errors;
 }
 
-function validateEarningsWeekReleasePayload(data, week, options = {}) {
+function validateCompanyReleaseResolutionsPayload(data, week, options = {}) {
   const errors = [];
+  if (!isObject(data)) {
+    errors.push('company-release resolution payload must be an object.');
+    return errors;
+  }
+  // Integrated refresh now validates in-memory retry results, not a persistent
+  // sidecar, so artifact metadata is optional and partial task coverage is OK.
   const taskMap = new Map((Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []).map((task) => [task.id, task]));
   const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
     ? options.now
-    : new Date(data.generatedAt);
+    : isIsoDateTime(data.generatedAt) ? new Date(data.generatedAt) : new Date();
 
-  if (data.schemaVersion !== 1) errors.push('schemaVersion must be 1.');
-  if (!isIsoDateTime(data.generatedAt)) errors.push('generatedAt must be an ISO timestamp.');
-  validateReleaseSidecarMetadata(errors, data, week, options);
+  if (data.schemaVersion !== undefined && data.schemaVersion !== 1) errors.push('schemaVersion must be 1.');
+  if (data.generatedAt !== undefined && !isIsoDateTime(data.generatedAt)) errors.push('generatedAt must be an ISO timestamp.');
   if (!Array.isArray(data.companyReleaseResolutions)) {
     errors.push('companyReleaseResolutions must be an array.');
   } else {
@@ -1051,42 +903,15 @@ function validateEarningsWeekReleasePayload(data, week, options = {}) {
     data.companyReleaseResolutions.forEach((item, index) => {
       if (seen.has(item?.taskId)) errors.push(`${item.taskId} appears more than once.`);
       seen.add(item?.taskId);
-      validateReleaseResolution(errors, item, taskMap, index, now);
+      validateCompanyReleaseResolution(errors, item, taskMap, index, now);
     });
-    for (const task of Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []) {
-      if (!seen.has(task.id)) errors.push(`${task.id} is missing from companyReleaseResolutions.`);
-    }
   }
-  validateReleaseSummary(errors, data);
 
   return errors;
 }
 
 function runValidation(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
-  if (args.mode === 'release') {
-    const week = readJson(args.week);
-    if (!Array.isArray(week.companyReleaseTasks)) {
-      throw new Error(`Earnings week validation failed for ${args.week}: companyReleaseTasks must be an array.`);
-    }
-    if (week.companyReleaseTasks.length === 0) {
-      console.log(`Company-release validation not applicable: ${args.week} has no active company-release tasks.`);
-      return;
-    }
-    const data = readJson(args.input);
-    const errors = validateEarningsWeekReleasePayload(data, week, { weekPath: args.week });
-
-    if (errors.length) {
-      throw new Error(`Earnings company-release resolution validation failed for ${args.input}: ${errors.join(' ')}`);
-    }
-
-    console.log(`Earnings company-release validation passed for ${args.input}`);
-    console.log(`Resolved: ${data.summary.resolved}`);
-    console.log(`Needs review: ${data.summary.needsReview}`);
-    console.log(`Unresolved: ${data.summary.unresolved}`);
-    return;
-  }
-
   const data = readJson(args.input);
   const errors = validateEarningsWeekPayload(data);
 
@@ -1108,5 +933,5 @@ if (require.main === module) {
 module.exports = {
   runValidation,
   validateEarningsWeekPayload,
-  validateEarningsWeekReleasePayload
+  validateCompanyReleaseResolutionsPayload
 };
