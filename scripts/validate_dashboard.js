@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const { deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
 
@@ -23,6 +23,33 @@ const DASHBOARD_VALIDATION_MODES = new Set(['staged', 'published']);
 function normalizedDashboardValidationMode(value) {
   return DASHBOARD_VALIDATION_MODES.has(value) ? value : 'published';
 }
+
+function rangesMatch(left, right) {
+  return Boolean(left?.from && left?.to && right?.from && right?.to && left.from === right.from && left.to === right.to);
+}
+
+function validCalendarSectionRange(errors, label, range) {
+  if (!range || typeof range !== 'object' || Array.isArray(range) || !isIsoDate(range.from) || !isIsoDate(range.to)) {
+    errors.push(`${label}.range must be an object with ISO from/to dates.`);
+    return null;
+  }
+  if (displayDatesForRange(range.from, range.to).length !== 5) {
+    errors.push(`${label}.range must cover Monday-Friday or Friday plus next Monday-Thursday.`);
+    return null;
+  }
+  return range;
+}
+
+function validateCalendarSectionRanges(errors, data) {
+  // Domain validators own full section schemas; publication validation proves
+  // the two calendar sections expose the same supported active date range.
+  const weekAheadRange = validCalendarSectionRange(errors, 'weekAhead', data?.weekAhead?.range);
+  const earningsWeekRange = validCalendarSectionRange(errors, 'earnings.week', data?.earnings?.week?.range);
+  if (weekAheadRange && earningsWeekRange && !rangesMatch(weekAheadRange, earningsWeekRange)) {
+    errors.push('weekAhead.range must match earnings.week.range.');
+  }
+}
+
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
@@ -687,6 +714,7 @@ if (!dashboardMatch) {
   if (data) {
     let chartData = null;
     const chartableRows = chartableRowsFromDashboardData(data);
+    validateCalendarSectionRanges(errors, data);
     validateDashboardTapeCommentary(errors, warnings, data, { validationMode });
 
     if (!chartDataMatch) {

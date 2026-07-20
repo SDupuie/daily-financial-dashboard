@@ -538,10 +538,16 @@ function readCurrentEarningsWeekArtifact(targetRange, checkedAt, filePath = EARN
 }
 
 function earningsTargetRange(args, canonicalWeek) {
+  return activeCalendarRange(args, canonicalWeek?.range);
+}
+
+function activeCalendarRange(args, canonicalRange) {
+  // Edition windows may compute a rollover range, but only scheduled runs or
+  // explicit manual rollover are allowed to replace the canonical active range.
   const rolloverRange = args.scheduled || args.rolloverCalendar
     ? args.calendarRolloverRange
     : null;
-  return rolloverRange || canonicalWeek?.range;
+  return rolloverRange || canonicalRange || null;
 }
 
 function earningsCalendarBuildDecision(args, {
@@ -555,8 +561,8 @@ function earningsCalendarBuildDecision(args, {
   if (!buildNeeded) return { build: false, blocked: false, reason: '' };
   // Only rollover paths are allowed to spend EarningsAPI budget. Schema repair
   // rebuilds the active range from free primary sources instead.
-  if (args.rolloverCalendar) return { build: true, blocked: false, reason: 'explicit_manual_rollover', useEarningsApi: true };
-  if (args.calendarRolloverRange) return { build: true, blocked: false, reason: 'scheduled_rollover', useEarningsApi: true };
+  if (args.rolloverCalendar && args.calendarRolloverRange) return { build: true, blocked: false, reason: 'explicit_manual_rollover', useEarningsApi: true };
+  if (args.scheduled && args.calendarRolloverRange) return { build: true, blocked: false, reason: 'scheduled_rollover', useEarningsApi: true };
   if (unavailableRetry) return { build: true, blocked: false, reason: 'scheduled_unavailable_retry' };
   if (failedAttemptNeedsRetry) return { build: true, blocked: false, reason: 'scheduled_failed_attempt_retry' };
   if (invalidPersistedArtifact) return { build: true, blocked: false, reason: 'schema_repair', skipEarningsApi: true };
@@ -571,6 +577,42 @@ function weekAheadStagingNeedsRebuild(filePath = WEEK_AHEAD_PATH) {
   } catch (_error) {
     return true;
   }
+}
+
+function weekAheadStagingMatchesRange(targetRange, filePath = WEEK_AHEAD_PATH) {
+  if (!targetRange?.from || !targetRange?.to || !fs.existsSync(filePath)) return false;
+  try {
+    const payload = readJson(filePath);
+    if (validateWeekAheadPayload(payload)?.length > 0) return false;
+    return rangesMatch(payload.range, targetRange);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function weekAheadPreparationCommandArgs(args, canonicalWeekAhead, { filePath = WEEK_AHEAD_PATH } = {}) {
+  const targetRange = activeCalendarRange(args, canonicalWeekAhead?.range);
+  if (!targetRange?.from || !targetRange?.to) throw new Error('Week Ahead target range is unavailable.');
+  const invalidPersistedWeekAhead = weekAheadStagingNeedsRebuild(filePath);
+  const authorizedRollover = Boolean((args.scheduled || args.rolloverCalendar) && args.calendarRolloverRange);
+  const unavailableRetry = requiresUnavailableRolloverRetry(canonicalWeekAhead);
+  const stagingMatchesTarget = weekAheadStagingMatchesRange(targetRange, filePath);
+  const commandArgs = ['scripts/fetch_week_ahead.js'];
+  // generated/week_ahead.json is an optimization source, not range authority:
+  // reuse it only when it already matches the canonical or authorized target.
+  if (authorizedRollover || unavailableRetry || invalidPersistedWeekAhead || !stagingMatchesTarget) {
+    commandArgs.push('--date', targetRange.from);
+  } else {
+    commandArgs.push('--refresh-values', '--input', filePath);
+  }
+  return {
+    commandArgs,
+    targetRange,
+    invalidPersistedWeekAhead,
+    stagingMatchesTarget,
+    authorizedRollover,
+    unavailableRetry
+  };
 }
 
 function readOptionalJson(filePath, fallback, label = path.basename(filePath)) {
@@ -2515,16 +2557,13 @@ function main() {
   }
 
   const canonicalWeekAhead = canonicalDashboardData.weekAhead || null;
-  const weekAheadRange = args.calendarRolloverRange || canonicalWeekAhead?.range;
-  const invalidPersistedWeekAhead = weekAheadStagingNeedsRebuild(WEEK_AHEAD_PATH);
-  if (invalidPersistedWeekAhead) {
+  const weekAheadCommand = weekAheadPreparationCommandArgs(args, canonicalWeekAhead);
+  const weekAheadRange = weekAheadCommand.targetRange;
+  if (weekAheadCommand.invalidPersistedWeekAhead) {
     process.stderr.write('Week Ahead staging artifact is invalid under the current contract; rebuilding the active range.\n');
   }
-  const weekAheadArgs = ['scripts/fetch_week_ahead.js'];
-  if (args.calendarRolloverRange || requiresUnavailableRolloverRetry(canonicalWeekAhead) || invalidPersistedWeekAhead) weekAheadArgs.push('--date', weekAheadRange.from);
-  else weekAheadArgs.push('--refresh-values', '--input', WEEK_AHEAD_PATH);
   const weekAheadPreparation = runWithSectionFallback(
-    () => runCommand('node', weekAheadArgs),
+    () => runCommand('node', weekAheadCommand.commandArgs),
     () => buildWeekAheadPreparationFallback(canonicalWeekAhead, weekAheadRange, { checkedAt }),
     {
       label: 'Week Ahead',
@@ -2649,10 +2688,13 @@ module.exports = {
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
   readCurrentEarningsWeekArtifact,
+  activeCalendarRange,
   earningsTargetRange,
   earningsCalendarBuildDecision,
   isEmptyEarningsRecoveryWeek,
   weekAheadStagingNeedsRebuild,
+  weekAheadStagingMatchesRange,
+  weekAheadPreparationCommandArgs,
   runCommand,
   runWithSectionFallback,
   reportPreparationStatus,

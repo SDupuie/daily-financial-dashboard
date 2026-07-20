@@ -4,6 +4,10 @@
 
 This is a personal static financial dashboard. Optimize for a reliable daily update, clear failure behavior, and low maintenance overhead. Do not add process or abstraction for hypothetical contributors.
 
+## Startup Requirement
+
+At the start of every new Codex task in this repository, read `AGENTS.md` and `README.md` before making recommendations, running update workflows, editing files, or performing reviews.
+
 ## Sources of Authority
 
 Use each repository artifact only for the scope it owns:
@@ -41,6 +45,18 @@ Do not directly edit dashboard HTML data as part of a normal refresh. Use the RE
 ## Implementation and Review
 
 Default implementation policy: choose the simplest final architecture and implementation that satisfies this repo's contracts within the authorized scope, even when that requires a larger diff than preserving the current shape. When existing code carries accidental complexity, stale paths, unsupported compatibility branches, or speculative scaffolding, remove or avoid that complexity instead of designing around it.
+
+### Simplicity Decision Gate
+
+Before source-code edits, explicitly choose the smallest correct end state by checking:
+
+- Can the requested behavior be achieved by deleting, narrowing, or reusing existing code before adding new code?
+- Which existing file or function owns the behavior?
+- Is a new helper, fallback, compatibility branch, public command, or production file truly necessary?
+- Will the change preserve visible UI unless a visible change was explicitly requested?
+- What focused runnable check proves the change?
+
+When adding any helper, abstraction, fallback path, compatibility branch, or new production file, document in the work summary why existing code was insufficient. If that reason is weak, do not add it.
 
 Work from this order of preference:
 

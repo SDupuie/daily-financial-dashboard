@@ -48,6 +48,7 @@ const {
   applyEditionMetadata,
   commitDashboardCandidate,
   earningsCalendarBuildDecision,
+  activeCalendarRange,
   earningsTargetRange,
   applyFuturesModule,
   applyTapeQuoteRows,
@@ -63,6 +64,7 @@ const {
   runCommand,
   runWithSectionFallback,
   isEmptyEarningsRecoveryWeek,
+  weekAheadPreparationCommandArgs,
   stageDashboardCandidate,
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
@@ -592,17 +594,22 @@ function testEarningsCalendarBuildAuthorization() {
     { from: '2026-07-20', to: '2026-07-24' }
   );
   assert.deepEqual(
-    earningsTargetRange({ scheduled: false, calendarRolloverRange: rolloverRange }, canonicalWeek),
+    activeCalendarRange({ scheduled: false, calendarRolloverRange: rolloverRange }, canonicalWeek.range),
     canonicalWeek.range,
     'An ordinary manual Friday-afternoon run must not infer calendar-build authority from its edition.'
   );
   assert.deepEqual(
-    earningsTargetRange({ scheduled: true, calendarRolloverRange: rolloverRange }, canonicalWeek),
+    activeCalendarRange({ scheduled: true, calendarRolloverRange: rolloverRange }, canonicalWeek.range),
     rolloverRange
   );
   assert.deepEqual(
-    earningsTargetRange({ scheduled: false, rolloverCalendar: true, calendarRolloverRange: rolloverRange }, canonicalWeek),
+    activeCalendarRange({ scheduled: false, rolloverCalendar: true, calendarRolloverRange: rolloverRange }, canonicalWeek.range),
     rolloverRange
+  );
+  assert.deepEqual(
+    earningsTargetRange({ scheduled: false, calendarRolloverRange: rolloverRange }, canonicalWeek),
+    canonicalWeek.range,
+    'Earnings must use the same active calendar range helper as Week Ahead.'
   );
   const decision = (args, overrides = {}) => earningsCalendarBuildDecision({
     scheduled: false,
@@ -617,7 +624,12 @@ function testEarningsCalendarBuildAuthorization() {
   });
 
   assert.deepEqual(decision({}), { build: false, blocked: true, reason: 'manual_build_not_authorized' });
-  assert.deepEqual(decision({ rolloverCalendar: true }), { build: true, blocked: false, reason: 'explicit_manual_rollover', useEarningsApi: true });
+  assert.deepEqual(
+    decision({ calendarRolloverRange: rolloverRange }),
+    { build: false, blocked: true, reason: 'manual_build_not_authorized' },
+    'A manual edition-derived range is not rollover authority without --rollover-calendar.'
+  );
+  assert.deepEqual(decision({ rolloverCalendar: true, calendarRolloverRange: rolloverRange }), { build: true, blocked: false, reason: 'explicit_manual_rollover', useEarningsApi: true });
   assert.deepEqual(decision({ scheduled: true, calendarRolloverRange: canonicalWeek.range }), { build: true, blocked: false, reason: 'scheduled_rollover', useEarningsApi: true });
   assert.deepEqual(decision({ scheduled: true }, { failedAttemptNeedsRetry: true }), { build: true, blocked: false, reason: 'scheduled_failed_attempt_retry' });
   assert.deepEqual(
@@ -634,6 +646,52 @@ function testEarningsCalendarBuildAuthorization() {
     decision({ scheduled: true }, { canonicalWeek: { ...canonicalWeek, availability: { status: 'unavailable' } } }),
     { build: true, blocked: false, reason: 'scheduled_unavailable_retry' }
   );
+}
+
+function testWeekAheadPreparationUsesCanonicalRangeForManualRefresh() {
+  const canonicalRange = { from: '2026-07-13', to: '2026-07-17' };
+  const rolloverRange = { from: '2026-07-17', to: '2026-07-23' };
+  const canonicalWeekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: canonicalRange,
+    officialSchedule: { events: [], authorities: [] },
+    now: new Date('2026-07-13T12:00:00Z')
+  });
+  const preRolledWeekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: rolloverRange,
+    officialSchedule: { events: [], authorities: [] },
+    now: new Date('2026-07-17T18:00:00Z')
+  });
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'week-ahead-range-');
+  const stagingPath = path.join(dir, 'week_ahead.json');
+  fs.writeFileSync(stagingPath, `${JSON.stringify(preRolledWeekAhead, null, 2)}\n`);
+
+  const manualPreparation = weekAheadPreparationCommandArgs({
+    scheduled: false,
+    rolloverCalendar: false,
+    calendarRolloverRange: rolloverRange
+  }, canonicalWeekAhead, { filePath: stagingPath });
+  assert.deepEqual(manualPreparation.targetRange, canonicalWeekAhead.range);
+  assert.deepEqual(
+    manualPreparation.commandArgs,
+    ['scripts/fetch_week_ahead.js', '--date', canonicalRange.from],
+    'A normal manual refresh must not reuse a pre-rolled Week Ahead staging artifact.'
+  );
+
+  fs.writeFileSync(stagingPath, `${JSON.stringify(canonicalWeekAhead, null, 2)}\n`);
+  const matchingManualPreparation = weekAheadPreparationCommandArgs({
+    scheduled: false,
+    rolloverCalendar: false,
+    calendarRolloverRange: rolloverRange
+  }, canonicalWeekAhead, { filePath: stagingPath });
+  assert.deepEqual(matchingManualPreparation.commandArgs, ['scripts/fetch_week_ahead.js', '--refresh-values', '--input', stagingPath]);
+
+  const rolloverPreparation = weekAheadPreparationCommandArgs({
+    scheduled: false,
+    rolloverCalendar: true,
+    calendarRolloverRange: rolloverRange
+  }, canonicalWeekAhead, { filePath: stagingPath });
+  assert.deepEqual(rolloverPreparation.targetRange, rolloverRange);
+  assert.deepEqual(rolloverPreparation.commandArgs, ['scripts/fetch_week_ahead.js', '--date', rolloverRange.from]);
 }
 
 function testPartialDeterministicRowsValidate() {
@@ -3037,21 +3095,57 @@ function validationDashboardData() {
   return createDashboardValidationFixture().dashboard;
 }
 
-function testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover() {
-  const staleEarnings = validationDashboardData();
-  staleEarnings.earnings.week.range = { from: '2026-07-06', to: '2026-07-10' };
+function testDashboardValidatorRejectsCalendarRangeDivergence() {
+  const staleRange = { from: '2026-07-06', to: '2026-07-10' };
+  const alignedStaleCalendar = validationDashboardData();
+  alignedStaleCalendar.earnings.week.range = staleRange;
+  alignedStaleCalendar.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+    range: staleRange,
+    officialSchedule: { events: [], authorities: [] },
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  const alignedStaleResult = validateDashboardFixture(alignedStaleCalendar);
+  assert.equal(alignedStaleResult.status, 0, 'A stale calendar baseline must remain renderable when Week Ahead and Earnings agree.');
 
+  const staleEarnings = validationDashboardData();
+  staleEarnings.earnings.week.range = staleRange;
   const staleEarningsResult = validateDashboardFixture(staleEarnings);
-  assert.equal(staleEarningsResult.status, 0, 'A stale New-pill baseline must not block a renderable Earnings section.');
+  assert.equal(staleEarningsResult.status, 1);
+  assert.match(staleEarningsResult.stderr, /weekAhead\.range must match earnings\.week\.range/);
 
   const staleWeekAhead = validationDashboardData();
   staleWeekAhead.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
-    range: { from: '2026-07-06', to: '2026-07-10' },
+    range: staleRange,
     officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-10T18:00:00Z')
   });
   const staleWeekAheadResult = validateDashboardFixture(staleWeekAhead);
-  assert.equal(staleWeekAheadResult.status, 0, 'A stale New-pill baseline must not block a renderable Week Ahead section.');
+  assert.equal(staleWeekAheadResult.status, 1);
+  assert.match(staleWeekAheadResult.stderr, /weekAhead\.range must match earnings\.week\.range/);
+
+  const missingWeekAheadRange = validationDashboardData();
+  delete missingWeekAheadRange.weekAhead.range;
+  const missingWeekAheadRangeResult = validateDashboardFixture(missingWeekAheadRange);
+  assert.equal(missingWeekAheadRangeResult.status, 1);
+  assert.match(missingWeekAheadRangeResult.stderr, /weekAhead\.range must be an object with ISO from\/to dates/);
+
+  const missingEarningsRange = validationDashboardData();
+  delete missingEarningsRange.earnings.week.range;
+  const missingEarningsRangeResult = validateDashboardFixture(missingEarningsRange);
+  assert.equal(missingEarningsRangeResult.status, 1);
+  assert.match(missingEarningsRangeResult.stderr, /earnings\.week\.range must be an object with ISO from\/to dates/);
+
+  const malformedWeekAheadRange = validationDashboardData();
+  malformedWeekAheadRange.weekAhead.range = { from: 'bad', to: '2026-07-10' };
+  const malformedWeekAheadRangeResult = validateDashboardFixture(malformedWeekAheadRange);
+  assert.equal(malformedWeekAheadRangeResult.status, 1);
+  assert.match(malformedWeekAheadRangeResult.stderr, /weekAhead\.range must be an object with ISO from\/to dates/);
+
+  const unsupportedEarningsRange = validationDashboardData();
+  unsupportedEarningsRange.earnings.week.range = { from: '2026-07-07', to: '2026-07-11' };
+  const unsupportedEarningsRangeResult = validateDashboardFixture(unsupportedEarningsRange);
+  assert.equal(unsupportedEarningsRangeResult.status, 1);
+  assert.match(unsupportedEarningsRangeResult.stderr, /earnings\.week\.range must cover Monday-Friday or Friday plus next Monday-Thursday/);
 }
 
 function testDashboardValidatorTapeNotesAreModeSpecific() {
@@ -3626,6 +3720,7 @@ const architectureContractTests = Object.freeze([
   testSectionCommandTimeoutFallsOpen,
   testEarningsRefreshFailureKeepsFreshBuildArtifact,
   testEarningsCalendarBuildAuthorization,
+  testWeekAheadPreparationUsesCanonicalRangeForManualRefresh,
   testLastGoodDashboardRecovery,
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,
   testArchitecturePreparationLeavesCanonicalUnchanged,
@@ -3673,7 +3768,7 @@ async function main() {
     testOpeningRenderingOmitsIncompleteBlocks,
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,
-    testDashboardValidatorAllowsCompletedFridayWithPartialCalendarRollover,
+    testDashboardValidatorRejectsCalendarRangeDivergence,
     testDashboardValidatorTapeNotesAreModeSpecific,
     testDashboardWriterNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,

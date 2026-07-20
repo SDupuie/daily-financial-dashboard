@@ -61,7 +61,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
    - Leave generated masthead date/edition, compile prefix, Futures labels, and Tape session label unchanged.
    - The AI owns only the key-driver portion of `tape.label` after the separator and non-derivable source or holiday context after the generated compile prefix.
    - The run date is always the current Chicago date, including prior-evening holiday context; explain a next-day closure in `weekAhead`, stories, or the editorial footer context rather than forward-dating the envelope.
-   - Friday afternoon shows current Friday plus next Monday-Thursday. Monday morning shows current Monday-Friday. Ordinary manual runs refresh the active Earnings range; manual calendar rollover requires `--rollover-calendar` and uses the local weekend day when run on Saturday or Sunday.
+   - Friday afternoon shows current Friday plus next Monday-Thursday. Monday morning shows current Monday-Friday. Ordinary manual runs refresh the active Week Ahead and Earnings ranges; manual calendar rollover requires `--rollover-calendar` and uses the local weekend day when run on Saturday or Sunday.
 
 2. Confirm the normal deterministic refresh ran before reading news.
    - Use the matching canonical two-command workflow entry.
