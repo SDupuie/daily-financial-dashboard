@@ -2307,7 +2307,10 @@
     }
     footer {
       display: grid;
-      gap: var(--gap-sm);
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      column-gap: var(--gap-md);
+      row-gap: var(--gap-sm);
       color: var(--muted);
       border-top: 5px solid var(--ink);
       margin-top: 42px;
@@ -2316,6 +2319,12 @@
       font-weight: 800;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+    }
+    .footer-compiled { min-width: 0; }
+    .footer-disclaimer {
+      justify-self: end;
+      text-align: right;
+      white-space: nowrap;
     }
     html[data-theme="dark"] {
       --paper: #10151d;
@@ -2723,6 +2732,8 @@
       }
     }
     @media (max-width: 560px) {
+      footer { grid-template-columns: 1fr; }
+      .footer-disclaimer { white-space: normal; }
       .week-day-header {
         grid-template-columns: 60px 10px minmax(0, 1fr);
         row-gap: 10px;
@@ -18115,18 +18126,14 @@
         return section('Calendar', 'The Week Ahead', actionHtml ? '' : note, body, 'section-week-ahead', actionHtml);
       }
 
-      function compactCompiledText(data) {
-        const raw = String(data.footer?.compiled || '');
-        const disclaimer = String(data.footer?.disclaimer || 'Not investment advice').trim();
-        if (!raw) return disclaimer;
-        if (raw.toLowerCase().includes(disclaimer.toLowerCase())) return raw;
-        const compiled = raw.replace(/[.\s]+$/, '');
-        return `${compiled} · ${disclaimer}`;
-      }
-
       function renderFooter(data) {
+        const raw = String(data.footer?.compiled || '').trim();
+        const disclaimer = String(data.footer?.disclaimer || 'Not investment advice').trim();
+        const compiled = raw.replace(/[.\s]+$/, '');
+        const separateDisclaimer = disclaimer && !compiled.toLowerCase().includes(disclaimer.toLowerCase());
         $('footer').innerHTML = `
-          <div>${esc(compactCompiledText(data))}</div>
+          <div class="footer-compiled">${esc(compiled)}</div>
+          ${separateDisclaimer ? `<div class="footer-disclaimer">${esc(disclaimer)}</div>` : ''}
         `;
       }
 
