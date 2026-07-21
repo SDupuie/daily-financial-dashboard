@@ -2732,8 +2732,16 @@
       }
     }
     @media (max-width: 560px) {
-      footer { grid-template-columns: 1fr; }
-      .footer-disclaimer { white-space: normal; }
+      footer {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        text-align: center;
+      }
+      .footer-disclaimer {
+        justify-self: center;
+        text-align: center;
+        white-space: normal;
+      }
       .week-day-header {
         grid-template-columns: 60px 10px minmax(0, 1fr);
         row-gap: 10px;
