@@ -32,8 +32,8 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 
 | Run | 1. Prepare Handoff | 2. AI Editorial Work | 3. Apply Handoff |
 | --- | --- | --- | --- |
-| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
-| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every requested non-News review item and decision. For News, follow the News-card contract and write selected cards only to `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
+| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the section contracts below. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
+| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the section contracts below. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
 
 ### Core guarantees
 
@@ -46,6 +46,8 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 Use this section during AI Editorial Work. It is the canonical handoff-editing contract for `generated/editorial/dashboard-data.json`: review, write, and select only the editorial fields described here. Do not edit source code, dashboard HTML, generated market data, calendar facts, earnings facts, or deterministic section values as part of AI Editorial Work.
 
 ### AI Editorial Work contracts
+
+Blank fields or decisions marked `pending_review` are active AI assignments unless the section contract explicitly says they are system-provided carry-forward state.
 
 - `opening`: write the current edition's `headline`, `deck`, and exactly 4 catalyst cards. Each catalyst must have a short `label` and a current, evidence-supported `body` summarizing one of the update's main market drivers.
 - `news`: use `editorialReview.newsSearch` as read-only source material. The only News field the AI edits is `editorialReview.newsSelection`; follow the News-card contract and Story selection policy below.
@@ -165,6 +167,8 @@ A transition from `scheduled` to `awaiting_actual` does not create a new narrati
 Use official company releases, filings, presentations, and earnings-call materials first. Use the deterministic Earnings facts for reported values and reaction data. Use reputable reporting when needed to explain market context or reaction. Evidence reviewed for one company does not verify commentary for another.
 
 `verified` means that current evidence was reviewed for that specific company, transition, and narrative field. The presence of text alone does not make a field verified.
+
+For Earnings, blank narrative fields marked `pending_review` are required AI assignments, not optional placeholders. Before Apply, scan every visible `earnings.week.rows[]` row. If a row has actual EPS or revenue, `outcome.interpretation` must be filled and marked `verified`, and guidance must be resolved as `verified`, `not_provided`, or still explicitly `pending_review` only when the official-source review could not be completed. If the verified close is available, `reaction.note` must also be filled and marked `verified`.
 
 Earnings field contract after actuals arrive:
 
