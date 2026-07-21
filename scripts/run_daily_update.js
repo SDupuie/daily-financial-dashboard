@@ -288,10 +288,7 @@ function chicagoEditionMetadata(windowMode, now = scheduledNow()) {
 
 function applyEditionMetadata(data, windowMode, now = scheduledNow()) {
   const metadata = chicagoEditionMetadata(windowMode, now);
-  const compiled = String(data.footer?.compiled || '');
-  const sourceContextIndex = compiled.indexOf(' · ');
-  const sourceContext = sourceContextIndex >= 0 ? compiled.slice(sourceContextIndex) : '';
-  data.footer = { ...data.footer, compiled: `${metadata.compiledPrefix}${sourceContext}` };
+  data.footer = { ...data.footer, compiled: metadata.compiledPrefix };
   if (!metadata.sectionLabel) return data;
   data.masthead = { ...data.masthead, edition: metadata.edition, date: metadata.date.replace(', ', ' · ') };
   data.futuresModule = { ...data.futuresModule, sectionLabel: metadata.sectionLabel, sectionTitle: metadata.sectionTitle };
@@ -869,6 +866,13 @@ function prepareEditorialWorkspace(args) {
   if (windowMode) applyEditionMetadata(dashboardData, windowMode, preparedAt);
   delete dashboardData.lede;
   delete dashboardData.renesas;
+  // Opening copy belongs to the current editorial pass; never let prior-run
+  // hero text or catalyst cards appear reviewed merely because staging copied them.
+  dashboardData.opening = {
+    headline: '',
+    deck: '',
+    catalysts: Array.from({ length: 4 }, () => ({ label: '', body: '' }))
+  };
   const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
     schemaVersion: 1,
@@ -2190,21 +2194,9 @@ function applyDashboardDataJson(args) {
       reviewManifest.preparedAt
     )
   };
-  const candidateCompiled = String(candidateDashboardData.footer?.compiled || '');
-  const editorialCompiled = String(editorialDashboardData.footer?.compiled || '');
-  const candidateFooterContextIndex = candidateCompiled.indexOf(' · ');
-  const editorialFooterContextIndex = editorialCompiled.indexOf(' · ');
-  const candidateMarketDataIndex = candidateCompiled.indexOf(' · Market data:');
-  const editorialMarketDataIndex = editorialCompiled.indexOf(' · Market data:');
-  const editorialContext = editorialFooterContextIndex >= 0 && editorialMarketDataIndex > editorialFooterContextIndex
-    ? editorialCompiled.slice(editorialFooterContextIndex, editorialMarketDataIndex)
-    : '';
-  const footerContext = candidateMarketDataIndex >= 0
-    ? `${editorialContext}${candidateCompiled.slice(candidateMarketDataIndex)}`
-    : candidateFooterContextIndex >= 0 ? candidateCompiled.slice(candidateFooterContextIndex) : '';
   dashboardData.footer = {
     ...dashboardData.footer,
-    compiled: `${candidateFooterContextIndex >= 0 ? candidateCompiled.slice(0, candidateFooterContextIndex) : candidateCompiled}${footerContext}`
+    compiled: String(candidateDashboardData.footer?.compiled || '')
   };
   const editorialWeekAheadDays = new Map(
     (Array.isArray(editorialDashboardData.weekAhead?.days) ? editorialDashboardData.weekAhead.days : [])

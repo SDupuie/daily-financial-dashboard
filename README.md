@@ -53,28 +53,28 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 - `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
 - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged. Complete every visible Earnings row under the Earnings editorial contract below.
 - `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions.
-- `footer`: preserve the generated compile prefix and maintain only concise non-derivable source-family or holiday context.
+- `footer`: leave the generated footer unchanged.
 
 ### AI Editorial Work checklist
 
 1. Verify the handoff and deterministic envelope before editorial work.
    - Use the current handoff only; regenerate it if it becomes stale.
    - Leave generated masthead date/edition, compile prefix, Futures labels, and Tape session label unchanged.
-   - The AI owns only the key-driver portion of `tape.label` after the separator and non-derivable source or holiday context after the generated compile prefix.
-   - The run date is always the current Chicago date, including prior-evening holiday context; explain a next-day closure in `weekAhead`, stories, or the editorial footer context rather than forward-dating the envelope.
+   - The AI owns only the key-driver portion of `tape.label` after the separator.
+   - The run date is always the current Chicago date, including prior-evening holiday context; explain a next-day closure in `weekAhead` or stories rather than forward-dating the envelope.
    - Friday afternoon shows current Friday plus next Monday-Thursday. Monday morning shows current Monday-Friday. Ordinary manual runs refresh the active Week Ahead and Earnings ranges; manual calendar rollover requires `--rollover-calendar` and uses the local weekend day when run on Saturday or Sunday.
 
 2. Confirm the normal deterministic refresh ran before reading news.
    - Use the matching canonical two-command workflow entry.
    - If generated market data, calendar facts, earnings facts, or deterministic section values look stale or wrong, stop and use the Reference Appendix.
-   - Do not name quote/news sources in narrative copy. News cards may show the deterministic card-level `sourceLabel`; keep broader source-family attribution in `footer.compiled` and use chart source details for row-specific provenance.
+   - Do not name quote/news sources in narrative copy. News cards may show the deterministic card-level `sourceLabel`; use chart source details for row-specific provenance.
    - Do not use source-verification phrasing such as `Reuters reported`, `Yahoo showed`, `fallback chain`, or similar process commentary in user-facing text.
    - Do not use market-superlative language such as `record`, `all-time`, `fresh high`, `new high`, `record close`, or `record low` unless that exact claim was directly verified for that instrument and session.
 
 3. Review downloaded News after prices and before making any editorial decisions.
    - Use `editorialReview.newsSearch` as read-only source material; do not edit, delete, reorder, prune, summarize, or mark candidates unavailable.
    - The AI owns relevance review, source-quality assessment, angle diversity, final selection, and reader-facing copy. The only News field the AI edits is `editorialReview.newsSelection`.
-   - Before editing Opening, Futures stories, Tape commentary, Moving Today, Crypto notes, Earnings narrative, Week Ahead commentary, Market Lens, or footer context, review every candidate in `editorialReview.newsSearch.generalCandidates` and `editorialReview.newsSearch.cryptoCandidates`, including every still-fresh prior card. Do not stop reviewing after finding enough stories to fill a section.
+   - Before editing Opening, Futures stories, Tape commentary, Moving Today, Crypto notes, Earnings narrative, Week Ahead commentary, or Market Lens, review every candidate in `editorialReview.newsSearch.generalCandidates` and `editorialReview.newsSearch.cryptoCandidates`, including every still-fresh prior card. Do not stop reviewing after finding enough stories to fill a section.
    - Review each candidate in sufficient detail to assess its title and subject, publisher and source fidelity, publication date and exact timestamp, reader-facing URL, available summary or article text, current-dashboard relevance, substantial overlap with other candidates, and eligibility for the authoritative Futures publication window. Do not silently skip a candidate just because article-page text is missing.
    - Provisional notes may be recorded during the complete-pool review, but do not finalize a shortlist, reject the remaining pool, write story copy, or begin other editorial work until every candidate has been examined.
    - Compare all candidates in the generated News inventory with every still-fresh prior card. Retain a prior card only when it remains among the strongest relevant, source-faithful coverage; do not discard or churn it merely because the scheduled window changed.
@@ -84,7 +84,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 
 4. Apply these copy and tone rules throughout AI Editorial Work.
    - Write normal text characters rather than HTML entity escapes unless actual markup is intended. Example: use `S&P`, not `S&amp;P`.
-   - Keep publisher attribution out of story titles and bodies. News-card provenance belongs only in the generated `sourceLabel` metadata and footer source-family context.
+   - Keep publisher attribution out of story titles and bodies. News-card provenance belongs only in the generated `sourceLabel` metadata.
    - Do not write tautological market-status copy that states routine facts without saying why they matter.
    - Market-closure rows should read as status labels, not watchlists. Prefer `U.S. Markets Closed`, `Markets Closed`, or `Early Close` as appropriate, then put any crypto or overseas-market context in the event sentence only if it is genuinely relevant.
    - Crypto ticker notes in `tape.rows[]` rows with `group: "Crypto"` should explain the factor driving that ticker or proxy today: bitcoin leadership, ETH/SOL relative strength, XRP-specific participation, ETF demand, listed-proxy beta, sentiment, flows, regulation, market structure, security events, protocol updates, or exchange/issuer developments.
@@ -102,7 +102,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
    - `crypto`: leave generated `crypto.stats[]` values unchanged and select only the crypto news collection through `editorialReview.newsSelection.crypto` per the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial.
    - `earnings.week`: complete the Earnings editorial contract below.
    - `weekAhead`: complete the Week Ahead and Market Lens editorial contract below.
-   - `footer`: complete the Footer contract above.
+   - `footer`: leave the generated footer unchanged.
 
 6. Run the final pre-Apply editorial gate.
    - Confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape or `editorialReview.marketLensDecisions[].action`. Complete every reviewable Earnings and Week Ahead Outcome field. Any remaining `pending_review` must be a system-provided carry-forward state left unchanged.
@@ -116,7 +116,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 
 ### News-card contract
 
-Every news card is a dated, reader-facing article. Do not use `referencePage`; durable calendars and schedules belong in `weekAhead` or footer context.
+Every news card is a dated, reader-facing article. Do not use `referencePage`; durable calendars and schedules belong in `weekAhead`.
 
 | Selection bucket | Target | AI supplies |
 | --- | --- | --- |
@@ -287,7 +287,7 @@ Manual fallback work never goes directly into `daily_financial_news.html`. Put t
 - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2` first, then the Alternative.me page if the API fails.
 - Asset Allocation Portfolio rows: instrument-level ETF market data only. Do not import or recreate tactical allocation/model logic from the separate Asset Allocation Dashboard.
 
-For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or footer. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows`.
+For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or its stale-data UI. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows`.
 
 ### Earnings Deterministic Method
 

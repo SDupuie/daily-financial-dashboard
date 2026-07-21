@@ -300,7 +300,7 @@ function createDashboardValidationFixture() {
         now: new Date(FIXTURE_NOW)
       }),
       footer: {
-        compiled: 'Compiled Friday, July 10, 2026 at 4:00 PM CDT · Market data: Alternative.me Crypto Fear & Greed Index, CoinMarketCap Altcoin Season Index'
+        compiled: 'Compiled Friday, July 10, 2026 at 4:00 PM CDT'
       },
       opening: {
         headline: 'Fixture headline',
@@ -1002,9 +1002,11 @@ async function testUpdaterModulePatches() {
   assert.deepEqual(data.futuresModule.futures.map((row) => row.symbol), ['ES=F', 'NQ=F', 'YM=F', 'RTY=F']);
 
   const weekendData = dashboardFixture();
+  weekendData.footer = { compiled: 'Compiled old run · Market data: Incorrect inherited source list' };
   applyEditionMetadata(weekendData, 'afternoon', new Date('2026-07-19T15:00:00.000Z'));
   assert.equal(weekendData.masthead.edition, 'Weekend Edition');
   assert.equal(weekendData.futuresModule.sectionTitle, 'Session Futures');
+  assert.equal(weekendData.footer.compiled, 'Compiled Sunday, July 19, 2026 at 10:00 AM CDT');
 
   applyAssetAllocationPortfolio(data, {
     compiledAt: '2026-07-06T13:00:00.000Z',
@@ -1782,6 +1784,9 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.deepEqual(handoff.futuresModule.stories, []);
   assert.deepEqual(handoff.stories, []);
   assert.deepEqual(handoff.crypto.notes, []);
+  assert.equal(handoff.opening.headline, '');
+  assert.equal(handoff.opening.deck, '');
+  assert.deepEqual(handoff.opening.catalysts, Array.from({ length: 4 }, () => ({ label: '', body: '' })));
   assert.deepEqual(handoff.editorialReview.newsSelection, { futures: [], stories: [], crypto: [] });
   assert.equal(
     handoff.editorialReview.newsSearch.generalCandidates.length,
@@ -2230,7 +2235,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   editorialPayload.crypto.stats[0].price = '$9.99T';
   editorialPayload.editorialReview.newsSelection.crypto[0].title = 'Reviewed crypto story';
   editorialPayload.assetAllocationPortfolio.rows[0].price = '$999.00';
-  editorialPayload.footer.compiled = dashboard.footer.compiled.replace(' · Market data:', ' · Holiday context: Reviewed. · Market data:');
+  editorialPayload.footer.compiled = `${dashboard.footer.compiled} · Holiday context: Reviewed. · Market data: Incorrect inherited source list`;
   const editorialEventDay = editorialPayload.weekAhead.days.find((day) => day.events.length);
   editorialEventDay.events[0].forecast = '9.9%';
   editorialEventDay.outcome = {
@@ -2326,7 +2331,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.crypto.notesCoverage, undefined);
   assert.deepEqual(finalized.tape.rows[0], dashboard.tape.rows[0], 'Editorial input cannot alter an unchanged quote bundle.');
   assert.match(finalized.tape.label, /^Friday After The Bell · Reviewed drivers$/);
-  assert.match(finalized.footer.compiled, /^Compiled Friday, July 10, 2026 at 4:00 PM CDT · Holiday context: Reviewed\./);
+  assert.equal(finalized.footer.compiled, 'Compiled Friday, July 10, 2026 at 4:00 PM CDT');
   assert.deepEqual(finalized.futuresModule.futures, dashboard.futuresModule.futures);
   assert.deepEqual(finalized.crypto.stats, dashboard.crypto.stats);
   assert.deepEqual(finalized.assetAllocationPortfolio, dashboard.assetAllocationPortfolio);
