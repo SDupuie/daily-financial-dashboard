@@ -274,13 +274,16 @@ const EVENT_RULES = [
   releaseRule({ key: 'core-pce', names: ['Core PCE Price Index'], name: 'Core PCE Price Index', agency: 'BEA', period: 'YoY', impact: 'high' }),
   releaseRule({ key: 'nonfarm-payrolls', names: ['Nonfarm Payrolls'], name: 'Nonfarm Payrolls', agency: 'BLS', period: 'Monthly', impact: 'high' }),
   releaseRule({ key: 'unemployment-rate', names: ['Unemployment Rate'], name: 'Unemployment Rate', agency: 'BLS', period: 'Monthly', impact: 'high' }),
-  releaseRule({ key: 'average-hourly-earnings', names: ['Average Hourly Earnings'], name: 'Average Hourly Earnings', agency: 'BLS', period: 'MoM', impact: 'high' }),
+  releaseRule({ key: 'average-hourly-earnings', names: ['Average Hourly Earnings'], name: 'Average Hourly Earnings', agency: 'BLS', period: 'YoY', impact: 'high' }),
   releaseRule({ key: 'adp-employment', names: ['ADP Employment Change'], name: 'ADP Employment Change', agency: 'ADP', period: 'Monthly', impact: 'medium' }),
   releaseRule({ key: 'jobless-claims', names: ['Initial Jobless Claims'], name: 'Initial Jobless Claims', agency: 'DOL', period: 'Weekly', impact: 'medium' }),
   releaseRule({ key: 'jolts', names: ['JOLTs Job Openings', 'JOLTS Job Openings'], name: 'JOLTS Job Openings', agency: 'BLS', period: 'Monthly', impact: 'medium' }),
   releaseRule({ key: 'retail-sales', names: ['Retail Sales'], name: 'Retail Sales', agency: 'Census', period: 'MoM', impact: 'high' }),
   releaseRule({ key: 'core-retail-sales', names: ['Core Retail Sales'], name: 'Core Retail Sales', agency: 'Census', period: 'MoM', impact: 'medium' }),
-  releaseRule({ key: 'gdp', names: ['GDP Growth Rate', 'GDP Price Index'], name: 'Gross Domestic Product', agency: 'BEA', period: 'Quarterly', impact: 'high' }),
+  releaseRule({
+    key: 'gdp', names: ['GDP Growth Rate', 'GDP Price Index'], name: 'Gross Domestic Product', agency: 'BEA', impact: 'high',
+    variants: [{ key: 'level', period: 'Level' }, { key: 'growth', period: 'QoQ SAAR' }]
+  }),
   releaseRule({ key: 'durable-goods', names: ['Durable Goods Orders'], name: 'Durable Goods Orders', agency: 'Census', period: 'MoM', impact: 'medium' }),
   releaseRule({ key: 'industrial-production', names: ['Industrial Production'], name: 'Industrial Production', agency: 'Federal Reserve', period: 'MoM', impact: 'medium' }),
   releaseRule({ key: 'factory-orders', names: ['Factory Orders'], name: 'Factory Orders', agency: 'Census', period: 'MoM', impact: 'low' }),
@@ -294,7 +297,7 @@ const EVENT_RULES = [
   releaseRule({ key: 'building-permits', names: ['Building Permits'], name: 'Building Permits', agency: 'Census', period: 'Annualized', impact: 'low' }),
   releaseRule({ key: 'existing-home-sales', names: ['Existing Home Sales'], name: 'Existing Home Sales', agency: 'NAR', period: 'Annualized', impact: 'low' }),
   releaseRule({ key: 'new-home-sales', names: ['New Home Sales'], name: 'New Home Sales', agency: 'Census', period: 'Annualized', impact: 'low' }),
-  releaseRule({ key: 'trade-balance', names: ['Trade Balance'], name: 'Trade Balance', agency: 'Census', period: 'Monthly', impact: 'medium' }),
+  releaseRule({ key: 'trade-balance', names: ['Trade Balance'], name: 'Trade Balance', agency: 'BEA', period: 'Monthly', impact: 'medium' }),
   releaseRule({ key: 'federal-budget', names: ['Federal Budget Balance'], name: 'Federal Budget Balance', agency: 'Treasury', period: 'Monthly', impact: 'low' }),
   releaseRule({ key: 'crude-oil-inventories', names: ['Crude Oil Inventories'], name: 'EIA Crude Oil Inventories', agency: 'EIA', period: 'Weekly', impact: 'low' }),
   releaseRule({ key: 'opec-meeting', names: ['OPEC Meeting'], name: 'OPEC Meeting', agency: 'OPEC', period: 'Policy', impact: 'medium' }),
@@ -434,11 +437,17 @@ const FX_MACRO_VALUE_RULES = {
   'core-pce': { announcementIndicator: 'core_pce', predictionIndicator: 'core_pce', field: 'val', unit: 'percent' },
   'nonfarm-payrolls': { announcementIndicator: 'non_farm_payrolls', predictionIndicator: 'non_farm_payrolls', field: 'val', unit: 'thousands' },
   'unemployment-rate': { announcementIndicator: 'unemployment', predictionIndicator: 'unemployment', field: 'val', unit: 'percent' },
+  'average-hourly-earnings': { announcementIndicator: 'average_hourly_earnings', predictionIndicator: 'average_hourly_earnings', field: 'val', unit: 'percent' },
   'jobless-claims': { announcementIndicator: 'initial_jobless_claims', predictionIndicator: 'initial_jobless_claims', field: 'val', unit: 'thousands' },
+  jolts: { announcementIndicator: 'job_openings', predictionIndicator: 'job_openings', field: 'val', unit: 'thousandsAsMillions' },
   'retail-sales': { announcementIndicator: 'retail_sales', predictionIndicator: 'retail_sales', field: 'val', unit: 'percent' },
+  'gdp-level': { announcementIndicator: 'gdp', predictionIndicator: 'gdp', field: 'val', unit: 'usdBillions' },
+  'gdp-growth': { announcementIndicator: 'gdp_growth_qoq_saar', predictionIndicator: 'gdp_growth_qoq_saar', field: 'val', unit: 'percent' },
   'durable-goods': { announcementIndicator: 'durable_goods_orders', predictionIndicator: 'durable_goods_orders', field: 'val', unit: 'percent' },
   'housing-starts': { announcementIndicator: 'housing_starts', predictionIndicator: 'housing_starts', field: 'val', unit: 'millions' },
-  'building-permits': { announcementIndicator: 'building_permits', predictionIndicator: 'building_permits', field: 'val', unit: 'millions' }
+  'building-permits': { announcementIndicator: 'building_permits', predictionIndicator: 'building_permits', field: 'val', unit: 'millions' },
+  'trade-balance': { announcementIndicator: 'trade_balance', predictionIndicator: 'trade_balance', field: 'val', unit: 'usdMillions' },
+  'fed-rate-decision': { announcementIndicator: 'policy_rate_midpoint', predictionIndicator: 'policy_rate_midpoint', field: 'val', unit: 'percent' }
 };
 
 function numberLabel(value, maximumFractionDigits = 1) {
@@ -463,6 +472,28 @@ function formatFxMacroValue(value, unit) {
     if (!Number.isFinite(numeric)) return null;
     const label = numberLabel(Math.abs(numeric) >= 100 ? numeric / 1000 : numeric, 3);
     return label === null ? null : `${label}M`;
+  }
+  if (unit === 'thousandsAsMillions') {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    const label = numberLabel(numeric / 1000, 1);
+    return label === null ? null : `${label}M`;
+  }
+  if (unit === 'usdBillions') {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    const absolute = Math.abs(numeric);
+    const label = absolute >= 1000 ? numberLabel(absolute / 1000, 2) : numberLabel(absolute, 1);
+    if (label === null) return null;
+    return `${numeric < 0 ? '-' : ''}$${label}${absolute >= 1000 ? 'T' : 'B'}`;
+  }
+  if (unit === 'usdMillions') {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    const absolute = Math.abs(numeric);
+    const label = absolute >= 1000 ? numberLabel(absolute / 1000, 1) : numberLabel(absolute, 0);
+    if (label === null) return null;
+    return `${numeric < 0 ? '-' : ''}$${label}${absolute >= 1000 ? 'B' : 'M'}`;
   }
   return numberLabel(value, 2);
 }

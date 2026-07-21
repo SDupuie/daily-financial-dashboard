@@ -429,6 +429,75 @@ async function testProducerAndScheduleNormalization() {
   assert.deepEqual(validateWeekAheadPayload(recoveredPayload), []);
 }
 
+function testVerifiedFxMacroValueMappings() {
+  const range = { from: '2026-07-13', to: '2026-07-17' };
+  const officialSchedule = {
+    events: [
+      {
+        date: '2026-07-13', time: '08:30', keys: ['average-hourly-earnings', 'gdp', 'trade-balance'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      },
+      {
+        date: '2026-07-13', time: '10:00', keys: ['jolts'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      },
+      {
+        date: '2026-07-13', time: '14:00', keys: ['fed-rate-decision'],
+        authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://example.test/'
+      }
+    ],
+    authorities: [{ id: 'fixture', name: 'Fixture schedule', url: 'https://example.test/', mode: 'fixture', status: 'fresh', checkedAt: '2026-07-10T18:00:00.000Z' }]
+  };
+  assert.deepEqual(fxMacroValueRequests(officialSchedule), {
+    announcements: ['average_hourly_earnings', 'gdp', 'gdp_growth_qoq_saar', 'trade_balance', 'job_openings', 'policy_rate_midpoint'],
+    predictions: ['average_hourly_earnings', 'gdp', 'gdp_growth_qoq_saar', 'trade_balance', 'job_openings', 'policy_rate_midpoint']
+  });
+  const payload = normalizeWeekAhead({
+    announcements: {
+      average_hourly_earnings: response([{ announcement_id: 'usd_average_hourly_earnings_2026-06-30', announcement_datetime: 1782995400, val: 3.5 }]),
+      gdp: response([{ announcement_id: 'usd_gdp_2026-03-31', announcement_datetime: 1777552200, val: 6045.105 }]),
+      gdp_growth_qoq_saar: response([{ announcement_id: 'usd_gdp_growth_qoq_saar_2026-03-31', announcement_datetime: 1777552200, val: 2.1 }]),
+      trade_balance: response([{ announcement_id: 'usd_trade_balance_2026-05-31', announcement_datetime: 1783427400, val: -77585 }]),
+      job_openings: response([{ announcement_id: 'usd_job_openings_2026-05-31', announcement_datetime: 1782828000, val: 7594 }]),
+      policy_rate_midpoint: response([{ announcement_id: 'usd_policy_rate_midpoint_2026-06-17', announcement_datetime: 1781719200, val: 3.625 }])
+    },
+    predictions: {
+      average_hourly_earnings: response([prediction('usd_average_hourly_earnings_2026-07-31', '2026-07-13T08:30:00-04:00', 3.51, 'fxmacrodata', 'FXMacroData Blended Forecast')]),
+      gdp: response([prediction('usd_gdp_2026-07-30', '2026-07-13T08:30:00-04:00', 6059.23, 'fxmacrodata', 'FXMacroData Blended Forecast')]),
+      gdp_growth_qoq_saar: response([prediction('usd_gdp_growth_qoq_saar_2026-07-30', '2026-07-13T08:30:00-04:00', 1.98, 'fxmacrodata', 'FXMacroData Blended Forecast')]),
+      trade_balance: response([prediction('usd_trade_balance_2026-08-04', '2026-07-13T08:30:00-04:00', -72701.01, 'fxmacrodata', 'FXMacroData Blended Forecast')]),
+      job_openings: response([prediction('usd_job_openings_2026-07-31', '2026-07-13T10:00:00-04:00', 7641.49, 'fxmacrodata', 'FXMacroData Blended Forecast')]),
+      policy_rate_midpoint: response([prediction('usd_policy_rate_midpoint_2026-07-29', '2026-07-13T14:00:00-04:00', 3.625)])
+    }
+  }, {
+    range,
+    officialSchedule,
+    now: new Date('2026-07-10T18:00:00Z')
+  });
+  const events = payload.days.find((day) => day.date === '2026-07-13').events;
+  assert.deepEqual(events.map((event) => event.id), [
+    '2026-07-13:08:30:average-hourly-earnings',
+    '2026-07-13:08:30:gdp-growth',
+    '2026-07-13:08:30:gdp-level',
+    '2026-07-13:08:30:trade-balance',
+    '2026-07-13:10:00:jolts',
+    '2026-07-13:14:00:fed-rate-decision'
+  ]);
+  assert.equal(events[0].period, 'YoY');
+  assert.equal(events[0].forecast, '3.5%');
+  assert.equal(events[1].forecast, '2%');
+  assert.equal(events[1].previous, '2.1%');
+  assert.equal(events[2].forecast, '$6.06T');
+  assert.equal(events[2].previous, '$6.05T');
+  assert.equal(events[3].forecast, '-$72.7B');
+  assert.equal(events[3].previous, '-$77.6B');
+  assert.equal(events[4].forecast, '7.6M');
+  assert.equal(events[4].previous, '7.6M');
+  assert.equal(events[5].forecast, '3.6%');
+  assert.equal(events[5].forecastType, 'consensus');
+  assert.deepEqual(validateWeekAheadPayload(payload), []);
+}
+
 function testLifecycleAndCloseReactionTransitions() {
   const { payload } = normalizedWeekAheadFixture();
   const awaitingActual = applyWeekAheadLifecycle(payload, null, { now: new Date('2026-07-14T13:00:00Z'), windowMode: 'morning' });
@@ -654,6 +723,9 @@ function testCalendarAndTransientCases() {
   assert.equal(isTransient(Object.assign(new Error('HTTP 503'), { status: 503 })), true);
   assert.equal(isTransient(Object.assign(new Error('Socket reset'), { transient: true })), true);
   assert.equal(formatFxMacroValue(1413, 'millions'), '1.413M');
+  assert.equal(formatFxMacroValue(7641.49, 'thousandsAsMillions'), '7.6M');
+  assert.equal(formatFxMacroValue(6059.23, 'usdBillions'), '$6.06T');
+  assert.equal(formatFxMacroValue(-72701.01, 'usdMillions'), '-$72.7B');
 }
 
 async function run() {
@@ -662,6 +734,7 @@ async function run() {
     testMarketLensDecisionApplication,
     testCalendarRolloverRange,
     testProducerAndScheduleNormalization,
+    testVerifiedFxMacroValueMappings,
     testLifecycleAndCloseReactionTransitions,
     testMarketLensDecisions,
     testPayloadValidationMutations,
