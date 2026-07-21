@@ -536,6 +536,16 @@ function readCurrentEarningsWeekArtifact(targetRange, checkedAt, filePath = EARN
   return payload;
 }
 
+function readCurrentFuturesModuleArtifact(expectedMode, checkedAt, filePath = path.join(GENERATED_DIR, 'futures_module.json')) {
+  const payload = readJson(filePath);
+  if (payload?.compiledAt !== checkedAt.toISOString()) {
+    throw new Error('Futures staging artifact does not belong to this preparation run.');
+  }
+  const errors = validateFuturesPayload(payload, { expectedMode });
+  if (errors.length) throw new Error(`Futures staging payload is invalid: ${errors.join(' ')}`);
+  return payload;
+}
+
 function earningsTargetRange(args, canonicalWeek) {
   return activeCalendarRange(args, canonicalWeek?.range);
 }
@@ -2474,16 +2484,18 @@ function main() {
     process.stderr.write('Weekend manual run detected; using latest regular-session futures path and Weekend Edition masthead.\n');
   }
 
-  const futuresArgs = ['scripts/fetch_chart_data.js', 'futures'];
-  if (args.windowMode === 'afternoon') futuresArgs.push('--session');
+  const futuresMode = args.windowMode === 'afternoon' ? 'session' : 'premarket';
+  const futuresArgs = ['scripts/fetch_chart_data.js', 'futures', '--as-of', checkedAt.toISOString()];
+  if (futuresMode === 'session') futuresArgs.push('--session');
   const futuresPreparation = runWithSectionFallback(
     () => runCommand('node', futuresArgs),
-    () => buildUnavailableFuturesPayload(args.windowMode === 'afternoon' ? 'session' : 'premarket', checkedAt),
+    () => buildUnavailableFuturesPayload(futuresMode, checkedAt),
     {
       label: 'Futures',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'futures_module.json')),
-      validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' }),
-      validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: args.windowMode === 'afternoon' ? 'session' : 'premarket' })
+      readFreshOnError: () => readCurrentFuturesModuleArtifact(futuresMode, checkedAt),
+      validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: futuresMode }),
+      validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: futuresMode })
     }
   );
   args.futuresPayload = futuresPreparation.payload;
@@ -2705,6 +2717,7 @@ module.exports = {
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
   readCurrentEarningsWeekArtifact,
+  readCurrentFuturesModuleArtifact,
   activeCalendarRange,
   earningsTargetRange,
   earningsCalendarBuildDecision,

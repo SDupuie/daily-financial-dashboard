@@ -390,9 +390,9 @@ function priorCandidate(item, pool, eligibleDates) {
   const title = String(item?.title || '').trim();
   const publishedOn = String(item?.publishedOn || '');
   const sourceLabel = String(item?.sourceLabel || '').trim();
-  // Prior cards re-enter review only with their already-validated source label;
-  // Stage 1 should not retroactively assign attribution to old published cards.
-  if (!url || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
+  // Prior cards keep their validated label but must still belong to the current
+  // approved-domain catalog before re-entering editorial review.
+  if (!url || !sourceForUrl(url) || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   try {
     if (new URL(url).protocol !== 'https:') return null;
   } catch (_error) {

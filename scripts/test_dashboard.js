@@ -16,6 +16,7 @@ const {
   buildUnavailableFuturesPayload,
   compactChartPayload,
   deriveQuoteRowsFromSeries,
+  fetchYahooJsonWithRetry,
   parseFuture,
   parseArgs: parseFetchChartDataArgs,
   quoteRowFromSeries,
@@ -60,6 +61,7 @@ const {
   parseArgs: parseRunDailyUpdateArgs,
   readJsonBlock,
   readCurrentEarningsWeekArtifact,
+  readCurrentFuturesModuleArtifact,
   requiresUnavailableRolloverRetry,
   runCommand,
   runWithSectionFallback,
@@ -87,7 +89,7 @@ const root = path.resolve(__dirname, '..');
 const FIXTURE_NOW = '2026-07-10T13:30:00Z';
 
 function story(kind, index) {
-  const url = `https://fixture.test/${kind}-${index}`;
+  const url = `https://www.cnbc.com/fixture/${kind}-${index}`;
   return {
     tag: kind === 'crypto' ? 'Crypto' : 'Markets',
     tone: kind === 'crypto' ? 'crypto' : 'neutral',
@@ -332,6 +334,7 @@ function fixtureNewsSearch(dashboard) {
       url,
       publishedOn,
       sourceLabel,
+      publishedAtVerified: true,
       ...(publishedAt ? { publishedAt } : {})
     }));
   const generalCandidates = [...dashboard.stories, ...dashboard.futuresModule.stories]
@@ -577,6 +580,155 @@ function testEarningsRefreshFailureKeepsFreshBuildArtifact() {
   assert.equal(result.recovered, true);
   assert.equal(result.fallback, null);
   assert.deepEqual(result.payload, freshWeek);
+}
+
+function testFuturesRefreshFailureKeepsCurrentPartialArtifact() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-recovery-');
+  const output = path.join(dir, 'futures_module.json');
+  const checkedAt = new Date('2026-07-10T21:05:00.000Z');
+  const rows = fixtureFutures();
+  for (const failedSymbol of rows.map((row) => row.symbol)) {
+    const freshPartial = {
+      compiledAt: checkedAt.toISOString(),
+      source: 'Yahoo Finance Chart API',
+      mode: 'session',
+      availability: {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: checkedAt.toISOString(),
+        failures: [{ symbol: failedSymbol, message: 'HTTP 400' }]
+      },
+      futures: rows.map((row) => row.symbol === failedSymbol ? {
+        symbol: row.symbol,
+        label: row.label,
+        value: 'Unavailable',
+        dir: 'flat',
+        body: 'Current contract data is unavailable; retrying on the next update.',
+        series: [],
+        raw: {},
+        availability: {
+          status: 'unavailable',
+          reason: 'source_refresh_failed',
+          checkedAt: checkedAt.toISOString(),
+          message: 'HTTP 400'
+        }
+      } : row)
+    };
+    fs.writeFileSync(output, `${JSON.stringify(freshPartial, null, 2)}\n`);
+
+    const result = runWithSectionFallback(
+      () => { throw new Error('fixture refresh failure after build'); },
+      () => buildUnavailableFuturesPayload('session', checkedAt),
+      {
+        label: 'Futures',
+        readFreshOnError: () => readCurrentFuturesModuleArtifact('session', checkedAt, output),
+        validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: 'session' }),
+        validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: 'session' })
+      }
+    );
+
+    assert.equal(result.recovered, true);
+    assert.equal(result.fallback, null);
+    assert.equal(result.payload.availability.status, 'partial');
+    assert.equal(result.payload.futures.find((row) => row.symbol === failedSymbol).value, 'Unavailable');
+    assert.deepEqual(
+      result.payload.futures.filter((row) => row.symbol !== failedSymbol),
+      rows.filter((row) => row.symbol !== failedSymbol)
+    );
+  }
+}
+
+function testFuturesAsOfUsesParentRunTimestamp() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-as-of-');
+  const output = path.join(dir, 'futures_module.json');
+  const rows = fixtureFutures();
+  const asOf = '2026-07-10T21:00:00.000Z';
+
+  return runFutures(['--session', '--output', output, '--as-of', asOf], {
+    now: new Date('2026-07-10T21:30:00.000Z'),
+    fetchFuture: async (spec) => structuredClone(rows.find((row) => row.symbol === spec.symbol))
+  }).then(() => {
+    const payload = JSON.parse(fs.readFileSync(output, 'utf8'));
+    assert.equal(payload.compiledAt, asOf);
+    assert.deepEqual(validateFuturesPayload(payload, { expectedMode: 'session' }), []);
+  });
+}
+
+async function testYahooFetchRetriesRateLimits() {
+  let calls = 0;
+  const delays = [];
+  const payload = { chart: { result: [] } };
+  const result = await fetchYahooJsonWithRetry(
+    'https://query1.finance.yahoo.com/v8/finance/chart/SPY',
+    {
+      timeoutMs: 1000,
+      yahooRateLimitRetries: 1,
+      yahooRateLimitDelayMs: 10
+    },
+    {},
+    {
+      fetchJson: async () => {
+        calls += 1;
+        if (calls === 1) {
+          const error = new Error('HTTP 429: Too Many Requests');
+          error.statusCode = 429;
+          error.headers = { 'retry-after': '2' };
+          throw error;
+        }
+        return payload;
+      },
+      sleep: async (ms) => {
+        delays.push(ms);
+      }
+    }
+  );
+
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [2000]);
+  assert.equal(result, payload);
+}
+
+async function testFuturesDownloaderStagesProgressSequentially() {
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-futures-progress-');
+  const output = path.join(dir, 'futures_module.json');
+  const rows = fixtureFutures();
+  for (const failedSymbol of rows.map((row) => row.symbol)) {
+    const writes = [];
+    const delays = [];
+    let active = 0;
+    let maxActive = 0;
+
+    await runFutures(['--session', '--output', output, '--delay-ms', '5', '--as-of', '2026-07-10T21:05:00.000Z'], {
+      fetchFuture: async (spec) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        if (spec.symbol === failedSymbol) throw new Error('fixture rate limit');
+        return structuredClone(rows.find((row) => row.symbol === spec.symbol));
+      },
+      writeJson: (_file, payload) => {
+        writes.push(structuredClone(payload));
+        fs.writeFileSync(output, `${JSON.stringify(payload, null, 2)}\n`);
+      },
+      sleep: async (ms) => {
+        delays.push(ms);
+      }
+    });
+
+    const finalPayload = JSON.parse(fs.readFileSync(output, 'utf8'));
+    assert.equal(maxActive, 1);
+    assert.ok(writes.length >= 4);
+    assert.equal(writes.at(-1).availability.status, 'partial');
+    assert.deepEqual(writes.at(-1), finalPayload);
+    assert.equal(finalPayload.futures.find((row) => row.symbol === failedSymbol).value, 'Unavailable');
+    assert.deepEqual(
+      finalPayload.futures.filter((row) => row.symbol !== failedSymbol),
+      rows.filter((row) => row.symbol !== failedSymbol)
+    );
+    assert.deepEqual(validateFuturesPayload(finalPayload, { expectedMode: 'session' }), []);
+    assert.deepEqual(delays, [5, 5, 5]);
+  }
 }
 
 function testEarningsCalendarBuildAuthorization() {
@@ -3826,6 +3978,10 @@ const architectureContractTests = Object.freeze([
   testDeterministicSectionFallbackContracts,
   testSectionCommandTimeoutFallsOpen,
   testEarningsRefreshFailureKeepsFreshBuildArtifact,
+  testFuturesRefreshFailureKeepsCurrentPartialArtifact,
+  testFuturesAsOfUsesParentRunTimestamp,
+  testYahooFetchRetriesRateLimits,
+  testFuturesDownloaderStagesProgressSequentially,
   testEarningsCalendarBuildAuthorization,
   testWeekAheadPreparationUsesCanonicalRangeForManualRefresh,
   testLastGoodDashboardRecovery,

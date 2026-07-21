@@ -125,7 +125,8 @@ function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
 function candidateInFuturesPublicationWindow(candidate, futuresWindow) {
   if (!futuresWindow) return false;
   const publishedAt = Date.parse(candidate?.publishedAt);
-  return Number.isFinite(publishedAt)
+  return candidate?.publishedAtVerified === true
+    && Number.isFinite(publishedAt)
     && publishedAt >= futuresWindow.start.getTime()
     && publishedAt <= futuresWindow.end.getTime();
 }

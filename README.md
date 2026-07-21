@@ -107,14 +107,20 @@ Blank fields or decisions marked `pending_review` are active AI assignments unle
    - `footer`: leave the generated footer unchanged.
 
 6. Run the final pre-Apply editorial gate.
-   - Confirm the handoff has no unfinished editorial markers: no `pending_review` remains in Tape or `editorialReview.marketLensDecisions[].action`. Complete every reviewable Earnings and Week Ahead Outcome field. Any remaining `pending_review` must be a system-provided carry-forward state left unchanged.
+   - Confirm the handoff has no unresolved active AI assignments: no `pending_review` remains in Tape, Market Lens, Earnings, Week Ahead Outcome, or guidance unless the section contract explicitly identifies that field as system-provided carry-forward state. Complete, fix, or repair the handoff before Apply.
+   - Audit every refreshed Tape note for ticker-specific, current commentary. Rewrite notes that are generic, formulaic, interchangeable across tickers, merely restate quote movement, or use repeated framing. Each refreshed note must name or clearly imply the relevant catalyst or market driver for that row.
+   - Audit every Crypto-group Tape note separately. Each visible Crypto ticker needs its own crypto-specific driver, such as bitcoin leadership, ETH/SOL relative strength, ETF demand, regulation, market structure, protocol updates, exchange/issuer developments, sentiment, or listed-proxy beta. Do not reuse generic crypto copy.
+   - Compare every refreshed Tape note against that row's generated direction, delta, and percent. Rewrite any note that contradicts or ignores the displayed move before Apply.
    - Every `editorialReview.newsSelection.futures[].url` must appear in `editorialReview.newsSearch.futuresCandidates`.
    - Every `editorialReview.newsSelection.stories[].url` must appear in `editorialReview.newsSearch.generalCandidates`.
    - Every `editorialReview.newsSelection.crypto[].url` must appear in `editorialReview.newsSearch.cryptoCandidates`.
    - No selected URL may appear twice within a section or across Futures, Stories, and Crypto.
    - Futures selections must satisfy the Futures catalyst rule below.
    - If a selected URL fails any check, fix `editorialReview.newsSelection` before Apply Handoff. Do not rely on Apply Handoff to omit or replace it.
+   - Inspect intended editorial fallbacks before Apply. Any avoidable editorial fallback, duplicate omission, blank reviewed field, or below-target section caused by AI selection or copy quality must be fixed or repaired in the handoff before Apply.
+   - Confirm required Earnings and Week Ahead commentary is current, company- or event-specific, and not carried forward as completed work when the section contract requires fresh review.
    - If the section remains below target after all eligible reviewed candidates are exhausted, leave it below target rather than inventing filler.
+   - Run Apply only after the AI can state: `The handoff passed the pre-Apply editorial checklist.` Any checklist failure means continue repairing `generated/editorial/dashboard-data.json` until it passes, then send it to Apply.
 
 ### News-card contract
 
@@ -143,7 +149,7 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 - Keep a prior-run link only when it remains among the best available candidates after direct comparison. Prefer the newer candidate when reporting quality and price relevance are materially similar; do not churn a link merely because the scheduled window changed.
 - Replace a link when it is stale in angle, too narrow for the card's claim, materially weaker than current reporting, or no longer the best explanation for market action. If a carried-forward link remains, rewrite its copy only as needed to stay faithful to that article.
 - Before finalizing a subscriber, metered, or commonly gated link, check for an accessible reputable substitute. Use gated outlets only when their reporting is original or materially stronger and no suitable accessible substitute exists.
-- Preferred general sources: AP, readable Reuters, CNBC, Investopedia, Kiplinger, Investor's Business Daily, Yahoo Finance, Morningstar, TheStreet, U.S. News Money, and official exchange or index-provider pages. Prefer primary sources for company, policy, or market-structure claims; preferred crypto sources include CoinDesk, Decrypt, Blockworks, CoinGecko, CoinMarketCap, Alternative.me, issuer pages, SEC filings, and official protocol, exchange, or company announcements.
+- Preferred general sources: CNBC, AP, Reuters, Yahoo Finance, Axios, Kiplinger, Investing.com, Investopedia, Morningstar, TheStreet, U.S. News Money, and official exchange or index-provider pages. Prefer primary sources for company, policy, or market-structure claims; preferred crypto sources include CoinDesk, Decrypt, Blockworks, CoinGecko, CoinMarketCap, Alternative.me, issuer pages, SEC filings, and official protocol, exchange, or company announcements.
 - Match every story's headline and body to its linked article's main reported theme. Narrow a card to a company, earnings, product, or subtheme angle when that is all the reporting supports; do not use it to imply a broader market, sector, or macro claim.
 - `READ MORE` links must be reader-facing HTML pages, never raw APIs, feeds, JSON, or CSV downloads.
 

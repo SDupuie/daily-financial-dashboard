@@ -7,23 +7,15 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'cnbc-tv18', displayName: 'CNBC TV18', domains: ['cnbctv18.com'] },
   { id: 'investopedia', displayName: 'Investopedia', domains: ['investopedia.com'] },
   { id: 'kiplinger', displayName: 'Kiplinger', domains: ['kiplinger.com'] },
-  { id: 'ibd', displayName: "Investor's Business Daily", domains: ['investors.com'] },
   { id: 'yahoo-finance', displayName: 'Yahoo Finance', domains: ['finance.yahoo.com'] },
   { id: 'morningstar', displayName: 'Morningstar', domains: ['morningstar.com'] },
   { id: 'the-street', displayName: 'TheStreet', domains: ['thestreet.com'] },
   { id: 'us-news-money', displayName: 'U.S. News Money', domains: ['money.usnews.com'] },
-  { id: 'marketwatch', displayName: 'MarketWatch', domains: ['marketwatch.com'] },
   { id: 'axios', displayName: 'Axios', domains: ['axios.com'] },
-  { id: 'fortune', displayName: 'Fortune', domains: ['fortune.com'] },
   { id: 'business-insider', displayName: 'Business Insider', domains: ['businessinsider.com'] },
   { id: 'fox-business', displayName: 'Fox Business', domains: ['foxbusiness.com'] },
   { id: 'abc-news', displayName: 'ABC News', domains: ['abcnews.go.com'] },
   { id: 'guardian', displayName: 'The Guardian', domains: ['theguardian.com'] },
-  { id: 'financial-times', displayName: 'Financial Times', domains: ['ft.com'] },
-  { id: 'economic-times', displayName: 'The Economic Times', domains: ['economictimes.indiatimes.com', 'm.economictimes.com'] },
-  { id: 'bloomberg', displayName: 'Bloomberg', domains: ['bloomberg.com'] },
-  { id: 'wall-street-journal', displayName: 'Wall Street Journal', domains: ['wsj.com'] },
-  { id: 'barrons', displayName: "Barron's", domains: ['barrons.com'] },
   { id: 'investing-com', displayName: 'Investing.com', domains: ['investing.com'] },
   { id: 'mining-com', displayName: 'Mining.com', domains: ['mining.com'] },
   { id: 'coindesk', displayName: 'CoinDesk', domains: ['coindesk.com'] },
@@ -74,11 +66,9 @@ const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'investing-crypto', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.investing.com/rss/news_301.rss' },
   { id: 'axios', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://api.axios.com/feed/' },
   { id: 'kiplinger', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.kiplinger.com/feed/all' },
-  { id: 'ibd', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investors.com/feed/' },
   { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
   { id: 'decrypt', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://decrypt.co/feed' },
-  { id: 'cnbc', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' },
-  { id: 'marketwatch', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://feeds.content.dowjones.io/public/rss/mw_topstories' }
+  { id: 'cnbc', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' }
 ].map((entry) => Object.freeze(entry)));
 
 function newsAcquisitionPaths() {

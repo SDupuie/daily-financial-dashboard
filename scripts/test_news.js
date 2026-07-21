@@ -132,16 +132,23 @@ async function testDeterministicNewsCandidateAcquisition() {
   const dashboardData = {
     stories: [{
       title: 'Still-fresh prior market card',
-      url: 'https://example.com/prior-market',
+      url: 'https://www.cnbc.com/prior-market',
       publishedOn: '2026-07-10',
       sourceLabel: 'Fixture News',
       tag: 'Prior',
       body: 'Previously reviewed market copy.'
+    }, {
+      title: 'Removed-source prior market card',
+      url: 'https://www.investors.com/prior-market',
+      publishedOn: '2026-07-10',
+      sourceLabel: "Investor's Business Daily",
+      tag: 'Prior',
+      body: 'This card must not re-enter review after its source is removed.'
     }],
     futuresModule: { stories: [] },
     crypto: { notes: [{
       title: 'Still-fresh prior crypto card',
-      url: 'https://example.com/prior-crypto',
+      url: 'https://www.coindesk.com/prior-crypto',
       publishedOn: '2026-07-10',
       sourceLabel: 'Fixture News',
       kicker: 'Prior',
@@ -173,7 +180,7 @@ async function testDeterministicNewsCandidateAcquisition() {
       }] };
       if (acquisitionPath.id === 'stockfit-market') return { items: [{
         publishedAt: '2026-07-10T19:00:00.000Z',
-        title: 'MarketWatch direct duplicate fixture',
+        title: 'Removed MarketWatch fixture',
         url: 'https://www.marketwatch.com/story/direct-fixture?mod=stockfit'
       }, {
         publishedAt: '2026-07-10T19:30:00.000Z',
@@ -190,11 +197,6 @@ async function testDeterministicNewsCandidateAcquisition() {
         publishedAt: '2026-07-10T20:00:00.000Z',
         title: 'CNBC direct duplicate fixture',
         url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html'
-      }] };
-      if (acquisitionPath.id === 'marketwatch') return { items: [{
-        publishedAt: '2026-07-10T19:00:00.000Z',
-        title: 'MarketWatch direct duplicate fixture',
-        url: 'https://www.marketwatch.com/story/direct-fixture?mod=mw_rss_topstories'
       }] };
       if (acquisitionPath.id === 'coindesk') return { items: [{
         publishedAt: '2026-07-10T18:00:00.000Z',
@@ -228,17 +230,14 @@ async function testDeterministicNewsCandidateAcquisition() {
     'Distinct non-Alpha endpoints should not wait for the second paced Alpha call.'
   );
   assert.deepEqual(pauses, [1250], 'The two Alpha Vantage calls must be paced.');
-  assert.equal(artifact.generalCandidates.length, 5, 'Direct duplicates, two Yahoo stories, and the prior card must remain available once each.');
+  assert.equal(artifact.generalCandidates.length, 4, 'The CNBC duplicate, two Yahoo stories, and the prior card must remain available once each.');
   assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
   const cnbc = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc');
   assert.equal(cnbc.provider, 'rss', 'A direct feed must win deterministic provenance deduplication over an aggregator copy.');
   assert.equal(cnbc.sourceLabel, 'CNBC');
   assert.equal(cnbc.publishedAtVerified, true, 'Article-page review must mark provider timestamps verified after confirmation.');
   assert.deepEqual(cnbc.searchPathIds, ['cnbc', 'alpha-financial-markets']);
-  const marketwatch = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'marketwatch');
-  assert.equal(marketwatch.provider, 'rss');
-  assert.equal(marketwatch.sourceLabel, 'MarketWatch');
-  assert.deepEqual(marketwatch.searchPathIds, ['marketwatch', 'stockfit-market']);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Removed MarketWatch fixture'), false);
   const resolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'original_validated');
   assert.equal(resolvedYahoo.url, 'https://www.reuters.com/markets/validated-fixture');
   assert.equal(resolvedYahoo.sourceLabel, 'Reuters');
@@ -253,6 +252,7 @@ async function testDeterministicNewsCandidateAcquisition() {
   const priorMarket = artifact.generalCandidates.find((candidate) => candidate.priorCard);
   assert.equal(priorMarket.sourceLabel, 'Fixture News');
   assert.equal(priorMarket.priorCopy.tag, 'Prior');
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Removed-source prior market card'), false);
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'coindesk').acceptedCount, 1);
   assert.equal(artifact.articleReview.status, 'complete');
@@ -332,18 +332,26 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
       title: 'Monday premarket fixture',
       url: 'https://www.cnbc.com/2026/07/13/monday-premarket.html'
     }, {
+      publishedAt: '2026-07-13T12:50:00.000Z',
+      title: 'Monday unverified premarket fixture',
+      url: 'https://www.cnbc.com/2026/07/13/monday-unverified.html'
+    }, {
       publishedAt: '2026-07-13T13:05:00.000Z',
       title: 'Monday after run fixture',
       url: 'https://www.cnbc.com/2026/07/13/monday-after-run.html'
     }] }),
-    fetchArticle: async (candidate) => ({
-      finalUrl: candidate.url,
-      pageTitle: candidate.title,
-      description: 'Fixture description.',
-      excerpt: 'Fixture article content.',
-      publishedAt: new Date(candidate.publishedAt)
-    })
+    fetchArticle: async (candidate) => {
+      if (candidate.title === 'Monday unverified premarket fixture') throw new Error('Fixture article unavailable.');
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: new Date(candidate.publishedAt)
+      };
+    }
   });
+  assert.ok(premarketArtifact.generalCandidates.some((candidate) => candidate.title === 'Monday unverified premarket fixture'));
   assert.deepEqual(
     premarketArtifact.futuresCandidates.map((candidate) => candidate.title).sort(),
     ['Monday premarket fixture', 'Sunday after futures open fixture']

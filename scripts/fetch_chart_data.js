@@ -12,6 +12,9 @@ const DEFAULT_DAYS = 1826;
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const FINNHUB_HOST = 'finnhub.io';
 const CHART_ROW_CONCURRENCY = 4;
+const DEFAULT_YAHOO_RATE_LIMIT_RETRIES = 1;
+const DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS = 3000;
+const DEFAULT_FUTURES_DELAY_MS = 750;
 const TREASURY_FIELDS = new Map([
   ['TREASURY:CURVE', 'BC_10YEAR'],
   ['TREASURY:3M', 'BC_3MONTH'],
@@ -20,6 +23,67 @@ const TREASURY_FIELDS = new Map([
   ['TREASURY:30Y', 'BC_30YEAR']
 ]);
 let envLoaded = false;
+function retryAfterDelayMs(headers = {}, fallbackMs = DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS) {
+  const raw = headers['retry-after'] || headers['Retry-After'];
+  if (raw !== undefined) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const retryDate = Date.parse(raw);
+    if (!Number.isNaN(retryDate)) return Math.max(0, retryDate - Date.now());
+  }
+  return Math.max(0, Number(fallbackMs) || 0);
+}
+
+function errorStatusCode(error) {
+  if (Number.isFinite(error?.statusCode)) return Number(error.statusCode);
+  const match = String(error?.message || '').match(/\bHTTP\s+(\d{3})\b/);
+  return match ? Number(match[1]) : null;
+}
+
+function isRetryableYahooError(error) {
+  const statusCode = errorStatusCode(error);
+  if ([408, 425, 429, 500, 502, 503, 504].includes(statusCode)) return true;
+  return /(?:timed out|timeout|ECONNRESET|EAI_AGAIN|ENOTFOUND|socket hang up)/i.test(String(error?.message || ''));
+}
+
+async function fetchYahooJsonWithRetry(url, args = {}, headers = {}, dependencies = {}) {
+  const fetchJsonFn = dependencies.fetchJson || fetchJson;
+  const sleepFn = dependencies.sleep || sleep;
+  const configuredRetries = Number(args.yahooRateLimitRetries ?? DEFAULT_YAHOO_RATE_LIMIT_RETRIES);
+  const configuredDelayMs = Number(args.yahooRateLimitDelayMs ?? DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS);
+  const retries = Number.isFinite(configuredRetries)
+    ? Math.max(0, Math.floor(configuredRetries))
+    : DEFAULT_YAHOO_RATE_LIMIT_RETRIES;
+  const fallbackDelayMs = Number.isFinite(configuredDelayMs)
+    ? Math.max(0, configuredDelayMs)
+    : DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS;
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fetchJsonFn(url, args, headers);
+    } catch (error) {
+      if (attempt >= retries || !isRetryableYahooError(error)) throw error;
+      attempt += 1;
+      await sleepFn(retryAfterDelayMs(error.headers, fallbackDelayMs));
+    }
+  }
+}
+
+async function fetchYahooChartJson(urlForHost, args = {}, headers = {}) {
+  const errors = [];
+  for (const host of YAHOO_HOSTS) {
+    try {
+      return {
+        host,
+        payload: await fetchYahooJsonWithRetry(urlForHost(host), args, headers)
+      };
+    } catch (error) {
+      errors.push(`${host}: ${error.message}`);
+      if (args.delayMs) await sleep(args.delayMs);
+    }
+  }
+  throw new Error(errors.join(' | '));
+}
 const TREASURY_CURVE_POINTS = [
   { label: '1M', field: 'BC_1MONTH', years: 1 / 12 },
   { label: '1.5M', field: 'BC_1_5MONTH', years: 1.5 / 12 },
@@ -170,8 +234,12 @@ function parseArgs(argv) {
   const args = {
     output: DEFAULT_OUTPUT,
     timeoutMs: REQUEST_TIMEOUT_MS,
+    delayMs: DEFAULT_FUTURES_DELAY_MS,
+    yahooRateLimitRetries: DEFAULT_YAHOO_RATE_LIMIT_RETRIES,
+    yahooRateLimitDelayMs: DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS,
     compact: false,
-    mode: 'premarket'
+    mode: 'premarket',
+    asOf: null
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -188,8 +256,33 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--delay-ms') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--delay-ms must be a finite nonnegative number.');
+      args.delayMs = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--yahoo-rate-limit-retries') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--yahoo-rate-limit-retries must be a finite nonnegative number.');
+      args.yahooRateLimitRetries = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--yahoo-rate-limit-delay-ms') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--yahoo-rate-limit-delay-ms must be a finite nonnegative number.');
+      args.yahooRateLimitDelayMs = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
     if (arg === '--compact') {
       args.compact = true;
+      continue;
+    }
+    if (arg === '--as-of') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--as-of requires an ISO timestamp.');
+      args.asOf = new Date(argv[i + 1]);
+      if (Number.isNaN(args.asOf.getTime())) throw new Error('--as-of must be a valid ISO timestamp.');
+      i += 1;
       continue;
     }
     if (arg === '--session') {
@@ -216,49 +309,20 @@ function printHelp() {
 Options:
   --output PATH       JSON output path (default: generated/futures_module.json)
   --timeout-ms 10000  HTTP timeout in ms per request
+  --delay-ms 750      Delay between futures contracts and Yahoo host fallbacks
+  --yahoo-rate-limit-retries 1      Retries for Yahoo rate limits and transient source errors
+  --yahoo-rate-limit-delay-ms 3000  Fallback delay before retrying Yahoo rate limits
   --compact           Print one-line symbol summary
+  --as-of TIMESTAMP   Fixed run timestamp used as compiledAt and data cutoff
   --session           Scope series to 8:30 AM-3:00 PM Central; store official times as 9:30 AM-4:00 PM Eastern
   --premarket         Use Yahoo's prior-close comparison (default)
   --help              Show this help
 `);
 }
 
-function yahooChartUrl(symbol, args, rangeOverride = '') {
+function yahooFuturesChartUrl(host, symbol, args, rangeOverride = '') {
   const range = rangeOverride || (args.mode === 'session' ? '5d' : '1d');
-  return `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=5m`;
-}
-
-function fetchJson(url, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, {
-      timeout: timeoutMs,
-      headers: {
-        'User-Agent': 'Daily-Financial-Dashboard/1.0'
-      }
-    }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => {
-        body += chunk;
-      });
-      res.on('end', () => {
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        try {
-          resolve(JSON.parse(body));
-        } catch (error) {
-          reject(new Error(`Invalid JSON: ${error.message}`));
-        }
-      });
-    });
-
-    req.on('timeout', () => {
-      req.destroy(new Error(`Timed out after ${timeoutMs}ms`));
-    });
-    req.on('error', reject);
-  });
+  return `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=5m`;
 }
 
 function numberFormat(maximumFractionDigits = 2) {
@@ -584,26 +648,21 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
 }
 
 async function fetchFuture(spec, args, runAt = new Date()) {
-  const payloadPromise = fetchJson(yahooChartUrl(spec.symbol, args), args.timeoutMs);
-  const referencePayloadPromise = args.mode === 'premarket'
-    ? fetchJson(yahooChartUrl(spec.symbol, args, '5d'), args.timeoutMs)
-    : Promise.resolve(null);
-  const [payload, referencePayload] = await Promise.all([payloadPromise, referencePayloadPromise]);
+  const { payload } = await fetchYahooChartJson(
+    (host) => yahooFuturesChartUrl(host, spec.symbol, args),
+    args
+  );
+  const referencePayload = args.mode === 'premarket'
+    ? (await fetchYahooChartJson(
+      (host) => yahooFuturesChartUrl(host, spec.symbol, args, '5d'),
+      args
+    )).payload
+    : null;
   return parseFuture(spec, payload, args, referencePayload, runAt);
 }
 
-async function main(argv = process.argv.slice(2), dependencies = {}) {
-  const args = parseArgs(argv);
-  const checkedAt = dependencies.now instanceof Date ? dependencies.now : scheduledNow();
-  const settled = await Promise.allSettled(FUTURES.map((spec) => (dependencies.fetchFuture || fetchFuture)(spec, args, checkedAt)));
-  const failures = [];
-  const results = settled.map((result, index) => {
-    if (result.status === 'fulfilled') return result.value;
-    failures.push({ symbol: FUTURES[index].symbol, message: result.reason?.message || 'source unavailable' });
-    return unavailableFutureRow(FUTURES[index], result.reason, checkedAt);
-  });
-  // Output is a staging payload; the published page renders embedded futuresModule.futures only.
-  const output = {
+function futuresOutput(args, checkedAt, results, failures) {
+  return {
     compiledAt: checkedAt.toISOString(),
     source: 'Yahoo Finance Chart API',
     mode: args.mode,
@@ -617,10 +676,48 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     } : {}),
     futures: results
   };
+}
+
+async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const args = parseArgs(argv);
+  const checkedAt = args.asOf || (dependencies.now instanceof Date ? dependencies.now : scheduledNow());
+  const results = FUTURES.map((spec) => unavailableFutureRow(
+    spec,
+    new Error('Refresh did not complete before this staging snapshot.'),
+    checkedAt
+  ));
+  const failuresBySymbol = new Map(FUTURES.map((spec) => [
+    spec.symbol,
+    { symbol: spec.symbol, message: 'Refresh did not complete before this staging snapshot.' }
+  ]));
+  const writeJson = dependencies.writeJson || atomicWriteJson;
+  const writeProgress = () => {
+    // Output is a staging payload; the published page renders embedded futuresModule.futures only.
+    const progressOutput = futuresOutput(args, checkedAt, results, [...failuresBySymbol.values()]);
+    const progressErrors = validateFuturesPayload(progressOutput, { expectedMode: args.mode });
+    if (progressErrors.length) throw new Error(`Generated Futures staging payload is invalid: ${progressErrors.join(' ')}`);
+    writeJson(args.output, progressOutput);
+  };
+
+  for (const [index, spec] of FUTURES.entries()) {
+    try {
+      results[index] = await (dependencies.fetchFuture || fetchFuture)(spec, args, checkedAt);
+      failuresBySymbol.delete(spec.symbol);
+    } catch (error) {
+      failuresBySymbol.set(spec.symbol, { symbol: spec.symbol, message: error?.message || 'source unavailable' });
+      results[index] = unavailableFutureRow(spec, error, checkedAt);
+    }
+    if (index < FUTURES.length - 1) {
+      writeProgress();
+      if (args.delayMs) await (dependencies.sleep || sleep)(args.delayMs);
+    }
+  }
+
+  const failures = [...failuresBySymbol.values()];
+  const output = futuresOutput(args, checkedAt, results, failures);
   const errors = validateFuturesPayload(output, { expectedMode: args.mode });
   if (errors.length) throw new Error(`Generated Futures staging payload is invalid: ${errors.join(' ')}`);
-
-  (dependencies.writeJson || atomicWriteJson)(args.output, output);
+  writeJson(args.output, output);
 
   if (args.compact) {
     process.stdout.write(results.map((row) => `${row.symbol} ${row.value}`).join(' | '));
@@ -649,6 +746,8 @@ function parseArgs(argv) {
     days: DEFAULT_DAYS,
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: 250,
+    yahooRateLimitRetries: DEFAULT_YAHOO_RATE_LIMIT_RETRIES,
+    yahooRateLimitDelayMs: DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS,
     asOf: null,
     tickers: [],
     compact: false
@@ -693,6 +792,18 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === '--yahoo-rate-limit-retries') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--yahoo-rate-limit-retries must be a finite nonnegative number.');
+      args.yahooRateLimitRetries = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--yahoo-rate-limit-delay-ms') {
+      if (!Number.isFinite(Number(argv[i + 1])) || Number(argv[i + 1]) < 0) throw new Error('--yahoo-rate-limit-delay-ms must be a finite nonnegative number.');
+      args.yahooRateLimitDelayMs = Number(argv[i + 1]);
+      i += 1;
+      continue;
+    }
     if (arg === '--ticker') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--ticker requires a symbol.');
       args.tickers.push(String(argv[i + 1]).trim().toUpperCase());
@@ -727,6 +838,8 @@ Options:
   --timeout-ms 15000  HTTP timeout in ms per request
   --as-of TIMESTAMP   Fixed run timestamp used as generatedAt and chart cutoff
   --delay-ms 250      Delay between source requests
+  --yahoo-rate-limit-retries 1      Retries for Yahoo rate limits and transient source errors
+  --yahoo-rate-limit-delay-ms 3000  Fallback delay before retrying Yahoo rate limits
   --ticker SYMBOL     Fetch only this dashboard ticker (repeatable)
   --compact           Print one-line series summary
   --help              Show this help
@@ -853,7 +966,11 @@ function fetchText(url, args, headers = {}) {
       });
       res.on('end', () => {
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 160).trim()}`));
+          const error = new Error(`HTTP ${res.statusCode}: ${body.slice(0, 160).trim()}`);
+          error.statusCode = res.statusCode;
+          error.headers = res.headers || {};
+          error.bodyPreview = body.slice(0, 240).trim();
+          reject(error);
           return;
         }
         resolve(body);
@@ -1374,7 +1491,7 @@ async function fetchYahooSeries(row, args, startDate, endDate) {
   // Yahoo occasionally fails one chart host while the other is healthy, so keep both as equivalent fallbacks.
   for (const host of YAHOO_HOSTS) {
     try {
-      const payload = await fetchJson(yahooChartUrl(host, row.sourceSymbol, startDate, endDate), args);
+      const payload = await fetchYahooJsonWithRetry(yahooChartUrl(host, row.sourceSymbol, startDate, endDate), args);
       const series = parseYahooSeries(row, payload, host);
       const quoteBar = shouldUseFinnhubQuoteFallback(series, payload)
         ? await fetchFinnhubQuoteBar(row, args)
@@ -1382,6 +1499,7 @@ async function fetchYahooSeries(row, args, startDate, endDate) {
       return mergeFinnhubQuoteBar(series, quoteBar, yahooVolumeByDate(payload));
     } catch (error) {
       errors.push(`${host}: ${error.message}`);
+      if (args.delayMs) await sleep(args.delayMs);
     }
   }
   throw new Error(errors.join(' | '));
@@ -1735,6 +1853,7 @@ module.exports = {
   cryptoQuoteRowFromSeries,
   compactChartPayload,
   fetchSeries,
+  fetchYahooJsonWithRetry,
   finnhubQuoteBarFromPayload,
   isoDateFromDate,
   mergeFinnhubQuoteBar,
@@ -1752,6 +1871,7 @@ module.exports = {
   readCryptoRows,
   readTapeRows,
   shouldUseFinnhubQuoteFallback,
+  retryAfterDelayMs,
   sleep,
   validateFuturesPayload: futuresModule.validateFuturesPayload
 };
