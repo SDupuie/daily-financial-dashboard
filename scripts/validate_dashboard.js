@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const { deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
 
@@ -41,8 +42,8 @@ function validCalendarSectionRange(errors, label, range) {
 }
 
 function validateCalendarSectionRanges(errors, data) {
-  // Domain validators own full section schemas; publication validation proves
-  // the two calendar sections expose the same supported active date range.
+  // Domain validators own full section schemas; staged contract validation
+  // proves the two calendar sections expose the same supported active date range.
   const weekAheadRange = validCalendarSectionRange(errors, 'weekAhead', data?.weekAhead?.range);
   const earningsWeekRange = validCalendarSectionRange(errors, 'earnings.week', data?.earnings?.week?.range);
   if (weekAheadRange && earningsWeekRange && !rangesMatch(weekAheadRange, earningsWeekRange)) {
@@ -50,10 +51,19 @@ function validateCalendarSectionRanges(errors, data) {
   }
 }
 
-function validatePublishedNewsCardMetadata(errors, label, cards, options = {}) {
+function validateEmbeddedEarningsWeekContract(errors, data) {
+  const earningsErrors = validateEarningsWeekPayload(data?.earnings?.week, { mode: 'published' });
+  for (const error of earningsErrors) {
+    errors.push(error === 'Earnings week payload must be an object.'
+      ? 'earnings.week must be an object.'
+      : `earnings.week.${error}`);
+  }
+}
+
+function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options = {}) {
   if (!Array.isArray(cards)) return;
-  // Publication validation proves the final embedded cards kept immutable
-  // provenance from Prepare/Apply; it does not re-rank or replace stories.
+  // Staged contract validation proves embedded cards kept immutable provenance
+  // from Prepare/Apply; it does not re-rank or replace stories.
   cards.forEach((card, index) => {
     const itemLabel = `${label}[${index}]`;
     if (!card || typeof card !== 'object' || Array.isArray(card)) {
@@ -83,10 +93,43 @@ function validatePublishedNewsCardMetadata(errors, label, cards, options = {}) {
   });
 }
 
-function validatePublishedNewsMetadata(errors, data) {
-  validatePublishedNewsCardMetadata(errors, 'stories', data?.stories);
-  validatePublishedNewsCardMetadata(errors, 'futuresModule.stories', data?.futuresModule?.stories, { requirePublishedAt: true });
-  validatePublishedNewsCardMetadata(errors, 'crypto.notes', data?.crypto?.notes);
+function validateEmbeddedNewsMetadataContract(errors, data) {
+  validateEmbeddedNewsCardMetadataContract(errors, 'stories', data?.stories);
+  validateEmbeddedNewsCardMetadataContract(errors, 'futuresModule.stories', data?.futuresModule?.stories, { requirePublishedAt: true });
+  validateEmbeddedNewsCardMetadataContract(errors, 'crypto.notes', data?.crypto?.notes);
+}
+
+function renderObject(errors, value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    errors.push(`${label} must be an object for dashboard rendering.`);
+    return false;
+  }
+  return true;
+}
+
+function renderArray(errors, value, label) {
+  if (!Array.isArray(value)) {
+    errors.push(`${label} must be an array for dashboard rendering.`);
+    return false;
+  }
+  return true;
+}
+
+function validateDashboardRenderSurface(errors, data, chartData) {
+  // The final publication gate checks only shapes the runtime dereferences at
+  // startup. Financial completeness, provenance, and freshness stay in staged
+  // contract checks so recoverable content issues do not take the page offline.
+  if (!renderObject(errors, data, 'dashboard-data')) return;
+  if (chartData === null || !renderObject(errors, chartData, 'chart-data') || !renderArray(errors, chartData.series, 'chart-data.series')) return;
+  for (const [seriesIndex, series] of chartData.series.entries()) {
+    const label = `chart-data.series[${seriesIndex}]`;
+    if (!renderObject(errors, series, label) || !renderArray(errors, series.bars, `${label}.bars`)) continue;
+    for (const [barIndex, bar] of series.bars.entries()) {
+      if (!Array.isArray(bar) || ![5, 6].includes(bar.length)) {
+        errors.push(`${label}.bars[${barIndex}] must be a compact [time, open, high, low, close, volume?] tuple for dashboard rendering.`);
+      }
+    }
+  }
 }
 
 function isFiniteNumber(value) {
@@ -389,14 +432,11 @@ function validateDerivedDashboardQuoteRows(errors, chartableRows, series, prefix
   }
 }
 
-function validateDashboardTapeCommentary(errors, warnings, data, { validationMode = 'published' } = {}) {
+function validateDashboardTapeCommentary(errors, data) {
   for (const [index, rowRaw] of (Array.isArray(data?.tape?.rows) ? data.tape.rows : []).entries()) {
     const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
     const ticker = String(row?.ticker || '').toUpperCase();
     const label = ticker || `tape.rows[${index}]`;
-    if (validationMode === 'published' && !String(row.note || '').trim()) {
-      warnings.push(`${label}.note is blank; editorial commentary is incomplete.`);
-    }
     for (const error of validateTapeCommentaryDisposition(row)) {
       errors.push(`${label}.${error}`);
     }
@@ -685,6 +725,14 @@ if (runtimeScriptMatches.length !== 1) {
   errors.push(`Expected exactly 1 dashboard-runtime script; found ${runtimeScriptMatches.length}.`);
 }
 const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
+if (runtimeScript) {
+  try {
+    // Compile only: executing the dashboard runtime would touch DOM/browser APIs.
+    new Function(runtimeScript);
+  } catch (error) {
+    errors.push(`dashboard-runtime JavaScript is invalid: ${error.message}`);
+  }
+}
 const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((match) => match[0]);
 const allowedLocalRefreshUrls = new Set([
   'https://192.168.2.2:2210/api/market-refresh'
@@ -760,10 +808,6 @@ if (!dashboardMatch) {
 
   if (data) {
     let chartData = null;
-    const chartableRows = chartableRowsFromDashboardData(data);
-    validateCalendarSectionRanges(errors, data);
-    validatePublishedNewsMetadata(errors, data);
-    validateDashboardTapeCommentary(errors, warnings, data, { validationMode });
 
     if (!chartDataMatch) {
       errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
@@ -775,21 +819,31 @@ if (!dashboardMatch) {
       }
     }
 
-    if (chartData) {
+    validateDashboardRenderSurface(errors, data, chartData);
+
+    if (validationMode === 'staged') {
+      const chartableRows = chartableRowsFromDashboardData(data);
+      validateCalendarSectionRanges(errors, data);
+      validateEmbeddedEarningsWeekContract(errors, data);
+      validateEmbeddedNewsMetadataContract(errors, data);
+      validateDashboardTapeCommentary(errors, data);
+
       const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
-      validateChartPayload(errors, chartData, {
-        warnings,
-        expectedByTicker,
-        expectedSectionByTicker,
-        decodeSeries: decodeTupleSeries,
-        label: 'chart-data',
-        dashboardRows: chartableRows,
-        absentMessage: 'is missing its embedded source mapping.',
-        duplicateMessage: 'Duplicate embedded chart series for',
-        missingMessage: 'Embedded chart data is missing',
-        volumeDescription: 'embedded',
-        closeOnlyPlaceholderSeverity: validationMode === 'published' ? 'warning' : 'error'
-      });
+      if (chartData) {
+        validateChartPayload(errors, chartData, {
+          warnings,
+          expectedByTicker,
+          expectedSectionByTicker,
+          decodeSeries: decodeTupleSeries,
+          label: 'chart-data',
+          dashboardRows: chartableRows,
+          absentMessage: 'is missing its embedded source mapping.',
+          duplicateMessage: 'Duplicate embedded chart series for',
+          missingMessage: 'Embedded chart data is missing',
+          volumeDescription: 'embedded',
+          closeOnlyPlaceholderSeverity: 'error'
+        });
+      }
     }
 
   }

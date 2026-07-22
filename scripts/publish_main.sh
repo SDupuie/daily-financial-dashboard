@@ -414,6 +414,8 @@ while true; do
   fi
 
   retrigger_count=$((retrigger_count + 1))
+  # An empty commit is the narrow recovery mechanism for a verified transient
+  # Pages failure; it changes deployment state without changing dashboard data.
   echo "Retrying Pages deploy via empty commit (${retrigger_count}/${PAGES_RETRIGGER_MAX})..." >&2
   git commit --allow-empty -m "Retry GitHub Pages deploy (${deploy_sha:0:7})"
   deploy_sha="$(git rev-parse HEAD)"

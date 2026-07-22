@@ -18,6 +18,7 @@ const {
   metricResult,
   mergeUnchangedEarningsNarrative,
   narrativeEditorialComplete,
+  resetRepeatedEarningsNarrativeForEditorial,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
 const {
@@ -234,14 +235,6 @@ function deterministicVerifiedWeekFixture() {
       }]
     }
   };
-}
-
-function expectWeekValidationFailure(payload, pattern, label) {
-  assert.throws(
-    () => validateWeekPayload(payload),
-    pattern,
-    label
-  );
 }
 
 function testFinnhubPrimaryAcceptance() {
@@ -1207,6 +1200,55 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
   );
 }
 
+function testUnavailableNarrativeDispositionsRequireAuditFields() {
+  const source = deterministicVerifiedWeekFixture();
+  const attemptedAt = '2026-01-08T22:05:00.000Z';
+  const unavailable = structuredClone(source);
+  unavailable.rows[0].outcome.interpretation = '';
+  unavailable.rows[0].outcome.interpretationDisposition = {
+    status: 'commentary_unavailable',
+    reason: 'not_verified_for_current_run',
+    attemptedAt
+  };
+  unavailable.rows[0].outcome.guide = '';
+  unavailable.rows[0].outcome.guidanceDisposition = {
+    status: 'unverified',
+    reason: 'not_verified_for_current_run',
+    attemptedAt
+  };
+  unavailable.rows[0].reaction.note = '';
+  unavailable.rows[0].reaction.commentaryDisposition = {
+    status: 'commentary_unavailable',
+    reason: 'not_verified_for_current_run',
+    attemptedAt
+  };
+  assert.deepEqual(validateEarningsWeekPayload(unavailable), []);
+
+  const missingInterpretationAudit = structuredClone(unavailable);
+  missingInterpretationAudit.rows[0].outcome.interpretationDisposition = { status: 'commentary_unavailable' };
+  assert.match(
+    validateEarningsWeekPayload(missingInterpretationAudit).join('\n'),
+    /interpretationDisposition\.status commentary_unavailable requires blank copy, non-empty reason, and ISO attemptedAt/,
+    'Staging validation must reject unavailable interpretation dispositions without audit fields.'
+  );
+
+  const missingGuidanceAudit = structuredClone(unavailable);
+  missingGuidanceAudit.rows[0].outcome.guidanceDisposition = { status: 'unverified' };
+  assert.match(
+    validateEarningsWeekPayload(missingGuidanceAudit).join('\n'),
+    /guidanceDisposition\.status unverified requires blank copy, non-empty reason, and ISO attemptedAt/,
+    'Staging validation must reject unverified guidance dispositions without audit fields.'
+  );
+
+  const missingReactionAudit = structuredClone(unavailable);
+  missingReactionAudit.rows[0].reaction.commentaryDisposition = { status: 'commentary_unavailable' };
+  assert.match(
+    validateEarningsWeekPayload(missingReactionAudit).join('\n'),
+    /reaction\.commentaryDisposition\.status commentary_unavailable requires blank copy, non-empty reason, and ISO attemptedAt/,
+    'Staging validation must reject unavailable reaction dispositions without audit fields.'
+  );
+}
+
 async function testResultRefreshDoesNotRebuildSlate() {
   const rows = buildRows([finnhubRow('REFRESH', {
     reportTiming: 'bmo',
@@ -1367,7 +1409,7 @@ async function testResultRefreshFailuresAreRowScoped() {
   assert.deepEqual(validateEarningsWeekPayload(failure.payload), []);
   const malformedDiagnostic = structuredClone(failure.payload);
   malformedDiagnostic.rows[0].sourceAudit.resultRefresh.failures[0].provider = 'unknown';
-  assert.deepEqual(validateEarningsWeekPayload(malformedDiagnostic), [], 'Fail-open row diagnostics must not block a renderable row.');
+  assert.deepEqual(validateEarningsWeekPayload(malformedDiagnostic), [], 'Non-blocking row diagnostics must not block a renderable row.');
 
   const recovered = await refreshEarningsResults(failure.payload, {
     finnhubRows: [finnhubRow('VERIFY')],
@@ -2197,6 +2239,144 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
   assert.equal(mergedClose.rows[0].reaction.commentaryDisposition, undefined);
 }
 
+function testRepeatedEarningsNarrativeResetsSameFieldOnly() {
+  const row = (symbol, company, interpretation) => ({
+    symbol,
+    company,
+    exchange: 'NYSE',
+    country: 'US',
+    currency: 'USD',
+    marketCap: 50000000000,
+    reportDate: '2026-07-14',
+    reportTiming: 'bmo',
+    lifecycle: 'scheduled',
+    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted', note: '' },
+    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+    outcome: {
+      overall: 'pending',
+      guide: '',
+      interpretation,
+      interpretationDisposition: { status: 'verified' }
+    },
+    reaction: { status: 'pending', note: '' }
+  });
+  const week = {
+    rows: [
+      row('AAA', 'Acme Analytics Inc.', 'Acme revenue cadence and margin execution remain the key read.'),
+      row('BBB', 'Beta Systems Corp.', 'Beta revenue cadence and margin execution remain the key read.'),
+      row('UNQ', 'Unique Holdings Inc.', 'Unique backlog conversion remains the company-specific setup.'),
+      row('SHA', 'Short Alpha Inc.', 'Alpha margins drove upside.'),
+      row('SHB', 'Short Beta Inc.', 'Beta margins drove upside!'),
+      row('DFA', 'Date Alpha Inc.', 'Alpha demand improved on 2026-07-21.'),
+      row('DFB', 'Date Beta Inc.', 'Beta demand improved on July 22, 2026.'),
+      row('FYA', 'Fiscal Alpha Inc.', 'Fiscal Alpha FY26 margin target depends on cloud demand.'),
+      row('FYB', 'Fiscal Beta Inc.', 'Fiscal Beta FY27 margin target depends on cloud demand.'),
+      {
+        ...row('GDA', 'Guide Alpha Inc.', 'Guide Alpha product mix is the setup.'),
+        outcome: {
+          overall: 'beat',
+          interpretation: 'Guide Alpha product mix is the setup.',
+          interpretationDisposition: { status: 'verified' },
+          guide: 'Management reaffirmed full-year margin and revenue targets.',
+          guidanceDisposition: { status: 'verified' }
+        }
+      },
+      {
+        ...row('GDB', 'Guide Beta Inc.', 'Guide Beta channel demand is the setup.'),
+        outcome: {
+          overall: 'beat',
+          interpretation: 'Guide Beta channel demand is the setup.',
+          interpretationDisposition: { status: 'verified' },
+          guide: 'Management reaffirmed full-year margin and revenue targets.',
+          guidanceDisposition: { status: 'verified' }
+        }
+      },
+      {
+        ...row('RXA', 'Reaction Alpha Inc.', 'Reaction Alpha order growth is the setup.'),
+        lifecycle: 'close_available',
+        reaction: {
+          status: 'computed',
+          note: 'Margin upside drove the close reaction despite mixed demand.',
+          commentaryDisposition: { status: 'verified' }
+        }
+      },
+      {
+        ...row('RXB', 'Reaction Beta Inc.', 'Reaction Beta order growth is the setup.'),
+        lifecycle: 'close_available',
+        reaction: {
+          status: 'computed',
+          note: 'Margin upside drove the close reaction despite mixed demand.',
+          commentaryDisposition: { status: 'verified' }
+        }
+      },
+      {
+        // Same text in another field must not trip the interpretation pass.
+        ...row('XFD', 'Cross Field Inc.', 'Management reaffirmed full-year margin and revenue targets.'),
+        outcome: {
+          overall: 'pending',
+          guide: '',
+          interpretation: 'Management reaffirmed full-year margin and revenue targets.',
+          interpretationDisposition: { status: 'verified' }
+        }
+      },
+      // Dual share classes can legitimately share one company-specific read.
+      row('GOOG', 'Alphabet Inc', 'Search monetization, cloud margin, and AI spending discipline drive the read.'),
+      row('GOOGL', 'Alphabet Inc', 'Search monetization, cloud margin, and AI spending discipline drive the read.'),
+      row('SIA', 'Same Issuer Inc', 'Same Issuer subscription retention is the decisive earnings question.'),
+      {
+        ...row('SIB', 'Same Issuer Inc', 'Same Issuer subscription retention is the decisive earnings question.'),
+        reportDate: '2026-07-21'
+      },
+      {
+        ...row('FQ1', 'Fiscal Event Inc', 'Fiscal Event recurring revenue remains the company-specific setup.'),
+        fiscalQuarterEnding: '2026-03-31'
+      },
+      {
+        ...row('FQ2', 'Fiscal Event Inc', 'Fiscal Event recurring revenue remains the company-specific setup.'),
+        fiscalQuarterEnding: '2026-06-30'
+      }
+    ]
+  };
+
+  const reset = resetRepeatedEarningsNarrativeForEditorial(week);
+  const bySymbol = new Map(reset.rows.map((item) => [item.symbol, item]));
+  assert.equal(bySymbol.get('AAA').outcome.interpretation, '');
+  assert.equal(bySymbol.get('AAA').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('BBB').outcome.interpretation, '');
+  assert.equal(bySymbol.get('BBB').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('UNQ').outcome.interpretation, 'Unique backlog conversion remains the company-specific setup.');
+  assert.equal(bySymbol.get('UNQ').outcome.interpretationDisposition.status, 'verified');
+  assert.equal(bySymbol.get('SHA').outcome.interpretation, '');
+  assert.equal(bySymbol.get('SHA').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('SHB').outcome.interpretation, '');
+  assert.equal(bySymbol.get('SHB').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('DFA').outcome.interpretation, '');
+  assert.equal(bySymbol.get('DFA').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('DFB').outcome.interpretation, '');
+  assert.equal(bySymbol.get('DFB').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('FYA').outcome.interpretation, '');
+  assert.equal(bySymbol.get('FYA').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('FYB').outcome.interpretation, '');
+  assert.equal(bySymbol.get('FYB').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('GDA').outcome.guide, '');
+  assert.equal(bySymbol.get('GDA').outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('GDA').outcome.interpretation, 'Guide Alpha product mix is the setup.');
+  assert.equal(bySymbol.get('GDB').outcome.guide, '');
+  assert.equal(bySymbol.get('GDB').outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('RXA').reaction.note, '');
+  assert.equal(bySymbol.get('RXA').reaction.commentaryDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('RXB').reaction.note, '');
+  assert.equal(bySymbol.get('RXB').reaction.commentaryDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('XFD').outcome.interpretation, 'Management reaffirmed full-year margin and revenue targets.');
+  assert.equal(bySymbol.get('XFD').outcome.interpretationDisposition.status, 'verified');
+  assert.equal(bySymbol.get('GOOG').outcome.interpretation, 'Search monetization, cloud margin, and AI spending discipline drive the read.');
+  assert.equal(bySymbol.get('GOOGL').outcome.interpretationDisposition.status, 'verified');
+  assert.equal(bySymbol.get('SIA').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('SIB').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('FQ1').outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(bySymbol.get('FQ2').outcome.interpretationDisposition.status, 'pending_review');
+}
+
 
 async function main() {
   testFinnhubPrimaryAcceptance();
@@ -2212,6 +2392,7 @@ async function main() {
   testApplyCompanyReleaseResolution();
   testApplyEarningsNarrative();
   testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization();
+  testUnavailableNarrativeDispositionsRequireAuditFields();
   await testNeedsReviewPromotesOfficialMetricsIndependently();
   testTaskPolicyMetadataDoesNotBlockValidation();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
@@ -2227,6 +2408,7 @@ async function main() {
   await testPrimaryFinnhubRefreshCreatesCompanyReleaseTask();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();
+  testRepeatedEarningsNarrativeResetsSameFieldOnly();
   console.log('Earnings week tests passed.');
 }
 

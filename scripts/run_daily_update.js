@@ -31,6 +31,9 @@ const {
   isDisplayEligibleEarningsRow,
   narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
+  resetRepeatedEarningsNarrativeForEditorial,
+  validEarningsCommentaryDisposition,
+  validEarningsGuidanceDisposition,
   earningsRowKey: earningsNarrativeRowKey
 } = require('./earnings_week_contract');
 const {
@@ -624,16 +627,6 @@ function weekAheadPreparationCommandArgs(args, canonicalWeekAhead, { filePath = 
   };
 }
 
-function readOptionalJson(filePath, fallback, label = path.basename(filePath)) {
-  if (!fs.existsSync(filePath)) return structuredClone(fallback);
-  try {
-    return readJson(filePath);
-  } catch (error) {
-    process.stderr.write(`${label} could not be read; continuing without optional prior data: ${error.message}\n`);
-    return structuredClone(fallback);
-  }
-}
-
 function writeJson(filePath, value) {
   atomicWriteJson(filePath, value);
 }
@@ -712,7 +705,9 @@ function prepareEarningsForEditorial(earnings) {
     }
     return next;
   });
-  return { ...earnings, week };
+  // This cross-row check follows lifecycle cleanup so any cleared text becomes
+  // an explicit editorial assignment in the handoff rather than a publication fallback.
+  return { ...earnings, week: resetRepeatedEarningsNarrativeForEditorial(week) };
 }
 
 function weekAheadDayHasReleasedActuals(day) {
@@ -985,7 +980,7 @@ function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, rev
     // Broken/missing chart-data is still caught by final validation.
   }
   if (selectEarningsRows) prepareEarningsRowsForPublication(stampedData);
-  stripPublishedEarningsSourceAudit(stampedData);
+  stripPublishedEarningsStagingState(stampedData);
   delete stampedData.editorialReview;
   if (reviewManifest) {
     try {
@@ -1008,7 +1003,7 @@ function stripSourceAuditFields(value) {
   return value;
 }
 
-function stripPublishedEarningsSourceAudit(data) {
+function stripPublishedEarningsStagingState(data) {
   const rows = data.earnings?.week?.rows;
   if (Array.isArray(rows)) {
     for (const row of rows) {
@@ -1017,6 +1012,7 @@ function stripPublishedEarningsSourceAudit(data) {
       row.companyReleaseStatus = String(row.companyReleaseStatus || row.sourceAudit?.companyReleaseResolution?.status || '');
     }
   }
+  clearEarningsInternalQueues(data.earnings?.week);
   stripSourceAuditFields(data.earnings?.week);
   return data;
 }
@@ -1035,7 +1031,7 @@ function commitDashboardCandidate(args, nextHtml, {
       cwd: ROOT,
       stdio: 'inherit'
     });
-    if (result.status !== 0) throw new Error('Editorial candidate failed validation; the published dashboard was not changed.');
+    if (result.status !== 0) throw new Error('Editorial candidate failed render-safety validation; the published dashboard was not changed.');
     fs.renameSync(candidate, args.dashboard);
     if (refreshLastGood) {
       try {
@@ -1265,7 +1261,7 @@ function prepareCandidateNews(data, now = scheduledNow()) {
   data.stories = retainFresh(data.stories);
   data.crypto = {
     ...data.crypto,
-    notes: retainFresh(data.crypto?.notes, { crypto: true })
+    notes: retainFresh(data.crypto?.notes)
   };
   data.futuresModule = {
     ...data.futuresModule,
@@ -1550,6 +1546,8 @@ function earningsNarrativeItem(row) {
 }
 
 function preserveSafePriorEarningsNarrative(finalWeek, previousWeek) {
+  // mergeUnchangedEarningsNarrative clears prior copy unless the deterministic
+  // field fingerprint matches, so recovery below cannot cross changed facts.
   const fallbackWeek = mergeUnchangedEarningsNarrative(previousWeek, finalWeek);
   const fallbackRowsByKey = new Map((Array.isArray(fallbackWeek?.rows) ? fallbackWeek.rows : [])
     .map((row) => [earningsNarrativeRowKey(row), row]));
@@ -1559,17 +1557,22 @@ function preserveSafePriorEarningsNarrative(finalWeek, previousWeek) {
       const fallback = fallbackRowsByKey.get(earningsNarrativeRowKey(row));
       if (!fallback || narrativeEditorialComplete(row, row)) return row;
       const output = structuredClone(row);
-      if (!validEarningsCommentaryDisposition(output.outcome?.interpretationDisposition, output.outcome?.interpretation)) {
+      // pending_review is an intentional handoff decision. Never revive prior
+      // copy over it, even when that prior copy is still structurally valid.
+      if (!pendingReviewDisposition(output.outcome?.interpretationDisposition)
+        && !validEarningsCommentaryDisposition(output.outcome?.interpretationDisposition, output.outcome?.interpretation)) {
         output.outcome.interpretation = fallback.outcome?.interpretation || '';
         if (fallback.outcome?.interpretationDisposition) output.outcome.interpretationDisposition = structuredClone(fallback.outcome.interpretationDisposition);
         else delete output.outcome.interpretationDisposition;
       }
-      if (!validEarningsGuidanceDisposition(output.outcome?.guidanceDisposition, output.outcome?.guide)) {
+      if (!pendingReviewDisposition(output.outcome?.guidanceDisposition)
+        && !validEarningsGuidanceDisposition(output.outcome?.guidanceDisposition, output.outcome?.guide)) {
         output.outcome.guide = fallback.outcome?.guide || '';
         if (fallback.outcome?.guidanceDisposition) output.outcome.guidanceDisposition = structuredClone(fallback.outcome.guidanceDisposition);
         else delete output.outcome.guidanceDisposition;
       }
-      if (!validEarningsCommentaryDisposition(output.reaction?.commentaryDisposition, output.reaction?.note)) {
+      if (!pendingReviewDisposition(output.reaction?.commentaryDisposition)
+        && !validEarningsCommentaryDisposition(output.reaction?.commentaryDisposition, output.reaction?.note)) {
         output.reaction.note = fallback.reaction?.note || '';
         if (fallback.reaction?.commentaryDisposition) output.reaction.commentaryDisposition = structuredClone(fallback.reaction.commentaryDisposition);
         else delete output.reaction.commentaryDisposition;
@@ -1654,10 +1657,9 @@ function sanitizeOpening(editorial) {
 }
 
 function structurallyUsableStory(item, options = {}) {
-  const { crypto = false, futures = false } = options;
+  const { futures = false } = options;
   if (!item || typeof item !== 'object' || Array.isArray(item) || item.referencePage !== undefined) return false;
-  const label = crypto ? item.kicker : item.tag;
-  if (typeof label !== 'string' || !label.trim() || typeof item.title !== 'string' || !item.title.trim() || typeof item.body !== 'string' || !item.body.trim()) return false;
+  if (typeof item.tag !== 'string' || !item.tag.trim() || typeof item.title !== 'string' || !item.title.trim() || typeof item.body !== 'string' || !item.body.trim()) return false;
   if (options.requireSourceLabel && (typeof item.sourceLabel !== 'string' || !item.sourceLabel.trim())) return false;
   if (!isIsoDate(item.publishedOn)) return false;
   if (options.requirePublishedAt && !isIsoDateTime(item.publishedAt)) return false;
@@ -1683,7 +1685,7 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
   // Carry source/candidate facts only; display badges are rebuilt from
   // newsBaseline during rendering instead of being stored on story rows.
   const story = {
-    ...(options.crypto ? { kicker: item?.kicker } : { tag: item?.tag }),
+    tag: item?.tag,
     ...(typeof item?.tone === 'string' ? { tone: item.tone } : {}),
     title: item?.title,
     body: item?.body,
@@ -1786,6 +1788,8 @@ function newsSelection(manifest, key) {
 }
 
 function readNewsCandidateSource(preparedAt) {
+  // Missing, malformed, or stale inventory is not replaced from prior cards.
+  // Empty candidate maps make Apply omit selections it can no longer prove.
   const generatedAt = new Date(preparedAt);
   if (Number.isNaN(generatedAt.getTime())) {
     return null;
@@ -1909,7 +1913,6 @@ function normalizePublishedStorySections(data) {
   data.stories = stories;
 
   data.crypto.notes = sanitizeStoryList(data.crypto?.notes, {
-    crypto: true,
     requireSourceLabel: true,
     path: 'crypto.notes',
     ...storyBlockSets(futuresStories, stories)
@@ -1917,15 +1920,22 @@ function normalizePublishedStorySections(data) {
 }
 
 function clearEarningsInternalQueues(week) {
+  // Published Earnings keeps compact display state only. Recovery queues,
+  // provider fetch diagnostics, and narrative-apply receipts remain staging data.
   if (!week || typeof week !== 'object' || Array.isArray(week)) return;
   if (!Array.isArray(week.rows)) week.rows = [];
-  week.secondaryRecoveryCandidates = [];
-  week.companyReleaseTasks = [];
-  week.summary = {
-    ...(week.summary && typeof week.summary === 'object' && !Array.isArray(week.summary) ? week.summary : {}),
-    counts: computeEarningsWeekCounts(week.rows, week.secondaryRecoveryCandidates, week.companyReleaseTasks)
-  };
+  const rows = week.rows;
+  delete week.secondaryRecoveryCandidates;
+  delete week.companyReleaseTasks;
   delete week.narrativeApply;
+  const summary = week.summary && typeof week.summary === 'object' && !Array.isArray(week.summary)
+    ? { ...week.summary }
+    : {};
+  delete summary.fetches;
+  week.summary = {
+    ...summary,
+    counts: computeEarningsWeekCounts(rows, [], [])
+  };
 }
 
 function prepareEarningsRowsForPublication(data) {
@@ -1955,6 +1965,8 @@ function validComputedEarningsReaction(reaction) {
 }
 
 function repairPublishedEarningsReaction(row) {
+  // A malformed computed reaction is downgraded to its lifecycle-appropriate
+  // empty state so one bad reaction does not remove an otherwise renderable row.
   if (!objectRecord(row)) return row;
   const reaction = objectRecord(row.reaction) ? row.reaction : null;
   if (validComputedEarningsReaction(reaction)) return row;
@@ -1992,41 +2004,14 @@ function renderSafePublishedEarningsRow(row) {
     && objectRecord(row.reaction);
 }
 
-function validEarningsCommentaryDisposition(disposition, text) {
-  if (disposition === undefined) return true;
-  if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)) return false;
-  if (disposition.status === 'verified') return Boolean(String(text || '').trim());
-  if (disposition.status !== 'commentary_unavailable') return false;
-  return !String(text || '').trim()
-    && typeof disposition.reason === 'string'
-    && disposition.reason.trim()
-    && isIsoDateTime(disposition.attemptedAt);
-}
-
-function validEarningsGuidanceDisposition(disposition, text) {
-  if (disposition === undefined) return true;
-  if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)) return false;
-  if (disposition.status === 'verified') return Boolean(String(text || '').trim());
-  if (disposition.status === 'not_provided') {
-    return !String(text || '').trim()
-      && disposition.evidenceSource === 'official_company'
-      && /^https:\/\//i.test(String(disposition.evidenceUrl || ''));
-  }
-  if (disposition.status === 'unverified') {
-    return !String(text || '').trim()
-      && typeof disposition.reason === 'string'
-      && disposition.reason.trim()
-      && isIsoDateTime(disposition.attemptedAt);
-  }
-  return false;
-}
-
 function pendingReviewDisposition(disposition) {
   return Boolean(disposition && typeof disposition === 'object' && !Array.isArray(disposition)
     && disposition.status === 'pending_review');
 }
 
 function normalizeEarningsCommentaryForPublication(row) {
+  // Unresolved or malformed pairs publish no copy. Fact-gated prior-copy
+  // recovery happens earlier; this final normalization never invents commentary.
   if (!row || typeof row !== 'object' || Array.isArray(row) || !row.outcome || typeof row.outcome !== 'object' || Array.isArray(row.outcome)) return row;
   const next = structuredClone(row);
   const outcome = next.outcome;
@@ -2174,7 +2159,6 @@ function applyDashboardDataJson(args) {
   dashboardData.crypto = {
     ...dashboardData.crypto,
     notes: sanitizeStoryList(newsSelection(reviewManifest, 'crypto'), {
-      crypto: true,
       requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'crypto',

@@ -39,7 +39,7 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 
 - **Prepare Handoff:** validates staging and writes the handoff/candidate while leaving the canonical dashboard unchanged.
 - **AI Editorial Work:** happens only in `generated/editorial/dashboard-data.json`; refreshed quotes need reviewed commentary, while failed quote downloads retain their prior validated quote and commentary together.
-- **Apply Handoff:** validates and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
+- **Apply Handoff:** merges editorial work, applies documented publication fallbacks, verifies the assembled dashboard artifact is renderable, and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
 
 ## AI Editorial Instructions
 
@@ -81,7 +81,7 @@ Blank fields or decisions marked `pending_review` are active AI assignments unle
    - Provisional notes may be recorded during the complete-pool review, but do not finalize a shortlist, reject the remaining pool, write story copy, or begin other editorial work until every candidate has been examined.
    - Compare all candidates in the generated News inventory with every still-fresh prior card. Retain a prior card only when it remains among the strongest relevant, source-faithful coverage; do not discard or churn it merely because the scheduled window changed.
    - Treat every candidate in the generated News inventory as eligible for editorial consideration. Before making any editorial decision, review the complete inventory and rank the candidates. Use the News-card selection counts as targets; when fewer candidates are available, select the strongest available cards and do not invent filler.
-   - For selected News cards, add one entry to `editorialReview.newsSelection.futures`, `.stories`, or `.crypto` with the candidate `url` plus only `tag`/`kicker`, `title`, and `body`; do not hand-build final card arrays.
+   - For selected News cards, add one entry to `editorialReview.newsSelection.futures`, `.stories`, or `.crypto` with the candidate `url` plus only `tag`, `title`, and `body`; do not hand-build final card arrays.
    - Follow the News-card contract and Story selection policy below for required fields, source choice, carry-forward decisions, and link rules.
 
 4. Apply these copy and tone rules throughout AI Editorial Work.
@@ -129,11 +129,12 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 | Selection bucket | Target | AI supplies |
 | --- | --- | --- |
 | `editorialReview.newsSelection.stories` | Target 9 broad-market cards from the generated News inventory | candidate `url`, `tag`, `title`, `body` |
-| `editorialReview.newsSelection.crypto` | Target 6 crypto-specific cards from the generated News inventory | candidate `url`, `kicker`, `title`, `body` |
+| `editorialReview.newsSelection.crypto` | Target 6 crypto-specific cards from the generated News inventory | candidate `url`, `tag`, `title`, `body` |
 | `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
 - `editorialReview.newsSearch` is read-only source material. Prepare Handoff filters displayed-session Futures stories into `futuresCandidates`: Pre-Market Futures use the overnight futures window from 5:00 PM CT on the prior Chicago calendar day through the prepared run time or 8:30 AM CT, whichever is earlier; Session Futures use the shared `raw.sessionDate` regular-session window. When no shared Futures story window can be proven, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
 - Prepare Handoff gives each candidate a `sourceLabel`: downloaded candidates use approved source-catalog display names, and still-fresh prior-card candidates preserve their validated published `sourceLabel`. Apply Handoff copies `sourceLabel`, `publishedOn`, and `publishedAt` from the selected candidate into the published card. The AI must not type, edit, or override `sourceLabel` in `editorialReview.newsSelection`.
+- Reuters candidates downloaded through MSN syndication remain Reuters-sourced and use the reader-facing MSN article page. Treat MSN `publishedDateTime` as provider-verified publication time only after the Reuters provider identity, matching feed/detail timestamp, NewsML identity, and full article text validate; never substitute MSN `createdDateTime` or `updatedDateTime`.
 - Futures selections must be major, current catalysts for the displayed futures session. Prefer stories that plausibly explain index-futures direction or broad cross-asset risk: macro data, rates, central banks, inflation, jobs, commodities, geopolitics, trade policy, credit/liquidity stress, global equity moves, or mega-cap earnings only when the article clearly ties the news to index-level market action.
 - Do not use single-company product, partnership, analyst, executive, customer, or routine earnings-preview stories as Futures cards unless the article itself makes a clear index-futures or broad-market impact case. Put those stories in broad-market News instead.
 - A selected URL must come from the generated candidate inventory.
@@ -149,7 +150,7 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 - Keep a prior-run link only when it remains among the best available candidates after direct comparison. Prefer the newer candidate when reporting quality and price relevance are materially similar; do not churn a link merely because the scheduled window changed.
 - Replace a link when it is stale in angle, too narrow for the card's claim, materially weaker than current reporting, or no longer the best explanation for market action. If a carried-forward link remains, rewrite its copy only as needed to stay faithful to that article.
 - Before finalizing a subscriber, metered, or commonly gated link, check for an accessible reputable substitute. Use gated outlets only when their reporting is original or materially stronger and no suitable accessible substitute exists.
-- Preferred general sources: CNBC, AP, Reuters, Yahoo Finance, Axios, Kiplinger, Investing.com, Investopedia, Morningstar, TheStreet, U.S. News Money, and official exchange or index-provider pages. Prefer primary sources for company, policy, or market-structure claims; preferred crypto sources include CoinDesk, Decrypt, Blockworks, CoinGecko, CoinMarketCap, Alternative.me, issuer pages, SEC filings, and official protocol, exchange, or company announcements.
+- Preferred general sources: AP, Reuters, CNBC, Yahoo Finance, Axios, Kiplinger, Investing.com, Investopedia, Morningstar, TheStreet, U.S. News Money, and official exchange or index-provider pages. Prefer primary sources for company, policy, or market-structure claims; preferred crypto sources include CoinDesk, Decrypt, CoinGecko, CoinMarketCap, Alternative.me, issuer pages, SEC filings, and official protocol, exchange, or company announcements.
 - Match every story's headline and body to its linked article's main reported theme. Narrow a card to a company, earnings, product, or subtheme angle when that is all the reporting supports; do not use it to imply a broader market, sector, or macro claim.
 - `READ MORE` links must be reader-facing HTML pages, never raw APIs, feeds, JSON, or CSV downloads.
 
@@ -216,6 +217,8 @@ Scheduled or awaiting days may retain generated Market Lens copy or use a valid 
 
 ### Required daily checks
 
+Publication validation is a final artifact safety check. It blocks malformed HTML, unparsable embedded JSON, missing required runtime blocks, render-surface shapes that would break dashboard initialization, and core published-file safety issues. It does not block publication solely for incomplete editorial work, partial sections, unavailable dispositions, omitted cards, blank fallback copy, or recoverable section-level data issues handled by Apply fallbacks and later handoffs.
+
 - Before committing a content-only update, run only `node scripts/validate_dashboard.js readiness --skip-tests --allow daily_financial_news.html`. The `--allow` option hides expected dirty files from the warning list; readiness reports but does not block on other dirty files.
 - For quick iteration or an ordinary non-publish check, run `node scripts/validate_dashboard.js daily_financial_news.html`.
 - Let `./scripts/publish_main.sh` own the full readiness gate before it pushes; do not run the complete suite immediately before publishing.
@@ -242,7 +245,7 @@ Normal daily updates stop here. The Reference Appendix is not AI Editorial Work 
 
 ### Data Contracts
 
-This section is the canonical human-readable contract for dashboard data. Keep `scripts/validate_dashboard.js` and fetch-script output in sync with this section whenever a payload shape changes.
+This section is the canonical human-readable contract for dashboard data. Data contracts describe canonical ownership and expected payload shape. Some contracts are enforced during Prepare/source validation, some through Apply normalization, and some through focused regression tests. The final publication gate enforces only artifact renderability and core published-file safety unless this appendix explicitly says a condition is publication-blocking. Keep validation, normalization, tests, and fetch-script output in sync with the relevant owner whenever a payload shape changes.
 
 #### Published payload boundary
 
@@ -252,14 +255,13 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 - Owner: `scripts/week_ahead_contract.js` defines the deterministic slate, Market Lens channel rules, and Outcome contract.
 - Boundary rules: Market Lens reactions must use canonical Tape tickers present in both `tape.rows[]` and `chart-data.series[]`; released events require current replacement commentary; `outcome` exists only at `close_available` and cannot change the preselected reaction ticker set.
-- Publication safety: Apply/finalization must not retain stale generated or pre-release Market Lens or Outcome commentary after release. When verified current Outcome copy is unavailable or invalid, the implementation records `pending_review` and publishes no Outcome copy.
 
 #### Tape and chart data
 
-- Owners: `scripts/fetch_chart_data.js` produces chart/futures data, and `scripts/validate_dashboard.js` enforces embedded chart/Tape consistency.
+- Owners: `scripts/fetch_chart_data.js` produces chart/futures data, and `scripts/validate_dashboard.js` provides artifact safety plus staged chart/Tape consistency checks.
 - Boundary rules: `chart-data.series[]` is the canonical market-data store; visible Tape quote fields are derived from it; every displayed Tape ticker must have matching embedded source, chart series, and derived quote data.
+- Each published compact chart bar contains exactly `[time, open, high, low, close]` or, when volume is included, `[time, open, high, low, close, volume]`. Additional values are not supported.
 - Tape commentary binds to the accepted quote revision. Refreshed quotes need reviewed commentary; failed quote downloads retain their last validated quote and bound commentary.
-- Crypto ticker quote rows live in `tape.rows[]`, not `crypto.tape[]`.
 
 #### Asset Allocation
 
@@ -269,35 +271,54 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 #### Crypto
 
 - Owner: `scripts/fetch_crypto_stats.js` supplies crypto stat cards; Crypto news cards follow the News-card contract.
-- Boundary rules: `crypto.stats[]` is for section stat cards, `crypto.notes[]` is for crypto news, and ticker-level crypto commentary belongs in `tape.rows[]`.
+- Boundary rules: `crypto.stats[]` is for section stat cards, `crypto.notes[]` is for crypto news, and ticker-level crypto quote rows and commentary live in `tape.rows[]`; `crypto.tape[]` is not supported.
 
 #### Futures
 
 - Owner: `scripts/fetch_chart_data.js` owns Futures payloads.
 - Boundary rules: `futuresModule.futures[]` contains exactly four index-futures rows unless `availability.status` is explicitly `unavailable`; Futures story rules live in the News-card contract.
 
+#### Publication fallback contracts
+
+These are Apply/finalization implementation contracts, not AI Editorial Work completion rules. The Daily Runbook and section editorial contracts above remain the authority for what the AI must complete before Apply.
+
+- `opening`: incomplete or invalid editorial Opening fields are omitted from the published payload rather than replaced with generated copy.
+- `news`: missing, invalid, duplicate, outside-inventory, or missing-provenance selected cards are omitted; Apply marks coverage partial where applicable and does not search for replacement stories or infer provenance.
+- `tape`: refreshed quote rows without reviewed commentary publish a blank note with `commentary_unavailable`; failed quote-download rows retain their last validated quote-bound commentary bundle.
+- `weekAhead`: invalid or unavailable released Market Lens commentary uses an unavailable disposition; missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
+- `earnings.week`: narrative fields still marked `pending_review` or carrying a valid unavailable status publish no copy for that field and preserve that disposition for the next handoff. Apply never replaces `pending_review` with prior commentary. For a malformed non-pending narrative/disposition pair, Apply may recover previously verified copy only when the relevant deterministic facts are unchanged; otherwise the field publishes no copy and the invalid state is normalized. Empty-row recovery may carry forward the previous non-empty Earnings week only under the documented recovery contract.
+- `futuresModule`, `crypto.stats`, and `assetAllocationPortfolio`: invalid or unavailable source payloads publish explicit unavailable or carried-forward section state instead of fabricated values.
+
 ### Deterministic Source Contracts
 
-Use this reference only when deterministic refresh fails and a documented manual fallback is necessary. Do not use it as an alternate daily workflow.
+The automated routing below describes the sources used by the deterministic fetchers. Use the normal Prepare Handoff / Apply Handoff workflow; this reference is not an alternate daily workflow.
 
-Manual fallback work never goes directly into `daily_financial_news.html`. Put the verified fallback into the appropriate staging artifact or editorial handoff, then return to the normal Prepare Handoff / Apply Handoff workflow. If the correct entry point is unclear, stop and check the relevant data contract rather than editing the published dashboard.
+#### Automated price-source routing
 
-#### Price-source hierarchy
+- Tape and chart series, including U.S. indices and equities, international and sector ETFs, commodity futures, rates-volatility and bond proxies, index futures, and crypto majors: Yahoo Finance chart history through the configured `sourceSymbol`.
+- Finnhub quote data: latest-bar repair only for eligible plain U.S. symbols when Yahoo exposes a newer close but does not provide usable OHLC for that date. Finnhub is not a second quote authority and is not used for futures, Treasury, or crypto symbols.
+- Treasury yields and curve data: Treasury.gov Daily Treasury Yield Curve Rate Data.
+- Total crypto market cap: CoinGecko global market API.
+- Altcoin Season Index: CoinMarketCap chart API; the stat-card `delta` comes from `historicalValues.yesterday`, and is `n/a` when that comparison is unavailable.
+- Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2`.
+- Asset Allocation Portfolio rows: Yahoo Finance instrument-level ETF market data only. The portfolio summary may use only the sanitized export from the separate Asset Allocation Dashboard; never import or recreate tactical allocation/model logic.
 
-- U.S. indices and equities: Yahoo Finance chart history first; use Finnhub quote data only as a latest-bar repair fallback when Yahoo exposes a newer close but does not provide usable OHLC for that date. Cross-check major index closes with AP, CNBC, Reuters, MarketWatch, or TradingView when available.
-- International equity ETFs such as VEA and VWO: Yahoo Finance chart/quote data first, then clearly labeled high-confidence backups.
-- Sector and commodity ETFs: Yahoo Finance chart history first; use Finnhub latest quotes only for the same latest-bar repair fallback on plain U.S. ETF symbols. MarketWatch quote pages are an acceptable backup.
-- Treasury yields: Treasury.gov daily rates first; Trading Economics or CNBC as backup.
-- Rates volatility and bond proxies: use the configured dashboard source or ETF quote source and label proxy rows clearly.
-- WTI: CME/NYMEX where available; MarketWatch, Trading Economics, or Reuters as backup.
-- Gold and silver: GoldPrice.org spot close or MarketWatch futures close. Preserve the chosen source in the chart source details.
+#### Manual research/cross-check references
+
+Use these sources only to diagnose a deterministic refresh failure or cross-check a suspicious value. They are not automated fallback inputs and do not authorize editing generated market data, the editorial handoff's deterministic fields, or `daily_financial_news.html`.
+
+- Major U.S. index closes: AP, CNBC, Reuters, MarketWatch, or TradingView when available.
+- International equity ETFs such as VEA and VWO, and sector or commodity ETFs: reputable quote pages with a clearly identified instrument and trade date; MarketWatch is acceptable.
+- Treasury yields: Trading Economics or CNBC against the Treasury.gov date and maturity.
+- Rates-volatility and bond proxies: verify the configured dashboard instrument and keep proxy labels explicit.
+- WTI: CME/NYMEX where available; MarketWatch, Trading Economics, or Reuters.
+- Gold and silver: GoldPrice.org spot data or MarketWatch futures data; distinguish spot from futures when comparing values.
 - Crypto majors: CoinGecko or CoinMarketCap.
-- Total crypto market cap: CoinGecko global market, CoinMarketCap global charts, or CoinGlance.
-- Altcoin Season Index: CoinMarketCap Altcoin Season Index. Prefer `node scripts/fetch_crypto_stats.js` so the stat-card `delta` comes from CoinMarketCap's chart API `historicalValues.yesterday`; otherwise use a clear `n/a` rather than fabricating a change.
-- Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2` first, then the Alternative.me page if the API fails.
-- Asset Allocation Portfolio rows: instrument-level ETF market data only. Do not import or recreate tactical allocation/model logic from the separate Asset Allocation Dashboard.
+- Total crypto market cap: CoinMarketCap global charts or CoinGlance against CoinGecko.
+- Altcoin Season Index: the CoinMarketCap public index page may cross-check the current reading, but only the chart API supplies the canonical yesterday comparison.
+- Crypto Fear & Greed: the Alternative.me page may cross-check the API reading.
 
-For every manually refreshed quote row, follow its full fallback chain before using `~`; never reuse the prior embedded price as a substitute. If no same-day close is available, use the latest verified close and make the trade date clear in the row or its stale-data UI. For a chartable ticker, reconcile the corresponding embedded `chart-data.series` latest bar to the same trade date/value; do not patch only `tape.rows`.
+If research identifies a source defect or a value that requires replacement, stop until the relevant data contract identifies a supported staging input. Never reuse the prior embedded price as a substitute, patch only `tape.rows`, or edit the published dashboard directly.
 
 ### Earnings Deterministic Method
 
@@ -315,9 +336,11 @@ The richer earnings monitor uses this contract as the canonical deterministic me
 
 During normal Prepare/refresh, every visible row whose report window has arrived and whose actuals are still missing enters the same `companyReleaseTasks` recovery path. A failed retry is non-blocking: the staged row keeps the correct `awaiting_actual` lifecycle, and the task stays active for a later refresh.
 
-#### Canonical row contract
+#### Published row and narrative state
 
-Earnings rows use the shared lifecycle vocabulary; validation owns the full schema. Dashboard-visible provenance stays compact, while detailed source audit remains build/debug data.
+Published Earnings rows are produced from the Earnings contract owner and Apply normalization. Prepare/source validation owns deterministic contract enforcement; final publication blocks only Earnings states that would make the dashboard fail to render. Display rows keep compact schedule, result, guidance, and reaction status fields; detailed `sourceAudit`, recovery queues, and provider diagnostics are staging/debug state and must not be treated as reader-facing content.
+
+Prepare Handoff treats repeated verified Earnings narrative as stale editorial state: same-field reuse across visible rows representing different underlying companies is reopened as `pending_review` for that field on the next handoff. Same-issuer rows, such as multiple share classes tied to one earnings report, may retain identical verified narrative only when they represent the same underlying company and earnings event; this does not allow reused or generic narrative across different issuers or relax the current-evidence requirement. This is a handoff self-healing check, not an Apply-time rejection gate.
 
 #### EarningsAPI budget policy
 

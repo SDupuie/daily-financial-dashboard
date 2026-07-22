@@ -23,8 +23,10 @@ const {
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
+  msnReutersReaderUrl,
   parseApNewsSitemap,
-  parseNewsFeed
+  parseNewsFeed,
+  priorNewsCandidates
 } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
 const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
@@ -151,7 +153,7 @@ async function testDeterministicNewsCandidateAcquisition() {
       url: 'https://www.coindesk.com/prior-crypto',
       publishedOn: '2026-07-10',
       sourceLabel: 'Fixture News',
-      kicker: 'Prior',
+      tag: 'Prior',
       body: 'Previously reviewed crypto copy.'
     }] }
   };
@@ -672,6 +674,144 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
   }
 }
 
+async function testMsnReutersProviderVerifiedAcquisition() {
+  const pathConfig = {
+    id: 'msn-reuters',
+    provider: 'msn-reuters',
+    pool: 'generalCandidates',
+    feedUrl: 'https://api.msn.com/news/providers/AAf3a78/items',
+    providerId: 'AAf3a78',
+    limit: 100
+  };
+  const provider = { id: 'AAf3a78', name: 'Reuters' };
+  const cards = [
+    {
+      id: 'AAfixture1', type: 'article', category: 'money', provider,
+      title: 'Markets rally on fixture catalyst', publishedDateTime: '2026-07-10T18:00:00Z',
+      url: 'https://www.msn.com/en-us/money/markets/markets-rally-on-fixture-catalyst/ar-AAfixture1?ocid=test'
+    },
+    {
+      id: 'AAfixture2', type: 'article', category: 'news', provider,
+      title: 'Markets rally on the fixture catalyst', publishedDateTime: '2026-07-10T18:01:00Z',
+      url: 'https://www.msn.com/en-us/news/markets/markets-rally-on-the-fixture-catalyst/ar-AAfixture2'
+    },
+    {
+      id: 'AAwrongtime', type: 'article', category: 'money', provider,
+      title: 'Updated time must not replace publication time', publishedDateTime: '2026-07-10T18:02:00Z',
+      url: 'https://www.msn.com/en-us/money/markets/updated-time-fixture/ar-AAwrongtime'
+    },
+    {
+      id: 'AAwronglegal', type: 'article', category: 'news', provider,
+      title: 'Wrong legal publisher fixture', publishedDateTime: '2026-07-10T18:02:30Z',
+      url: 'https://www.msn.com/en-us/news/markets/wrong-legal-publisher/ar-AAwronglegal'
+    },
+    {
+      id: 'AAsports', type: 'article', category: 'sports', provider,
+      title: 'Sports fixture', publishedDateTime: '2026-07-10T18:03:00Z',
+      url: 'https://www.msn.com/en-us/sports/other/sports-fixture/ar-AAsports'
+    },
+    {
+      id: 'AAspoofed', type: 'article', category: 'money', provider: { id: 'other', name: 'Reuters' },
+      title: 'Spoofed provider fixture', publishedDateTime: '2026-07-10T18:04:00Z',
+      url: 'https://www.msn.com/en-us/money/markets/spoofed-provider/ar-AAspoofed'
+    }
+  ];
+  const articleBody = '<p>This Reuters fixture contains a complete article body for editorial review. '.repeat(5) + '</p>';
+  const detail = (card, overrides = {}) => ({
+    id: card.id,
+    type: 'article',
+    title: card.title,
+    abstract: 'Reuters fixture abstract.',
+    body: articleBody,
+    publishedDateTime: card.publishedDateTime,
+    createdDateTime: '2026-07-10T18:05:00Z',
+    updatedDateTime: '2026-07-10T18:15:00Z',
+    sourceId: 'tag:reuters.com,2026:newsml_KBNFIXTURE1',
+    provider: { ...provider, companyLegalName: 'Reuters News & Media Inc.' },
+    ...overrides
+  });
+  const details = new Map([
+    ['AAfixture1', detail(cards[0])],
+    ['AAfixture2', detail(cards[1])],
+    ['AAwrongtime', detail(cards[2], { publishedDateTime: '2026-07-10T18:15:00Z', sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGTIME' })],
+    ['AAwronglegal', detail(cards[3], { provider: { ...provider, companyLegalName: 'Not Reuters' }, sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGLEGAL' })]
+  ]);
+  const originalFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (value) => {
+    const url = new URL(String(value));
+    calls.push(url);
+    if (url.hostname === 'api.msn.com') {
+      return new Response(JSON.stringify({ value: [{ subCards: cards }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    const item = details.get(decodeURIComponent(url.pathname.split('/').pop()));
+    return new Response(JSON.stringify(item || {}), {
+      status: item ? 200 : 404,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  let result;
+  let staleResult;
+  let emptyResult;
+  try {
+    result = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(['2026-07-10']), timeoutMs: 1000 });
+    staleResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(['2026-07-09']), timeoutMs: 1000 });
+    emptyResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(), timeoutMs: 1000 });
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  const feedCall = calls.find((url) => url.hostname === 'api.msn.com');
+  assert.equal(feedCall.searchParams.get('contentType'), 'article');
+  assert.equal(feedCall.searchParams.get('$top'), '100');
+  assert.equal(calls.filter((url) => url.hostname === 'assets.msn.com').length, 4, 'Sports and spoofed-provider cards must be rejected before detail retrieval.');
+  assert.deepEqual(staleResult, { items: [] }, 'Out-of-window cards must be discarded before detail retrieval.');
+  assert.deepEqual(emptyResult, { items: [] }, 'An empty eligible date set must not become a provider failure.');
+  assert.equal(result.items.length, 2, 'Timestamp-mismatched detail records must be rejected without discarding the valid Reuters batch.');
+  assert.ok(result.items.every((item) => item.publishedAtVerified === true));
+  assert.ok(result.items.every((item) => item.publisherStoryId === 'tag:reuters.com,2026:newsml_KBNFIXTURE1'));
+  assert.ok(result.items.every((item) => item.article.text.length > 200));
+  assert.equal(
+    msnReutersReaderUrl(cards[0].url, cards[0].id),
+    'https://www.msn.com/en-us/money/markets/markets-rally-on-fixture-catalyst/ar-AAfixture1'
+  );
+  assert.equal(msnReutersReaderUrl('https://www.msn.com/en-us/money/not-an-article', 'AAfixture1'), '');
+
+  const asOf = new Date('2026-07-10T21:00:00Z');
+  const artifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [pathConfig],
+    clock: () => asOf,
+    fetchPath: async () => result,
+    fetchArticle: async () => {
+      throw new Error('Provider-verified Reuters candidates must bypass article-page timestamp review.');
+    }
+  });
+  assert.equal(artifact.generalCandidates.length, 1, 'Duplicate MSN records for one Reuters NewsML story must collapse.');
+  const candidate = artifact.generalCandidates[0];
+  assert.equal(candidate.provider, 'msn-reuters');
+  assert.equal(candidate.sourceId, 'reuters');
+  assert.equal(candidate.sourceLabel, 'Reuters');
+  assert.equal(candidate.publishedAtVerified, true);
+  assert.equal(candidate.publishedAt, '2026-07-10T18:00:00.000Z');
+  assert.equal(candidate.article.text.length > 200, true);
+  assert.equal(artifact.articleReview.reviewCandidateCount, 0);
+
+  const prior = priorNewsCandidates({
+    stories: [{
+      tag: 'Markets', title: candidate.title, body: 'Prior Reuters fixture copy.', url: candidate.url,
+      publishedOn: candidate.publishedOn, publishedAt: candidate.publishedAt, sourceLabel: 'Reuters'
+    }],
+    futuresModule: { stories: [] },
+    crypto: { notes: [] }
+  }, new Set([candidate.publishedOn]));
+  assert.equal(prior.generalCandidates.length, 1, 'A previously validated MSN-hosted Reuters card must remain eligible while fresh.');
+}
+
 async function testVerifiedPublishedAtCandidatesBypassReviewCap() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const unverifiedCount = ARTICLE_REVIEW_CANDIDATE_LIMIT + 10;
@@ -890,6 +1030,7 @@ async function main() {
   testRssParsing();
   testApNewsSitemapParsing();
   await testApPublicAcquisitionUsesOneSitemapFetch();
+  await testMsnReutersProviderVerifiedAcquisition();
   await testVerifiedPublishedAtCandidatesBypassReviewCap();
   await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();

@@ -1789,6 +1789,8 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   ]));
   const writeJson = dependencies.writeJson || atomicWriteJson;
   const reportProgress = () => {
+    // Persist only full-roster snapshots. The initial carried-forward state and
+    // each completed row are recoverable without exposing a half-written ticker set.
     const series = seriesByIndex.filter(Boolean);
     if (series.length !== inputRows.length) return;
     const failures = [...failuresByTicker.values()];

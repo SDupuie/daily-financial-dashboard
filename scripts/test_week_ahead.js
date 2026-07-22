@@ -563,17 +563,17 @@ function testLifecycleAndCloseReactionTransitions() {
   const unfinishedOutcome = finalizeWeekAheadOutcomes(afterClose, { now: new Date('2026-07-14T22:05:00Z') });
   assert.equal(unfinishedOutcome.days.find((day) => day.date === '2026-07-14').outcome.status, 'pending_review');
   assert.deepEqual(validateWeekAheadPayload(unfinishedOutcome, { requireOutcomeDisposition: true }), []);
-  const failOpenOutcome = structuredClone(afterClose);
-  failOpenOutcome.days.find((day) => day.date === '2026-07-14').outcome = {
+  const nonBlockingOutcome = structuredClone(afterClose);
+  nonBlockingOutcome.days.find((day) => day.date === '2026-07-14').outcome = {
     status: 'commentary_unavailable',
     source: 'editorial',
     reason: 'current_run_research_exhausted',
     attemptedAt: '2026-07-14T22:05:00.000Z'
   };
-  assert.deepEqual(validateWeekAheadPayload(failOpenOutcome, { requireOutcomeDisposition: true }), []);
-  const retriedOutcome = finalizeWeekAheadOutcomes(failOpenOutcome, { now: new Date('2026-07-15T22:05:00Z') });
+  assert.deepEqual(validateWeekAheadPayload(nonBlockingOutcome, { requireOutcomeDisposition: true }), []);
+  const retriedOutcome = finalizeWeekAheadOutcomes(nonBlockingOutcome, { now: new Date('2026-07-15T22:05:00Z') });
   assert.deepEqual(retriedOutcome.days.find((day) => day.date === '2026-07-14').outcome, { status: 'pending_review' });
-  const contradictoryOutcome = structuredClone(failOpenOutcome);
+  const contradictoryOutcome = structuredClone(nonBlockingOutcome);
   contradictoryOutcome.days.find((day) => day.date === '2026-07-14').outcome.title = 'Unsupported interpretation';
   assert.deepEqual(validateWeekAheadPayload(finalizeWeekAheadOutcomes(contradictoryOutcome, { now: new Date('2026-07-14T22:05:00Z') }), { requireOutcomeDisposition: true }), []);
   closedTuesday.outcome = { source: 'editorial', title: 'Inflation firmed', body: 'The release and close reaction reinforced a firmer expected policy path.' };

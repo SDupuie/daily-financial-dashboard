@@ -3,12 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  EARNINGS_WEEK_SCHEMA_VERSION,
   earningsCloseAvailable,
   earningsRowKey: rowKey,
-  earningsRowLifecycle,
-  earningsReactionBasis,
-  metricResult
+  metricResult,
+  validEarningsCommentaryDisposition,
+  validEarningsGuidanceDisposition
 } = require('./earnings_week_contract');
 const {
   compareIsoDate,
@@ -42,7 +41,6 @@ const REACTION_BASES = new Set([
 ]);
 const REACTION_STATUSES = new Set(['computed', 'awaiting_close', 'unavailable', 'pending']);
 const LIFECYCLES = new Set(['scheduled', 'awaiting_actual', 'released_awaiting_close', 'close_available']);
-const SOURCE_SUMMARY_PRIMARIES = new Set(['finnhub', 'earningsApiCompany', 'sec_company_release']);
 const SECONDARY_CALENDAR_SOURCES = new Set(['alphaVantageCalendar']);
 const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
 const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
@@ -50,14 +48,7 @@ const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavail
 const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const COMMENTARY_UNAVAILABLE_STATUSES = new Set(['commentary_unavailable']);
 const GUIDANCE_UNAVAILABLE_STATUSES = new Set(['unverified']);
-const RESULT_REFRESH_PROVIDERS = new Set(['finnhub', 'earningsApiCompany', 'yahoo']);
-const RESULT_REFRESH_FAILURE_CODES = new Set([
-  'missing_api_key',
-  'usage_ledger_unreadable',
-  'budget_unavailable',
-  'provider_request_failed',
-  'provider_row_unavailable'
-]);
+const EARNINGS_WEEK_VALIDATION_MODES = new Set(['staged', 'published']);
 const NUMBER_TOLERANCE = 0.0001;
 const PCT_TOLERANCE = 0.03;
 const OUTCOME_NO_GUIDANCE_PATTERN = /\bno\s+(?:(?:formal|updated)\s+)?guidance\b|\bguidance\s+(?:not\s+(?:provided|issued|available)|unverified|none)\b/i;
@@ -152,6 +143,12 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function normalizedValidationMode(value) {
+  // "published" selects the compact embedded shape for staging/tests; final
+  // artifact publication uses validateDashboardRenderSurface instead.
+  return EARNINGS_WEEK_VALIDATION_MODES.has(value) ? value : 'staged';
+}
+
 function isRenderableEarningsRow(row) {
   return isObject(row)
     && typeof row.symbol === 'string'
@@ -202,26 +199,6 @@ function validateRange(errors, range) {
   }
 }
 
-function validateSecondaryRecoveryTaskCompanyAudit(errors, task, label) {
-  const audit = task.sourceAudit?.earningsApiCompany;
-  if (!isObject(audit)) {
-    errors.push(`${label}.sourceAudit.earningsApiCompany must be populated.`);
-    return;
-  }
-  if (!isObject(audit.selectedRow)) {
-    if (typeof audit.error !== 'string' || !audit.error.trim()) {
-      errors.push(`${label}.sourceAudit.earningsApiCompany.selectedRow must be populated or carry a retryable provider error.`);
-    }
-    return;
-  }
-  if (audit.selectedRow.reportDate !== task.reportDate) {
-    errors.push(`${label}.sourceAudit.earningsApiCompany.selectedRow.reportDate must match task.reportDate.`);
-  }
-  if (!TIMINGS.has(audit.selectedRow.reportTiming)) {
-    errors.push(`${label}.sourceAudit.earningsApiCompany.selectedRow.reportTiming is invalid.`);
-  }
-}
-
 function validateReaction(errors, row, label) {
   const reaction = row.reaction;
   if (!isObject(reaction)) {
@@ -236,13 +213,6 @@ function validateReaction(errors, row, label) {
 
 function expectedSource(value, source) {
   return value === null ? 'none' : source;
-}
-
-function arraysEqual(left, right) {
-  return Array.isArray(left)
-    && Array.isArray(right)
-    && left.length === right.length
-    && left.every((item, index) => item === right[index]);
 }
 
 function secondaryCalendarAuditSource(value) {
@@ -592,10 +562,27 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
-function validateRow(errors, rowRaw, index, range) {
+function validateRow(errors, rowRaw, index, range, options = {}) {
+  const validationMode = normalizedValidationMode(options.mode);
   const row = isObject(rowRaw) ? rowRaw : {};
   const label = row.symbol || `rows[${index}]`;
 
+  if (!isObject(rowRaw)) {
+    errors.push(`${label} must be an object.`);
+  }
+  if (validationMode === 'published') {
+    for (const field of Object.keys(rowRaw || {})) {
+      if (!ROW_FIELDS.has(field)) errors.push(`${label}.${field} is not part of the published Earnings row contract.`);
+    }
+    for (const field of FORBIDDEN_ROW_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(row, field)) {
+        errors.push(`${label}.${field} must not appear; use eps/revenue/outcome/reaction nested fields.`);
+      }
+    }
+    if (row.sourceAudit !== undefined) {
+      errors.push(`${label}.sourceAudit must not be embedded in published dashboard data.`);
+    }
+  }
   if (typeof row.symbol !== 'string' || !/^[A-Z0-9.-]+$/.test(row.symbol)) {
     errors.push(`${label}.symbol must be populated and uppercase.`);
   }
@@ -629,35 +616,22 @@ function validateRow(errors, rowRaw, index, range) {
     errors.push(`${label}.companyReleaseStatus must be a string.`);
   }
   validateReaction(errors, row, label);
-  // Source audit is part of the deterministic contract. This proves structured
-  // provenance for the row, not that the remote source is still reachable.
-  const audit = isObject(row.sourceAudit) ? row.sourceAudit : null;
-  const selected = audit?.selectedSources;
-  if (!audit) {
-    errors.push(`${label}.sourceAudit must be populated.`);
-  } else if (!isObject(selected)) {
-    errors.push(`${label}.sourceAudit.selectedSources must be populated.`);
-  } else if (selected.slate === 'finnhub') {
-    validateFinnhubRowSourceAudit(errors, row, audit, selected, label);
-  } else if (SECONDARY_CALENDAR_SOURCES.has(selected.slate)) {
-    validateEarningsApiRowSourceAudit(errors, row, audit, selected, label);
-  } else {
-    errors.push(`${label}.sourceAudit.selectedSources.slate is invalid.`);
-  }
-}
-
-function validateSummary(errors, data) {
-  const counts = data.summary?.counts;
-  if (!isObject(data.summary)) {
-    errors.push('summary must be an object.');
-    return;
-  }
-  if (!isObject(counts)) {
-    errors.push('summary.counts must be an object.');
-    return;
-  }
-  if (Object.prototype.hasOwnProperty.call(data.summary.fetches || {}, 'nasdaqCalendar')) {
-    errors.push('summary.fetches.nasdaqCalendar is not part of the canonical Earnings source contract.');
+  if (validationMode === 'staged') {
+    // Source audit is part of the deterministic contract. This proves structured
+    // provenance for the row, not that the remote source is still reachable.
+    const audit = isObject(row.sourceAudit) ? row.sourceAudit : null;
+    const selected = audit?.selectedSources;
+    if (!audit) {
+      errors.push(`${label}.sourceAudit must be populated.`);
+    } else if (!isObject(selected)) {
+      errors.push(`${label}.sourceAudit.selectedSources must be populated.`);
+    } else if (selected.slate === 'finnhub') {
+      validateFinnhubRowSourceAudit(errors, row, audit, selected, label);
+    } else if (SECONDARY_CALENDAR_SOURCES.has(selected.slate)) {
+      validateEarningsApiRowSourceAudit(errors, row, audit, selected, label);
+    } else {
+      errors.push(`${label}.sourceAudit.selectedSources.slate is invalid.`);
+    }
   }
 }
 
@@ -671,7 +645,8 @@ function validateAvailability(errors, data) {
   if (!['carried_forward', 'unavailable'].includes(status)) errors.push('availability.status is invalid.');
 }
 
-function validateEditorialDisposition(errors, disposition, label, allowedStatuses, copy, unavailableStatuses) {
+function validateEditorialDisposition(errors, disposition, label, allowedStatuses, copy, unavailableStatuses, options = {}) {
+  const validationMode = normalizedValidationMode(options.mode);
   const text = String(copy || '').trim();
   if (disposition === undefined) return text ? 'verified' : '';
   if (!isObject(disposition)) {
@@ -692,19 +667,30 @@ function validateEditorialDisposition(errors, disposition, label, allowedStatuse
   }
   if (disposition.status === 'not_provided') {
     if (text) errors.push(`${label}.status not_provided must not carry guidance text.`);
-    if (disposition.evidenceSource !== 'official_company') errors.push(`${label}.evidenceSource must be official_company when guidance was not provided.`);
-    if (typeof disposition.evidenceUrl !== 'string' || !/^https:\/\//.test(disposition.evidenceUrl)) {
-      errors.push(`${label}.evidenceUrl must identify the official company evidence.`);
+    if (validationMode === 'staged') {
+      if (disposition.evidenceSource !== 'official_company') errors.push(`${label}.evidenceSource must be official_company when guidance was not provided.`);
+      if (typeof disposition.evidenceUrl !== 'string' || !/^https:\/\//.test(disposition.evidenceUrl)) {
+        errors.push(`${label}.evidenceUrl must identify the official company evidence.`);
+      }
     }
     return disposition.status;
   }
   if (unavailableStatuses.has(disposition.status)) {
     if (text) errors.push(`${label}.status ${disposition.status} must not carry unsupported editorial copy.`);
+    const validUnavailable = disposition.status === 'commentary_unavailable'
+      ? validEarningsCommentaryDisposition(disposition, text)
+      : validEarningsGuidanceDisposition(disposition, text, { requireNotProvidedEvidence: validationMode === 'staged' });
+    if (!validUnavailable) {
+      errors.push(`${label}.status ${disposition.status} requires blank copy, non-empty reason, and ISO attemptedAt.`);
+    }
   }
   return disposition.status;
 }
 
-function validateNarrativeApply(errors, data) {
+function validateNarrativeApply(errors, data, options = {}) {
+  // This validates copy/disposition pair structure, not whether editorial work
+  // is complete. Pending and unavailable states remain valid for later handoffs.
+  const validationMode = normalizedValidationMode(options.mode);
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const requiredRows = rows.filter(isRenderableEarningsRow);
 
@@ -716,7 +702,8 @@ function validateNarrativeApply(errors, data) {
       `${row.symbol}.outcome.interpretationDisposition`,
       COMMENTARY_DISPOSITION_STATUSES,
       row.outcome?.interpretation,
-      COMMENTARY_UNAVAILABLE_STATUSES
+      COMMENTARY_UNAVAILABLE_STATUSES,
+      { mode: validationMode }
     );
     const guidanceRequired = reportedRow;
     const guide = String(row.outcome?.guide || '').trim();
@@ -727,7 +714,8 @@ function validateNarrativeApply(errors, data) {
           `${row.symbol}.outcome.guidanceDisposition`,
           GUIDANCE_DISPOSITION_STATUSES,
           guide,
-          GUIDANCE_UNAVAILABLE_STATUSES
+          GUIDANCE_UNAVAILABLE_STATUSES,
+          { mode: validationMode }
         )
       : '';
     if (guidanceRequired) {
@@ -743,21 +731,24 @@ function validateNarrativeApply(errors, data) {
         `${row.symbol}.reaction.commentaryDisposition`,
         COMMENTARY_DISPOSITION_STATUSES,
         note,
-        COMMENTARY_UNAVAILABLE_STATUSES
+        COMMENTARY_UNAVAILABLE_STATUSES,
+        { mode: validationMode }
       );
     }
   }
 }
 
-function validateSecondaryRecoveryCandidates(errors, data) {
-  if (!Array.isArray(data.secondaryRecoveryCandidates)) {
-    errors.push('secondaryRecoveryCandidates must be an array.');
+function validatePublishedInternalQueues(errors, data) {
+  for (const field of ['secondaryRecoveryCandidates', 'companyReleaseTasks']) {
+    if (data[field] === undefined) continue;
+    if (!Array.isArray(data[field])) {
+      errors.push(`${field} must be an array when present in published dashboard data.`);
+    } else if (data[field].length) {
+      errors.push(`${field} must be empty in published dashboard data.`);
+    }
   }
-}
-
-function validateCompanyReleaseTasks(errors, data) {
-  if (!Array.isArray(data.companyReleaseTasks)) {
-    errors.push('companyReleaseTasks must be an array.');
+  if (data.outputPath !== undefined) {
+    errors.push('outputPath must not be embedded in published dashboard data.');
   }
 }
 
@@ -860,14 +851,21 @@ function validateCompanyReleaseResolution(errors, itemRaw, taskMap, rowMap, inde
   validateCompanyReleaseResolutionReaction(errors, item, label, now);
 }
 
-function validateEarningsWeekPayload(data) {
+function validateEarningsWeekPayload(data, options = {}) {
   const errors = [];
+  const validationMode = normalizedValidationMode(options.mode);
+
+  if (!isObject(data)) {
+    errors.push('Earnings week payload must be an object.');
+    return errors;
+  }
 
   for (const field of Object.keys(data || {})) {
     if (!TOP_LEVEL_FIELDS.has(field)) errors.push(`${field} is not part of the canonical Earnings week contract.`);
   }
   validateRange(errors, data.range);
   validateAvailability(errors, data);
+  if (validationMode === 'published') validatePublishedInternalQueues(errors, data);
 
   if (!Array.isArray(data.rows)) {
     errors.push('rows must be an array.');
@@ -877,11 +875,11 @@ function validateEarningsWeekPayload(data) {
       const key = `${row?.reportDate || index}:${row?.symbol || index}`;
       if (seen.has(key)) errors.push(`Duplicate earnings row ${key}.`);
       seen.add(key);
-      validateRow(errors, row, index, data.range);
+      validateRow(errors, row, index, data.range, { mode: validationMode });
     });
   }
 
-  validateNarrativeApply(errors, data);
+  validateNarrativeApply(errors, data, { mode: validationMode });
 
   return errors;
 }

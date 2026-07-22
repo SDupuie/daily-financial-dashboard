@@ -21,9 +21,7 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'coindesk', displayName: 'CoinDesk', domains: ['coindesk.com'] },
   { id: 'crypto-briefing', displayName: 'Crypto Briefing', domains: ['cryptobriefing.com'] },
   { id: 'decrypt', displayName: 'Decrypt', domains: ['decrypt.co'] },
-  { id: 'blockworks', displayName: 'Blockworks', domains: ['blockworks.co'] },
   { id: 'the-block', displayName: 'The Block', domains: ['theblock.co'] },
-  { id: 'dl-news', displayName: 'DL News', domains: ['dlnews.com'] },
   { id: 'crypto-news', displayName: 'Crypto.news', domains: ['crypto.news'] },
   { id: 'fx-news-group', displayName: 'FX News Group', domains: ['fxnewsgroup.com'] },
   { id: 'coingecko', displayName: 'CoinGecko', domains: ['coingecko.com'] },
@@ -57,6 +55,7 @@ const STOCKFIT_NEWS_PATHS = Object.freeze([
 
 const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates', feedUrl: 'https://apnews.com/news-sitemap-content.xml' },
+  { id: 'msn-reuters', provider: 'msn-reuters', pool: 'generalCandidates', feedUrl: 'https://api.msn.com/news/providers/AAf3a78/items', providerId: 'AAf3a78', limit: 100 },
   { id: 'investing-market', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_25.rss' },
   { id: 'investing-economy', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_14.rss' },
   { id: 'investing-indicators', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_95.rss' },

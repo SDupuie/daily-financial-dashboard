@@ -9,6 +9,53 @@ const DISPLAY_MIN_MARKET_CAP = 10000000000;
 const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
 const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const EDITORIAL_UNAVAILABLE_REASON = 'not_verified_for_current_run';
+const COMPANY_TOKEN_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'co',
+  'company',
+  'corp',
+  'corporation',
+  'holdings',
+  'inc',
+  'incorporated',
+  'limited',
+  'llc',
+  'ltd',
+  'of',
+  'plc',
+  'sa',
+  'the'
+]);
+const NARRATIVE_REUSE_FIELDS = Object.freeze([
+  // Reset fields independently: a repeated guidance sentence does not make an
+  // otherwise company-specific result interpretation or close reaction stale.
+  {
+    copy: (row) => row?.outcome?.interpretation,
+    disposition: (row) => row?.outcome?.interpretationDisposition,
+    reset(row) {
+      row.outcome.interpretation = '';
+      row.outcome.interpretationDisposition = { status: 'pending_review' };
+    }
+  },
+  {
+    copy: (row) => row?.outcome?.guide,
+    disposition: (row) => row?.outcome?.guidanceDisposition,
+    reset(row) {
+      row.outcome.guide = '';
+      row.outcome.guidanceDisposition = { status: 'pending_review' };
+    }
+  },
+  {
+    copy: (row) => row?.reaction?.note,
+    disposition: (row) => row?.reaction?.commentaryDisposition,
+    reset(row) {
+      row.reaction.note = '';
+      row.reaction.commentaryDisposition = { status: 'pending_review' };
+    }
+  }
+]);
 
 function defaultEditorialDisposition(status, attemptedAt) {
   return {
@@ -21,6 +68,41 @@ function defaultEditorialDisposition(status, attemptedAt) {
 function suppliedDisposition(value, allowedStatuses) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return allowedStatuses.has(value.status) ? { ...value } : value;
+}
+
+function objectRecord(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function validEarningsCommentaryDisposition(disposition, text) {
+  if (disposition === undefined) return true;
+  if (!objectRecord(disposition)) return false;
+  if (disposition.status === 'verified') return Boolean(String(text || '').trim());
+  if (disposition.status !== 'commentary_unavailable') return false;
+  return !String(text || '').trim()
+    && typeof disposition.reason === 'string'
+    && disposition.reason.trim()
+    && isIsoDateTime(disposition.attemptedAt);
+}
+
+function validEarningsGuidanceDisposition(disposition, text, { requireNotProvidedEvidence = true } = {}) {
+  if (disposition === undefined) return true;
+  if (!objectRecord(disposition)) return false;
+  if (disposition.status === 'verified') return Boolean(String(text || '').trim());
+  if (disposition.status === 'not_provided') {
+    return !String(text || '').trim()
+      && (!requireNotProvidedEvidence || (
+        disposition.evidenceSource === 'official_company'
+        && /^https:\/\//i.test(String(disposition.evidenceUrl || ''))
+      ));
+  }
+  if (disposition.status === 'unverified') {
+    return !String(text || '').trim()
+      && typeof disposition.reason === 'string'
+      && disposition.reason.trim()
+      && isIsoDateTime(disposition.attemptedAt);
+  }
+  return false;
 }
 
 function earningsNarrativeDispositions(row, narrative, attemptedAt = '') {
@@ -124,6 +206,104 @@ function narrativeEditorialComplete(row, narrative) {
     if (!(reactionDisposition?.status === 'verified' && reaction)) return false;
   }
   return true;
+}
+
+function normalizeNarrativeReuseText(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+    .toLowerCase()
+    .replace(/\b([a-z0-9]+)'s\b/g, '$1')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9.%$ -]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function earningsNarrativeRowTokens(row) {
+  const tokens = new Set();
+  for (const value of [row?.symbol, row?.company]) {
+    const words = normalizeNarrativeReuseText(value).match(/[a-z0-9]+/g) || [];
+    for (const word of words) {
+      if (word.length >= 2 && !COMPANY_TOKEN_STOPWORDS.has(word)) tokens.add(word);
+    }
+  }
+  return tokens;
+}
+
+function earningsNarrativeCompanyKey(row) {
+  const companyTokens = normalizeNarrativeReuseText(row?.company)
+    .match(/[a-z0-9]+/g) || [];
+  const specific = companyTokens.filter((word) => word.length >= 2 && !COMPANY_TOKEN_STOPWORDS.has(word));
+  return specific.length ? specific.join(' ') : String(row?.symbol || '').trim().toUpperCase();
+}
+
+function earningsNarrativeEventKey(row) {
+  // Share classes may reuse one issuer's commentary only for the same report;
+  // report date and fiscal period prevent that exception leaking into later events.
+  return [
+    earningsNarrativeCompanyKey(row),
+    String(row?.reportDate || '').trim(),
+    String(row?.fiscalQuarterEnding || '').trim()
+  ].join(':');
+}
+
+function narrativeReuseSkeletonKey(row, text) {
+  // Company tokens and time-sensitive numbers vary legitimately between rows;
+  // remove them to expose a shared editorial template without fuzzy matching.
+  const rowTokens = earningsNarrativeRowTokens(row);
+  const skeleton = normalizeNarrativeReuseText(text)
+    .replace(/\b(?:fy|fiscal\s+year)\s*\d{2,4}\b/g, ' ')
+    .replace(/\b(?:q[1-4]|[1-4]q)\s*(?:fy)?\s*\d{2,4}\b/g, ' ')
+    .replace(/\$?\b\d+(?:[.,]\d+)*(?:%|bn|b|mn|m)?\b/g, ' ')
+    .replace(/\b(?:q[1-4]|fy|fiscal|quarter|full-year|fullyear|year|january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|sept|october|oct|november|nov|december|dec)\b/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word && !rowTokens.has(word) && !COMPANY_TOKEN_STOPWORDS.has(word))
+    .join(' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return skeleton;
+}
+
+function earningsNarrativeReuseKeys(row, text) {
+  const exact = normalizeNarrativeReuseText(text);
+  const keys = [];
+  if (exact) keys.push(`exact:${exact}`);
+  const skeleton = narrativeReuseSkeletonKey(row, text);
+  if (skeleton && skeleton !== exact) keys.push(`skeleton:${skeleton}`);
+  return keys;
+}
+
+function resetRepeatedEarningsNarrativeForEditorial(week) {
+  const output = structuredClone(week || { rows: [] });
+  const rows = Array.isArray(output.rows) ? output.rows : [];
+  for (const field of NARRATIVE_REUSE_FIELDS) {
+    const grouped = new Map();
+    for (const [index, row] of rows.entries()) {
+      if (!isDisplayEligibleEarningsRow(row)) continue;
+      const text = String(field.copy(row) || '').trim();
+      if (!text || field.disposition(row)?.status !== 'verified') continue;
+      for (const key of earningsNarrativeReuseKeys(row, text)) {
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(index);
+      }
+    }
+    const repeatedIndexes = new Set();
+    for (const indexes of grouped.values()) {
+      // Clear every affected row: the contract cannot reliably identify which
+      // duplicate was original, and published verified copy must be row-specific.
+      // Same-issuer rows can cover multiple share classes tied to one earnings report;
+      // reuse across different issuers or earnings events is stale editorial state.
+      if (new Set(indexes.map((index) => earningsNarrativeEventKey(rows[index]))).size > 1) {
+        indexes.forEach((index) => repeatedIndexes.add(index));
+      }
+    }
+    for (const index of repeatedIndexes) field.reset(rows[index]);
+  }
+  return output;
 }
 
 function earningsResultNarrativeFingerprint(row) {
@@ -855,6 +1035,7 @@ module.exports = {
   earningsScheduleReviewRows,
   earningsNarrativeDispositions,
   earningsNarrativeFingerprint,
+  resetRepeatedEarningsNarrativeForEditorial,
   narrativeEditorialAttempted,
   narrativeEditorialComplete,
   emptyEarningsApiUsage,
@@ -873,5 +1054,7 @@ module.exports = {
   recordEarningsApiRequest,
   recordEarningsApiResponse,
   reportWindowArrived,
+  validEarningsCommentaryDisposition,
+  validEarningsGuidanceDisposition,
   valueOutcome
 };

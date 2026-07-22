@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { isIsoDateTime } = require('./calendar_contract');
 const {
   allowedNewsDates,
   candidateInFuturesPublicationWindow,
@@ -17,11 +18,14 @@ const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'news_candidates.json');
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
+const MSN_CONTENT_DETAIL_URL = 'https://assets.msn.com/content/view/v2/Detail/en-us/';
+const MSN_REUTERS_LEGAL_NAME = 'Reuters News & Media Inc.';
+const MSN_REUTERS_CATEGORIES = new Set(['money', 'news']);
 const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const ALPHA_VANTAGE_PACING_MS = 1250;
-const PROVENANCE_PRIORITY = Object.freeze({ 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const PROVENANCE_PRIORITY = Object.freeze({ 'msn-reuters': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 
 function parseArgs(argv) {
   const args = {
@@ -189,11 +193,116 @@ async function fetchApPublic(acquisitionPath, { timeoutMs }) {
   return { items };
 }
 
+function msnReutersProvider(provider, providerId) {
+  return provider?.id === providerId
+    && provider?.name === 'Reuters';
+}
+
+function msnReutersReaderUrl(value, contentId = '') {
+  try {
+    const url = new URL(value);
+    const expectedSuffix = contentId ? `/ar-${contentId}` : '';
+    if (url.protocol !== 'https:'
+      || !['msn.com', 'www.msn.com'].includes(url.hostname.toLowerCase())
+      || !/\/ar-AA[A-Za-z0-9]+$/.test(url.pathname)
+      || (expectedSuffix && !url.pathname.endsWith(expectedSuffix))) return '';
+    url.searchParams.delete('ocid');
+    return canonicalStoryUrl(url.toString());
+  } catch (_error) {
+    return '';
+  }
+}
+
+function normalizeMsnReutersItem(card, detail, acquisitionPath) {
+  if (card?.type !== 'article'
+    || !MSN_REUTERS_CATEGORIES.has(card?.category)
+    || !msnReutersProvider(card?.provider, acquisitionPath.providerId)
+    || detail?.id !== card.id
+    || detail?.type !== 'article'
+    || !msnReutersProvider(detail?.provider, acquisitionPath.providerId)
+    || detail?.provider?.companyLegalName !== MSN_REUTERS_LEGAL_NAME
+    || !isIsoDateTime(card?.publishedDateTime)
+    || card.publishedDateTime !== detail?.publishedDateTime
+    || !/^tag:reuters\.com,\d{4}:newsml_[A-Z0-9]+(?::\d+)?$/.test(String(detail?.sourceId || ''))) return null;
+  const url = msnReutersReaderUrl(card.url, card.id);
+  const title = plainText(detail.title || card.title);
+  const cardTitle = plainText(card.title);
+  const articleText = plainText(detail.body);
+  if (!url || !title || !cardTitle || !titleEquivalent(title, cardTitle) || articleText.length < 200) return null;
+  return {
+    title,
+    url,
+    publishedAt: detail.publishedDateTime,
+    publishedAtVerified: true,
+    summary: detail.abstract,
+    providerSourceName: 'Reuters',
+    providerVerified: true,
+    publisherStoryId: detail.sourceId,
+    article: {
+      accessible: true,
+      finalUrl: url,
+      pageTitle: title,
+      description: plainText(detail.abstract),
+      excerpt: articleText.slice(0, 1800),
+      text: articleText
+    }
+  };
+}
+
+async function fetchMsnReuters(acquisitionPath, { eligibleDates, timeoutMs }) {
+  const url = new URL(acquisitionPath.feedUrl);
+  url.searchParams.set('$top', String(acquisitionPath.limit || 100));
+  url.searchParams.set('responseSchema', 'CardView');
+  url.searchParams.set('market', 'en-us');
+  url.searchParams.set('contentType', 'article');
+  const response = await fetchResponse(url, {
+    timeoutMs,
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+    }
+  });
+  const payload = await response.json();
+  const cards = payload?.value?.[0]?.subCards;
+  if (!Array.isArray(cards)) throw new Error('MSN Reuters response must contain value[0].subCards[].');
+  if (eligibleDates instanceof Set && !eligibleDates.size) return { items: [] };
+  // Reject stale feed cards before the per-article detail requests; otherwise a
+  // stale batch can consume one network timeout for every provider card.
+  const providerCards = cards.filter((card) => card?.type === 'article'
+    && MSN_REUTERS_CATEGORIES.has(card?.category)
+    && msnReutersProvider(card?.provider, acquisitionPath.providerId)
+    && isIsoDateTime(card?.publishedDateTime));
+  const eligibleCards = eligibleDates instanceof Set
+    ? providerCards.filter((card) => eligibleDates.has(chicagoIsoDate(new Date(card.publishedDateTime))))
+    : providerCards;
+  if (providerCards.length && !eligibleCards.length) return { items: [] };
+  const items = Array(eligibleCards.length).fill(null);
+  await mapConcurrent(eligibleCards.map((card, index) => ({ card, index })), ARTICLE_CONCURRENCY, async ({ card, index }) => {
+    try {
+      const detailResponse = await fetchResponse(`${MSN_CONTENT_DETAIL_URL}${encodeURIComponent(card.id)}`, {
+        timeoutMs,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+        }
+      });
+      const item = normalizeMsnReutersItem(card, await detailResponse.json(), acquisitionPath);
+      if (item) items[index] = item;
+    } catch (_error) {
+      // One malformed or unavailable syndication record must not discard the rest of the Reuters batch.
+    }
+  });
+  const validatedItems = items.filter(Boolean);
+  if (!validatedItems.length) throw new Error('MSN Reuters response contains no validated Reuters article items.');
+  return { items: validatedItems };
+}
+
 async function fetchAcquisitionPath(acquisitionPath, options) {
   if (acquisitionPath.provider === 'alpha-vantage') return fetchAlphaVantage(acquisitionPath, options);
   if (acquisitionPath.provider === 'stockfit') return fetchStockfit(acquisitionPath, options);
   if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
   if (acquisitionPath.provider === 'ap-public') return fetchApPublic(acquisitionPath, options);
+  if (acquisitionPath.provider === 'msn-reuters') return fetchMsnReuters(acquisitionPath, options);
   throw new Error(`Unsupported News provider ${acquisitionPath.provider}.`);
 }
 
@@ -273,7 +382,9 @@ function sourceForUrl(value) {
 
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
-  const source = sourceForUrl(url);
+  const source = acquisitionPath.provider === 'msn-reuters' && item?.providerVerified === true
+    ? APPROVED_NEWS_SOURCES.find((entry) => entry.id === 'reuters')
+    : sourceForUrl(url);
   const publishedAt = new Date(String(item?.publishedAt || '').trim());
   const title = plainText(item?.title);
   if (!url || !source || Number.isNaN(publishedAt.getTime()) || !title) return null;
@@ -293,6 +404,8 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     provider: acquisitionPath.provider,
     ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
     ...(plainText(item.providerSourceName) ? { providerSourceName: plainText(item.providerSourceName) } : {}),
+    ...(item.publisherStoryId ? { publisherStoryId: item.publisherStoryId } : {}),
+    ...(item.article ? { article: item.article } : {}),
     origin: 'downloaded',
     pool: acquisitionPath.pool,
     searchPathIds: [acquisitionPath.id]
@@ -390,9 +503,12 @@ function priorCandidate(item, pool, eligibleDates) {
   const title = String(item?.title || '').trim();
   const publishedOn = String(item?.publishedOn || '');
   const sourceLabel = String(item?.sourceLabel || '').trim();
-  // Prior cards keep their validated label but must still belong to the current
-  // approved-domain catalog before re-entering editorial review.
-  if (!url || !sourceForUrl(url) || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
+  // MSN is a validated syndication host, not an approved publisher domain. A
+  // previously published Reuters card may re-enter only through its exact MSN
+  // article route and preserved updater-owned Reuters label.
+  const approvedPriorSource = sourceForUrl(url)
+    || (sourceLabel === 'Reuters' && msnReutersReaderUrl(url));
+  if (!url || !approvedPriorSource || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   try {
     if (new URL(url).protocol !== 'https:') return null;
   } catch (_error) {
@@ -412,7 +528,6 @@ function priorCandidate(item, pool, eligibleDates) {
     pool,
     priorCopy: {
       ...(item.tag ? { tag: item.tag } : {}),
-      ...(item.kicker ? { kicker: item.kicker } : {}),
       ...(item.body ? { body: item.body } : {})
     },
     searchPathIds: []
@@ -449,7 +564,9 @@ function deduplicateCandidates(candidates) {
   const selected = [];
   for (const candidate of candidates) {
     const titleKey = normalizeStoryTitle(candidate.title);
-    const index = selected.findIndex((item) => item.url === candidate.url || (titleKey && normalizeStoryTitle(item.title) === titleKey));
+    const index = selected.findIndex((item) => item.url === candidate.url
+      || (candidate.publisherStoryId && candidate.publisherStoryId === item.publisherStoryId)
+      || (titleKey && normalizeStoryTitle(item.title) === titleKey));
     if (index < 0) {
       selected.push(candidate);
       continue;
@@ -763,6 +880,9 @@ module.exports = {
   extractArticleMetadata,
   fetchAcquisitionPath,
   fetchArticlePage,
+  fetchMsnReuters,
+  msnReutersReaderUrl,
+  normalizeMsnReutersItem,
   normalizeProviderCandidate,
   parseApNewsSitemap,
   parseArgs,

@@ -521,6 +521,8 @@ function normalizedSummary(raw, stale, refreshError) {
 
 function buildAssetAllocationFallback(canonicalPortfolio, { month, asOf, checkedAt = new Date() } = {}) {
   const timestamp = new Date(checkedAt).toISOString();
+  // MTD values cannot cross a month boundary: retain a complete prior section
+  // only within the same month, otherwise publish an explicit empty state.
   const sameMonth = canonicalPortfolio?.month === month
     && Array.isArray(canonicalPortfolio?.rows)
     && canonicalPortfolio.rows.length === HOLDINGS.length;

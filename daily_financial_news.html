@@ -15438,7 +15438,7 @@
       /* TEST BLOCK START: local-refresh-quote-rows */
       function applyTapeQuoteRows(data, quoteRows) {
         data.tape = { ...data.tape };
-        const rows = data.tape.rows;
+        const rows = Array.isArray(data.tape.rows) ? data.tape.rows : [];
         const byTicker = new Map(quoteRows.map((row) => [String(row?.ticker || '').toUpperCase(), row]));
         let changed = false;
         data.tape.rows = rows.map((row) => {
@@ -15473,7 +15473,7 @@
 
       function applyCryptoQuoteRows(data, quoteRows) {
         data.tape = { ...data.tape };
-        const rows = data.tape.rows;
+        const rows = Array.isArray(data.tape.rows) ? data.tape.rows : [];
         const byTicker = new Map(quoteRows.map((row) => [String(row?.sym || row?.ticker || '').toUpperCase(), row]));
         let changed = false;
         // Local crypto refreshes still arrive as price/chg; the embedded dashboard contract is tape.rows last/pct.
@@ -16540,7 +16540,9 @@
       }
 
       function numericValue(text) {
-        const value = Number(String(text || '').replace(/[$,%+,]/g, ''));
+        const normalized = String(text ?? '').trim();
+        if (!normalized) return null;
+        const value = Number(normalized.replace(/[$,%+,]/g, ''));
         return Number.isFinite(value) ? value : null;
       }
 
@@ -16838,8 +16840,10 @@
         `;
       }
 
+      /* TEST BLOCK START: tape-groups */
       function tapeGroupsForData(data) {
-        const allRows = data.tape.rows;
+        const allRows = (Array.isArray(data?.tape?.rows) ? data.tape.rows : [])
+          .filter((row) => row && typeof row === 'object' && !Array.isArray(row));
         return TAPE_GROUPS.map((group) => {
           const rows = group.tickers
             .map((ticker) => allRows.find((row) => row.ticker === ticker))
@@ -16847,6 +16851,7 @@
           return { ...group, key: tapeGroupKey(group.label), rows };
         }).filter((group) => group.rows.length);
       }
+      /* TEST BLOCK END: tape-groups */
 
       function renderTape(data) {
         const tapeGroups = tapeGroupsForData(data);
@@ -16991,7 +16996,7 @@
       }
 
       function portfolioTotalReturn(data) {
-        const portfolio = data.assetAllocationPortfolio;
+        const portfolio = data.assetAllocationPortfolio || {};
         const value = Number(portfolio.portfolioMtdReturnValue);
         // Portfolio-level return is a sanitized display export; tactical model details stay outside this repo.
         const available = portfolio.portfolioMtdReturnStatus === 'available' && Number.isFinite(value);
@@ -17358,7 +17363,7 @@
           return `
             <article class="crypto-note editorial-card surface card">
               <div class="story-kicker-row">
-                <div class="tag crypto">${esc(note.kicker)}</div>
+                <div class="tag crypto">${esc(note.tag)}</div>
                 ${newPill}
               </div>
               <h3>${esc(note.title)}</h3>

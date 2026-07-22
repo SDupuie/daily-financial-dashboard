@@ -1044,6 +1044,8 @@ function hasEditorialMarketLens(day) {
 }
 
 function preserveMissingWeekAheadValues(incomingEvent, priorEvent) {
+  // Only partial source refreshes use this path, and stable event identity keeps
+  // prior values from leaking into a different release after a schedule change.
   if (!priorEvent || incomingEvent?.id !== priorEvent.id) return incomingEvent;
   const next = { ...incomingEvent };
   const missing = (value) => value === null || value === undefined || value === '';

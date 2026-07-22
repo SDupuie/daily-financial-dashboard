@@ -20,7 +20,6 @@ const {
   isEarningsApiUsage,
   migrateEarningsApiUsage,
   metricResult,
-  normalizeEarningsTiming,
   normalizeFinnhubCalendarFields,
   numberOrNull,
   pctChange,
@@ -1042,7 +1041,7 @@ function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range, confirmat
         ? 'in_week_calendar_date_conflict'
         : 'uncorroborated_primary_calendar_date';
     // A missing or conflicting secondary date is not evidence that Finnhub is
-    // wrong. Keep its row as the fail-open primary while retaining actionable
+    // wrong. Keep its row as the non-blocking primary row while retaining actionable
     // review evidence for a later official upgrade or exclusion.
     verifiedRows.push({
       ...row,

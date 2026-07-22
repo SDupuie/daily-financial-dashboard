@@ -71,7 +71,7 @@ const {
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
 const { applyWeekAheadLifecycle, buildWeekAheadPreparationFallback, normalizeWeekAhead } = require('./week_ahead_contract');
-const { validateEarningsWeekPayload } = require('./earnings_week_contract');
+const { validateEarningsWeekPayload } = require('./earnings_week');
 const { atomicWriteFile } = require('./staging_writer');
 const { newsAcquisitionPaths } = require('./news_sources');
 const {
@@ -93,7 +93,6 @@ function story(kind, index) {
   return {
     tag: kind === 'crypto' ? 'Crypto' : 'Markets',
     tone: kind === 'crypto' ? 'crypto' : 'neutral',
-    kicker: kind === 'crypto' ? 'Digital assets' : undefined,
     title: `${kind} fixture story ${index}`,
     body: `Fixture reporting item ${index} provides a concise, dated market-development summary for validator coverage.`,
     url,
@@ -373,7 +372,7 @@ function fixtureNewsSelection(dashboard) {
   return {
     futures: dashboard.futuresModule.stories.map(storyFields),
     stories: dashboard.stories.map(storyFields),
-    crypto: dashboard.crypto.notes.map(({ url, kicker, title, body }) => ({ url, kicker, title, body }))
+    crypto: dashboard.crypto.notes.map(storyFields)
   };
 }
 
@@ -541,7 +540,7 @@ function testDeterministicSectionFallbackContracts() {
   assert.equal(invalidArtifact.payload.status, 'carried_forward');
 }
 
-function testSectionCommandTimeoutFallsOpen() {
+function testSectionTimeoutFallback() {
   const result = runWithSectionFallback(
     () => runCommand(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 100 }),
     () => ({ status: 'carried_forward' }),
@@ -559,6 +558,10 @@ function testEarningsRefreshFailureKeepsFreshBuildArtifact() {
   const output = path.join(dir, 'earnings_week.json');
   const checkedAt = new Date('2026-07-10T21:05:00.000Z');
   const range = { from: '2026-07-10', to: '2026-07-16' };
+  const fallbackPayload = {
+    mode: 'carried_forward',
+    week: { ...fixtureEarningsWeek(), generatedAt: '2026-07-09T21:05:00.000Z' }
+  };
   const freshWeek = {
     ...fixtureEarningsWeek(),
     generatedAt: checkedAt.toISOString(),
@@ -568,7 +571,7 @@ function testEarningsRefreshFailureKeepsFreshBuildArtifact() {
 
   const result = runWithSectionFallback(
     () => { throw new Error('fixture refresh failure after build'); },
-    () => ({ mode: 'carried_forward', week: { ...fixtureEarningsWeek(), generatedAt: '2026-07-09T21:05:00.000Z' } }),
+    () => structuredClone(fallbackPayload),
     {
       label: 'Earnings',
       readFreshOnError: () => readCurrentEarningsWeekArtifact(range, checkedAt, output),
@@ -580,6 +583,20 @@ function testEarningsRefreshFailureKeepsFreshBuildArtifact() {
   assert.equal(result.recovered, true);
   assert.equal(result.fallback, null);
   assert.deepEqual(result.payload, freshWeek);
+
+  const malformedResult = runWithSectionFallback(
+    () => { throw new Error('fixture refresh failure after malformed build'); },
+    () => structuredClone(fallbackPayload),
+    {
+      label: 'Earnings',
+      readFreshOnError: () => ({ rows: 'malformed' }),
+      validateFresh: validateEarningsWeekPayload,
+      validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
+    }
+  );
+
+  assert.equal(malformedResult.recovered, undefined);
+  assert.deepEqual(malformedResult.payload, fallbackPayload);
 }
 
 function testFuturesRefreshFailureKeepsCurrentPartialArtifact() {
@@ -1399,7 +1416,8 @@ function testPublicationDisplaySectionNormalization() {
   const missingSourceLabelDashboard = createDashboardValidationFixture().dashboard;
   delete missingSourceLabelDashboard.stories[0].sourceLabel;
   const missingSourceResult = validateDashboardHtml(renderDashboardValidationFixture(missingSourceLabelDashboard, chartData), {
-    now: new Date(FIXTURE_NOW)
+    now: new Date(FIXTURE_NOW),
+    validationMode: 'staged'
   });
   assert.match(missingSourceResult.errors.join('\n'), /stories\[0\]\.sourceLabel must be populated/);
 }
@@ -1469,7 +1487,14 @@ function testEarningsCommentaryPublicationNormalization() {
           symbol: 'DROP',
           reportDate: '2026-07-10',
           outcome: {}
-        }]
+        }],
+        secondaryRecoveryCandidates: [{ symbol: 'SMALL', reason: 'fixture_recovery_candidate' }],
+        companyReleaseTasks: [{ symbol: 'BAD', reason: 'fixture_missing_actuals' }],
+        narrativeApply: { appliedAt: FIXTURE_NOW },
+        summary: {
+          counts: {},
+          fetches: { finnhubCalendar: { requests: 1, ok: 1 } }
+        }
       }
     }
   };
@@ -1483,6 +1508,12 @@ function testEarningsCommentaryPublicationNormalization() {
   assert.equal(centrallyPublished.earnings.week.rows[0].symbol, 'BAD');
   assert.equal(centrallyPublished.earnings.week.rows[1].symbol, 'ADR');
   assert.equal(centrallyPublished.earnings.week.rows[1].sourceAudit, undefined);
+  assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'secondaryRecoveryCandidates'), false);
+  assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'companyReleaseTasks'), false);
+  assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'narrativeApply'), false);
+  assert.equal(Object.hasOwn(centrallyPublished.earnings.week.summary, 'fetches'), false);
+  assert.equal(centrallyPublished.earnings.week.summary.counts.secondaryRecoveryCandidates, 0);
+  assert.equal(centrallyPublished.earnings.week.summary.counts.companyReleaseTasks, 0);
   normalizePublicationDisplaySections(centrallyPublished, { now: new Date(FIXTURE_NOW) });
   assert.equal(centrallyPublished.earnings.week.rows.length, 2);
   const row = centrallyPublished.earnings.week.rows[0];
@@ -1785,6 +1816,23 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   earningsCloseReactionOnly.outcome.guidanceDisposition = { status: 'verified' };
   earningsCloseReactionOnly.reaction.note = 'Old reaction copy must be refreshed.';
   delete earningsCloseReactionOnly.reaction.commentaryDisposition;
+  const duplicatedInterpretationA = fixtureReportedEarningsRow();
+  duplicatedInterpretationA.symbol = 'DUPA';
+  duplicatedInterpretationA.company = 'Duplicate Alpha Inc';
+  duplicatedInterpretationA.sourceAudit.finnhubUsListing.symbol = 'DUPA';
+  duplicatedInterpretationA.outcome.interpretation = 'Duplicate Alpha revenue cadence and margin execution remain the key read.';
+  duplicatedInterpretationA.outcome.interpretationDisposition = { status: 'verified' };
+  duplicatedInterpretationA.outcome.guide = 'Duplicate Alpha raised its full-year operating margin target.';
+  duplicatedInterpretationA.outcome.guidanceDisposition = { status: 'verified' };
+  duplicatedInterpretationA.reaction.note = 'Duplicate Alpha margin upside drove the stock response.';
+  duplicatedInterpretationA.reaction.commentaryDisposition = { status: 'verified' };
+  const duplicatedInterpretationB = structuredClone(duplicatedInterpretationA);
+  duplicatedInterpretationB.symbol = 'DUPB';
+  duplicatedInterpretationB.company = 'Duplicate Beta Inc';
+  duplicatedInterpretationB.sourceAudit.finnhubUsListing.symbol = 'DUPB';
+  duplicatedInterpretationB.outcome.interpretation = 'Duplicate Beta revenue cadence and margin execution remain the key read.';
+  duplicatedInterpretationB.outcome.guide = 'Duplicate Beta kept its quarterly revenue outlook intact.';
+  duplicatedInterpretationB.reaction.note = 'Duplicate Beta subscription backlog limited the stock response.';
   candidateDashboard.earnings.week.rows = [
     earningsNeedsReview,
     earningsAwaitingResults,
@@ -1793,7 +1841,9 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
     earningsGuidanceNotProvided,
     earningsVerifiedGuidance,
     earningsGuidanceRetry,
-    earningsCloseReactionOnly
+    earningsCloseReactionOnly,
+    duplicatedInterpretationA,
+    duplicatedInterpretationB
   ];
   const sourceWeekDay = candidateDashboard.weekAhead.days.find((day) => day.events.length);
   const sourceWeekEvent = structuredClone(sourceWeekDay.events[0]);
@@ -1921,6 +1971,20 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.equal(handoffEarningsCloseReactionOnly.outcome.guidanceDisposition.status, 'verified');
   assert.equal(handoffEarningsCloseReactionOnly.reaction.note, '');
   assert.equal(handoffEarningsCloseReactionOnly.reaction.commentaryDisposition.status, 'pending_review');
+  const handoffDuplicatedInterpretationA = handoff.earnings.week.rows.find((row) => row.symbol === 'DUPA');
+  const handoffDuplicatedInterpretationB = handoff.earnings.week.rows.find((row) => row.symbol === 'DUPB');
+  assert.equal(handoffDuplicatedInterpretationA.outcome.interpretation, '');
+  assert.equal(handoffDuplicatedInterpretationA.outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(handoffDuplicatedInterpretationB.outcome.interpretation, '');
+  assert.equal(handoffDuplicatedInterpretationB.outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(handoffDuplicatedInterpretationA.outcome.guide, duplicatedInterpretationA.outcome.guide);
+  assert.equal(handoffDuplicatedInterpretationA.outcome.guidanceDisposition.status, 'verified');
+  assert.equal(handoffDuplicatedInterpretationB.outcome.guide, duplicatedInterpretationB.outcome.guide);
+  assert.equal(handoffDuplicatedInterpretationB.outcome.guidanceDisposition.status, 'verified');
+  assert.equal(handoffDuplicatedInterpretationA.reaction.note, duplicatedInterpretationA.reaction.note);
+  assert.equal(handoffDuplicatedInterpretationA.reaction.commentaryDisposition.status, 'verified');
+  assert.equal(handoffDuplicatedInterpretationB.reaction.note, duplicatedInterpretationB.reaction.note);
+  assert.equal(handoffDuplicatedInterpretationB.reaction.commentaryDisposition.status, 'verified');
   const marketLensDecisionByDate = new Map(handoff.editorialReview.marketLensDecisions.map((decision) => [decision.date, decision]));
   assert.equal(marketLensDecisionByDate.get(scheduledWeekDay.date).action, 'retain-generated');
   assert.equal(marketLensDecisionByDate.get(missingActualsWeekDay.date).action, 'retain-generated');
@@ -2477,6 +2541,8 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
   assert.equal(finalized.futuresModule.stories[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.crypto.notes[0].title, 'Reviewed crypto story');
+  assert.equal(finalized.crypto.notes[0].tag, 'Crypto');
+  assert.equal('kicker' in finalized.crypto.notes[0], false);
   assert.equal(finalized.crypto.notes[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.storiesCoverage, undefined);
   assert.equal(finalized.futuresModule.storiesCoverage, undefined);
@@ -2496,7 +2562,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.action === 'unavailable_disposition'));
 }
 
-function testEarningsFinalizationPreservesOnlySafePriorNarrative() {
+function testPendingEarningsNarrativeStaysPending() {
   const prior = fixtureReportedEarningsRow();
   const pending = structuredClone(prior);
   pending.outcome = {
@@ -2548,10 +2614,10 @@ function testEarningsFinalizationPreservesOnlySafePriorNarrative() {
     { earnings: { week: { rows: [pending] } } },
     { earnings: { week: week(prior) } }
   );
-  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretation, prior.outcome.interpretation);
-  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretationDisposition.status, 'verified');
-  assert.equal(unchanged.earnings.week.rows[0].reaction.note, prior.reaction.note);
-  assert.equal(unchanged.earnings.week.rows[0].reaction.commentaryDisposition.status, 'verified');
+  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretation, '');
+  assert.equal(unchanged.earnings.week.rows[0].outcome.interpretationDisposition.status, 'pending_review');
+  assert.equal(unchanged.earnings.week.rows[0].reaction.note, '');
+  assert.equal(unchanged.earnings.week.rows[0].reaction.commentaryDisposition.status, 'pending_review');
 
   const changedPending = structuredClone(pending);
   changedPending.eps = {
@@ -2750,7 +2816,13 @@ function testRecoveredEarningsPublishSkipsRecoverySourceRefresh() {
     availability: { status: 'carried_forward', reason: 'empty_earnings_recovery', checkedAt: FIXTURE_NOW },
     rows: [row]
   };
-  const recoveredHtml = renderDashboardValidationFixture(recoveredDashboard, chartData);
+  const recoveredHtml = patchDashboardDataBlock(
+    renderDashboardValidationFixture(recoveredDashboard, chartData),
+    recoveredDashboard,
+    null,
+    null,
+    { stampEdition: false }
+  );
   fs.writeFileSync(dashboardFile, priorHtml);
   fs.writeFileSync(lastGoodFile, priorHtml);
   commitDashboardCandidate({ dashboard: dashboardFile }, recoveredHtml, {
@@ -3310,6 +3382,11 @@ function validateDashboardFixture(data, now = FIXTURE_NOW) {
   return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), now);
 }
 
+function validateStagedDashboardFixture(data, now = FIXTURE_NOW) {
+  const { chartData } = createDashboardValidationFixture();
+  return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), now, 'staged');
+}
+
 function validateDashboardAndChartFixture(data, chartData) {
   return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), FIXTURE_NOW);
 }
@@ -3341,12 +3418,12 @@ function testDashboardValidatorRejectsCalendarRangeDivergence() {
     officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-10T18:00:00Z')
   });
-  const alignedStaleResult = validateDashboardFixture(alignedStaleCalendar);
+  const alignedStaleResult = validateStagedDashboardFixture(alignedStaleCalendar);
   assert.equal(alignedStaleResult.status, 0, 'A stale calendar baseline must remain renderable when Week Ahead and Earnings agree.');
 
   const staleEarnings = validationDashboardData();
   staleEarnings.earnings.week.range = staleRange;
-  const staleEarningsResult = validateDashboardFixture(staleEarnings);
+  const staleEarningsResult = validateStagedDashboardFixture(staleEarnings);
   assert.equal(staleEarningsResult.status, 1);
   assert.match(staleEarningsResult.stderr, /weekAhead\.range must match earnings\.week\.range/);
 
@@ -3356,33 +3433,106 @@ function testDashboardValidatorRejectsCalendarRangeDivergence() {
     officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-10T18:00:00Z')
   });
-  const staleWeekAheadResult = validateDashboardFixture(staleWeekAhead);
+  const staleWeekAheadResult = validateStagedDashboardFixture(staleWeekAhead);
   assert.equal(staleWeekAheadResult.status, 1);
   assert.match(staleWeekAheadResult.stderr, /weekAhead\.range must match earnings\.week\.range/);
 
   const missingWeekAheadRange = validationDashboardData();
   delete missingWeekAheadRange.weekAhead.range;
-  const missingWeekAheadRangeResult = validateDashboardFixture(missingWeekAheadRange);
+  const missingWeekAheadRangeResult = validateStagedDashboardFixture(missingWeekAheadRange);
   assert.equal(missingWeekAheadRangeResult.status, 1);
   assert.match(missingWeekAheadRangeResult.stderr, /weekAhead\.range must be an object with ISO from\/to dates/);
 
   const missingEarningsRange = validationDashboardData();
   delete missingEarningsRange.earnings.week.range;
-  const missingEarningsRangeResult = validateDashboardFixture(missingEarningsRange);
+  const missingEarningsRangeResult = validateStagedDashboardFixture(missingEarningsRange);
   assert.equal(missingEarningsRangeResult.status, 1);
   assert.match(missingEarningsRangeResult.stderr, /earnings\.week\.range must be an object with ISO from\/to dates/);
 
   const malformedWeekAheadRange = validationDashboardData();
   malformedWeekAheadRange.weekAhead.range = { from: 'bad', to: '2026-07-10' };
-  const malformedWeekAheadRangeResult = validateDashboardFixture(malformedWeekAheadRange);
+  const malformedWeekAheadRangeResult = validateStagedDashboardFixture(malformedWeekAheadRange);
   assert.equal(malformedWeekAheadRangeResult.status, 1);
   assert.match(malformedWeekAheadRangeResult.stderr, /weekAhead\.range must be an object with ISO from\/to dates/);
 
   const unsupportedEarningsRange = validationDashboardData();
   unsupportedEarningsRange.earnings.week.range = { from: '2026-07-07', to: '2026-07-11' };
-  const unsupportedEarningsRangeResult = validateDashboardFixture(unsupportedEarningsRange);
+  const unsupportedEarningsRangeResult = validateStagedDashboardFixture(unsupportedEarningsRange);
   assert.equal(unsupportedEarningsRangeResult.status, 1);
   assert.match(unsupportedEarningsRangeResult.stderr, /earnings\.week\.range must cover Monday-Friday or Friday plus next Monday-Thursday/);
+}
+
+function testDashboardValidatorKeepsPublishedGateToRenderSurface() {
+  const valid = validationDashboardData();
+  const validResult = validateDashboardFixture(valid);
+  assert.equal(validResult.status, 0, validResult.stderr);
+
+  const recoverableSections = validationDashboardData();
+  recoverableSections.opening = null;
+  recoverableSections.stories = 'malformed';
+  recoverableSections.earnings.week.rows = 'malformed';
+  recoverableSections.weekAhead = null;
+  recoverableSections.footer = null;
+  recoverableSections.tape.rows = [null, 'malformed', ...recoverableSections.tape.rows];
+  recoverableSections.crypto.stats = [{ name: 'Fear & Greed', sym: 'F&G', price: '', chg: '' }];
+  const recoverableSectionsResult = validateDashboardFixture(recoverableSections);
+  assert.equal(recoverableSectionsResult.status, 0, recoverableSectionsResult.stderr);
+
+  const pendingWithCopy = validationDashboardData();
+  const reportedRow = fixtureReportedEarningsRow();
+  delete reportedRow.sourceAudit;
+  reportedRow.outcome.interpretationDisposition = { status: 'pending_review' };
+  reportedRow.outcome.interpretation = 'Stale prior interpretation must not survive a pending disposition.';
+  pendingWithCopy.earnings.week.rows = [reportedRow];
+  const pendingWithCopyResult = validateDashboardFixture(pendingWithCopy);
+  assert.equal(pendingWithCopyResult.status, 0, pendingWithCopyResult.stderr);
+
+  const stagedPendingWithCopyResult = validateStagedDashboardFixture(pendingWithCopy);
+  assert.equal(stagedPendingWithCopyResult.status, 1);
+  assert.match(stagedPendingWithCopyResult.stderr, /earnings\.week\.EARN\.outcome\.interpretationDisposition\.status pending_review must not carry editorial copy/);
+}
+
+function testDashboardValidatorBlocksStartupCrashSurfaces() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const validHtml = renderDashboardValidationFixture(dashboard, chartData);
+  assert.equal(dashboardValidationResult(validHtml).status, 0);
+
+  const syntaxErrorHtml = validHtml.replace(
+    "const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>",
+    "const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh']; const invalidRuntime = ;</script>"
+  );
+  const syntaxErrorResult = dashboardValidationResult(syntaxErrorHtml);
+  assert.equal(syntaxErrorResult.status, 1);
+  assert.match(syntaxErrorResult.stderr, /dashboard-runtime JavaScript is invalid/);
+
+  const missingSeries = structuredClone(chartData);
+  missingSeries.series = null;
+  const missingSeriesResult = validateDashboardAndChartFixture(dashboard, missingSeries);
+  assert.equal(missingSeriesResult.status, 1);
+  assert.match(missingSeriesResult.stderr, /chart-data\.series must be an array/);
+
+  const nullSeries = structuredClone(chartData);
+  nullSeries.series[0] = null;
+  const nullSeriesResult = validateDashboardAndChartFixture(dashboard, nullSeries);
+  assert.equal(nullSeriesResult.status, 1);
+  assert.match(nullSeriesResult.stderr, /chart-data\.series\[0\] must be an object/);
+
+  const malformedBars = structuredClone(chartData);
+  malformedBars.series[0].bars = 'malformed';
+  const malformedBarsResult = validateDashboardAndChartFixture(dashboard, malformedBars);
+  assert.equal(malformedBarsResult.status, 1);
+  assert.match(malformedBarsResult.stderr, /chart-data\.series\[0\]\.bars must be an array/);
+
+  const objectBar = structuredClone(chartData);
+  objectBar.series[0].bars[0] = { time: '2026-07-09', close: 100 };
+  const objectBarResult = validateDashboardAndChartFixture(dashboard, objectBar);
+  assert.equal(objectBarResult.status, 1);
+  assert.match(objectBarResult.stderr, /chart-data\.series\[0\]\.bars\[0\] must be a compact/);
+
+  const optionalVolume = structuredClone(chartData);
+  optionalVolume.series[0].bars[0] = optionalVolume.series[0].bars[0].slice(0, 5);
+  const optionalVolumeResult = validateDashboardAndChartFixture(dashboard, optionalVolume);
+  assert.equal(optionalVolumeResult.status, 0, optionalVolumeResult.stderr);
 }
 
 function testDashboardValidatorTapeNotesAreModeSpecific() {
@@ -3399,10 +3549,10 @@ function testDashboardValidatorTapeNotesAreModeSpecific() {
 
   const published = dashboardValidationResult(html, FIXTURE_NOW, 'published');
   assert.equal(published.status, 0);
-  assert.match(published.stdout, /SPX\.note is blank; editorial commentary is incomplete\./);
+  assert.equal(published.stdout, '');
 }
 
-function testDashboardValidatorCloseOnlyPlaceholderIsPublishedWarning() {
+function testDashboardValidatorCloseOnlyPlaceholderIsStagedOnly() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const html = renderDashboardValidationFixture(dashboard, chartDataWithLatestCloseOnlyPlaceholder(chartData));
 
@@ -3412,7 +3562,7 @@ function testDashboardValidatorCloseOnlyPlaceholderIsPublishedWarning() {
 
   const published = dashboardValidationResult(html, FIXTURE_NOW, 'published');
   assert.equal(published.status, 0);
-  assert.match(published.stdout, /SPX\.bars\[1\] contains a latest quote-only placeholder/);
+  assert.equal(published.stdout, '');
 }
 
 function testDashboardWriterNormalizesStaleTapeCommentary() {
@@ -3819,6 +3969,8 @@ function testTouchTooltipControls() {
   const localQuoteDashboard = {
     tape: {
       rows: [
+        null,
+        'malformed',
         { ticker: 'SPX', last: '100', pct: '+1.00%', asOf: '2026-07-09', note: 'Existing equity commentary.', noteDisposition: reviewedDisposition },
         { ticker: 'BTC', last: '$60,000', pct: '+2.00%', asOf: '2026-07-09', note: 'Existing crypto commentary.', noteDisposition: reviewedDisposition }
       ]
@@ -3827,13 +3979,19 @@ function testTouchTooltipControls() {
   assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(localQuoteDashboard, [{
     ticker: 'SPX', last: '101', delta: '+1', pct: '+1.01%', dir: 'up', asOf: '2026-07-10'
   }]), true);
-  assert.equal(localQuoteDashboard.tape.rows[0].note, 'Existing equity commentary.');
-  assert.deepEqual(localQuoteDashboard.tape.rows[0].noteDisposition, reviewedDisposition);
+  assert.equal(localQuoteDashboard.tape.rows[2].note, 'Existing equity commentary.');
+  assert.deepEqual(localQuoteDashboard.tape.rows[2].noteDisposition, reviewedDisposition);
   assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(localQuoteDashboard, [{
     ticker: 'BTC', price: '$61,000', delta: '+$1,000', chg: '+1.67%', dir: 'up', asOf: '2026-07-10'
   }]), true);
-  assert.equal(localQuoteDashboard.tape.rows[1].note, 'Existing crypto commentary.');
-  assert.deepEqual(localQuoteDashboard.tape.rows[1].noteDisposition, reviewedDisposition);
+  assert.equal(localQuoteDashboard.tape.rows[3].note, 'Existing crypto commentary.');
+  assert.deepEqual(localQuoteDashboard.tape.rows[3].noteDisposition, reviewedDisposition);
+  const tapeGroupsSource = extractDashboardRuntimeTestBlock(html, 'tape-groups');
+  const tapeGroupsRuntime = Function('TAPE_GROUPS', 'tapeGroupKey', `${tapeGroupsSource}\nreturn { tapeGroupsForData };`)(
+    [{ label: 'Equities', tickers: ['SPX', 'NDX'] }],
+    (label) => label.toLowerCase()
+  );
+  assert.deepEqual(tapeGroupsRuntime.tapeGroupsForData(localQuoteDashboard).map((group) => group.rows.map((row) => row.ticker)), [['SPX']]);
   assert.doesNotMatch(html, /Market-driver commentary is temporarily unavailable/);
 }
 
@@ -3976,7 +4134,7 @@ async function runDashboardTest(test) {
 const architectureContractTests = Object.freeze([
   testArchitectureSingleWriterAndCliBoundaries,
   testDeterministicSectionFallbackContracts,
-  testSectionCommandTimeoutFallsOpen,
+  testSectionTimeoutFallback,
   testEarningsRefreshFailureKeepsFreshBuildArtifact,
   testFuturesRefreshFailureKeepsCurrentPartialArtifact,
   testFuturesAsOfUsesParentRunTimestamp,
@@ -3996,7 +4154,7 @@ const architectureContractTests = Object.freeze([
   testApplyDoesNotOwnWeekAheadLifecycle,
   testPreparedEditionIdDrivesFuturesStoryWindow,
   testArchitectureFinalizationValidatesBeforeReplace,
-  testEarningsFinalizationPreservesOnlySafePriorNarrative,
+  testPendingEarningsNarrativeStaysPending,
   testMissingEarningsReactionRepairsInsteadOfDroppingRow,
   testEmptyEarningsWithEvidenceCarriesForwardPriorWeek,
   testRecoveredEarningsPublishSkipsRecoverySourceRefresh,
@@ -4033,8 +4191,10 @@ async function main() {
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,
     testDashboardValidatorRejectsCalendarRangeDivergence,
+    testDashboardValidatorKeepsPublishedGateToRenderSurface,
+    testDashboardValidatorBlocksStartupCrashSurfaces,
     testDashboardValidatorTapeNotesAreModeSpecific,
-    testDashboardValidatorCloseOnlyPlaceholderIsPublishedWarning,
+    testDashboardValidatorCloseOnlyPlaceholderIsStagedOnly,
     testDashboardWriterNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,

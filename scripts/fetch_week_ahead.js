@@ -434,6 +434,8 @@ async function run(args = parseArgs(process.argv.slice(2))) {
   let range = rangeForDate(date);
   let staged = null;
   if (args.refreshValues) {
+    // A values-only refresh deliberately retains the staged release slate;
+    // schedule changes require a full prepare so editorial decisions stay aligned.
     if (!fs.existsSync(args.input)) throw new Error(`Week Ahead staging payload not found: ${args.input}`);
     staged = applyWeekAheadLifecycle(JSON.parse(fs.readFileSync(args.input, 'utf8')), null, { now });
     const errors = validateWeekAheadPayload(staged);
