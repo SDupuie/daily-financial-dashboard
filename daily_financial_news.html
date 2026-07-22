@@ -16213,6 +16213,7 @@
         openTapeChart(ticker, options);
       }
 
+      /* TEST BLOCK START: tape-chart-routing */
       function selectTapeChartRow(groupKey, ticker, options = {}) {
         const key = String(groupKey || '');
         const selectedTicker = String(ticker || '').toUpperCase();
@@ -16227,10 +16228,11 @@
         syncTapeInlineChart(key, options);
       }
 
-      function selectFirstTapeChartRow(groupKey) {
+      function selectFirstTapeChartRow(groupKey, options = {}) {
         const ticker = firstTapeChartTickerForGroup(groupKey);
-        if (ticker) selectTapeChartRow(groupKey, ticker);
+        if (ticker) selectTapeChartRow(groupKey, ticker, options);
       }
+      /* TEST BLOCK END: tape-chart-routing */
 
       function tapeRowHtml(row, groupKey) {
         const rowTone = tapeTone(row);
@@ -17902,7 +17904,7 @@
         }
         const tapeChartCueButton = event.target.closest?.('[data-tape-chart-cue-button]');
         if (tapeChartCueButton) {
-          selectFirstTapeChartRow(tapeChartCueButton.dataset.tapeChartCueButton);
+          selectFirstTapeChartRow(tapeChartCueButton.dataset.tapeChartCueButton, { focusChart: true });
           return;
         }
         const tapeGroupButton = event.target.closest?.('[data-tape-group-button]');
@@ -17917,7 +17919,7 @@
         }
         const tapeChartRow = event.target.closest?.('[data-tape-chart-button]');
         if (tapeChartRow && !tapeChartRow.disabled) {
-          selectTapeChartRow(tapeChartRow.dataset.tapeGroup, tapeChartRow.dataset.tapeChartRow, { scrollIntoView: true });
+          selectTapeChartRow(tapeChartRow.dataset.tapeGroup, tapeChartRow.dataset.tapeChartRow, { scrollIntoView: true, focusChart: true });
           return;
         }
         const rangeButton = event.target.closest?.('[data-chart-range]');

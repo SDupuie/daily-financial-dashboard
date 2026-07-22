@@ -3377,6 +3377,44 @@ function testMarketLensReactionOpensChartBelowDay() {
   assert.equal(runtime.snapshot().calls.length, 4, 'An unavailable or noncanonical ticker must not open a chart.');
 }
 
+function testTapeChartRoutingPassesFocusOptions() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'tape-chart-routing');
+  const runtime = Function(`
+    const available = new Set(['SPX', 'BTC']);
+    const calls = [];
+    let tapeChartIsOpen = false;
+    const activeTapeChartTickerByGroup = new Map();
+    const chartSeriesForTicker = (ticker) => available.has(ticker) ? { ticker } : null;
+    const closeWeekAheadChart = () => calls.push(['close-week']);
+    const closeTapeChart = () => {
+      calls.push(['close-tape']);
+      tapeChartIsOpen = false;
+      activeTapeChartTickerByGroup.clear();
+    };
+    const syncTapeInlineChart = (key, options) => calls.push(['chart', key, activeTapeChartTickerByGroup.get(key), options]);
+    const firstTapeChartTickerForGroup = (groupKey) => groupKey === 'Crypto' ? 'BTC' : '';
+    ${source}
+    return {
+      selectTapeChartRow,
+      selectFirstTapeChartRow,
+      snapshot: () => ({ calls: [...calls] })
+    };
+  `)();
+
+  runtime.selectFirstTapeChartRow('Crypto', { focusChart: true });
+  assert.deepEqual(runtime.snapshot().calls, [
+    ['close-week'],
+    ['chart', 'Crypto', 'BTC', { focusChart: true }]
+  ]);
+
+  runtime.selectTapeChartRow('Indices', 'spx', { scrollIntoView: true, focusChart: true });
+  assert.deepEqual(runtime.snapshot().calls.slice(-2), [
+    ['close-week'],
+    ['chart', 'Indices', 'SPX', { scrollIntoView: true, focusChart: true }]
+  ]);
+}
+
 function validateDashboardFixture(data, now = FIXTURE_NOW) {
   const { chartData } = createDashboardValidationFixture();
   return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), now);
@@ -4190,6 +4228,7 @@ async function main() {
     testOpeningRenderingOmitsIncompleteBlocks,
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,
+    testTapeChartRoutingPassesFocusOptions,
     testDashboardValidatorRejectsCalendarRangeDivergence,
     testDashboardValidatorKeepsPublishedGateToRenderSurface,
     testDashboardValidatorBlocksStartupCrashSurfaces,
