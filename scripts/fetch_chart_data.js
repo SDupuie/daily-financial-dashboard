@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { atomicWriteJson } = require('./staging_writer');
+const { mapConcurrent } = require('./fetch_concurrency');
 
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
@@ -1799,17 +1800,6 @@ function validateAndWriteChartOutput(output, expectedRows, writeJson, outputPath
   writeJson(outputPath, output);
 }
 
-async function mapIndexesConcurrent(indexes, concurrency, worker, delayMs, sleepFn) {
-  let next = 0;
-  async function run() {
-    while (next < indexes.length) {
-      await worker(indexes[next++]);
-      if (delayMs) await sleepFn(delayMs);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, indexes.length) }, run));
-}
-
 async function main(argv = process.argv.slice(2), dependencies = {}) {
   const args = parseArgs(argv);
   const requestedTickers = new Set(args.tickers.filter(Boolean));
@@ -1867,9 +1857,10 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   reportProgress();
   const treasuryIndexes = inputRows.map((row, index) => row.sourceSymbol.startsWith('TREASURY:') ? index : null).filter((index) => index !== null);
   const independentIndexes = inputRows.map((row, index) => row.sourceSymbol.startsWith('TREASURY:') ? null : index).filter((index) => index !== null);
+  const concurrencyOptions = { delayMs: args.delayMs, sleep: dependencies.sleep || sleep };
   await Promise.all([
-    mapIndexesConcurrent(independentIndexes, CHART_ROW_CONCURRENCY, processRow, args.delayMs, dependencies.sleep || sleep),
-    mapIndexesConcurrent(treasuryIndexes, 1, processRow, args.delayMs, dependencies.sleep || sleep)
+    mapConcurrent(independentIndexes, CHART_ROW_CONCURRENCY, processRow, concurrencyOptions),
+    mapConcurrent(treasuryIndexes, 1, processRow, concurrencyOptions)
   ]);
 
   const missingRows = inputRows.filter((row, index) => !seriesByIndex[index]

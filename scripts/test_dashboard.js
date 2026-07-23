@@ -10,6 +10,7 @@ const {
   isAllowedBrowserOrigin,
   parseArgs: parseLocalMarketServerArgs
 } = require('./local_market_server');
+const { mapConcurrent } = require('./fetch_concurrency');
 const {
   acceptedFreshChartTickers,
   buildChartDataFallback,
@@ -88,6 +89,42 @@ const {
 const root = path.resolve(__dirname, '..');
 // Complete synthetic dashboard used as the valid baseline for validator mutation tests.
 const FIXTURE_NOW = '2026-07-10T13:30:00Z';
+
+async function testFetchConcurrencyHelperContract() {
+  const active = { count: 0, max: 0 };
+  const settled = [];
+  const sleepCalls = [];
+  const result = await mapConcurrent([30, 10, 20, 5], 2, async (delay, index) => {
+    active.count += 1;
+    active.max = Math.max(active.max, active.count);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    active.count -= 1;
+    return `item-${index}`;
+  }, {
+    delayMs: 1,
+    sleep: async (ms) => {
+      sleepCalls.push(ms);
+    },
+    onSuccess: (_item, index, value) => {
+      settled.push([index, value]);
+    }
+  });
+
+  assert.deepEqual(result, ['item-0', 'item-1', 'item-2', 'item-3']);
+  assert.equal(active.max, 2);
+  assert.deepEqual(settled.map(([index]) => index).sort((left, right) => left - right), [0, 1, 2, 3]);
+  assert.deepEqual(sleepCalls, [1, 1, 1, 1]);
+  await assert.rejects(
+    () => mapConcurrent([1], 1, async () => {
+      throw new Error('worker failed');
+    }),
+    /worker failed/
+  );
+  await assert.rejects(
+    () => mapConcurrent([1], 1, async () => 'ok', { delayMs: 1 }),
+    /requires options\.sleep/
+  );
+}
 
 function story(kind, index) {
   const url = `https://www.cnbc.com/fixture/${kind}-${index}`;
@@ -4394,6 +4431,7 @@ async function runDashboardTest(test) {
 }
 
 const architectureContractTests = Object.freeze([
+  testFetchConcurrencyHelperContract,
   testArchitectureSingleWriterAndCliBoundaries,
   testDeterministicSectionFallbackContracts,
   testSectionTimeoutFallback,

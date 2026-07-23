@@ -7,6 +7,7 @@ const path = require('path');
 
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
+const { mapConcurrent } = require('./fetch_concurrency');
 
 // Bind the reserved primary-LAN address explicitly; network policy, not this process, keeps guest and WAN clients out.
 const DEFAULT_HOST = '192.168.2.2';
@@ -183,20 +184,6 @@ function sourceArgs(args) {
   };
 }
 
-async function mapLimit(items, limit, worker) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await worker(items[index], index);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
 function isoDateToUtcMs(value) {
   const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return null;
@@ -283,7 +270,7 @@ async function fetchChartPayload(args, startDate, endDate) {
   const rows = localRefreshChartRows(args.input);
   const treasuryMonthCache = new Map();
   const errors = [];
-  const results = await mapLimit(rows, args.concurrency, async (row) => {
+  const results = await mapConcurrent(rows, args.concurrency, async (row) => {
     try {
       const series = await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache);
       return { ...series, quoteRevision: endDate.toISOString() };

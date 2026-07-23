@@ -5,6 +5,7 @@ const path = require('path');
 const https = require('https');
 const os = require('os');
 const { atomicWriteJson } = require('./staging_writer');
+const { mapConcurrent } = require('./fetch_concurrency');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
@@ -109,17 +110,7 @@ async function fetchYahooBars(symbol, from, to, args, fetchJson) {
 }
 
 async function fetchYahooBarsForRows(rows, args, fetchJson) {
-  const output = new Array(rows.length);
-  let next = 0;
-  async function run() {
-    while (next < rows.length) {
-      const index = next++;
-      const row = rows[index];
-      output[index] = await fetchYahooBars(row.symbol, args.from, args.to, args, fetchJson);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, run));
-  return output;
+  return mapConcurrent(rows, 4, (row) => fetchYahooBars(row.symbol, args.from, args.to, args, fetchJson));
 }
 
 function parseArgs(argv) {

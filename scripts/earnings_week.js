@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./staging_writer');
+const { mapConcurrent } = require('./fetch_concurrency');
 const {
   combinedOutcome,
   computeEarningsSourceStatus,
@@ -1205,26 +1206,17 @@ async function collectRefreshData(source, args, dependencies = {}) {
   // Reaction fetches run only after actual EPS or revenue exists; estimates-only
   // rows keep their pending reaction state and avoid unnecessary Yahoo calls.
   const yahooSymbols = [...new Set(yahooTargets.map((row) => row.symbol))];
-  const yahooFetches = new Array(yahooSymbols.length);
-  let nextYahoo = 0;
-  async function fetchNextYahoo() {
-    while (nextYahoo < yahooSymbols.length) {
-      const index = nextYahoo++;
-      const symbol = yahooSymbols[index];
-      const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
-      try {
-        const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
-        if (result?.ok) {
-          yahooFetches[index] = result;
-        } else {
-          addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
-        }
-      } catch (error) {
-        addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', error.message));
-      }
+  const yahooFetches = await mapConcurrent(yahooSymbols, 4, async (symbol) => {
+    const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
+    try {
+      const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
+      if (result?.ok) return result;
+      addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
+    } catch (error) {
+      addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', error.message));
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(4, yahooSymbols.length) }, fetchNextYahoo));
+    return null;
+  });
 
   return {
     zacksRows,

@@ -12,6 +12,7 @@ const {
 } = require('./news_contract');
 const { APPROVED_NEWS_SOURCES, newsAcquisitionPaths } = require('./news_sources');
 const { atomicWriteJson } = require('./staging_writer');
+const { mapConcurrent } = require('./fetch_concurrency');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
@@ -584,18 +585,6 @@ function candidateOrder(left, right) {
     || left.url.localeCompare(right.url);
 }
 
-async function mapConcurrent(items, concurrency, worker, onSettled = null) {
-  let next = 0;
-  async function run() {
-    while (next < items.length) {
-      const item = items[next++];
-      await worker(item);
-      if (onSettled) await onSettled(item);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-}
-
 function articlePathUrl(value) {
   try {
     const url = new URL(value);
@@ -837,12 +826,14 @@ async function collectNewsCandidates({
     fetchArticle,
     articleTimeoutMs,
     clock
-  }), (candidate) => {
-    reviewedDownloaded.push(candidate);
-    articleReview.reviewedCount += 1;
-    if (articleReview.reviewedCount % ARTICLE_CONCURRENCY === 0
-      || articleReview.reviewedCount === cappedReviewCandidates.length) {
-      reportProgress('reviewing');
+  }), {
+    onSuccess: (candidate) => {
+      reviewedDownloaded.push(candidate);
+      articleReview.reviewedCount += 1;
+      if (articleReview.reviewedCount % ARTICLE_CONCURRENCY === 0
+        || articleReview.reviewedCount === cappedReviewCandidates.length) {
+        reportProgress('reviewing');
+      }
     }
   });
   articleReview.status = 'complete';

@@ -5,11 +5,13 @@ const path = require('path');
 const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
 const { isIsoDate } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
+const { mapConcurrent } = require('./fetch_concurrency');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.join(ROOT, 'generated', 'earnings_week.json');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'editorial', 'earnings_week_guidance.json');
 const DEFAULT_TIMEOUT_MS = 12000;
+const DEFAULT_GUIDANCE_CONCURRENCY = 3;
 const MAX_DOCUMENTS_PER_ROW = 2;
 const MAX_SNIPPETS_PER_DOCUMENT = 8;
 const MAX_SNIPPET_LENGTH = 620;
@@ -617,11 +619,11 @@ async function buildEarningsGuidanceEvidencePayload(week, options = {}) {
     return payload;
   }
 
-  for (const row of targets) {
+  payload.rows = await mapConcurrent(targets, options.concurrency || DEFAULT_GUIDANCE_CONCURRENCY, async (row) => {
     try {
-      payload.rows.push(await buildRowEvidence(row, tickerMap, options));
+      return await buildRowEvidence(row, tickerMap, options);
     } catch (error) {
-      payload.rows.push({
+      return {
         key: `${row.symbol}:${row.reportDate}`,
         symbol: row.symbol,
         company: row.company,
@@ -630,9 +632,9 @@ async function buildEarningsGuidanceEvidencePayload(week, options = {}) {
         documents: [],
         guidanceSignalCount: 0,
         message: error.message
-      });
+      };
     }
-  }
+  });
   payload.summary = summarizeEvidenceRows(payload.rows, targets.length, payload.summary.skippedNoActuals);
   return payload;
 }
