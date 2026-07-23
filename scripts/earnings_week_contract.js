@@ -649,6 +649,10 @@ function earningsReactionBasisForRow(row) {
   return compareIsoDate(observedDate, row.reportDate) <= 0 ? 'same_day_close' : 'next_session_close';
 }
 
+function needsYahooReactionFetch(row) {
+  return earningsHasActual(row) && earningsReactionBasisForRow(row) !== 'unavailable';
+}
+
 function earningsRowKey(row) {
   return `${row?.reportDate || ''}:${row?.symbol || ''}`;
 }
@@ -719,11 +723,9 @@ function computeEarningsWeekCounts(rows, secondaryRecoveryCandidates = []) {
 function computeEarningsSourceStatus(row, options = {}) {
   const requireComputedReaction = options.requireComputedReaction !== false;
   const scheduleVerificationStatus = row?.scheduleVerificationStatus || row?.sourceAudit?.scheduleVerification?.status;
-  const companyReleaseStatus = row?.companyReleaseStatus || row?.sourceAudit?.companyReleaseResolution?.status;
   const selectedSlate = row?.sourceAudit?.selectedSources?.slate;
   if (row?.sourceAudit?.resultRefresh?.status === 'partial') return 'partial';
-  if (['needs_review', 'unresolved'].includes(companyReleaseStatus)) return 'partial';
-  if (selectedSlate !== 'zacks' && !['corroborated', 'official_confirmed'].includes(scheduleVerificationStatus)) return 'partial';
+  if (selectedSlate !== 'zacks' && scheduleVerificationStatus !== 'corroborated') return 'partial';
   if (row?.reportTiming === 'unknown') return 'partial';
   if (!Number.isFinite(row?.eps?.estimate) || !Number.isFinite(row?.eps?.actual)) return 'partial';
   if (!Number.isFinite(row?.revenue?.estimate) || !Number.isFinite(row?.revenue?.actual)) return 'partial';
@@ -1029,6 +1031,7 @@ module.exports = {
   metricResult,
   mergeUnchangedEarningsNarrative,
   narrativeNeedsEditorialCopy,
+  needsYahooReactionFetch,
   normalizeFinnhubCalendarFields,
   normalizeEarningsTiming,
   numberOrNull,

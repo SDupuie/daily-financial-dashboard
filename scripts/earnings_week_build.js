@@ -20,6 +20,7 @@ const {
   isEarningsApiUsage,
   migrateEarningsApiUsage,
   metricResult,
+  needsYahooReactionFetch,
   normalizeFinnhubCalendarFields,
   numberOrNull,
   pctChange,
@@ -49,8 +50,6 @@ const DEFAULT_FINNHUB_METRIC_CACHE = path.resolve(process.cwd(), 'generated', 'f
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(process.cwd(), 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
 const DEFAULT_EARNINGSAPI_RESERVE = 20;
-const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
-const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
 const ZACKS_ENDPOINT = 'https://www.zacks.com/data_handler/earnings_calendar/calendar_handlers.php';
 const ZACKS_REFERER = 'https://www.zacks.com/earnings/earnings-calendar?icid=earnings-earnings-nav_tracking-zcom-main_menu_wrapper-earnings_calendar';
 const ZACKS_BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36';
@@ -123,11 +122,6 @@ async function fetchYahooBarsForRows(rows, args, fetchJson) {
   return output;
 }
 
-function needsYahooReactionFetch(row) {
-  return row?.reportTiming !== 'unknown'
-    && (Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual));
-}
-
 function parseArgs(argv) {
   const args = {
     from: '',
@@ -145,8 +139,6 @@ function parseArgs(argv) {
     earningsApiUsage: DEFAULT_EARNINGSAPI_USAGE,
     earningsApiDailyLimit: DEFAULT_EARNINGSAPI_DAILY_LIMIT,
     earningsApiReserve: DEFAULT_EARNINGSAPI_RESERVE,
-    scheduleConfirmations: DEFAULT_SCHEDULE_CONFIRMATIONS,
-    scheduleReview: DEFAULT_SCHEDULE_REVIEW,
     useEarningsApi: false,
     skipEarningsApi: false,
     compact: false
@@ -229,16 +221,6 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
-    if (arg === '--schedule-confirmations') {
-      args.scheduleConfirmations = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_SCHEDULE_CONFIRMATIONS);
-      i += 1;
-      continue;
-    }
-    if (arg === '--schedule-review') {
-      args.scheduleReview = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_SCHEDULE_REVIEW);
-      i += 1;
-      continue;
-    }
     if (arg === '--use-earningsapi') {
       args.useEarningsApi = true;
       continue;
@@ -296,9 +278,6 @@ Options:
   --earningsapi-usage PATH     EarningsAPI daily usage ledger
   --earningsapi-daily-limit    Daily EarningsAPI call cap (default: 100)
   --earningsapi-reserve 20     Calls reserved for result refreshes
-  --schedule-confirmations PATH
-                               Event-scoped official IR dates for conflicts, complete-response omissions, outages, and recovery rows
-  --schedule-review PATH       Generated review queue for rows requiring an official date confirmation
   --use-earningsapi            Permit metered EarningsAPI usage for approved rollover/recovery only
   --skip-earningsapi           Disable secondary-source recovery
   --compact                    Print compact coverage report
@@ -1329,106 +1308,28 @@ function resolveProviderDateConflicts(finnhubRows, secondaryCalendarDays) {
   };
 }
 
-function readScheduleConfirmations(file) {
-  if (!fs.existsSync(file)) return { rows: [], diagnostics: [] };
-  let payload;
-  try {
-    payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (error) {
-    return {
-      rows: [],
-      diagnostics: [{ code: 'confirmation_file_invalid_json', message: error.message }]
-    };
-  }
-  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.rows)) {
-    return {
-      rows: [],
-      diagnostics: [{
-        code: 'confirmation_file_invalid_contract',
-        message: 'earnings_schedule_confirmations.json must contain schemaVersion 2 and event-scoped rows[].'
-      }]
-    };
-  }
-  const diagnostics = [];
-  const rowsByEvent = new Map();
-  payload.rows.forEach((row, index) => {
-    const symbol = String(row?.symbol || '').trim().toUpperCase();
-    const primaryDate = String(row?.primaryDate || '').trim();
-    const reportDate = String(row?.reportDate || '').trim();
-    const sourceUrl = String(row?.sourceUrl || '').trim();
-    const sourceName = String(row?.sourceName || '').trim();
-    if (!/^[A-Z0-9.-]+$/.test(symbol) || !isIsoDate(primaryDate) || !isIsoDate(reportDate) || !/^https:\/\//.test(sourceUrl) || !sourceName) {
-      diagnostics.push({
-        code: 'confirmation_row_invalid',
-        rowIndex: index,
-        message: `rows[${index}] must provide symbol, ISO primaryDate, ISO reportDate, sourceName, and HTTPS sourceUrl.`
-      });
-      return;
-    }
-    // The provider's original date identifies one earnings event. Symbol-only
-    // confirmations would let an old quarter silently affect a later slate.
-    const key = `${symbol}:${primaryDate}`;
-    if (!rowsByEvent.has(key)) rowsByEvent.set(key, []);
-    rowsByEvent.get(key).push({ symbol, primaryDate, reportDate, sourceUrl, sourceName });
-  });
-  const rows = [];
-  for (const [key, candidates] of rowsByEvent) {
-    if (candidates.length === 1) rows.push(candidates[0]);
-    else diagnostics.push({
-      code: 'confirmation_event_duplicate',
-      event: key,
-      message: `Duplicate confirmations for ${key} were ignored.`
-    });
-  }
-  return { rows, diagnostics };
-}
-
-function scheduleAudit(status, row, secondaryDates, official = null) {
+function scheduleAudit(status, row, secondaryDates) {
   return {
     status,
     primaryDate: row.reportDate,
     secondaryDates,
-    official
+    official: null
   };
 }
 
-function officialScheduleReview(row, secondaryDates, reason) {
-  return {
-    symbol: row.symbol,
-    company: row.company,
-    primaryDate: row.reportDate,
-    secondaryDates,
-    reason,
-    required: 'company_investor_relations_then_sec_date_confirmation',
-    sourceOrder: ['company_investor_relations', 'sec_filing']
-  };
-}
-
-function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range, confirmations = []) {
-  const activeDates = new Set(displayDatesForRange(range.from, range.to));
-  const secondaryCalendarComplete = [...activeDates].every((date) =>
-    secondaryCalendarDays.some((day) => day.date === date && day.ok)
-  );
-  const secondaryCalendarUnavailable = secondaryCalendarDays.some((day) => day?.ok === false);
+function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range) {
   const secondaryDatesBySymbol = new Map();
   for (const candidate of secondaryCalendarDays.flatMap((day) => day.rows || [])) {
     if (!secondaryDatesBySymbol.has(candidate.symbol)) secondaryDatesBySymbol.set(candidate.symbol, new Set());
     secondaryDatesBySymbol.get(candidate.symbol).add(candidate.reportDate);
   }
-  const confirmationsByEvent = new Map(confirmations.map((row) => [`${row.symbol}:${row.primaryDate}`, row]));
-  const review = [];
   const verifiedRows = [];
 
   for (const row of rows) {
     if (!isDisplayEligibleEarningsRow(row)) continue;
     const secondaryDates = [...(secondaryDatesBySymbol.get(row.symbol) || new Set())].sort();
-    const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
     const datesAgree = secondaryDates.length === 1 && secondaryDates[0] === row.reportDate;
-    const hasCrossWeekConflict = secondaryDates.some((date) => !activeDates.has(date));
-    const hasInWeekConflict = secondaryDates.length > 0 && !datesAgree && !hasCrossWeekConflict;
 
-    // Provider agreement is sufficient corroboration; IR evidence is a fallback
-    // for this event, not a standing ticker-level override.
     if (datesAgree) {
       verifiedRows.push({
         ...row,
@@ -1439,31 +1340,6 @@ function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range, confirmat
       });
       continue;
     }
-    // Consult event-scoped IR only after the secondary attempt did not produce
-    // agreement. This covers real conflicts, complete-response omissions, and
-    // optional promotion during an outage without making IR a primary source.
-    if (confirmation && activeDates.has(confirmation.reportDate)) {
-      verifiedRows.push({
-        ...row,
-        reportDate: confirmation.reportDate,
-        sourceAudit: {
-          ...row.sourceAudit,
-          scheduleVerification: scheduleAudit('official_confirmed', row, secondaryDates, confirmation)
-        }
-      });
-      continue;
-    }
-    if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
-    const reason = secondaryCalendarUnavailable
-      ? 'secondary_calendar_unavailable'
-      : hasCrossWeekConflict
-      ? 'cross_week_calendar_date_conflict'
-      : hasInWeekConflict
-        ? 'in_week_calendar_date_conflict'
-        : 'uncorroborated_primary_calendar_date';
-    // A missing or conflicting secondary date is not evidence that Finnhub is
-    // wrong. Keep its row as the non-blocking primary row while retaining actionable
-    // review evidence for a later official upgrade or exclusion.
     verifiedRows.push({
       ...row,
       sourceStatus: 'partial',
@@ -1472,36 +1348,14 @@ function verifyFinnhubScheduleRows(rows, secondaryCalendarDays, range, confirmat
         scheduleVerification: scheduleAudit('primary_only', row, secondaryDates)
       }
     });
-    if (secondaryCalendarComplete || secondaryDates.length > 0 || secondaryCalendarUnavailable) {
-      review.push(officialScheduleReview(row, secondaryDates, reason));
-    }
   }
-  return { rows: verifiedRows, review };
+  return { rows: verifiedRows };
 }
 
-function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidates = []) {
-  const activeDates = new Set(displayDatesForRange(range.from, range.to));
-  const confirmationsByEvent = new Map(confirmations.map((row) => [`${row.symbol}:${row.primaryDate}`, row]));
+function verifyEarningsApiRecoveryRows(rows, range) {
   const verifiedRows = [];
-  const review = [];
-  const rowKeys = new Set(rows.map((row) => `${row.reportDate}:${row.symbol}`));
   for (const row of rows) {
     if (!isDisplayEligibleEarningsRow(row)) continue;
-    const confirmation = confirmationsByEvent.get(`${row.symbol}:${row.reportDate}`) || null;
-    if (confirmation && activeDates.has(confirmation.reportDate)) {
-      verifiedRows.push({
-        ...row,
-        reportDate: confirmation.reportDate,
-        sourceAudit: {
-          ...row.sourceAudit,
-          scheduleVerification: scheduleAudit('official_confirmed', row, [], confirmation)
-        }
-      });
-      continue;
-    }
-    if (confirmation) continue;
-    // The calendar and company endpoints independently agree on the same event.
-    // Publish it with degraded provenance while retaining the IR review request.
     verifiedRows.push({
       ...row,
       sourceStatus: 'partial',
@@ -1510,23 +1364,8 @@ function verifyEarningsApiRecoveryRows(rows, range, confirmations = [], candidat
         scheduleVerification: scheduleAudit('secondary_only', row, [])
       }
     });
-    review.push(officialScheduleReview(row, [], 'uncorroborated_secondary_recovery_date'));
   }
-  for (const candidate of candidates) {
-    const key = `${candidate.reportDate}:${candidate.symbol}`;
-    if (rowKeys.has(key)) continue;
-    const confirmation = confirmationsByEvent.get(`${candidate.symbol}:${candidate.reportDate}`) || null;
-    if (confirmation && !activeDates.has(confirmation.reportDate)) continue;
-    review.push({
-      symbol: candidate.symbol,
-      company: candidate.company,
-      primaryDate: candidate.reportDate,
-      secondaryDates: [],
-      reason: 'earningsapi_company_date_unavailable',
-      required: 'matching_earningsapi_company_date'
-    });
-  }
-  return { rows: verifiedRows, review };
+  return { rows: verifiedRows };
 }
 
 function buildSecondaryRecoveryCandidates(finnhubRows, secondaryCalendarDays, profiles, usListings = []) {
@@ -2747,14 +2586,6 @@ async function runBuild(argv = process.argv.slice(2)) {
       }),
       outputPath: args.output
     };
-    atomicWriteJson(args.scheduleReview, {
-      schemaVersion: 1,
-      generatedAt: args.asOf,
-      range: { from: args.from, to: args.to },
-      rows: [],
-      diagnostics: [],
-      outputPath: args.scheduleReview
-    });
     atomicWriteJson(args.output, payload);
     printReport(payload, args.compact);
     return;
@@ -2775,10 +2606,8 @@ async function runBuild(argv = process.argv.slice(2)) {
     throw new Error(`Finnhub U.S. symbol directory is unavailable. ${finnhubUsSymbols.error || ''}`.trim());
   }
 
-  // The surrounding-date production window catches conflicts while discovery
-  // remains limited to the five visible trading dates. Official company IR,
-  // then SEC, is the fallback when this secondary check is unavailable or does
-  // not corroborate the primary date.
+  // The surrounding-date production window catches provider conflicts while
+  // discovery remains limited to the five visible trading dates.
   const secondaryCalendarDays = await fetchAlphaVantageCalendar(
     args,
     alphaVantageToken,
@@ -2808,28 +2637,16 @@ async function runBuild(argv = process.argv.slice(2)) {
     secondaryCalendarDays: calendarResolution.secondaryCalendarDays,
     usListings: finnhubUsSymbols.listings
   });
-  const scheduleConfirmationInput = readScheduleConfirmations(args.scheduleConfirmations);
   const scheduleVerification = verifyFinnhubScheduleRows(
     finnhubRows,
     secondaryCalendarDays,
-    { from: args.from, to: args.to },
-    scheduleConfirmationInput.rows
+    { from: args.from, to: args.to }
   );
   const earningsApiRows = buildEarningsApiRows(secondaryRecoveryCandidates, earningsApiCompanyFetches);
   const earningsApiScheduleVerification = verifyEarningsApiRecoveryRows(
     earningsApiRows,
-    { from: args.from, to: args.to },
-    scheduleConfirmationInput.rows,
-    secondaryRecoveryCandidates
+    { from: args.from, to: args.to }
   );
-  atomicWriteJson(args.scheduleReview, {
-    schemaVersion: 1,
-    generatedAt: args.asOf,
-    range: { from: args.from, to: args.to },
-    rows: [...scheduleVerification.review, ...earningsApiScheduleVerification.review],
-    diagnostics: scheduleConfirmationInput.diagnostics,
-    outputPath: args.scheduleReview
-  });
   const mergedRows = [...scheduleVerification.rows, ...earningsApiScheduleVerification.rows].sort((left, right) => {
     const dateCompare = left.reportDate.localeCompare(right.reportDate);
     if (dateCompare) return dateCompare;
@@ -2902,7 +2719,6 @@ module.exports = {
   parseZacksTable,
   profileFromCache,
   isEligibleFinnhubUsListing,
-  readScheduleConfirmations,
   resolveProviderDateConflicts,
   runBuild,
   zacksEndpointDateFromUrl,

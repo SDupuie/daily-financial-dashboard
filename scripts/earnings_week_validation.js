@@ -2,10 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { isDeepStrictEqual } = require('util');
 const {
-  earningsCloseAvailable,
+  computeEarningsWeekCounts,
   earningsReactionBasisForRow,
-  earningsRowKey: rowKey,
   metricResult,
   validEarningsCommentaryDisposition,
   validEarningsGuidanceDisposition
@@ -43,8 +43,6 @@ const REACTION_BASES = new Set([
 const REACTION_STATUSES = new Set(['computed', 'awaiting_close', 'unavailable', 'pending']);
 const LIFECYCLES = new Set(['scheduled', 'awaiting_actual', 'released_awaiting_close', 'close_available']);
 const SECONDARY_CALENDAR_SOURCES = new Set(['alphaVantageCalendar']);
-const RELEASE_RESOLUTION_STATUSES = new Set(['resolved', 'needs_review', 'unresolved']);
-const RELEASE_RESOLUTION_CONFIDENCES = new Set(['high', 'medium', 'low']);
 const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
 const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const COMMENTARY_UNAVAILABLE_STATUSES = new Set(['commentary_unavailable']);
@@ -87,7 +85,6 @@ const ROW_FIELDS = new Set([
   'lifecycle',
   'sourceStatus',
   'scheduleVerificationStatus',
-  'companyReleaseStatus',
   'sourceSummary',
   'sourceAudit'
 ]);
@@ -273,15 +270,8 @@ function validateSelectedSources(errors, selected, expected, label, row = null, 
       const source = selected?.[metric]?.[field];
       if (value === null && source !== 'none') errors.push(`${label}.sourceAudit.selectedSources.${metric}.${field} must be none when ${metric}.${field} is null.`);
       if (value !== null && source === 'none') errors.push(`${label}.sourceAudit.selectedSources.${metric}.${field} must identify a source when ${metric}.${field} is populated.`);
-      if (companyReleaseSource(source) && !isObject(audit?.companyReleaseResolution)) {
-        errors.push(`${label}.sourceAudit.companyReleaseResolution must be populated when ${metric}.${field} uses a company-release source.`);
-      }
     }
   }
-}
-
-function companyReleaseSource(value) {
-  return String(value || '').startsWith('sec_company_release');
 }
 
 function validateZacksMetricAudit(errors, audit, row, metric, label) {
@@ -328,80 +318,19 @@ function validateZacksRowSourceAudit(errors, row, audit, selected, label) {
   validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
-function validateCompanyReleaseResolutionEvidence(errors, resolution, label) {
-  const epsActual = resolution.fields?.eps?.actual;
-  const revenueActual = resolution.fields?.revenue?.actual;
-  const hasEps = isFiniteNumber(epsActual);
-  const hasRevenue = isFiniteNumber(revenueActual);
-  if (resolution.status === 'resolved') {
-    if (resolution.confidence !== 'high') errors.push(`${label}.confidence must be high when resolved.`);
-    if (!hasEps) errors.push(`${label}.fields.eps.actual is required when resolved.`);
-    if (!hasRevenue) errors.push(`${label}.fields.revenue.actual is required when resolved.`);
-  } else if (resolution.status === 'needs_review') {
-    if (resolution.confidence !== 'medium') errors.push(`${label}.confidence must be medium when needs_review.`);
-    if (hasEps && hasRevenue) errors.push(`${label}.status must be resolved when both official actuals are available.`);
-  } else if (resolution.status === 'unresolved') {
-    if (resolution.confidence !== 'low') errors.push(`${label}.confidence must be low when unresolved.`);
-    if (hasEps || hasRevenue) errors.push(`${label}.unresolved disposition must not contain official actuals.`);
-  }
-  if (['resolved', 'needs_review'].includes(resolution.status)) {
-    if (resolution.sourceType !== 'sec_8k_exhibit_99_1') errors.push(`${label}.sourceType must be sec_8k_exhibit_99_1.`);
-    if (!/^https:\/\/www\.sec\.gov\//.test(resolution.sourceUrl || '')) errors.push(`${label}.sourceUrl must be an SEC URL.`);
-    if (!/^https:\/\/www\.sec\.gov\//.test(resolution.secFilingUrl || '')) errors.push(`${label}.secFilingUrl must be an SEC URL.`);
-  }
-  if (hasEps && !String(resolution.fields?.eps?.actualSource || '').startsWith('sec_company_release')) {
-    errors.push(`${label}.fields.eps.actualSource must identify the SEC/company release when an official EPS actual is populated.`);
-  }
-}
-
-function validateCompanyReleaseAudit(errors, resolution, row, label) {
-  if (!RELEASE_RESOLUTION_STATUSES.has(resolution.status)) {
-    errors.push(`${label}.sourceAudit.companyReleaseResolution.status must be resolved, needs_review, or unresolved.`);
-    return;
-  }
-  if (typeof resolution.taskId !== 'string' || !resolution.taskId.trim()) errors.push(`${label}.sourceAudit.companyReleaseResolution.taskId must be populated.`);
-  if (resolution.symbol !== row.symbol) errors.push(`${label}.sourceAudit.companyReleaseResolution.symbol must match row.symbol.`);
-  if (!isIsoDate(resolution.reportDate)) errors.push(`${label}.sourceAudit.companyReleaseResolution.reportDate must be an ISO date.`);
-  if (!RELEASE_RESOLUTION_CONFIDENCES.has(resolution.confidence)) errors.push(`${label}.sourceAudit.companyReleaseResolution.confidence is invalid.`);
-  if (!Array.isArray(resolution.notes) || (resolution.status !== 'resolved' && !resolution.notes.length)) {
-    errors.push(`${label}.sourceAudit.companyReleaseResolution.notes must record why the task was not resolved.`);
-  }
-  if (resolution.status !== 'resolved' && row.sourceStatus !== 'partial') {
-    errors.push(`${label}.sourceStatus must remain partial for a non-resolved company-release disposition.`);
-  }
-  if (['resolved', 'needs_review'].includes(resolution.status)) {
-    if (resolution.sourceType !== 'sec_8k_exhibit_99_1') errors.push(`${label}.sourceAudit.companyReleaseResolution.sourceType must be sec_8k_exhibit_99_1.`);
-    if (!/^https:\/\/www\.sec\.gov\//.test(resolution.sourceUrl || '')) errors.push(`${label}.sourceAudit.companyReleaseResolution.sourceUrl must be an SEC URL.`);
-    if (!/^https:\/\/www\.sec\.gov\//.test(resolution.secFilingUrl || '')) errors.push(`${label}.sourceAudit.companyReleaseResolution.secFilingUrl must be an SEC URL.`);
-  }
-}
 
 function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
-  const companyReleaseResolution = isObject(audit.companyReleaseResolution) ? audit.companyReleaseResolution : null;
-  const promotedEps = companyReleaseSource(selected.eps?.actual);
-  const promotedRevenue = companyReleaseSource(selected.revenue?.actual);
   const scheduleVerification = isObject(audit.scheduleVerification) ? audit.scheduleVerification : null;
   if (scheduleVerification) {
-    if (!['corroborated', 'official_confirmed', 'primary_only'].includes(scheduleVerification.status)) {
+    if (!['corroborated', 'primary_only'].includes(scheduleVerification.status)) {
       errors.push(`${label}.sourceAudit.scheduleVerification.status is invalid.`);
     }
     if (!isIsoDate(scheduleVerification.primaryDate)) errors.push(`${label}.sourceAudit.scheduleVerification.primaryDate must be an ISO date.`);
     if (!Array.isArray(scheduleVerification.secondaryDates) || scheduleVerification.secondaryDates.some((date) => !isIsoDate(date))) {
       errors.push(`${label}.sourceAudit.scheduleVerification.secondaryDates must contain ISO dates.`);
     }
-    if (scheduleVerification.status === 'official_confirmed') {
-      const official = scheduleVerification.official;
-      // This proves that published provenance is scoped to the canonical event;
-      // it does not prove that the linked IR page's contents were fetched or read.
-      if (!isObject(official) || official.symbol !== row.symbol || official.primaryDate !== scheduleVerification.primaryDate || !isIsoDate(official.primaryDate) || !isIsoDate(official.reportDate) || !/^https:\/\//.test(official.sourceUrl || '') || !String(official.sourceName || '').trim()) {
-        errors.push(`${label}.sourceAudit.scheduleVerification.official must identify the current symbol and primary date and provide an official ISO report date, HTTPS URL, and source name.`);
-      } else if (official.reportDate !== row.reportDate) {
-        errors.push(`${label}.reportDate must match the official schedule confirmation.`);
-      }
-    } else {
-      if (scheduleVerification.official !== null) {
-        errors.push(`${label}.sourceAudit.scheduleVerification.official must be null unless officially confirmed.`);
-      }
+    if (scheduleVerification.official !== null) {
+      errors.push(`${label}.sourceAudit.scheduleVerification.official must be null.`);
     }
   }
   if (!isObject(audit.finnhubCalendar)) {
@@ -425,8 +354,6 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
       }
       if (conflictSelectedDate !== calendar.reportDate) errors.push(`${label}.providerDateConflict.selectedDate must match the retained Finnhub calendar date.`);
       if (!conflictFinnhubDates.includes(calendar.reportDate)) errors.push(`${label}.finnhubCalendar.reportDate must match a providerDateConflict Finnhub candidate.`);
-    } else if (scheduleVerification?.status === 'official_confirmed') {
-      if (calendar.reportDate !== scheduleVerification.primaryDate) errors.push(`${label}.finnhubCalendar.reportDate must match scheduleVerification.primaryDate.`);
     } else if (calendar.reportDate !== row.reportDate) {
       errors.push(`${label}.finnhubCalendar.reportDate must match row.reportDate.`);
     }
@@ -453,7 +380,7 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
   const timingFallbackSource = secondaryCalendarAuditSource(selected.timing);
   // Mirror buildRows source precedence exactly; this keeps identity recovery
   // explicit instead of accepting broad legacy aliases or oldName || newName drift.
-  let expectedSources = {
+  const expectedSources = {
     slate: 'finnhub',
     company: profileName ? 'finnhubProfile' : hasSecondaryCalendarCompany ? selected.company : 'symbol',
     marketCap: isFiniteNumber(audit.finnhubProfile?.marketCap) ? 'finnhubProfile' : hasMetricMarketCap ? 'finnhubMetric' : 'none',
@@ -468,34 +395,6 @@ function validateFinnhubRowSourceAudit(errors, row, audit, selected, label) {
     },
     reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
   };
-  if (companyReleaseResolution?.status === 'resolved') {
-    validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
-    expectedSources = {
-      ...expectedSources,
-      timing: row.reportTiming === 'unknown' ? 'none' : 'sec_company_release',
-      eps: {
-        estimate: selected.eps?.estimate || expectedSources.eps.estimate,
-        actual: expectedSource(row.eps?.actual, promotedEps ? selected.eps.actual : 'sec_company_release')
-      },
-      revenue: {
-        estimate: selected.revenue?.estimate || expectedSources.revenue.estimate,
-        actual: expectedSource(row.revenue?.actual, promotedRevenue ? selected.revenue.actual : 'sec_company_release')
-      }
-    };
-  } else if (companyReleaseResolution) {
-    validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
-    expectedSources = {
-      ...expectedSources,
-      eps: {
-        ...expectedSources.eps,
-        ...(promotedEps ? { actual: selected.eps.actual } : {})
-      },
-      revenue: {
-        ...expectedSources.revenue,
-        ...(promotedRevenue ? { actual: selected.revenue.actual } : {})
-      }
-    };
-  }
   validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
@@ -508,28 +407,13 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
   const scheduleVerification = isObject(audit.scheduleVerification) ? audit.scheduleVerification : null;
   if (scheduleVerification) {
     const official = scheduleVerification.official;
-    if (scheduleVerification.status === 'secondary_only') {
-      if (!isIsoDate(scheduleVerification.primaryDate)
-        || scheduleVerification.primaryDate !== row.reportDate
-        || !Array.isArray(scheduleVerification.secondaryDates)
-        || scheduleVerification.secondaryDates.length
-        || official !== null) {
-        errors.push(`${label}.sourceAudit.scheduleVerification must identify an unconfirmed secondary-only date.`);
-      }
-    } else if (scheduleVerification.status !== 'official_confirmed'
+    if (scheduleVerification.status !== 'secondary_only'
       || !isIsoDate(scheduleVerification.primaryDate)
+      || scheduleVerification.primaryDate !== row.reportDate
       || !Array.isArray(scheduleVerification.secondaryDates)
-      || !isObject(official)
-      || official.symbol !== row.symbol
-      || official.primaryDate !== scheduleVerification.primaryDate
-      || !isIsoDate(official.primaryDate)
-      || !isIsoDate(official.reportDate)
-      || official.reportDate !== row.reportDate
-      || !/^https:\/\//.test(official.sourceUrl || '')
-      || !String(official.sourceName || '').trim()) {
-      // Structural validation proves event-bound provenance, not remote source
-      // authenticity.
-      errors.push(`${label}.sourceAudit.scheduleVerification must be secondary_only or a complete official schedule confirmation.`);
+      || scheduleVerification.secondaryDates.length
+      || official !== null) {
+      errors.push(`${label}.sourceAudit.scheduleVerification must identify an unconfirmed secondary-only date.`);
     }
   }
   if (audit.finnhubCalendar?.present !== false) {
@@ -543,71 +427,25 @@ function validateEarningsApiRowSourceAudit(errors, row, audit, selected, label) 
     return;
   }
   const companyRow = audit.earningsApiCompany.selectedRow;
-  const companyReleaseResolution = audit.companyReleaseResolution;
-  const promotedEps = companyReleaseSource(selected.eps?.actual);
-  const promotedRevenue = companyReleaseSource(selected.revenue?.actual);
-  if (companyRow.reportDate !== row.reportDate
-    && !(scheduleVerification?.status === 'official_confirmed' && companyRow.reportDate === scheduleVerification.primaryDate)) {
+  if (companyRow.reportDate !== row.reportDate) {
     errors.push(`${label}.earningsApiCompany.reportDate must match row.reportDate.`);
   }
-  let expectedSources;
-  if (companyReleaseResolution?.status === 'resolved') {
-    validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
-    expectedSources = {
-      slate: calendarAuditSource,
-      company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
-      marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
-      timing: row.reportTiming === 'unknown' ? 'none' : 'sec_company_release',
-      eps: {
-        estimate: selected.eps?.estimate || expectedSource(row.eps?.estimate, 'earningsApiCompany'),
-        actual: expectedSource(row.eps?.actual, promotedEps ? selected.eps.actual : 'sec_company_release')
-      },
-      revenue: {
-        estimate: selected.revenue?.estimate || expectedSource(row.revenue?.estimate, 'earningsApiCompany'),
-        actual: expectedSource(row.revenue?.actual, promotedRevenue ? selected.revenue.actual : 'sec_company_release')
-      },
-      reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
-    };
-  } else if (isObject(companyReleaseResolution)) {
-    validateCompanyReleaseAudit(errors, companyReleaseResolution, row, label);
-    if (companyRow.reportTiming !== row.reportTiming) errors.push(`${label}.earningsApiCompany.reportTiming must match row.reportTiming.`);
-    expectedSources = {
-      slate: calendarAuditSource,
-      company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
-      marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
-      timing: row.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
-      eps: {
-        estimate: expectedSource(row.eps?.estimate, 'earningsApiCompany'),
-        actual: promotedEps
-          ? selected.eps.actual
-          : expectedSource(row.eps?.actual, 'earningsApiCompany')
-      },
-      revenue: {
-        estimate: expectedSource(row.revenue?.estimate, 'earningsApiCompany'),
-        actual: promotedRevenue
-          ? selected.revenue.actual
-          : expectedSource(row.revenue?.actual, 'earningsApiCompany')
-      },
-      reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
-    };
-  } else {
-    if (companyRow.reportTiming !== row.reportTiming) errors.push(`${label}.earningsApiCompany.reportTiming must match row.reportTiming.`);
-    expectedSources = {
-      slate: calendarAuditSource,
-      company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
-      marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
-      timing: row.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
-      eps: {
-        estimate: expectedSource(row.eps?.estimate, 'earningsApiCompany'),
-        actual: expectedSource(row.eps?.actual, 'earningsApiCompany')
-      },
-      revenue: {
-        estimate: expectedSource(row.revenue?.estimate, 'earningsApiCompany'),
-        actual: expectedSource(row.revenue?.actual, 'earningsApiCompany')
-      },
-      reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
-    };
-  }
+  if (companyRow.reportTiming !== row.reportTiming) errors.push(`${label}.earningsApiCompany.reportTiming must match row.reportTiming.`);
+  const expectedSources = {
+    slate: calendarAuditSource,
+    company: audit.finnhubProfile?.name ? 'finnhubProfile' : 'earningsApiCompany',
+    marketCap: row.marketCap === null ? 'none' : 'finnhubProfile',
+    timing: row.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
+    eps: {
+      estimate: expectedSource(row.eps?.estimate, 'earningsApiCompany'),
+      actual: expectedSource(row.eps?.actual, 'earningsApiCompany')
+    },
+    revenue: {
+      estimate: expectedSource(row.revenue?.estimate, 'earningsApiCompany'),
+      actual: expectedSource(row.revenue?.actual, 'earningsApiCompany')
+    },
+    reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
+  };
   validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
@@ -667,9 +505,6 @@ function validateRow(errors, rowRaw, index, range, options = {}) {
   if (!SOURCE_STATUSES.has(row.sourceStatus)) errors.push(`${label}.sourceStatus is invalid.`);
   if (row.scheduleVerificationStatus !== undefined && typeof row.scheduleVerificationStatus !== 'string') {
     errors.push(`${label}.scheduleVerificationStatus must be a string.`);
-  }
-  if (row.companyReleaseStatus !== undefined && typeof row.companyReleaseStatus !== 'string') {
-    errors.push(`${label}.companyReleaseStatus must be a string.`);
   }
   validateReaction(errors, row, label);
   if (validationMode === 'staged') {
@@ -810,103 +645,26 @@ function validatePublishedInternalQueues(errors, data) {
   }
 }
 
-function validateCompanyReleaseResolutionReaction(errors, item, label, now) {
-  const reaction = item.reaction;
-  if (!isObject(reaction)) {
-    errors.push(`${label}.reaction must be an object.`);
+function validatePublishedSummary(errors, data) {
+  if (!isObject(data.summary)) {
+    errors.push('summary must be an object in published dashboard data.');
     return;
   }
-  if (!REACTION_BASES.has(reaction.basis)) errors.push(`${label}.reaction.basis is invalid.`);
-  if (!nullableNumber(reaction.percent)) errors.push(`${label}.reaction.percent must be numeric or null.`);
-  if (!REACTION_STATUSES.has(reaction.status)) errors.push(`${label}.reaction.status is invalid.`);
-  if (typeof reaction.note !== 'string') errors.push(`${label}.reaction.note must be a string.`);
-  if (reaction.status === 'awaiting_close') {
-    if (reaction.basis === 'unavailable') errors.push(`${label}.reaction awaiting_close requires a known reaction basis.`);
-    if (reaction.percent !== null || reaction.fromDate || reaction.toDate || reaction.fromClose !== null || reaction.toClose !== null) {
-      errors.push(`${label}.reaction close fields must remain empty while awaiting_close.`);
-    }
-    return;
-  }
-  if (reaction.basis === 'unavailable') {
-    if (reaction.percent !== null) errors.push(`${label}.reaction.percent must be null when unavailable.`);
-    return;
-  }
-  for (const field of ['fromDate', 'toDate']) {
-    if (!isIsoDate(reaction[field])) errors.push(`${label}.reaction.${field} must be an ISO date.`);
-  }
-  for (const field of ['fromClose', 'toClose']) {
-    if (!isFiniteNumber(reaction[field])) errors.push(`${label}.reaction.${field} must be numeric.`);
-  }
-  // Resolution retry may run before the reaction window closes; computed close
-  // fields are accepted only once the canonical close boundary has arrived.
-  const reportTiming = item.fields?.reportTiming;
-  if (reportTiming === 'amc') {
-    if (isIsoDate(reaction.fromDate) && compareIsoDate(reaction.fromDate, item.reportDate) < 0) errors.push(`${label}.reaction.fromDate must be on or after reportDate for amc reports.`);
-    if (isIsoDate(reaction.fromDate) && isIsoDate(reaction.toDate) && compareIsoDate(reaction.toDate, reaction.fromDate) <= 0) errors.push(`${label}.reaction.toDate must follow fromDate for amc reports.`);
-  } else if (reportTiming === 'bmo' || reportTiming === 'dmh') {
-    if (isIsoDate(reaction.fromDate) && compareIsoDate(reaction.fromDate, item.reportDate) >= 0) errors.push(`${label}.reaction.fromDate must precede reportDate for ${reportTiming} reports.`);
-    if (isIsoDate(reaction.toDate) && compareIsoDate(reaction.toDate, item.reportDate) < 0) errors.push(`${label}.reaction.toDate must be on or after reportDate for ${reportTiming} reports.`);
-  }
-  if (!earningsCloseAvailable({ date: reaction.toDate }, now)) {
-    errors.push(`${label}.reaction cannot be computed before the required closing response is available.`);
-  }
-  const expectedPct = pctChange(reaction.fromClose, reaction.toClose);
-  if (expectedPct !== null && !nearlyEqual(reaction.percent, expectedPct, PCT_TOLERANCE)) {
-    errors.push(`${label}.reaction.percent must match fromClose/toClose.`);
-  }
-}
 
-function companyReleaseEstimateSource(row, metric) {
-  return row?.sourceAudit?.selectedSources?.[metric]?.estimate === 'finnhub'
-    ? 'finnhub'
-    : 'earningsapi_company';
-}
-
-function validateCompanyReleaseResolution(errors, itemRaw, taskMap, rowMap, index, now) {
-  const item = isObject(itemRaw) ? itemRaw : {};
-  const label = item.symbol || `companyReleaseResolutions[${index}]`;
-  const task = taskMap.get(item.taskId);
-  if (!task) errors.push(`${label}.taskId must map to companyReleaseTasks.`);
-  if (task && item.symbol !== task.symbol) errors.push(`${label}.symbol must match company-release task.`);
-  if (!RELEASE_RESOLUTION_STATUSES.has(item.status)) errors.push(`${label}.status is invalid.`);
-  if (!RELEASE_RESOLUTION_CONFIDENCES.has(item.confidence)) errors.push(`${label}.confidence is invalid.`);
-  if (!isObject(item.fields)) {
-    errors.push(`${label}.fields must be an object.`);
+  const extraFields = Object.keys(data.summary).filter((field) => field !== 'counts');
+  if (extraFields.length) {
+    errors.push(`summary may only contain counts in published dashboard data; remove ${extraFields.join(', ')}.`);
+  }
+  if (!isObject(data.summary.counts)) {
+    errors.push('summary.counts must be an object in published dashboard data.');
     return;
   }
-  if (!TIMINGS.has(item.fields.reportTiming)) errors.push(`${label}.fields.reportTiming is invalid.`);
-  if (!isObject(item.fields.eps)) errors.push(`${label}.fields.eps must be populated.`);
-  if (!isObject(item.fields.revenue)) errors.push(`${label}.fields.revenue must be populated.`);
-  const eps = isObject(item.fields.eps) ? item.fields.eps : {};
-  const revenue = isObject(item.fields.revenue) ? item.fields.revenue : {};
-  for (const staleField of ['epsActual', 'revenueActual', 'gaapEpsActual', 'epsEstimate', 'epsEstimateSource', 'revenueEstimate', 'revenueEstimateSource']) {
-    if (Object.prototype.hasOwnProperty.call(item.fields, staleField)) {
-      errors.push(`${label}.fields.${staleField} must not appear; use eps/revenue nested fields.`);
-    }
+  if (!Array.isArray(data.rows)) return;
+
+  const expectedCounts = computeEarningsWeekCounts(data.rows, []);
+  if (!isDeepStrictEqual(data.summary.counts, expectedCounts)) {
+    errors.push('summary.counts must match published earnings rows.');
   }
-  if (!nullableNumber(eps.actual)) errors.push(`${label}.fields.eps.actual must be numeric or null.`);
-  if (!nullableNumber(revenue.actual)) errors.push(`${label}.fields.revenue.actual must be numeric or null.`);
-  if (!nullableNumber(eps.gaapActual)) errors.push(`${label}.fields.eps.gaapActual must be numeric or null.`);
-  if (!nullableNumber(eps.estimate)) errors.push(`${label}.fields.eps.estimate must be numeric or null.`);
-  if (!nullableNumber(revenue.estimate)) errors.push(`${label}.fields.revenue.estimate must be numeric or null.`);
-  const row = rowMap.get(`${task?.reportDate || ''}:${task?.symbol || ''}`);
-  const epsEstimateSource = companyReleaseEstimateSource(row, 'eps');
-  const revenueEstimateSource = companyReleaseEstimateSource(row, 'revenue');
-  if (eps.estimate !== null && eps.estimateSource !== epsEstimateSource) {
-    errors.push(`${label}.fields.eps.estimateSource must be ${epsEstimateSource} when eps.estimate is populated.`);
-  }
-  if (eps.estimate === null && eps.estimateSource) {
-    errors.push(`${label}.fields.eps.estimateSource must be blank when eps.estimate is null.`);
-  }
-  if (revenue.estimate !== null && revenue.estimateSource !== revenueEstimateSource) {
-    errors.push(`${label}.fields.revenue.estimateSource must be ${revenueEstimateSource} when revenue.estimate is populated.`);
-  }
-  validateCompanyReleaseResolutionEvidence(errors, item, label);
-  if (String(eps.comparisonSource || '').startsWith('unreconciled_') && eps.estimate !== null) {
-    errors.push(`${label}.fields.eps.estimate must not be used while the retained EPS actual is unreconciled.`);
-  }
-  if (!Array.isArray(item.notes)) errors.push(`${label}.notes must be an array.`);
-  validateCompanyReleaseResolutionReaction(errors, item, label, now);
 }
 
 function validateEarningsWeekPayload(data, options = {}) {
@@ -937,37 +695,9 @@ function validateEarningsWeekPayload(data, options = {}) {
     });
   }
 
+  if (validationMode === 'published') validatePublishedSummary(errors, data);
+
   validateNarrativeApply(errors, data, { mode: validationMode });
-
-  return errors;
-}
-
-function validateCompanyReleaseResolutionsPayload(data, week, options = {}) {
-  const errors = [];
-  if (!isObject(data)) {
-    errors.push('company-release resolution payload must be an object.');
-    return errors;
-  }
-  // Integrated refresh now validates in-memory retry results, not a persistent
-  // sidecar, so artifact metadata is optional and partial task coverage is OK.
-  const taskMap = new Map((Array.isArray(week.companyReleaseTasks) ? week.companyReleaseTasks : []).map((task) => [task.id, task]));
-  const rowMap = new Map((Array.isArray(week.rows) ? week.rows : []).map((row) => [`${row.reportDate}:${row.symbol}`, row]));
-  const now = options.now instanceof Date && !Number.isNaN(options.now.getTime())
-    ? options.now
-    : isIsoDateTime(data.generatedAt) ? new Date(data.generatedAt) : new Date();
-
-  if (data.schemaVersion !== undefined && data.schemaVersion !== 1) errors.push('schemaVersion must be 1.');
-  if (data.generatedAt !== undefined && !isIsoDateTime(data.generatedAt)) errors.push('generatedAt must be an ISO timestamp.');
-  if (!Array.isArray(data.companyReleaseResolutions)) {
-    errors.push('companyReleaseResolutions must be an array.');
-  } else {
-    const seen = new Set();
-    data.companyReleaseResolutions.forEach((item, index) => {
-      if (seen.has(item?.taskId)) errors.push(`${item.taskId} appears more than once.`);
-      seen.add(item?.taskId);
-      validateCompanyReleaseResolution(errors, item, taskMap, rowMap, index, now);
-    });
-  }
 
   return errors;
 }
@@ -994,6 +724,5 @@ if (require.main === module) {
 
 module.exports = {
   runValidation,
-  validateEarningsWeekPayload,
-  validateCompanyReleaseResolutionsPayload
+  validateEarningsWeekPayload
 };

@@ -37,7 +37,6 @@ const {
   finnhubCalendarFromResponse,
   fetchYahooBarsForRows,
   parseZacksTable,
-  readScheduleConfirmations,
   resolveProviderDateConflicts,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
@@ -46,18 +45,22 @@ const {
   zacksGate
 } = require('./earnings_week_build');
 const {
-  applyCompanyReleaseResolutions,
   applyEarningsNarrative,
   collectRefreshData,
   earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
-  pendingEarningsScheduleReviews,
   repairRecoveredEarningsSourceAudit,
   refreshEarningsResults,
   refreshTargetRows,
   validateEarningsWeekPayload
 } = require('./earnings_week');
-const { validateCompanyReleaseResolutionsPayload } = require('./earnings_week_validation');
+const {
+  buildEarningsGuidanceEvidenceIndex,
+  chooseEarningsFiling,
+  chooseExhibitDocuments,
+  guidanceSignalsFromText,
+  writeEarningsGuidanceEvidence
+} = require('./earnings_week_guidance');
 const root = path.resolve(__dirname, '..');
 
 function profile(symbol, marketCap = 50000000000) {
@@ -173,11 +176,6 @@ function assertThrowsLike(fn, pattern, label) {
 
 function validateWeekPayload(payload) {
   const errors = validateEarningsWeekPayload(payload);
-  if (errors.length) throw new Error(errors.join(' '));
-}
-
-function validateCompanyReleasePayload(week, payload) {
-  const errors = validateCompanyReleaseResolutionsPayload(payload, week);
   if (errors.length) throw new Error(errors.join(' '));
 }
 
@@ -377,17 +375,15 @@ function testPrimaryScheduleVerification() {
     date: '2026-01-06', rows: [earningsApiRow('MATCH', { reportDate: '2026-01-06' })]
   }], range);
   assert.equal(matching.rows.length, 1);
-  assert.equal(matching.review.length, 0);
   assert.equal(matching.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
 
   const crossWeek = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [{
     date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })]
   }], range);
-  assert.equal(crossWeek.rows.length, 1, 'A cross-week conflict must retain the Finnhub row while awaiting official confirmation.');
+  assert.equal(crossWeek.rows.length, 1, 'A cross-week conflict must retain the provider row with partial provenance.');
   assert.equal(crossWeek.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
   assert.deepEqual(crossWeek.rows[0].sourceAudit.scheduleVerification.secondaryDates, ['2026-01-30']);
   assert.equal(crossWeek.rows[0].sourceStatus, 'partial');
-  assert.deepEqual(crossWeek.review.map((row) => row.reason), ['cross_week_calendar_date_conflict']);
 
   const inWeekConflict = verifyFinnhubScheduleRows(baseRows('INWEEK'), [{
     date: '2026-01-08', rows: [earningsApiRow('INWEEK', { reportDate: '2026-01-08' })]
@@ -395,30 +391,17 @@ function testPrimaryScheduleVerification() {
   assert.equal(inWeekConflict.rows.length, 1);
   assert.equal(inWeekConflict.rows[0].reportDate, '2026-01-06');
   assert.equal(inWeekConflict.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.deepEqual(inWeekConflict.review.map((row) => row.reason), ['in_week_calendar_date_conflict']);
-
-  const crossWeekOfficial = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [], range, [{
-    symbol: 'OUTSIDE',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-30',
-    sourceName: 'Official investor relations calendar',
-    sourceUrl: 'https://investors.example.test/earnings'
-  }]);
-  assert.equal(crossWeekOfficial.rows.length, 0, 'An official out-of-week date must exclude the row from the active slate.');
-  assert.equal(crossWeekOfficial.review.length, 0);
 
   const uncorroborated = verifyFinnhubScheduleRows(baseRows('SINGLE'), [], range);
   assert.equal(uncorroborated.rows.length, 1);
   assert.equal(uncorroborated.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
   assert.equal(uncorroborated.rows[0].sourceStatus, 'partial');
-  assert.deepEqual(uncorroborated.review, []);
 
   const secondaryOutage = verifyFinnhubScheduleRows(baseRows('OUTAGE'), [{
     date: '2026-01-05', ok: false, status: 429, rows: []
   }], range);
   assert.equal(secondaryOutage.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.deepEqual(secondaryOutage.review.map((row) => row.reason), ['secondary_calendar_unavailable']);
-  assert.deepEqual(secondaryOutage.review[0].sourceOrder, ['company_investor_relations', 'sec_filing']);
+  assert.equal(secondaryOutage.rows[0].sourceStatus, 'partial');
 
   const completeSecondaryMiss = verifyFinnhubScheduleRows(baseRows('SINGLE'), displayDatesForRange(range.from, range.to).map((date) => ({
     date,
@@ -428,118 +411,12 @@ function testPrimaryScheduleVerification() {
   assert.equal(completeSecondaryMiss.rows.length, 1);
   assert.equal(completeSecondaryMiss.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
   assert.equal(completeSecondaryMiss.rows[0].sourceStatus, 'partial');
-  assert.deepEqual(completeSecondaryMiss.review.map((row) => row.reason), ['uncorroborated_primary_calendar_date']);
 
-  const official = verifyFinnhubScheduleRows(baseRows('OFFICIAL'), [], range, [{
-    symbol: 'OFFICIAL',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-08',
-    sourceName: 'Official investor relations calendar',
-    sourceUrl: 'https://investors.example.test/earnings'
-  }]);
-  assert.equal(official.rows[0].reportDate, '2026-01-08');
-  assert.equal(official.rows[0].sourceAudit.scheduleVerification.status, 'official_confirmed');
-  assert.equal(official.review.length, 0);
-
-  const staleOutageConfirmation = verifyFinnhubScheduleRows(baseRows('STALE'), [], range, [{
-    symbol: 'STALE',
-    primaryDate: '2025-10-06',
-    reportDate: '2025-10-08',
-    sourceName: 'Prior-quarter investor relations calendar',
-    sourceUrl: 'https://investors.example.test/prior-quarter'
-  }]);
-  assert.equal(staleOutageConfirmation.rows[0].reportDate, '2026-01-06');
-  assert.equal(staleOutageConfirmation.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-
-  const matchingIgnoresIr = verifyFinnhubScheduleRows(baseRows('MATCHFIRST'), [{
+  const providerAgreementIgnoresOtherDates = verifyFinnhubScheduleRows(baseRows('MATCHFIRST'), [{
     date: '2026-01-06', rows: [earningsApiRow('MATCHFIRST', { reportDate: '2026-01-06' })]
-  }], range, [{
-    symbol: 'MATCHFIRST',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-08',
-    sourceName: 'Conflicting investor relations fixture',
-    sourceUrl: 'https://investors.example.test/conflicting-fixture'
   }]);
-  assert.equal(matchingIgnoresIr.rows[0].reportDate, '2026-01-06');
-  assert.equal(matchingIgnoresIr.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
-
-  const completeMissWithOfficial = verifyFinnhubScheduleRows(baseRows('MISSOFFICIAL'), displayDatesForRange(range.from, range.to).map((date) => ({
-    date,
-    ok: true,
-    rows: []
-  })), range, [{
-    symbol: 'MISSOFFICIAL',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-08',
-    sourceName: 'Official investor relations calendar',
-    sourceUrl: 'https://investors.example.test/earnings'
-  }]);
-  assert.equal(completeMissWithOfficial.rows[0].reportDate, '2026-01-08');
-  assert.equal(completeMissWithOfficial.rows[0].sourceAudit.scheduleVerification.status, 'official_confirmed');
-
-  const confirmationsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-schedule-confirmations-'));
-  try {
-    const confirmationsFile = path.join(confirmationsDir, 'confirmations.json');
-    fs.writeFileSync(confirmationsFile, `${JSON.stringify({
-      schemaVersion: 2,
-      rows: [{
-        symbol: 'OFFICIAL',
-        primaryDate: '2026-01-06',
-        reportDate: '2026-01-08',
-        sourceName: 'Official investor relations calendar',
-        sourceUrl: 'https://investors.example.test/earnings'
-      }]
-    })}\n`);
-    assert.deepEqual(readScheduleConfirmations(confirmationsFile).rows[0], {
-      symbol: 'OFFICIAL',
-      primaryDate: '2026-01-06',
-      reportDate: '2026-01-08',
-      sourceName: 'Official investor relations calendar',
-      sourceUrl: 'https://investors.example.test/earnings'
-    });
-    fs.writeFileSync(confirmationsFile, `${JSON.stringify({ schemaVersion: 1, rows: [] })}\n`);
-    const invalidContract = readScheduleConfirmations(confirmationsFile);
-    assert.deepEqual(invalidContract.rows, []);
-    assert.deepEqual(invalidContract.diagnostics.map((item) => item.code), ['confirmation_file_invalid_contract']);
-    fs.writeFileSync(confirmationsFile, '{');
-    assert.deepEqual(readScheduleConfirmations(confirmationsFile).diagnostics.map((item) => item.code), ['confirmation_file_invalid_json']);
-    fs.writeFileSync(confirmationsFile, `${JSON.stringify({
-      schemaVersion: 2,
-      rows: [{
-        symbol: 'GOOD',
-        primaryDate: '2026-01-06',
-        reportDate: '2026-01-06',
-        sourceName: 'Good IR',
-        sourceUrl: 'https://investors.example.test/good'
-      }, {
-        symbol: 'BAD',
-        primaryDate: '',
-        reportDate: '2026-01-06',
-        sourceName: 'Bad IR',
-        sourceUrl: 'http://example.test/bad'
-      }, {
-        symbol: 'DUP',
-        primaryDate: '2026-01-07',
-        reportDate: '2026-01-07',
-        sourceName: 'Duplicate IR A',
-        sourceUrl: 'https://investors.example.test/a'
-      }, {
-        symbol: 'DUP',
-        primaryDate: '2026-01-07',
-        reportDate: '2026-01-08',
-        sourceName: 'Duplicate IR B',
-        sourceUrl: 'https://investors.example.test/b'
-      }]
-    })}\n`);
-    const partial = readScheduleConfirmations(confirmationsFile);
-    assert.deepEqual(partial.rows.map((row) => row.symbol), ['GOOD']);
-    assert.deepEqual(partial.diagnostics.map((item) => item.code), [
-      'confirmation_row_invalid',
-      'confirmation_event_duplicate'
-    ]);
-  } finally {
-    fs.rmSync(confirmationsDir, { recursive: true, force: true });
-  }
+  assert.equal(providerAgreementIgnoresOtherDates.rows[0].reportDate, '2026-01-06');
+  assert.equal(providerAgreementIgnoresOtherDates.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
 
   const verificationDates = calendarVerificationDates({ from: range.from, to: range.to });
   assert.equal(verificationDates[0], addDays(range.from, -7));
@@ -559,36 +436,6 @@ function testPrimaryScheduleVerification() {
   assert.equal(recovery.rows.length, 1);
   assert.equal(recovery.rows[0].sourceAudit.scheduleVerification.status, 'secondary_only');
   assert.equal(recovery.rows[0].sourceStatus, 'partial');
-  assert.deepEqual(recovery.review.map((row) => row.reason), ['uncorroborated_secondary_recovery_date']);
-  const staleRecoveryConfirmation = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
-    symbol: 'RECOVERY',
-    primaryDate: '2025-10-06',
-    reportDate: '2025-10-08',
-    sourceName: 'Prior-quarter investor relations calendar',
-    sourceUrl: 'https://investors.example.test/prior-quarter'
-  }]);
-  assert.equal(staleRecoveryConfirmation.rows.length, 1);
-  assert.equal(staleRecoveryConfirmation.rows[0].sourceAudit.scheduleVerification.status, 'secondary_only');
-  assert.deepEqual(staleRecoveryConfirmation.review.map((row) => row.reason), ['uncorroborated_secondary_recovery_date']);
-  const officialRecovery = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
-    symbol: 'RECOVERY',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-08',
-    sourceName: 'Official investor relations calendar',
-    sourceUrl: 'https://investors.example.test/earnings'
-  }]);
-  assert.equal(officialRecovery.rows[0].reportDate, '2026-01-08');
-  assert.equal(officialRecovery.rows[0].sourceAudit.scheduleVerification.status, 'official_confirmed');
-
-  const officialRecoveryOutsideWeek = verifyEarningsApiRecoveryRows([recoveryRow], range, [{
-    symbol: 'RECOVERY',
-    primaryDate: '2026-01-06',
-    reportDate: '2026-01-20',
-    sourceName: 'Official investor relations calendar',
-    sourceUrl: 'https://investors.example.test/earnings'
-  }]);
-  assert.equal(officialRecoveryOutsideWeek.rows.length, 0);
-  assert.equal(officialRecoveryOutsideWeek.review.length, 0);
 
   const missingCandidate = {
     symbol: 'MISSING',
@@ -608,23 +455,11 @@ function testPrimaryScheduleVerification() {
     rows: [earningsApiRow('MISSING', { reportDate: '2026-01-08' })]
   }]);
   assert.equal(mismatchedCompanyRows.length, 0, 'A company endpoint date mismatch must not create a canonical recovery row.');
-  const missingCompanyRow = verifyEarningsApiRecoveryRows(mismatchedCompanyRows, range, [], [missingCandidate]);
+  const missingCompanyRow = verifyEarningsApiRecoveryRows(mismatchedCompanyRows, range);
   assert.equal(missingCompanyRow.rows.length, 0);
-  assert.deepEqual(missingCompanyRow.review.map((row) => row.reason), ['earningsapi_company_date_unavailable']);
 }
 
-function testScheduleReviewAndPreparationFallbacks() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-schedule-review-fallback-'));
-  try {
-    const reviewFile = path.join(dir, 'earnings_schedule_review.json');
-    fs.writeFileSync(reviewFile, '{');
-    const malformed = pendingEarningsScheduleReviews(reviewFile, { from: '2026-01-05', to: '2026-01-09' });
-    assert.deepEqual(malformed.rows, []);
-    assert.deepEqual(malformed.diagnostics.map((item) => item.code), ['schedule_review_invalid_json']);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-
+function testProviderScheduleRetryAndPreparationFallbacks() {
   const canonical = deterministicVerifiedWeekFixture();
   const retryWeek = structuredClone(canonical);
   retryWeek.generatedAt = '2026-01-05T12:00:00.000Z';
@@ -1120,134 +955,213 @@ function testZacksVisibleDateMapping() {
   );
 }
 
-function testApplyCompanyReleaseResolution() {
-  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
-    [],
-    [{ date: '2026-01-06', rows: [alphaVantageRow('RECOVERFULL')] }],
-    [profile('RECOVERFULL')],
-    [usListing('RECOVERFULL')]
-  );
-  const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, [{
-    symbol: 'RECOVERFULL',
-    ok: true,
-    status: 200,
-    rows: [earningsApiRow('RECOVERFULL')]
-  }]);
-  const recoveredRows = buildEarningsApiRows(secondaryRecoveryCandidates, [{
-    symbol: 'RECOVERFULL',
-    ok: true,
-    status: 200,
-    rows: [earningsApiRow('RECOVERFULL')]
-  }]);
-  recoveredRows[0].eps.actual = null;
-  recoveredRows[0].eps.result = 'pending';
-  recoveredRows[0].eps.surprisePercent = null;
-  recoveredRows[0].outcome.overall = 'pending';
-  recoveredRows[0].outcome.guide = 'FY26 preview guide remains under review.';
-  recoveredRows[0].outcome.interpretation = 'Pre-event margin expectations frame the setup.';
-  recoveredRows[0].reaction = { note: 'The next-session response remains the confirmation test.' };
-  recoveredRows[0].sourceStatus = 'partial';
-  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-06T22:00:00.000Z');
-  const task = companyReleaseTasks[0];
-  const source = {
-    rows: recoveredRows,
-    secondaryRecoveryCandidates,
-    companyReleaseTasks,
-    summary: {
-      counts: {}
+function testEarningsGuidanceChoosesSameEventFiling() {
+  const filing = chooseEarningsFiling({
+    symbol: 'TXN',
+    reportDate: '2026-07-22'
+  }, {
+    accessionNumber: ['older', 'same-day-6k', 'same-day-8k', 'nearby-8k'],
+    primaryDocument: ['older.htm', 'foreign.htm', 'txn-20260722.htm', 'nearby.htm'],
+    filingDate: ['2026-07-19', '2026-07-22', '2026-07-22', '2026-07-23'],
+    acceptanceDateTime: ['20260719170000', '20260722120000', '20260722160500', '20260723160500'],
+    form: ['8-K', '6-K', '8-K', '8-K'],
+    items: ['7.01,9.01', '', '2.02,9.01', '2.02,9.01']
+  });
+
+  assert.equal(filing.accessionNumber, 'same-day-8k');
+  assert.equal(filing.primaryDocument, 'txn-20260722.htm');
+}
+
+function testEarningsGuidanceExhibitSelectionUsesWrapperLabels() {
+  const cases = [
+    { symbol: 'TXN', primary: 'txn-20260722.htm', expected: ['q22026txnex99-eredgar.htm'], html: ['q22026txnex99-eredgar.htm'] },
+    { symbol: 'NOW', primary: 'now-20260722.htm', expected: ['erq2fy26.htm'], html: ['erq2fy26.htm'] },
+    { symbol: 'IBM', primary: 'ibm-20260722.htm', expected: ['ibm-20260722xex991.htm', 'ibm-20260722xex992.htm'], html: ['ibm-20260722xex991.htm', 'ibm-20260722xex992.htm'] },
+    { symbol: 'GOOGL', primary: 'goog-20260722.htm', expected: ['googexhibit991q22026.htm'], html: ['googexhibit991q22026.htm'] },
+    { symbol: 'T', primary: 't-20260722.htm', expected: ['t-2q2026exhibit991.htm', 't-2q2026exhibit992.htm'], html: ['t-2q2026exhibit991.htm', 't-2q2026exhibit992.htm', 't-2q2026exhibit993.htm'] },
+    { symbol: 'PM', primary: 'pm-20260722.htm', expected: ['earningsreleasepm-ex991xq2.htm'], html: ['earningsreleasepm-ex991xq2.htm', 'glossaryselectfininfoandno.htm'] },
+    {
+      symbol: 'CCI',
+      primary: 'cci-20260723.htm',
+      expected: ['q22026earningsrelease.htm'],
+      html: ['q22026earningsrelease.htm', 'q22026supplement.htm'],
+      detailHtml: `
+        <tr><td>2</td><td>EARNINGS RELEASE</td><td><a href="q22026earningsrelease.htm">q22026earningsrelease.htm</a></td><td>EX-99.1</td><td>42000</td></tr>
+        <tr><td>3</td><td>SUPPLEMENT</td><td><a href="q22026supplement.htm">q22026supplement.htm</a></td><td>EX-99.2</td><td>250000</td></tr>
+        <tr><td>4</td><td>EX-99.3</td><td><a href="q22026trendreport_ex993.htm">q22026trendreport_ex993.htm</a></td><td>EX-99.3</td><td>175000</td></tr>
+      `
+    },
+    {
+      symbol: 'NTRS',
+      primary: 'ntrs-20260723.htm',
+      expected: ['q22026earningsreleaseex991.htm'],
+      html: ['q22026earningsreleaseex991.htm', 'q22026presentationmateri.htm'],
+      detailHtml: `
+        <tr><td>2</td><td>EARNINGS RELEASE</td><td><a href="q22026earningsreleaseex991.htm">q22026earningsreleaseex991.htm</a></td><td>EX-99.1</td><td>43000</td></tr>
+        <tr><td>3</td><td>PRESENTATION MATERIALS</td><td><a href="q22026presentationmateri.htm">q22026presentationmateri.htm</a></td><td>EX-99.2</td><td>210000</td></tr>
+      `
+    },
+    { symbol: 'SCHW', primary: 'schw-20260721.htm', expected: ['a2q26exhibit991.htm'], html: ['a2q26exhibit991.htm'] },
+    {
+      symbol: 'NVS',
+      primary: 'nvs-20260630.htm',
+      expected: ['nvs-20260630-99_1.htm', 'nvs-20260630-99_2.htm'],
+      html: ['nvs-20260630-99_1.htm', 'nvs-20260630-99_2.htm'],
+      form: '6-K',
+      detailHtml: `
+        <tr><td>1</td><td>6-K</td><td><a href="nvs-20260630.htm">nvs-20260630.htm</a></td><td>6-K</td><td>9658</td></tr>
+        <tr><td>2</td><td>99.1 FINANCIAL REPORT Q2 2026</td><td><a href="nvs-20260630-99_1.htm">nvs-20260630-99_1.htm</a></td><td>EX-99</td><td>147183</td></tr>
+        <tr><td>3</td><td>99.2 INTERIM FINANCIAL REPORT</td><td><a href="nvs-20260630-99_2.htm">nvs-20260630-99_2.htm</a></td><td>EX-99</td><td>2280708</td></tr>
+        <tr><td>4</td><td>XBRL TAXONOMY EXTENSION SCHEMA DOCUMENT</td><td><a href="nvs-20260630.xsd">nvs-20260630.xsd</a></td><td>EX-101.SCH</td><td>605158</td></tr>
+      `
+    },
+    {
+      symbol: 'SAN',
+      primary: 'q22026earningspresentati.htm',
+      expected: ['q22026earningspresentati.htm'],
+      html: [],
+      form: '6-K',
+      detailHtml: '<tr><td>1</td><td>6-K</td><td><a href="q22026earningspresentati.htm">q22026earningspresentati.htm</a></td><td>6-K</td><td>114916</td></tr>'
+    },
+    {
+      symbol: 'EQNR',
+      primary: 'equinorfinancialstatements.htm',
+      expected: ['equinorfinancialstatements.htm'],
+      html: [],
+      form: '6-K',
+      detailHtml: `
+        <tr><td>1</td><td>EQUINOR SECOND QUARTER 2026 REPORT</td><td><a href="equinorfinancialstatements.htm">equinorfinancialstatements.htm</a></td><td>6-K</td><td>5453289</td></tr>
+        <tr><td>12</td><td>GRAPHIC</td><td><a href="crop_tle-dsc00299a.jpg">crop_tle-dsc00299a.jpg</a></td><td>GRAPHIC</td><td>1536550</td></tr>
+      `
+    }
+  ];
+
+  for (const item of cases) {
+    const names = [
+      `0000000000-26-000001-index-headers.html`,
+      `0000000000-26-000001-index.html`,
+      item.primary,
+      ...item.html,
+      'R1.htm'
+    ];
+    const indexData = {
+      directory: {
+        item: names.map((name, index) => ({ name, size: String(1000 + index * 500) }))
+      }
+    };
+    const primaryHtml = item.html
+      .map((name, index) => `<tr><td>EX-99.${index + 1}</td><td><a href="${name}">${name}</a></td></tr>`)
+      .join('\n');
+    const selected = chooseExhibitDocuments(indexData, { primaryDocument: item.primary, form: item.form || '8-K' }, primaryHtml, item.detailHtml || '');
+    assert.deepEqual(
+      selected.map((document) => document.name),
+      item.expected,
+      `${item.symbol} should select the current earnings release exhibit document(s).`
+    );
+  }
+}
+
+function testEarningsGuidanceExhibitSelectionPrefersDetailTableMetadata() {
+  const indexData = {
+    directory: {
+      item: [
+        { name: 'xom-20260501.htm', size: '40000' },
+        { name: 'livef8k1q26991.htm', size: '25000' },
+        { name: 'livef8k1q26992.htm', size: '95000' },
+        { name: 'xom-20260501xbrl.xml', size: '100000' },
+        { name: 'xomgraphic.jpg', size: '200000' }
+      ]
     }
   };
-  const resolution = {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    status: 'resolved',
-    sourceType: 'sec_8k_exhibit_99_1',
-    sourceUrl: 'https://www.sec.gov/Archives/edgar/data/1/ex99-1.htm',
-    secFilingUrl: 'https://www.sec.gov/Archives/edgar/data/1/filing.htm',
-    confidence: 'high',
-    fields: {
-      company: task.company,
-      fiscalPeriod: 'Fiscal Q4 2025',
-      reportTiming: 'amc',
-      eps: {
-        estimate: 1,
-        actual: 1.25,
-        basis: 'adjusted_non_gaap',
-        gaapActual: null,
-        gaapBasis: '',
-        adjustment: null,
-        actualSource: 'sec_company_release',
-        estimateSource: 'earningsapi_company',
-        estimateCount: '',
-        comparisonSource: 'earningsapi_company_eps_estimate'
-      },
-      revenue: {
-        estimate: 1000000000,
-        actual: 1200000000,
-        estimateSource: 'earningsapi_company'
-      }
-    },
-    reaction: {
-      basis: 'next_session_close',
-      percent: 10,
-      fromDate: '2026-01-06',
-      fromClose: 100,
-      toDate: '2026-01-07',
-      toClose: 110,
-      status: 'computed',
-      note: '',
-      source: 'Yahoo Finance Chart API',
+  const detailHtml = `
+    <table>
+      <tr><th>Seq</th><th>Description</th><th>Document</th><th>Type</th><th>Size</th></tr>
+      <tr><td>1</td><td>FORM 8-K</td><td><a href="/Archives/edgar/data/34088/000003408826000065/xom-20260501.htm">xom-20260501.htm</a></td><td>8-K</td><td>40000</td></tr>
+      <tr><td>2</td><td>NEWS RELEASE</td><td><a href="/Archives/edgar/data/34088/000003408826000065/livef8k1q26991.htm">livef8k1q26991.htm</a></td><td>EX-99.1</td><td>25000</td></tr>
+      <tr><td>3</td><td>INVESTOR RELATIONS DATA SUMMARY</td><td><a href="/Archives/edgar/data/34088/000003408826000065/livef8k1q26992.htm">livef8k1q26992.htm</a></td><td>EX-99.2</td><td>95000</td></tr>
+      <tr><td>4</td><td>XBRL INSTANCE DOCUMENT</td><td><a href="/Archives/edgar/data/34088/000003408826000065/xom-20260501xbrl.xml">xom-20260501xbrl.xml</a></td><td>XML</td><td>100000</td></tr>
+      <tr><td>5</td><td>GRAPHIC</td><td><a href="/Archives/edgar/data/34088/000003408826000065/xomgraphic.jpg">xomgraphic.jpg</a></td><td>GRAPHIC</td><td>200000</td></tr>
+    </table>
+  `;
+  const selected = chooseExhibitDocuments(indexData, { primaryDocument: 'xom-20260501.htm' }, '', detailHtml);
+
+  assert.deepEqual(selected.map((document) => document.name), ['livef8k1q26991.htm']);
+  assert.equal(selected[0].source, 'filing_detail_table');
+  assert.equal(selected[0].description, 'NEWS RELEASE');
+  assert.equal(selected[0].exhibitType, 'EX-99.1');
+}
+
+function testEarningsGuidanceSignalsAndIndex() {
+  const snippets = guidanceSignalsFromText(`
+    The company expects third quarter revenue of $5.1 billion to $5.5 billion and non-GAAP earnings per share of $1.40 to $1.60.
+    Management also discussed product demand and cost savings.
+  `);
+  assert.equal(snippets.length, 1);
+  assert.match(snippets[0].text, /expects third quarter revenue/);
+
+  const index = buildEarningsGuidanceEvidenceIndex({
+    schemaVersion: 1,
+    generatedAt: '2026-07-23T20:00:00.000Z',
+    source: 'sec_edgar',
+    sourceUse: 'editorial_guidance_evidence',
+    summary: { targetCount: 1, available: 1, guidanceSignalCount: 1, byStatus: { available: 1 } },
+    rows: [{
+      key: 'TXN:2026-07-22',
+      symbol: 'TXN',
+      reportDate: '2026-07-22',
+      status: 'available',
+      guidanceSignalCount: 1,
+      filingUrl: 'https://www.sec.gov/Archives/example/txn.htm',
+      documents: [{
+        status: 'available',
+        url: 'https://www.sec.gov/Archives/example/q22026txnex99-eredgar.htm'
+      }]
+    }]
+  }, path.join(root, 'generated', 'editorial', 'earnings_week_guidance.json'));
+  assert.equal(index.artifact, 'generated/editorial/earnings_week_guidance.json');
+  assert.equal(index.rows[0].evidenceRef, 'generated/editorial/earnings_week_guidance.json#TXN:2026-07-22');
+  assert.equal(index.rows[0].primaryUrl, 'https://www.sec.gov/Archives/example/q22026txnex99-eredgar.htm');
+}
+
+async function testEarningsGuidanceEvidenceIncludesLegacyBackupRows() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-earnings-guidance-legacy-'));
+  try {
+    const output = path.join(dir, 'earnings_week_guidance.json');
+    const legacyRow = {
+      symbol: 'LEGACY',
+      company: 'Legacy Backup Corp',
+      marketCap: 30000000000,
+      reportDate: '2026-07-22',
+      reportTiming: 'bmo',
+      eps: { estimate: 1, actual: 1.25 },
+      revenue: { estimate: 1000000000, actual: 1200000000 },
       sourceAudit: {
-        status: 200,
-        rowCount: 2,
-        error: ''
+        selectedSources: {
+          slate: 'alphaVantageCalendar',
+          eps: { estimate: 'earningsApiCompany', actual: 'earningsApiCompany' },
+          revenue: { estimate: 'earningsApiCompany', actual: 'earningsApiCompany' }
+        },
+        finnhubUsListing: { symbol: 'LEGACY', market: 'US', mic: 'XNYS' }
       }
-    },
-    notes: []
-  };
-  const output = applyCompanyReleaseResolutions(source, {
-    outputPath: 'synthetic-company-release-resolutions.json',
-    companyReleaseResolutions: [resolution]
-  });
-  const row = output.rows.find((item) => item.symbol === 'RECOVERFULL');
-
-  assert.equal(row.eps.actual, 1.25, 'Company-release EPS actual should update the canonical row.');
-  assert.equal(row.revenue.estimate, 1000000000, 'Deterministic revenue estimate should survive application.');
-  assert.equal(row.revenue.actual, 1200000000);
-  assert.equal(row.outcome.overall, 'beat');
-  assert.equal(row.sourceStatus, 'partial', 'Company-release metrics cannot promote a row without schedule verification.');
-  assert.equal(row.sourceSummary.primary, 'sec_company_release');
-  assert.equal(row.sourceAudit.selectedSources.eps.actual, 'sec_company_release');
-  assert.equal(row.sourceAudit.selectedSources.revenue.estimate, 'earningsApiCompany');
-  assert.equal(row.sourceAudit.companyReleaseResolution.taskId, task.id);
-  assert.equal(row.outcome.interpretation, '', 'A completed close response must invalidate preview commentary.');
-  assert.equal(output.summary.counts.verified, 0);
-  assert.equal(output.summary.counts.partial, 1);
-  assert.equal(output.summary.counts.companyReleaseTasks, 1);
-  assert.equal(Object.prototype.hasOwnProperty.call(output, 'companyReleaseApply'), false);
-
-  const awaitingResolution = structuredClone(resolution);
-  awaitingResolution.reaction = {
-    basis: 'next_session_close',
-    percent: null,
-    fromDate: '',
-    fromClose: null,
-    toDate: '',
-    toClose: null,
-    status: 'awaiting_close',
-    note: '',
-    source: 'Yahoo Finance Chart API'
-  };
-  const awaitingOutput = applyCompanyReleaseResolutions(source, {
-    outputPath: 'synthetic-company-release-resolutions.json',
-    companyReleaseResolutions: [awaitingResolution]
-  });
-  const awaitingRow = awaitingOutput.rows.find((item) => item.symbol === 'RECOVERFULL');
-  assert.equal(awaitingRow.lifecycle, 'released_awaiting_close');
-  assert.equal(awaitingRow.outcome.interpretation, '', 'Official actuals must invalidate preview commentary even while the row awaits close reaction.');
-  assert.equal(awaitingRow.reaction.note, '', 'Reaction commentary must wait for the verified close response.');
+    };
+    const week = {
+      range: { from: '2026-07-20', to: '2026-07-24' },
+      rows: [legacyRow]
+    };
+    const before = structuredClone(legacyRow);
+    const { payload, index } = await writeEarningsGuidanceEvidence(week, output, {
+      asOf: '2026-07-23T20:00:00.000Z',
+      networkDisabled: true,
+      sourceArtifact: 'generated/earnings_week.json'
+    });
+    assert.equal(payload.sourceUse, 'editorial_guidance_evidence');
+    assert.deepEqual(payload.rows.map((row) => row.key), ['LEGACY:2026-07-22']);
+    assert.equal(payload.rows[0].status, 'network_disabled');
+    assert.deepEqual(index.rows.map((row) => row.key), ['LEGACY:2026-07-22']);
+    assert.deepEqual(legacyRow, before, 'SEC guidance evidence must not mutate deterministic provider facts.');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function testApplyEarningsNarrative() {
@@ -1723,6 +1637,36 @@ async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() 
   assert.deepEqual(yahooCalls, ['OLD', 'FRESH']);
   assert.deepEqual(refreshData.yahooFetches.map((item) => item.symbol), ['OLD', 'FRESH']);
 
+  const unknownRows = buildRows([
+    finnhubRow('TIMEADR', { reportTiming: 'unknown' })
+  ], [profile('TIMEADR')], {
+    usListings: [usListing('TIMEADR')]
+  });
+  unknownRows[0].actualsObservedAt = '2026-01-06T15:00:00.000Z';
+  const unknownSource = {
+    range: { from: '2026-01-05', to: '2026-01-09' },
+    rows: unknownRows
+  };
+  const unknownYahooCalls = [];
+  const unknownRefreshData = await collectRefreshData(unknownSource, {
+    asOf: '2026-01-06T22:00:00.000Z',
+    timeoutMs: 1000,
+    earningsApiUsage: 'generated/earningsapi_usage.json',
+    earningsApiDailyLimit: 100,
+    earningsApiReserve: 0
+  }, {
+    env: { FINNHUB_API_KEY: 'test' },
+    fetchFinnhubCalendarRows: async () => [
+      finnhubRow('TIMEADR', { reportTiming: 'unknown' })
+    ],
+    fetchYahooBars: async (symbol) => {
+      unknownYahooCalls.push(symbol);
+      return { symbol, ok: true, status: 200, responseMs: 1, error: '', bars: [] };
+    }
+  });
+  assert.deepEqual(unknownYahooCalls, ['TIMEADR']);
+  assert.deepEqual(unknownRefreshData.yahooFetches.map((item) => item.symbol), ['TIMEADR']);
+
   let activeBuildFetches = 0;
   let maxActiveBuildFetches = 0;
   const buildRowsForFetch = ['SLOW', 'FAST1', 'FAST2', 'FAST3', 'FAST4', 'FAST5'].map((symbol) => ({ symbol }));
@@ -1756,16 +1700,11 @@ async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() 
 function testResultRefreshWaitsForReportWindow() {
   const source = deterministicVerifiedWeekFixture();
   const row = source.rows[0];
-  source.companyReleaseTasks = [{
-    id: `${row.reportDate}:${row.symbol}:company-release`,
-    symbol: row.symbol,
-    reportDate: row.reportDate
-  }];
 
   assert.deepEqual(
     refreshTargetRows(source, '2026-01-05T12:00:00.000Z'),
     [],
-    'An unresolved company-release task must not make a future row eligible for provider result refresh.'
+    'Provider result refresh must wait for the report window.'
   );
   assert.deepEqual(
     refreshTargetRows(source, '2026-01-07T12:00:00.000Z').map((item) => item.symbol),
@@ -1789,7 +1728,7 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
   retained.sourceAudit.finnhubUsListing = usListing('RETAIN');
   source.rows.push(retained);
   source.narrativeApply.applied.push({ symbol: 'RETAIN', reportDate: retained.reportDate });
-  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
+  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates);
   const retainedBefore = structuredClone(retained);
 
   const result = await refreshEarningsResults(source, {
@@ -1828,381 +1767,13 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
   assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
 }
 
-async function testResultRefreshRetriesPostWindowCompanyReleaseTasks() {
-  const { source, task } = companyReleaseRefreshFixture('AUTORETRY');
-  let loadCalls = 0;
-  const result = await refreshEarningsResults(source, {
-    finnhubRows: [],
-    earningsApiCompanyRowsBySymbol: {},
-    yahooFetches: [],
-    rowDiagnosticsByKey: {}
-  }, {
-    asOf: '2026-01-06T15:00:00.000Z',
-    outputPath: 'generated/earnings_week.json',
-    loadTickerMap: async () => {
-      loadCalls += 1;
-      return new Map([[task.symbol, { cik: 1, title: task.company }]]);
-    },
-    resolveCompanyReleaseTask: async (retryTask, _tickerMap, _args, row) => {
-      assert.equal(retryTask.id, task.id);
-      assert.equal(row.symbol, task.symbol);
-      return companyReleaseResolvedFixture(retryTask);
-    }
-  });
-  const row = result.payload.rows.find((item) => item.symbol === task.symbol);
-
-  assert.equal(loadCalls, 1, 'Refresh should load the company-release resolver dependencies once for retryable rows.');
-  assert.equal(row.eps.actual, 1.25);
-  assert.equal(row.revenue.actual, 1200000000);
-  assert.equal(row.lifecycle, 'released_awaiting_close');
-  assert.equal(row.outcome.interpretation, '', 'Official actuals must clear pre-release outcome commentary even before close reaction is available.');
-  assert.equal(row.outcome.guide, '', 'Official actuals must clear stale guidance text for post-release review.');
-  assert.equal(row.outcome.interpretationDisposition, undefined);
-  assert.equal(row.outcome.guidanceDisposition, undefined);
-  assert.equal(row.reaction.status, 'awaiting_close', 'Market reaction commentary can still wait for the verified close.');
-  assert.equal(row.reaction.note, '');
-  assert.equal(row.sourceAudit.companyReleaseResolution.status, 'resolved');
-  assert.deepEqual(result.payload.companyReleaseTasks, [], 'A resolved retry should clear the completed company-release task.');
-  assert.equal(Object.prototype.hasOwnProperty.call(result.payload, 'companyReleaseApply'), false, 'Integrated retry should not retain a sidecar apply receipt after all tasks resolve.');
-  assert.equal(result.changedRows, 1);
-  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
-}
-
-async function testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails() {
-  const { source, task } = companyReleaseRefreshFixture('AUTOMISS');
-  const result = await refreshEarningsResults(source, {
-    finnhubRows: [],
-    earningsApiCompanyRowsBySymbol: {},
-    yahooFetches: [],
-    rowDiagnosticsByKey: {}
-  }, {
-    asOf: '2026-01-06T15:00:00.000Z',
-    loadTickerMap: async () => new Map([[task.symbol, { cik: 1, title: task.company }]]),
-    resolveCompanyReleaseTask: async (retryTask) => companyReleaseNonResolvedFixture(retryTask, 'unresolved')
-  });
-  const row = result.payload.rows.find((item) => item.symbol === task.symbol);
-
-  assert.equal(row.eps.actual, null);
-  assert.equal(row.revenue.actual, null);
-  assert.equal(row.lifecycle, 'awaiting_actual', 'A post-window BMO row with missing actuals must not remain scheduled.');
-  assert.equal(row.sourceAudit.companyReleaseResolution.status, 'unresolved');
-  assert.equal(Object.prototype.hasOwnProperty.call(result.payload, 'companyReleaseApply'), false);
-  assert.equal(result.payload.companyReleaseTasks.length, 1, 'Unresolved automatic retry should keep the active task available for the next refresh.');
-  assert.equal(result.payload.companyReleaseTasks[0].id, task.id);
-  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
-}
-
-async function testPrimaryFinnhubRefreshCreatesCompanyReleaseTask() {
-  const { source } = companyReleaseRefreshFixture('PRIMARYMISS');
-  const row = source.rows[0];
-  row.sourceAudit = {
-    ...row.sourceAudit,
-    finnhubCalendar: { present: true, reportDate: row.reportDate, reportTiming: row.reportTiming },
-    selectedSources: {
-      ...row.sourceAudit.selectedSources,
-      slate: 'finnhub',
-      eps: { estimate: 'finnhub', actual: 'none' },
-      revenue: { estimate: 'finnhub', actual: 'none' }
-    }
-  };
-  source.secondaryRecoveryCandidates = [];
-  source.companyReleaseTasks = [];
-  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
-  let retriedTask;
-
-  const result = await refreshEarningsResults(source, {
-    finnhubRows: [],
-    earningsApiCompanyRowsBySymbol: {},
-    yahooFetches: [],
-    rowDiagnosticsByKey: {
-      [earningsRowKey(row)]: [{
-        provider: 'finnhub',
-        code: 'provider_row_unavailable',
-        message: 'Finnhub returned no matching fixture row.'
-      }]
-    }
-  }, {
-    asOf: '2026-01-06T15:00:00.000Z',
-    loadTickerMap: async () => new Map([[row.symbol, { cik: 1, title: row.company }]]),
-    resolveCompanyReleaseTask: async (task) => {
-      retriedTask = task;
-      const resolution = companyReleaseResolvedFixture(task);
-      resolution.fields.eps.estimateSource = 'finnhub';
-      resolution.fields.eps.comparisonSource = '';
-      resolution.fields.revenue.estimateSource = 'finnhub';
-      resolution.notes = ['Finnhub supplied the retained consensus estimates for comparison.'];
-      return resolution;
-    }
-  });
-
-  const updated = result.payload.rows.find((item) => item.symbol === row.symbol);
-  assert.ok(retriedTask, 'A post-window Finnhub row with missing actuals must enter company-release recovery.');
-  assert.equal(retriedTask.reason, 'missing_eps_actual');
-  assert.equal(updated.eps.actual, 1.25);
-  assert.equal(updated.revenue.actual, 1200000000);
-  assert.deepEqual(result.payload.companyReleaseTasks, []);
-  assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
-}
-
-async function testNeedsReviewPromotesOfficialMetricsIndependently() {
-  for (const [metric, actual] of [['eps', 123.45], ['revenue', 987654321]]) {
-    const source = embeddedWeekFixture();
-    const task = companyReleaseTaskFixture(source);
-    const original = structuredClone(source.rows.find((row) => row.symbol === task.symbol && row.reportDate === task.reportDate));
-    source.companyReleaseTasks = [task];
-    source.summary.counts.companyReleaseTasks = 1;
-    const resolution = companyReleaseNonResolvedFixture(task, 'needs_review');
-    resolution.fields[metric].actual = actual;
-    if (metric === 'eps') {
-      resolution.fields.eps.basis = 'gaap_diluted';
-      resolution.fields.eps.gaapActual = actual;
-      resolution.fields.eps.gaapBasis = 'gaap_diluted';
-      resolution.fields.eps.actualSource = 'sec_company_release';
-    }
-    const output = applyCompanyReleaseResolutions(source, {
-      companyReleaseResolutions: [resolution]
-    });
-    const row = output.rows.find((item) => item.symbol === task.symbol && item.reportDate === task.reportDate);
-    const otherMetric = metric === 'eps' ? 'revenue' : 'eps';
-
-    assert.equal(row[metric].actual, actual, `${metric} should promote independently from the official company release.`);
-    assert.deepEqual(row[otherMetric], original[otherMetric], `${otherMetric} should retain its provider-selected facts.`);
-    assert.equal(row.sourceAudit.selectedSources[metric].actual, 'sec_company_release');
-    assert.equal(row.sourceAudit.selectedSources[otherMetric].actual, original.sourceAudit.selectedSources[otherMetric].actual);
-    assert.equal(row.sourceSummary.primary, original.sourceSummary.primary);
-    assert.deepEqual(row.sourceSummary.fallbacks, [...original.sourceSummary.fallbacks, 'sec_company_release']);
-    assert.equal(row.sourceStatus, 'partial');
-    assert.equal(row.sourceAudit.companyReleaseResolution.status, 'needs_review');
-    assert.equal(Object.prototype.hasOwnProperty.call(output, 'companyReleaseApply'), false);
-    const validationErrors = validateEarningsWeekPayload(output);
-    assert.deepEqual(validationErrors, [], `${metric}-only official promotion must remain valid staging data: ${validationErrors.join(' ')}`);
-    assert.equal(output.narrativeApply, undefined, 'A newly promoted official actual must invalidate the prior narrative receipt.');
-
-    const providerOtherActual = otherMetric === 'eps' ? 2.5 : 1234567890;
-    const providerRow = {
-      symbol: task.symbol,
-      reportDate: task.reportDate,
-      reportTiming: original.reportTiming === 'unknown' ? 'amc' : original.reportTiming,
-      fiscalQuarter: original.fiscalQuarter,
-      fiscalYear: original.fiscalYear,
-      eps: {
-        estimate: original.eps.estimate,
-        actual: metric === 'eps' ? actual + 1 : providerOtherActual
-      },
-      revenue: {
-        estimate: original.revenue.estimate,
-        actual: metric === 'revenue' ? actual + 1000000 : providerOtherActual
-      }
-    };
-    const usesFinnhub = original.sourceAudit.selectedSources.slate === 'finnhub';
-    const focusedOutput = structuredClone(output);
-    focusedOutput.rows = [row];
-    focusedOutput.secondaryRecoveryCandidates = focusedOutput.secondaryRecoveryCandidates.filter((item) => item.symbol === task.symbol);
-    focusedOutput.companyReleaseTasks = [task];
-    focusedOutput.summary.counts = computeEarningsWeekCounts(focusedOutput.rows, focusedOutput.secondaryRecoveryCandidates, focusedOutput.companyReleaseTasks);
-    const refreshed = await refreshEarningsResults(focusedOutput, {
-      finnhubRows: usesFinnhub ? [providerRow] : [],
-      earningsApiCompanyRowsBySymbol: usesFinnhub ? {} : { [task.symbol]: [providerRow] },
-      yahooFetches: []
-    }, { asOf: `${task.reportDate}T23:00:00.000Z` });
-    const refreshedRow = refreshed.payload.rows.find((item) => item.symbol === task.symbol && item.reportDate === task.reportDate);
-    assert.equal(refreshedRow[metric].actual, actual, `Provider retries must not overwrite the promoted official ${metric} actual.`);
-    assert.equal(refreshedRow[otherMetric].actual, providerOtherActual, `Provider retries should still fill the unpromoted ${otherMetric} actual.`);
-    assert.equal(refreshedRow.sourceAudit.selectedSources[metric].actual, 'sec_company_release');
-    assert.equal(refreshedRow.sourceAudit.selectedSources[otherMetric].actual, usesFinnhub ? 'finnhub' : 'earningsApiCompany');
-    assert.equal(refreshedRow.sourceAudit.companyReleaseResolution.status, 'needs_review');
-    assert.equal(refreshed.payload.companyReleaseTasks.length, 1, 'A partial official resolution should remain retryable after provider recovery of the other metric.');
-    const refreshValidationErrors = validateEarningsWeekPayload(refreshed.payload);
-    assert.deepEqual(refreshValidationErrors, [], `${metric}-only official provenance must survive provider retries: ${refreshValidationErrors.join(' ')}`);
-  }
-}
-
-function companyReleaseNonResolvedFixture(task, status) {
-  const hasCompanyRelease = status === 'needs_review';
-  return {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    status,
-    sourceType: hasCompanyRelease ? 'sec_8k_exhibit_99_1' : '',
-    sourceUrl: hasCompanyRelease ? 'https://www.sec.gov/Archives/edgar/data/1/ex99-1.htm' : '',
-    secFilingUrl: hasCompanyRelease ? 'https://www.sec.gov/Archives/edgar/data/1/filing.htm' : '',
-    confidence: status === 'needs_review' ? 'medium' : 'low',
-    fields: {
-      company: task.company,
-      fiscalPeriod: '',
-      reportTiming: 'unknown',
-      eps: {
-        actual: null,
-        basis: '',
-        gaapActual: null,
-        gaapBasis: '',
-        adjustment: null,
-        actualSource: '',
-        estimate: null,
-        estimateSource: '',
-        estimateCount: '',
-        comparisonSource: ''
-      },
-      revenue: { actual: null, estimate: null, estimateSource: '' }
-    },
-    reaction: {
-      basis: 'unavailable',
-      percent: null,
-      fromDate: '',
-      fromClose: null,
-      toDate: '',
-      toClose: null,
-      status: 'unavailable',
-      note: '',
-      source: '',
-      sourceAudit: {}
-    },
-    notes: [`${status}_fixture`],
-    sourceAudit: {}
-  };
-}
-
-function companyReleaseResolvedFixture(task) {
-  return {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    status: 'resolved',
-    sourceType: 'sec_8k_exhibit_99_1',
-    sourceUrl: 'https://www.sec.gov/Archives/edgar/data/1/ex99-1.htm',
-    secFilingUrl: 'https://www.sec.gov/Archives/edgar/data/1/filing.htm',
-    confidence: 'high',
-    fields: {
-      company: task.company,
-      fiscalPeriod: 'Fiscal Q4 2025',
-      reportTiming: 'bmo',
-      eps: {
-        estimate: 1,
-        actual: 1.25,
-        basis: 'adjusted_non_gaap',
-        gaapActual: null,
-        gaapBasis: '',
-        adjustment: null,
-        actualSource: 'sec_company_release',
-        estimateSource: 'earningsapi_company',
-        estimateCount: '',
-        comparisonSource: 'earningsapi_company_eps_estimate'
-      },
-      revenue: {
-        estimate: 1000000000,
-        actual: 1200000000,
-        estimateSource: 'earningsapi_company'
-      }
-    },
-    reaction: {
-      basis: 'same_day_close',
-      percent: null,
-      fromDate: '',
-      fromClose: null,
-      toDate: '',
-      toClose: null,
-      status: 'awaiting_close',
-      note: '',
-      source: 'Yahoo Finance Chart API',
-      sourceAudit: {
-        status: 200,
-        rowCount: 1,
-        error: ''
-      }
-    },
-    notes: ['EarningsAPI company endpoint supplied the retained consensus estimates for comparison.'],
-    sourceAudit: {}
-  };
-}
-
-function companyReleaseRefreshFixture(symbol) {
-  const secondaryRecoveryCandidatesBase = buildSecondaryRecoveryCandidates(
-    [],
-    [{ date: '2026-01-06', rows: [alphaVantageRow(symbol, { reportTiming: 'bmo' })] }],
-    [profile(symbol)],
-    [usListing(symbol)]
-  );
-  const companyFetch = {
-    symbol,
-    ok: true,
-    status: 200,
-    rows: [earningsApiRow(symbol, {
-      reportTiming: 'bmo',
-      eps: { estimate: 1, actual: null },
-      revenue: { estimate: 1000000000, actual: null }
-    })]
-  };
-  const secondaryRecoveryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidatesBase, [companyFetch]);
-  const recoveredRows = buildEarningsApiRows(secondaryRecoveryCandidates, [companyFetch]);
-  const row = recoveredRows[0];
-  row.lifecycle = 'scheduled';
-  row.outcome.interpretation = 'Pre-report fare and fuel setup.';
-  row.outcome.guide = 'Pre-report capacity outlook.';
-  row.outcome.interpretationDisposition = { status: 'verified' };
-  row.outcome.guidanceDisposition = { status: 'verified' };
-  row.reaction = {
-    basis: 'same_day_close',
-    percent: null,
-    fromDate: '',
-    fromClose: null,
-    toDate: '',
-    toClose: null,
-    status: 'pending',
-    note: '',
-    source: 'Yahoo Finance Chart API'
-  };
-  row.sourceStatus = 'partial';
-  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-06T15:00:00.000Z');
-  assert.equal(companyReleaseTasks.length, 1);
-  const source = {
-    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
-    generatedAt: '2026-01-06T13:00:00.000Z',
-    range: { from: '2026-01-05', to: '2026-01-09' },
-    rows: recoveredRows,
-    secondaryRecoveryCandidates,
-    companyReleaseTasks,
-    summary: {
-      counts: computeEarningsWeekCounts(recoveredRows, secondaryRecoveryCandidates, companyReleaseTasks),
-      fetches: {}
-    },
-    narrativeApply: {
-      generatedAt: '2026-01-06T13:05:00.000Z',
-      narrativeArtifact: 'generated/earnings_narrative.json',
-      applied: [{ symbol, reportDate: '2026-01-06' }]
-    }
-  };
-  return { source, task: companyReleaseTasks[0] };
-}
-
-function companyReleaseTaskFixture(source) {
-  const row = source.rows.find((item) => item.sourceAudit?.finnhubProfile);
-  assert.ok(row, 'Embedded dashboard fixture must include a profiled canonical row for company-release validation coverage.');
-  return {
-    id: `${row.reportDate}:${row.symbol}:company-release`,
-    symbol: row.symbol,
-    company: row.company,
-    reportDate: row.reportDate,
-    reason: 'missing_eps_actual',
-    priority: 'normal',
-    marketCap: row.marketCap,
-    marketCapDisplay: row.marketCapDisplay,
-    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
-    neededFields: ['reportTiming', 'fiscalPeriod', 'eps.actual', 'revenue.actual', 'companyReleaseUrl', 'secFilingUrl'],
-    preferredSources: ['SEC 8-K Exhibit 99.1', 'Company investor relations earnings release'],
-    doNotUseForOverrides: ['finnhub_calendar_row'],
-    permittedUses: ['official_actuals_resolution', 'timing_resolution', 'fiscal_period_resolution', 'eps_basis_resolution'],
-    instructions: 'Use an official company release to resolve missing timing or actuals. Keep the row\'s deterministic estimates for comparison.',
-    sourceAudit: row.sourceAudit
-  };
-}
-
 function testCompanyReleaseTasksAreRetiredFromCanonicalWeek() {
   const source = embeddedWeekFixture();
-  const task = companyReleaseTaskFixture(source);
-  source.companyReleaseTasks = [task];
+  source.companyReleaseTasks = [{
+    id: `${source.rows[0].reportDate}:${source.rows[0].symbol}:company-release`,
+    symbol: source.rows[0].symbol,
+    reportDate: source.rows[0].reportDate
+  }];
   assert.match(
     validateEarningsWeekPayload(source).join(' '),
     /companyReleaseTasks is not part of the canonical Earnings week contract/
@@ -2222,82 +1793,45 @@ function testWeekValidatorAcceptsDeterministicVerifiedRow() {
   validateWeekPayload(source);
 }
 
-function testCompanyReleaseResolutionValidatorRejectsCalendarEstimates() {
-  const week = embeddedWeekFixture();
-  const task = companyReleaseTaskFixture(week);
-  week.companyReleaseTasks = [task];
-  week.summary.counts.companyReleaseTasks = 1;
-  const weekWithReceipt = structuredClone(week);
-  weekWithReceipt.companyReleaseApply = { generatedAt: '2026-01-06T22:00:00.000Z' };
-  assert.match(
-    validateEarningsWeekPayload(weekWithReceipt).join(' '),
-    /companyReleaseApply is not part of the canonical Earnings week contract/,
-    'Canonical week validation must reject the retired company-release apply receipt.'
-  );
-  const payload = {
-    schemaVersion: 1,
-    generatedAt: '2026-01-06T22:00:00.000Z',
-    companyReleaseResolutions: [{
-      taskId: task.id,
-      symbol: task.symbol,
-      company: task.company,
-      reportDate: task.reportDate,
-      status: 'resolved',
-      sourceType: 'sec_8k_exhibit_99_1',
-      sourceUrl: 'https://www.sec.gov/Archives/example/exhibit99.htm',
-      secFilingUrl: 'https://www.sec.gov/Archives/example/filing.htm',
-      confidence: 'high',
-      fields: {
-        company: task.company,
-        fiscalPeriod: 'Fiscal Q4 2025',
-        reportTiming: 'amc',
-        eps: {
-          actual: 1.25,
-          basis: 'adjusted_non_gaap',
-          gaapActual: null,
-          gaapBasis: '',
-          adjustment: null,
-          actualSource: 'sec_company_release',
-          estimate: 1,
-          estimateSource: 'earningsapi_calendar',
-          estimateCount: '',
-          comparisonSource: 'earningsapi_calendar_eps_estimate'
-        },
-        revenue: {
-          actual: 1200000000,
-          estimate: 1000000000,
-          estimateSource: 'earningsapi_calendar'
-        }
-      },
-      reaction: {
-        basis: 'next_session_close',
-        percent: 10,
-        fromDate: task.reportDate,
-        fromClose: 100,
-        toDate: '2026-07-01',
-        toClose: 110,
-        status: 'computed',
-        note: '',
-        source: 'Yahoo Finance Chart API'
-      },
-      notes: []
-    }]
+function publishedWeekFixture() {
+  const source = deterministicVerifiedWeekFixture();
+  const published = structuredClone(source);
+  delete published.narrativeApply;
+  delete published.secondaryRecoveryCandidates;
+  for (const row of published.rows) {
+    delete row.sourceAudit;
+  }
+  published.summary = {
+    counts: computeEarningsWeekCounts(published.rows, [])
   };
+  return published;
+}
 
-  assert.throws(
-    () => validateCompanyReleasePayload(week, payload),
-    /estimateSource must be finnhub/,
-    'Company-release resolution payload must not use EarningsAPI calendar as a metric source.'
+function testPublishedSummaryValidationIsStrict() {
+  const published = publishedWeekFixture();
+
+  assert.deepEqual(validateEarningsWeekPayload(published, { mode: 'published' }), []);
+
+  const debugSummary = structuredClone(published);
+  debugSummary.summary.providerMode = 'zacks';
+  debugSummary.summary.zacksGate = { ok: true };
+  assert.match(
+    validateEarningsWeekPayload(debugSummary, { mode: 'published' }).join(' '),
+    /summary may only contain counts in published dashboard data/
   );
 
-  payload.companyReleaseResolutions[0].fields.eps.estimateSource = 'finnhub';
-  payload.companyReleaseResolutions[0].fields.eps.comparisonSource = 'finnhub_eps_estimate';
-  payload.companyReleaseResolutions[0].fields.revenue.estimateSource = 'finnhub';
-  payload.generatedAt = '2026-07-01T19:59:00.000Z';
-  assert.throws(
-    () => validateCompanyReleasePayload(week, payload),
-    /cannot be computed before the required closing response/,
-    'Company-release reaction validation must not accept a future closing response.'
+  const staleCounts = structuredClone(published);
+  staleCounts.summary.counts = { total: -1 };
+  assert.match(
+    validateEarningsWeekPayload(staleCounts, { mode: 'published' }).join(' '),
+    /summary\.counts must match published earnings rows/
+  );
+
+  const missingSummary = structuredClone(published);
+  delete missingSummary.summary;
+  assert.match(
+    validateEarningsWeekPayload(missingSummary, { mode: 'published' }).join(' '),
+    /summary must be an object in published dashboard data/
   );
 }
 
@@ -2601,7 +2135,7 @@ async function main() {
   testMetricComparisonsUseDisplayedPrecision();
   testUsListingEligibilityUsesExactDirectorySymbol();
   testPrimaryScheduleVerification();
-  testScheduleReviewAndPreparationFallbacks();
+  testProviderScheduleRetryAndPreparationFallbacks();
   await testEarningsApiCalendarStopsAfterQuotaResponse();
   testAlphaVantageCalendarBackupFlow();
   testSkipEarningsApiDoesNotReadUsageLedger();
@@ -2610,12 +2144,18 @@ async function main() {
   testZacksListingFilterUsesFinnhubDirectory();
   testUnknownTimingActualObservationDrivesReactionBasis();
   testZacksVisibleDateMapping();
+  testEarningsGuidanceChoosesSameEventFiling();
+  testEarningsGuidanceExhibitSelectionUsesWrapperLabels();
+  testEarningsGuidanceExhibitSelectionPrefersDetailTableMetadata();
+  testEarningsGuidanceSignalsAndIndex();
+  await testEarningsGuidanceEvidenceIncludesLegacyBackupRows();
   testSecondaryRecoveryAndRevenueComparison();
   testApplyEarningsNarrative();
   testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization();
   testUnavailableNarrativeDispositionsRequireAuditFields();
   testCompanyReleaseTasksAreRetiredFromCanonicalWeek();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
+  testPublishedSummaryValidationIsStrict();
   testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();

@@ -1618,8 +1618,7 @@ function testEarningsCommentaryPublicationNormalization() {
           sourceAudit: {
             finnhubUsListing: { market: 'US', symbol: 'BAD', mic: 'XNYS' },
             finnhubProfile: { industry: 'Industrials' },
-            scheduleVerification: { status: 'primary_only' },
-            companyReleaseResolution: { status: 'needs_review' }
+            scheduleVerification: { status: 'primary_only' }
           }
         }, {
           symbol: 'ADR',
@@ -1659,6 +1658,8 @@ function testEarningsCommentaryPublicationNormalization() {
         secondaryRecoveryCandidates: [{ symbol: 'SMALL', reason: 'fixture_recovery_candidate' }],
         narrativeApply: { appliedAt: FIXTURE_NOW },
         summary: {
+          providerMode: 'zacks',
+          zacksGate: { ok: true, failures: [] },
           counts: {},
           fetches: { finnhubCalendar: { requests: 1, ok: 1 } }
         }
@@ -1678,7 +1679,7 @@ function testEarningsCommentaryPublicationNormalization() {
   assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'secondaryRecoveryCandidates'), false);
   assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'companyReleaseTasks'), false);
   assert.equal(Object.hasOwn(centrallyPublished.earnings.week, 'narrativeApply'), false);
-  assert.equal(Object.hasOwn(centrallyPublished.earnings.week.summary, 'fetches'), false);
+  assert.deepEqual(Object.keys(centrallyPublished.earnings.week.summary), ['counts']);
   assert.equal(centrallyPublished.earnings.week.summary.counts.secondaryRecoveryCandidates, 0);
   assert.equal(Object.hasOwn(centrallyPublished.earnings.week.summary.counts, 'companyReleaseTasks'), false);
   assert.equal(centrallyPublished.earnings.week.rows.length, 2);
@@ -1686,7 +1687,7 @@ function testEarningsCommentaryPublicationNormalization() {
   assert.equal(row.symbol, 'BAD');
   const outcome = row.outcome;
   assert.equal(row.scheduleVerificationStatus, 'primary_only');
-  assert.equal(row.companyReleaseStatus, 'needs_review');
+  assert.equal(Object.hasOwn(row, 'companyReleaseStatus'), false);
   assert.equal(outcome.interpretation, '');
   assert.equal(outcome.guide, '');
   assert.equal(outcome.interpretationDisposition, undefined);
@@ -1698,7 +1699,7 @@ function testEarningsCommentaryPublicationNormalization() {
   }), 'dashboard-data');
   assert.equal(published.earnings.week.rows[0].sourceAudit, undefined);
   assert.equal(published.earnings.week.rows[0].scheduleVerificationStatus, 'primary_only');
-  assert.equal(published.earnings.week.rows[0].companyReleaseStatus, 'needs_review');
+  assert.equal(Object.hasOwn(published.earnings.week.rows[0], 'companyReleaseStatus'), false);
   assert.equal(published.earnings.week.rows[1].symbol, 'ADR');
 
   const applied = {};
@@ -2093,8 +2094,11 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
     }
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(fs.readdirSync(editorialDir), ['dashboard-data.json']);
+  assert.deepEqual(fs.readdirSync(editorialDir).sort(), ['dashboard-data.json', 'earnings_week_guidance.json']);
   const handoff = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
+  const guidanceEvidence = JSON.parse(fs.readFileSync(path.join(editorialDir, 'earnings_week_guidance.json'), 'utf8'));
+  assert.equal(handoff.editorialReview.earningsGuidanceEvidence.artifact.endsWith('earnings_week_guidance.json'), true);
+  assert.equal(guidanceEvidence.sourceUse, 'editorial_guidance_evidence');
   assert.equal(handoff.tape.rows[0].noteDisposition.status, 'pending_review');
   assert.equal(handoff.tape.rows[0].note, '');
   const handoffEarningsNeedsReview = handoff.earnings.week.rows.find((row) => row.symbol === 'EARN');

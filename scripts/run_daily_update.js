@@ -41,9 +41,9 @@ const {
   applyEarningsNarrative,
   earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
-  pendingEarningsScheduleReviews,
   validateEarningsWeekPayload
 } = require('./earnings_week');
+const { writeEarningsGuidanceEvidence } = require('./earnings_week_guidance');
 const {
   applyMarketLensDecisions,
   applyWeekAheadLifecycle,
@@ -86,7 +86,6 @@ const DEFAULT_EDITORIAL_DASHBOARD_DATA = path.join(DEFAULT_EDITORIAL_DIR, 'dashb
 const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_good.html');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
-const EARNINGS_SCHEDULE_REVIEW_PATH = path.join(GENERATED_DIR, 'earnings_schedule_review.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
 const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
@@ -867,7 +866,7 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
   }
 }
 
-function prepareEditorialWorkspace(args) {
+async function prepareEditorialWorkspace(args) {
   const html = fs.readFileSync(args.candidate, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
   const previousDashboardData = assertCandidateMatchesCanonical(args, dashboardData);
@@ -908,6 +907,12 @@ function prepareEditorialWorkspace(args) {
   dashboardData.stories = [];
   if (dashboardData.crypto) dashboardData.crypto.notes = [];
   dashboardData.earnings = prepareEarningsForEditorial(dashboardData.earnings);
+  const guidancePath = path.join(args.prepareEditorialDir, 'earnings_week_guidance.json');
+  const guidanceEvidence = await writeEarningsGuidanceEvidence(dashboardData.earnings?.week || null, guidancePath, {
+    asOf: preparedAt,
+    sourceArtifact: 'generated/earnings_week.json'
+  });
+  reviewManifest.earningsGuidanceEvidence = guidanceEvidence.index;
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
   reviewManifest.marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
@@ -1001,7 +1006,7 @@ function stripPublishedEarningsStagingState(data) {
     for (const row of rows) {
       if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
       row.scheduleVerificationStatus = String(row.scheduleVerificationStatus || row.sourceAudit?.scheduleVerification?.status || '');
-      row.companyReleaseStatus = String(row.companyReleaseStatus || row.sourceAudit?.companyReleaseResolution?.status || '');
+      delete row.companyReleaseStatus;
     }
   }
   clearEarningsInternalQueues(data.earnings?.week);
@@ -1153,8 +1158,6 @@ function emptyEarningsContradicted(sourceWeek, { incomingRows = 0, evidenceRows 
   if (!useSidecarEvidence) return false;
   const range = sourceWeek?.range;
   if (!range) return false;
-  const scheduleReview = optionalJson(EARNINGS_SCHEDULE_REVIEW_PATH);
-  if (rangesMatch(scheduleReview?.range, range) && Array.isArray(scheduleReview.rows) && scheduleReview.rows.length > 0) return true;
   const narrative = optionalJson(EARNINGS_NARRATIVE_PATH);
   return rangesMatch(narrative?.sourceRange, range) && Array.isArray(narrative.rows) && narrative.rows.length > 0;
 }
@@ -1833,12 +1836,7 @@ function clearEarningsInternalQueues(week) {
   const rows = week.rows;
   delete week.secondaryRecoveryCandidates;
   delete week.narrativeApply;
-  const summary = week.summary && typeof week.summary === 'object' && !Array.isArray(week.summary)
-    ? { ...week.summary }
-    : {};
-  delete summary.fetches;
   week.summary = {
-    ...summary,
     counts: computeEarningsWeekCounts(rows, [])
   };
 }
@@ -1923,7 +1921,7 @@ function normalizeEarningsCommentaryForPublication(row) {
   const outcome = next.outcome;
   const reaction = next.reaction;
   next.scheduleVerificationStatus = String(next.scheduleVerificationStatus || next.sourceAudit?.scheduleVerification?.status || '');
-  next.companyReleaseStatus = String(next.companyReleaseStatus || next.sourceAudit?.companyReleaseResolution?.status || '');
+  delete next.companyReleaseStatus;
   outcome.overall = combinedOutcome(next.eps?.result, next.revenue?.result);
 
   if (pendingReviewDisposition(outcome.interpretationDisposition)) {
@@ -2187,22 +2185,10 @@ function applyEarningsWeekJson(args) {
     reportPreparationStatus('skipped', `Earnings focused preparation input was unusable; candidate and canonical dashboard unchanged: ${error.message}`);
     return;
   }
-  const scheduleReviewPath = path.join(path.dirname(args.applyEarningsWeekJson), 'earnings_schedule_review.json');
-  const scheduleReviews = pendingEarningsScheduleReviews(scheduleReviewPath, earningsWeek.range);
-  reportPendingEarningsScheduleReviews(scheduleReviews);
   prepareCandidateNews(dashboardData);
   const nextHtml = patchDashboardDataBlock(html, dashboardData, null, null, { stampEdition: false });
   stageDashboardCandidate(args, nextHtml);
   reportPreparationStatus('candidate ready', `focused Earnings repair staged at ${args.candidate}; canonical dashboard unchanged`);
-}
-
-function reportPendingEarningsScheduleReviews(result) {
-  for (const diagnostic of result.diagnostics || []) {
-    process.stderr.write(`Earnings schedule-review warning (${diagnostic.code}): ${diagnostic.message}\n`);
-  }
-  if (!result.rows?.length) return;
-  const labels = result.rows.map((row) => `${row.symbol} (${row.primaryDate})`).join(', ');
-  process.stderr.write(`Earnings schedule review remains pending; retain Finnhub primary-only rows and research company investor relations before SEC: ${labels}\n`);
 }
 
 function mergeChartDataJson(args) {
@@ -2261,7 +2247,7 @@ function syncChartQuotes(args) {
   reportPreparationStatus('candidate ready', `chart quote synchronization staged at ${args.candidate}; canonical dashboard unchanged`);
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   args.calendarRolloverRange = args.rolloverCalendar
     ? manualCalendarRolloverRange(args.windowMode)
@@ -2285,7 +2271,7 @@ function main() {
   }
 
   if (args.prepareEditorialDir) {
-    const workspace = prepareEditorialWorkspace(args);
+    const workspace = await prepareEditorialWorkspace(args);
     process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
     return;
   }
@@ -2494,7 +2480,6 @@ function main() {
       if (buildDecision.skipEarningsApi) buildArgs.push('--skip-earningsapi');
       runCommand('node', buildArgs, { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS });
     }
-    reportPendingEarningsScheduleReviews(pendingEarningsScheduleReviews(undefined, earningsRange));
     runCommand('node', [
       'scripts/earnings_week.js',
       'refresh',
@@ -2524,7 +2509,7 @@ function main() {
   if (args.prepareEditorialAfterStaging) {
     reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
     args.prepareEditorialDir = DEFAULT_EDITORIAL_DIR;
-    const workspace = prepareEditorialWorkspace(args);
+    const workspace = await prepareEditorialWorkspace(args);
     process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
     return;
   }
@@ -2532,14 +2517,12 @@ function main() {
 }
 
 if (require.main === module) {
-  try {
-    main();
-  } catch (error) {
+  main().catch((error) => {
     if (!failIncompletePreparation(error.message)) {
       process.stderr.write(`run_daily_update failed: ${error.message}\n`);
       process.exitCode = error.exitCode || 1;
     }
-  }
+  });
 }
 
 module.exports = {

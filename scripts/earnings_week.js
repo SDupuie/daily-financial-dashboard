@@ -12,9 +12,9 @@ const {
   earningsNarrativeDispositions,
   earningsRowKey: rowKey,
   applyEarningsLifecycle,
-  earningsScheduleReviewRows,
   metricResult,
   isDisplayEligibleEarningsRow,
+  needsYahooReactionFetch,
   numberOrNull,
   pctChange,
   reportWindowArrived
@@ -28,22 +28,15 @@ const {
 } = require('./earnings_week_build');
 const {
   runValidation,
-  validateCompanyReleaseResolutionsPayload,
   validateEarningsWeekPayload
 } = require('./earnings_week_validation');
 const root = path.resolve(__dirname, '..');
 const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.json');
 const DEFAULT_NARRATIVE = path.resolve(root, 'generated', 'earnings_narrative.json');
-const DEFAULT_SCHEDULE_REVIEW = path.resolve(root, 'generated', 'earnings_schedule_review.json');
 const SECONDARY_CALENDAR_SLATES = new Set(['alphaVantageCalendar']);
 
 function isSecondaryCalendarSlate(value) {
   return SECONDARY_CALENDAR_SLATES.has(value);
-}
-
-function recoveryCalendarSlateFromTask(task) {
-  if (task?.sourceAudit?.alphaVantageCalendar) return 'alphaVantageCalendar';
-  throw new Error(`${task?.symbol || 'Secondary recovery task'} is missing Alpha Vantage calendar provenance.`);
 }
 
 function printHelp() {
@@ -195,46 +188,6 @@ function earningsCalendarFailedAttemptNeedsRetry(range, earningsWeekPath = DEFAU
   }
 }
 
-function pendingEarningsScheduleReviews(scheduleReviewPath = DEFAULT_SCHEDULE_REVIEW, activeRange = null) {
-  if (!fs.existsSync(scheduleReviewPath)) return { rows: [], diagnostics: [] };
-  let review;
-  try {
-    review = readJson(scheduleReviewPath);
-  } catch (error) {
-    return {
-      rows: [],
-      diagnostics: [{ code: 'schedule_review_invalid_json', message: error.message }]
-    };
-  }
-  if (review?.schemaVersion !== 1 || !Array.isArray(review.rows) || !review.range) {
-    return {
-      rows: [],
-      diagnostics: [{
-        code: 'schedule_review_invalid_contract',
-        message: 'earnings_schedule_review.json must contain schemaVersion 1, range, and rows[].'
-      }]
-    };
-  }
-  const diagnostics = Array.isArray(review.diagnostics)
-    ? review.diagnostics.filter((item) => item && typeof item.code === 'string' && typeof item.message === 'string')
-    : [];
-  const validRows = [];
-  review.rows.forEach((row, index) => {
-    if (row && typeof row.symbol === 'string' && typeof row.primaryDate === 'string') {
-      validRows.push(row);
-    } else {
-      diagnostics.push({
-        code: 'schedule_review_row_invalid',
-        message: `earnings_schedule_review.rows[${index}] was ignored.`
-      });
-    }
-  });
-  return {
-    rows: earningsScheduleReviewRows({ ...review, rows: validRows }, { range: activeRange }),
-    diagnostics
-  };
-}
-
 function writeJson(file, payload) {
   atomicWriteJson(file, payload);
 }
@@ -288,313 +241,6 @@ function metricPayload(fields, metric, options = {}) {
     result: metricResult(actual, estimate, metric),
     ...options
   };
-}
-
-function sourceFromResolution(value, fallback = 'none') {
-  if (!value) return fallback;
-  if (value === 'earningsapi_company') return 'earningsApiCompany';
-  if (value === 'finnhub') return 'finnhub';
-  return value;
-}
-
-function reactionSource(reaction) {
-  return reaction?.status === 'computed' ? 'yahoo' : 'none';
-}
-
-function clearAppliedNarrative(row) {
-  const output = {
-    ...row,
-    eps: { ...row.eps, note: '' },
-    revenue: { ...row.revenue, note: '' },
-    outcome: { ...row.outcome, guide: '', interpretation: '' },
-    reaction: { ...row.reaction, note: '' }
-  };
-  for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
-    if (row.outcome?.[field]?.status === 'pending_review') output.outcome[field] = structuredClone(row.outcome[field]);
-    else delete output.outcome[field];
-  }
-  if (row.reaction?.commentaryDisposition?.status === 'pending_review') {
-    output.reaction.commentaryDisposition = structuredClone(row.reaction.commentaryDisposition);
-  } else {
-    delete output.reaction.commentaryDisposition;
-  }
-  return output;
-}
-
-function rowFromTask(task, resolution) {
-  const profile = task.sourceAudit?.finnhubProfile || null;
-  const calendarSlate = recoveryCalendarSlateFromTask(task);
-  return {
-    symbol: resolution.symbol,
-    company: profile?.name || resolution.company || task.company || resolution.symbol,
-    exchange: profile?.exchange || '',
-    country: profile?.country || '',
-    currency: profile?.currency || '',
-    marketCap: Number.isFinite(profile?.marketCap) ? profile.marketCap : task.marketCap ?? null,
-    marketCapDisplay: task.marketCapDisplay || '',
-    reportDate: resolution.reportDate,
-    reportTiming: resolution.fields.reportTiming,
-    fiscalQuarterEnding: task.fiscalQuarterEnding || '',
-    fiscalQuarter: null,
-    fiscalYear: null,
-    eps: null,
-    revenue: null,
-    outcome: null,
-    reaction: null,
-    sourceStatus: 'partial',
-    sourceSummary: {
-      primary: 'sec_company_release',
-      fallbacks: ['earningsApiCompany', 'finnhubProfile'].filter((item) => item !== 'finnhubProfile' || profile),
-      reaction: 'none'
-    },
-    sourceAudit: {
-      finnhubCalendar: { present: false },
-      finnhubProfile: profile,
-      alphaVantageCalendar: task.sourceAudit?.alphaVantageCalendar || null,
-      earningsApiCompany: task.sourceAudit?.earningsApiCompany || null,
-      selectedSources: {
-        slate: calendarSlate,
-        company: profile?.name ? 'finnhubProfile' : 'earningsApiCompany',
-        marketCap: Number.isFinite(profile?.marketCap) ? 'finnhubProfile' : 'none',
-        timing: 'none',
-        eps: { estimate: 'none', actual: 'none' },
-        revenue: { estimate: 'none', actual: 'none' },
-        reaction: 'none'
-      },
-      yahoo: {}
-    }
-  };
-}
-
-function companyReleaseAudit(resolution) {
-  return {
-    taskId: resolution.taskId,
-    symbol: resolution.symbol,
-    company: resolution.company,
-    reportDate: resolution.reportDate,
-    status: resolution.status,
-    sourceType: resolution.sourceType || '',
-    sourceUrl: resolution.sourceUrl || '',
-    secFilingUrl: resolution.secFilingUrl || '',
-    confidence: resolution.confidence || '',
-    notes: Array.isArray(resolution.notes) ? [...resolution.notes] : []
-  };
-}
-
-function applyResolution(row, task, resolution) {
-  const epsFields = resolution.fields?.eps || {};
-  const revenueFields = resolution.fields?.revenue || {};
-  const reaction = resolution.reaction || {
-    basis: 'unavailable',
-    percent: null,
-    fromDate: '',
-    fromClose: null,
-    toDate: '',
-    toClose: null,
-    status: 'unavailable',
-    note: '',
-    source: ''
-  };
-  const eps = metricPayload(epsFields, 'eps', {
-    basis: epsFields.basis || '',
-    note: epsFields.adjustment?.note || ''
-  });
-  const revenue = metricPayload(revenueFields, 'revenue', {
-    note: ''
-  });
-  const selectedSources = {
-    ...row.sourceAudit.selectedSources,
-    timing: resolution.fields.reportTiming === 'unknown' ? 'none' : 'sec_company_release',
-    eps: {
-      estimate: sourceFromResolution(epsFields.estimateSource, Number.isFinite(eps.estimate) ? 'earningsApiCompany' : 'none'),
-      actual: Number.isFinite(eps.actual) ? (epsFields.actualSource || 'sec_company_release') : 'none'
-    },
-    revenue: {
-      estimate: sourceFromResolution(revenueFields.estimateSource, Number.isFinite(revenue.estimate) ? 'earningsApiCompany' : 'none'),
-      actual: Number.isFinite(revenue.actual) ? 'sec_company_release' : 'none'
-    },
-    reaction: reactionSource(reaction)
-  };
-
-  const updated = {
-    ...row,
-    reportDate: resolution.reportDate,
-    company: row.company || resolution.company || task.company,
-    reportTiming: resolution.fields.reportTiming,
-    eps,
-    revenue,
-    outcome: {
-      overall: combinedOutcome(eps.result, revenue.result),
-      guide: '',
-      interpretation: ''
-    },
-    reaction,
-    sourceSummary: {
-      primary: 'sec_company_release',
-      fallbacks: row.sourceAudit?.selectedSources?.slate === 'finnhub'
-        ? ['finnhub', ...(row.sourceAudit?.selectedSources?.marketCap === 'finnhubMetric' ? ['finnhubMetric'] : [])]
-        : ['earningsApiCompany', 'finnhubProfile'].filter((item) => item !== 'finnhubProfile' || row.sourceAudit?.finnhubProfile),
-      reaction: reactionSource(reaction)
-    },
-    sourceAudit: {
-      ...row.sourceAudit,
-      companyReleaseResolution: companyReleaseAudit(resolution),
-      selectedSources,
-      yahoo: reaction.sourceAudit || row.sourceAudit?.yahoo || {}
-    }
-  };
-  delete updated.sourceAudit.resultRefresh;
-  return applyEarningsLifecycle(updated);
-}
-
-function applyPartialResolutionMetrics(row, resolution) {
-  const epsFields = resolution.fields?.eps || {};
-  const revenueFields = resolution.fields?.revenue || {};
-  const promoteEps = Number.isFinite(numberOrNull(epsFields.actual));
-  const promoteRevenue = Number.isFinite(numberOrNull(revenueFields.actual));
-  if (!promoteEps && !promoteRevenue) {
-    return {
-      row: {
-        ...row,
-        sourceAudit: {
-          ...row.sourceAudit,
-          companyReleaseResolution: companyReleaseAudit(resolution)
-        }
-      },
-      factsChanged: false
-    };
-  }
-  const factsSnapshot = (value) => JSON.stringify({
-    eps: value.eps,
-    revenue: value.revenue,
-    outcomeOverall: value.outcome?.overall,
-    lifecycle: value.lifecycle,
-    reaction: value.reaction
-  });
-  const before = factsSnapshot(row);
-  const eps = promoteEps
-    ? {
-        ...row.eps,
-        ...metricPayload({ estimate: row.eps?.estimate, actual: epsFields.actual }, 'eps', {
-          basis: epsFields.basis || row.eps?.basis || '',
-          note: epsFields.adjustment?.note || row.eps?.note || ''
-        })
-      }
-    : row.eps;
-  const revenue = promoteRevenue
-    ? {
-        ...row.revenue,
-        ...metricPayload({ estimate: row.revenue?.estimate, actual: revenueFields.actual }, 'revenue', {
-          note: row.revenue?.note || ''
-        })
-      }
-    : row.revenue;
-  const selectedSources = {
-    ...row.sourceAudit.selectedSources,
-    eps: {
-      ...row.sourceAudit.selectedSources.eps,
-      ...(promoteEps ? { actual: epsFields.actualSource || 'sec_company_release' } : {})
-    },
-    revenue: {
-      ...row.sourceAudit.selectedSources.revenue,
-      ...(promoteRevenue ? { actual: 'sec_company_release' } : {})
-    }
-  };
-  const fallbacks = [...(row.sourceSummary?.fallbacks || [])];
-  if ((promoteEps || promoteRevenue) && !fallbacks.includes('sec_company_release')) fallbacks.push('sec_company_release');
-  let updated = applyEarningsLifecycle({
-    ...row,
-    eps,
-    revenue,
-    outcome: {
-      ...row.outcome,
-      overall: combinedOutcome(eps.result, revenue.result)
-    },
-    sourceSummary: {
-      ...row.sourceSummary,
-      fallbacks
-    },
-    sourceAudit: {
-      ...row.sourceAudit,
-      companyReleaseResolution: companyReleaseAudit(resolution),
-      selectedSources
-    }
-  });
-  const factsChanged = factsSnapshot(updated) !== before;
-  if (factsChanged && !(updated.lifecycle === 'released_awaiting_close' && updated.reaction?.status === 'awaiting_close')) {
-    updated = clearAppliedNarrative(updated);
-  }
-  return { row: updated, factsChanged };
-}
-
-function updateSummary(source) {
-  const rows = Array.isArray(source.rows) ? source.rows : [];
-  const secondaryRecoveryCandidates = Array.isArray(source.secondaryRecoveryCandidates) ? source.secondaryRecoveryCandidates : [];
-  source.summary = {
-    ...(source.summary || {}),
-    counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates)
-  };
-}
-
-function applyCompanyReleaseResolutions(source, resolutionPayload) {
-  assertRefreshSourceAudit(source);
-  const resolutionErrors = validateCompanyReleaseResolutionsPayload(resolutionPayload, source);
-  if (resolutionErrors.length) {
-    throw new Error(`Company-release resolution payload is invalid: ${resolutionErrors.join(' ')}`);
-  }
-  const output = JSON.parse(JSON.stringify(source));
-  delete output.policy;
-  const taskMap = new Map((output.companyReleaseTasks || []).map((task) => [task.id, task]));
-  const rowsByKey = new Map((output.rows || []).map((row, index) => [rowKey(row), { row, index }]));
-  let deterministicFactsChanged = false;
-
-  for (const resolution of resolutionPayload.companyReleaseResolutions || []) {
-    const task = taskMap.get(resolution.taskId);
-    if (!task) throw new Error(`${resolution.taskId} does not map to companyReleaseTasks.`);
-    if (task.symbol !== resolution.symbol) throw new Error(`${resolution.taskId} symbol does not match resolution.`);
-
-    const key = rowKey(resolution);
-    const existing = rowsByKey.get(key) || rowsByKey.get(rowKey(task));
-    if (resolution.status !== 'resolved') {
-      if (!existing) throw new Error(`${resolution.taskId} non-resolved disposition has no admitted canonical row.`);
-      const partial = resolution.status === 'needs_review'
-        ? applyPartialResolutionMetrics(existing.row, resolution)
-        : {
-            row: {
-              ...existing.row,
-              sourceAudit: {
-                ...existing.row.sourceAudit,
-                companyReleaseResolution: companyReleaseAudit(resolution)
-              }
-            },
-            factsChanged: false
-          };
-      const updated = partial.row;
-      updated.sourceStatus = computeEarningsSourceStatus(updated);
-      deterministicFactsChanged = deterministicFactsChanged || partial.factsChanged;
-      output.rows[existing.index] = updated;
-      rowsByKey.set(rowKey(updated), { row: updated, index: existing.index });
-      continue;
-    }
-    const baseRow = existing?.row || rowFromTask(task, resolution);
-    const updated = applyResolution(baseRow, task, resolution);
-    if (existing) {
-      output.rows[existing.index] = updated;
-    } else {
-      output.rows.push(updated);
-      rowsByKey.set(key, { row: updated, index: output.rows.length - 1 });
-    }
-  }
-
-  if (deterministicFactsChanged) delete output.narrativeApply;
-
-  output.rows.sort((left, right) => {
-    const dateCompare = left.reportDate.localeCompare(right.reportDate);
-    if (dateCompare) return dateCompare;
-    return left.symbol.localeCompare(right.symbol);
-  });
-  updateSummary(output);
-  return output;
 }
 
 function sourceRangeMatches(left, right) {
@@ -712,8 +358,8 @@ function applyNarrativeCommand(argv) {
   process.stdout.write(`Applied ${output.narrativeApply.applied.length} earnings narrative row(s) to ${args.output}\n`);
 }
 
-// Command factories keep refresh and resolution helper names private while the
-// public earnings CLI and tests share this single implementation file.
+// Command factories keep refresh helper names private while the public
+// earnings CLI and tests share this single implementation file.
 function createRefreshCommand() {
 
 const fs = require('fs');
@@ -886,24 +532,6 @@ function metricPayload(current, incoming, metric, options = {}) {
 
 function sourceFor(value, source) {
   return Number.isFinite(value) ? source : 'none';
-}
-
-function hasPromotedCompanyReleaseActual(row, metric) {
-  return row.sourceAudit?.companyReleaseResolution?.status === 'needs_review'
-    && Number.isFinite(row[metric]?.actual)
-    && String(row.sourceAudit?.selectedSources?.[metric]?.actual || '').startsWith('sec_company_release');
-}
-
-function providerMetricInput(row, providerRow, metric) {
-  return hasPromotedCompanyReleaseActual(row, metric)
-    ? { ...providerRow[metric], actual: row[metric].actual }
-    : providerRow[metric];
-}
-
-function refreshedActualSource(row, metric, providerSource, actual) {
-  return hasPromotedCompanyReleaseActual(row, metric)
-    ? row.sourceAudit.selectedSources[metric].actual
-    : sourceFor(actual, providerSource);
 }
 
 function fetchJson(url, args, headers = {}) {
@@ -1163,11 +791,11 @@ function finalizeRow(row) {
 
 function applyFinnhubRefresh(row, providerRow) {
   if (!providerRow) return row;
-  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), 'eps', {
+  const eps = metricPayload(row.eps, providerRow.eps, 'eps', {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), 'revenue', {
+  const revenue = metricPayload(row.revenue, providerRow.revenue, 'revenue', {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -1211,11 +839,11 @@ function applyFinnhubRefresh(row, providerRow) {
         timing: providerRow.reportTiming === 'unknown' ? 'none' : 'finnhub',
         eps: {
           estimate: sourceFor(eps.estimate, 'finnhub'),
-          actual: refreshedActualSource(row, 'eps', 'finnhub', eps.actual)
+          actual: sourceFor(eps.actual, 'finnhub')
         },
         revenue: {
           estimate: sourceFor(revenue.estimate, 'finnhub'),
-          actual: refreshedActualSource(row, 'revenue', 'finnhub', revenue.actual)
+          actual: sourceFor(revenue.actual, 'finnhub')
         }
       }
     }
@@ -1272,12 +900,12 @@ function mergeFinnhubConflictCandidates(candidates, providerRow) {
 }
 
 function applyEarningsApiCompanyRefresh(row, providerRow) {
-  if (!providerRow || row.sourceAudit?.companyReleaseResolution?.status === 'resolved') return row;
-  const eps = metricPayload(row.eps, providerMetricInput(row, providerRow, 'eps'), 'eps', {
+  if (!providerRow) return row;
+  const eps = metricPayload(row.eps, providerRow.eps, 'eps', {
     basis: row.eps?.basis || '',
     note: row.eps?.note || ''
   });
-  const revenue = metricPayload(row.revenue, providerMetricInput(row, providerRow, 'revenue'), 'revenue', {
+  const revenue = metricPayload(row.revenue, providerRow.revenue, 'revenue', {
     note: row.revenue?.note || ''
   });
   return finalizeRow({
@@ -1299,11 +927,11 @@ function applyEarningsApiCompanyRefresh(row, providerRow) {
         timing: providerRow.reportTiming === 'unknown' ? 'none' : 'earningsApiCompany',
         eps: {
           estimate: sourceFor(eps.estimate, 'earningsApiCompany'),
-          actual: refreshedActualSource(row, 'eps', 'earningsApiCompany', eps.actual)
+          actual: sourceFor(eps.actual, 'earningsApiCompany')
         },
         revenue: {
           estimate: sourceFor(revenue.estimate, 'earningsApiCompany'),
-          actual: refreshedActualSource(row, 'revenue', 'earningsApiCompany', revenue.actual)
+          actual: sourceFor(revenue.actual, 'earningsApiCompany')
         }
       }
     }
@@ -1342,28 +970,7 @@ function selectCompanyRow(rows, target) {
 }
 
 function selectFinnhubRefreshRow(rows, target) {
-  const exact = rows.find((row) => rowKey(row) === rowKey(target));
-  if (exact) return exact;
-
-  const scheduleVerification = target.sourceAudit?.scheduleVerification;
-  const officiallyRedated = scheduleVerification?.status === 'official_confirmed'
-    && scheduleVerification?.official?.reportDate === target.reportDate
-    && scheduleVerification.primaryDate !== target.reportDate;
-  if (!officiallyRedated) return null;
-
-  // After an official redate, Finnhub can still publish the quarter's actuals
-  // under its original (or revised) date.
-  // Match only the same reported fiscal period and require an actual so a
-  // neighboring estimate-only entry cannot overwrite the dashboard row.
-  return rows
-    .filter((row) => row.symbol === target.symbol)
-    .filter((row) => row.fiscalQuarter === target.fiscalQuarter && row.fiscalYear === target.fiscalYear)
-    .filter((row) => Number.isFinite(row.eps?.actual) || Number.isFinite(row.revenue?.actual))
-    .sort((left, right) => {
-      const leftActuals = Number.isFinite(left.eps?.actual) + Number.isFinite(left.revenue?.actual);
-      const rightActuals = Number.isFinite(right.eps?.actual) + Number.isFinite(right.revenue?.actual);
-      return rightActuals - leftActuals || right.reportDate.localeCompare(left.reportDate);
-    })[0] || null;
+  return rows.find((row) => rowKey(row) === rowKey(target)) || null;
 }
 
 function selectZacksRefreshRow(rows, target) {
@@ -1373,123 +980,6 @@ function selectZacksRefreshRow(rows, target) {
 function refreshTargetRows(source, asOf) {
   return (Array.isArray(source.rows) ? source.rows : [])
     .filter((row) => reportWindowArrived(row, asOf));
-}
-
-function missingCompanyReleaseActual(row) {
-  return !Number.isFinite(row?.eps?.actual) || !Number.isFinite(row?.revenue?.actual);
-}
-
-function unresolvedCompanyReleaseRetry(task, reason, error = '') {
-  // Integrated refresh must never block publication; resolver outages become the
-  // row-level unresolved audit that keeps the task active for a later retry.
-  return {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    status: 'unresolved',
-    sourceType: '',
-    sourceUrl: '',
-    secFilingUrl: '',
-    confidence: 'low',
-    fields: {
-      company: task.company,
-      fiscalPeriod: '',
-      reportTiming: 'unknown',
-      eps: {
-        actual: null,
-        basis: '',
-        gaapActual: null,
-        gaapBasis: '',
-        adjustment: null,
-        actualSource: '',
-        estimate: null,
-        estimateSource: '',
-        estimateCount: '',
-        comparisonSource: ''
-      },
-      revenue: {
-        actual: null,
-        estimate: null,
-        estimateSource: ''
-      }
-    },
-    reaction: {
-      basis: 'unavailable',
-      percent: null,
-      fromDate: '',
-      fromClose: null,
-      toDate: '',
-      toClose: null,
-      status: 'unavailable',
-      note: '',
-      source: '',
-      sourceAudit: {}
-    },
-    notes: [reason],
-    sourceAudit: error ? { error: String(error).slice(0, 240) } : {}
-  };
-}
-
-function companyReleaseRetryRows(output, asOf) {
-  const rowsByKey = new Map((Array.isArray(output.rows) ? output.rows : []).map((row) => [rowKey(row), row]));
-  return (Array.isArray(output.companyReleaseTasks) ? output.companyReleaseTasks : [])
-    .map((task) => ({ task, row: rowsByKey.get(rowKey(task)) }))
-    .filter(({ task, row }) => {
-      const status = row?.sourceAudit?.companyReleaseResolution?.status || '';
-      // Retry only when the report window now matters and provider actuals are
-      // still incomplete; scheduled pre-window tasks remain cheap metadata.
-      return row
-        && isDisplayEligibleEarningsRow(row)
-        && reportWindowArrived(row, asOf)
-        && missingCompanyReleaseActual(row)
-        && status !== 'resolved'
-        && task?.id;
-    });
-}
-
-async function retryCompanyReleaseTasks(output, asOf, options = {}) {
-  if (options.retryCompanyReleaseTasks === false) return output;
-  const retryRows = companyReleaseRetryRows(output, asOf);
-  if (!retryRows.length) return output;
-
-  const loadTickerMap = options.loadTickerMap;
-  const resolveCompanyReleaseTask = options.resolveCompanyReleaseTask;
-  const requestArgs = options.companyReleaseRequestArgs || options;
-  let tickerMap = null;
-  if (loadTickerMap && resolveCompanyReleaseTask) {
-    try {
-      tickerMap = await loadTickerMap(requestArgs);
-    } catch (error) {
-      const companyReleaseResolutions = retryRows.map(({ task }) => unresolvedCompanyReleaseRetry(task, 'company_release_retry_unavailable', error.message));
-      return applyCompanyReleaseResolutions(output, {
-        schemaVersion: 1,
-        generatedAt: new Date(asOf).toISOString(),
-        companyReleaseResolutions
-      });
-    }
-  } else {
-    return output;
-  }
-
-  const companyReleaseResolutions = [];
-  for (const { task, row } of retryRows) {
-    try {
-      companyReleaseResolutions.push(await resolveCompanyReleaseTask(task, tickerMap, requestArgs, row));
-    } catch (error) {
-      companyReleaseResolutions.push(unresolvedCompanyReleaseRetry(task, 'company_release_retry_unavailable', error.message));
-    }
-  }
-  return applyCompanyReleaseResolutions(output, {
-    schemaVersion: 1,
-    generatedAt: new Date(asOf).toISOString(),
-    companyReleaseResolutions
-  });
-}
-
-function needsYahooReactionFetch(row) {
-  return row?.reportTiming !== 'unknown'
-    && (Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual));
 }
 
 function applyResultRefreshDiagnostics(row, failures, checkedAt) {
@@ -1569,17 +1059,7 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     ? applyResultRefreshDiagnostics(row, rowDiagnosticsByKey[rowKey(row)] || [], asOf)
     : row);
 
-  delete output.companyReleaseTasks;
-  const activeTaskIds = new Set();
-  output.rows = output.rows.map((row) => {
-    const resolution = row.sourceAudit?.companyReleaseResolution;
-    if (!['needs_review', 'unresolved'].includes(resolution?.status) || activeTaskIds.has(resolution.taskId)) return row;
-    const next = structuredClone(row);
-    delete next.sourceAudit.companyReleaseResolution;
-    next.sourceStatus = computeEarningsSourceStatus(next);
-    return next;
-  });
-  // Even when every provider/release retry misses, post-window rows must move
+  // Even when every provider retry misses, post-window rows must move
   // from scheduled to awaiting_actual so the dashboard state stays truthful.
   output.rows = output.rows.map((row) => targetKeys.has(rowKey(row))
     ? applyEarningsLifecycle(row, asOf)
@@ -1608,8 +1088,7 @@ async function collectRefreshData(source, args, dependencies = {}) {
   const zacksTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'zacks');
   const finnhubTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub');
   const earningsApiTargets = targetRows
-    .filter((row) => isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate))
-    .filter((row) => row.sourceAudit?.companyReleaseResolution?.status !== 'resolved');
+    .filter((row) => isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate));
   const environment = dependencies.env || process.env;
   const finnhubToken = environment.FINNHUB_API_KEY;
   const earningsApiToken = environment.EARNINGSAPI_API_KEY;
@@ -1781,10 +1260,7 @@ async function run(argv) {
   const refreshData = await collectRefreshData(source, args);
   const result = await refreshEarningsResults(source, refreshData, {
     asOf: args.asOf,
-    outputPath: args.output,
-    companyReleaseRequestArgs: args,
-    loadTickerMap: companyReleaseResolver.loadTickerMap,
-    resolveCompanyReleaseTask: companyReleaseResolver.resolveTask
+    outputPath: args.output
   });
   const outputErrors = validateEarningsWeekPayload(result.payload);
   if (outputErrors.length) throw new Error(`Refreshed earnings week payload is invalid: ${outputErrors.join(' ')}`);
@@ -1807,486 +1283,6 @@ return {
 }
 
 const refreshCommand = createRefreshCommand();
-
-function createCompanyReleaseResolver() {
-
-const https = require('https');
-const { earningsCloseAvailable, numberOrNull, pctChange, reactionWindow } = require('./earnings_week_contract');
-const { dateFromIso } = require('./calendar_contract');
-
-function requestHeaders(headers = {}) {
-  const userAgent = String(process.env.SEC_USER_AGENT || '').trim();
-  if (!userAgent) {
-    throw new Error('SEC_USER_AGENT is required in .env or the environment for SEC/company-release resolution.');
-  }
-  // SEC requests require an identifying User-Agent; keep it configurable so
-  // local operators can supply contact info without hard-coding it here.
-  return {
-    'User-Agent': userAgent,
-    Accept: 'application/json,text/html,*/*',
-    ...headers
-  };
-}
-
-function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-
-function fetchText(url, args, headers = {}) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const req = https.get(url, {
-      timeout: args.timeoutMs,
-      headers: requestHeaders(headers)
-    }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => body += chunk);
-      res.on('end', () => resolve({
-        ok: res.statusCode >= 200 && res.statusCode < 300,
-        status: res.statusCode,
-        ms: Date.now() - started,
-        body,
-        error: res.statusCode >= 200 && res.statusCode < 300 ? '' : `HTTP ${res.statusCode}`
-      }));
-    });
-    req.on('error', (error) => resolve({
-      ok: false,
-      status: 0,
-      ms: Date.now() - started,
-      body: '',
-      error: error.message
-    }));
-    req.setTimeout(args.timeoutMs, () => req.destroy(new Error('request timeout')));
-  });
-}
-
-async function fetchJson(url, args, headers = {}) {
-  const result = await fetchText(url, args, headers);
-  if (!result.ok) return { ...result, data: null, parseError: '' };
-  try {
-    return { ...result, data: JSON.parse(result.body), parseError: '' };
-  } catch (error) {
-    return { ...result, ok: false, data: null, parseError: error.message };
-  }
-}
-
-function roundedCents(value) {
-  return Number.isFinite(value) ? Math.round(value * 100) / 100 : null;
-}
-
-function nearlyEqual(left, right, tolerance = 0.03) {
-  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) <= tolerance;
-}
-
-function moneyNumber(value, unit) {
-  const number = Number(String(value || '').replace(/,/g, ''));
-  if (!Number.isFinite(number)) return null;
-  const normalizedUnit = String(unit || '').toLowerCase();
-  if (normalizedUnit.startsWith('b')) return number * 1000000000;
-  if (normalizedUnit.startsWith('m')) return number * 1000000;
-  return number;
-}
-
-function cleanText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&#160;|&nbsp;/g, ' ')
-    .replace(/&#34;|&quot;/g, '"')
-    .replace(/&#39;|&apos;/g, "'")
-    .replace(/&#58;/g, ':')
-    .replace(/&#8226;/g, ' ')
-    .replace(/&#8212;/g, '-')
-    .replace(/&#8211;/g, '-')
-    .replace(/&#47;/g, '/')
-    .replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-async function loadTickerMap(args) {
-  const result = await fetchJson('https://www.sec.gov/files/company_tickers.json', args);
-  if (!result.ok || !result.data) throw new Error(`Unable to load SEC ticker map: ${result.error || result.parseError}`);
-  const map = new Map();
-  for (const item of Object.values(result.data)) {
-    const ticker = String(item.ticker || '').toUpperCase();
-    if (!ticker) continue;
-    map.set(ticker, {
-      cik: Number(item.cik_str),
-      title: String(item.title || '').trim()
-    });
-  }
-  return map;
-}
-
-function cikPadded(cik) {
-  return String(cik).padStart(10, '0');
-}
-
-function cikPath(cik) {
-  return String(Number(cik));
-}
-
-function daysBetween(left, right) {
-  return Math.round((dateFromIso(right).getTime() - dateFromIso(left).getTime()) / 86400000);
-}
-
-function chooseEarningsFiling(task, recent) {
-  const rows = [];
-  for (let index = 0; index < recent.accessionNumber.length; index += 1) {
-    const form = recent.form[index];
-    const filingDate = recent.filingDate[index];
-    const items = String(recent.items?.[index] || '');
-    if (form !== '8-K') continue;
-    if (!items.includes('2.02')) continue;
-    const distance = Math.abs(daysBetween(task.reportDate, filingDate));
-    if (distance > 3) continue;
-    rows.push({
-      accessionNumber: recent.accessionNumber[index],
-      primaryDocument: recent.primaryDocument[index],
-      filingDate,
-      acceptanceDateTime: recent.acceptanceDateTime?.[index] || '',
-      items,
-      distance
-    });
-  }
-  rows.sort((left, right) => left.distance - right.distance || left.filingDate.localeCompare(right.filingDate));
-  return rows[0] || null;
-}
-
-async function fetchFilingIndex(cik, accessionNumber, args) {
-  const accessionPath = accessionNumber.replace(/-/g, '');
-  const url = `https://www.sec.gov/Archives/edgar/data/${cikPath(cik)}/${accessionPath}/index.json`;
-  const result = await fetchJson(url, args);
-  return { ...result, url };
-}
-
-function chooseExhibit(indexData) {
-  const items = Array.isArray(indexData?.directory?.item) ? indexData.directory.item : [];
-  const htmlItems = items.filter((item) => /\.html?$/i.test(item.name));
-  const exhibit = htmlItems.find((item) => /(?:exhibit|ex-?)?99[\d._-]*.*\.html?$/i.test(item.name) && !/index/i.test(item.name))
-    || htmlItems.find((item) => /99/i.test(item.name) && !/index/i.test(item.name))
-    || htmlItems.find((item) => /exhibit/i.test(item.name) && !/index/i.test(item.name));
-  return exhibit?.name || '';
-}
-
-function extractFiscalPeriod(text, reportDate) {
-  const year = reportDate.slice(0, 4);
-  const lower = text.toLowerCase();
-  const fiscalYear = text.match(/fiscal\s+(\d{4})/i)?.[1] || year;
-  if (lower.includes('fourth quarter') || /\bq4\b/i.test(text)) return `Fiscal Q4 ${fiscalYear}`;
-  if (lower.includes('third quarter') || /\bq3\b/i.test(text)) return `Fiscal Q3 ${fiscalYear}`;
-  if (lower.includes('second quarter') || /\bq2\b/i.test(text)) return `Fiscal Q2 ${fiscalYear}`;
-  if (lower.includes('first quarter') || /\bq1\b/i.test(text)) return `Fiscal Q1 ${fiscalYear}`;
-  return `Fiscal period ending ${reportDate}`;
-}
-
-function extractReportTiming(filing) {
-  const acceptedDate = new Date(filing.acceptanceDateTime || '');
-  if (Number.isNaN(acceptedDate.getTime())) return 'unknown';
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(acceptedDate);
-  const hour = Number(parts.find((part) => part.type === 'hour')?.value);
-  const minute = Number(parts.find((part) => part.type === 'minute')?.value);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 'unknown';
-  const minutes = hour * 60 + minute;
-  if (minutes < 9 * 60 + 30) return 'bmo';
-  if (minutes >= 16 * 60) return 'amc';
-  return 'unknown';
-}
-
-function extractEps(text) {
-  const patterns = [
-    { basis: 'gaap_diluted', regex: /Net loss[\s\S]{0,260}?\(\s*\$\s*([\d.]+)\s*\)\s+per share/i, sign: -1 },
-    { basis: 'adjusted_non_gaap', regex: /(?:Adjusted diluted EPS|Adjusted EPS|Non-GAAP diluted earnings per share|Non-GAAP diluted EPS)[^$]{0,220}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i },
-    { basis: 'gaap_diluted', regex: /Diluted earnings per (?:common )?share[^$]{0,220}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i },
-    { basis: 'gaap_diluted', regex: /Diluted EPS[^$]{0,160}(?:\(\s*)?\$\s*([\d.]+)\s*\)?/i }
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern.regex);
-    if (match) return { value: (pattern.sign || (/\(\s*\$/.test(match[0]) ? -1 : 1)) * Number(match[1]), basis: pattern.basis };
-  }
-  return { value: null, basis: '' };
-}
-
-function extractPerShareAdjustment(text, actual) {
-  if (!Number.isFinite(actual)) return null;
-  const match = text.match(/Diluted earnings per share was\s*\$\s*([\d.]+)[^.]{0,260}?including a\s*\$\s*([\d.]+)\s*(benefit|charge|expense|loss|gain)[^.]{0,220}\./i);
-  if (!match) return null;
-  const headline = Number(match[1]);
-  const amount = Number(match[2]);
-  if (!nearlyEqual(headline, actual, 0.005) || !Number.isFinite(amount)) return null;
-  const kind = match[3].toLowerCase();
-  const isBenefit = kind === 'benefit' || kind === 'gain';
-  const comparable = roundedCents(isBenefit ? actual - amount : actual + amount);
-  return {
-    kind,
-    amount,
-    comparableEps: comparable,
-    note: `GAAP EPS ${moneyText(actual)} includes ${moneyText(amount)} ${kind}.`
-  };
-}
-
-function moneyText(value) {
-  return Number.isFinite(value) ? `$${value.toFixed(2)}` : '';
-}
-
-function retainedEstimateSource(row, metric) {
-  return row.sourceAudit?.selectedSources?.[metric]?.estimate === 'finnhub'
-    ? 'finnhub'
-    : 'earningsapi_company';
-}
-
-function earningsApiBackup(_task, row = {}) {
-  return {
-    eps: {
-      estimate: numberOrNull(row.eps?.estimate),
-      actual: numberOrNull(row.eps?.actual),
-      estimateSource: Number.isFinite(numberOrNull(row.eps?.estimate)) ? retainedEstimateSource(row, 'eps') : ''
-    },
-    revenue: {
-      estimate: numberOrNull(row.revenue?.estimate),
-      estimateSource: Number.isFinite(numberOrNull(row.revenue?.estimate)) ? retainedEstimateSource(row, 'revenue') : ''
-    },
-    fiscalQuarterEnding: String(row.fiscalQuarterEnding || '').trim()
-  };
-}
-
-function resolveComparableEps(secEps, task, text, row) {
-  const backup = earningsApiBackup(task, row);
-  const comparisonSource = backup.eps.estimateSource === 'finnhub'
-    ? 'finnhub_eps_estimate'
-    : 'earningsapi_company_eps_estimate';
-  const adjustment = extractPerShareAdjustment(text, secEps.value);
-  const result = {
-    actual: secEps.value,
-    basis: secEps.basis,
-    gaapActual: secEps.basis === 'gaap_diluted' ? secEps.value : null,
-    gaapBasis: secEps.basis === 'gaap_diluted' ? secEps.basis : '',
-    adjustment,
-    estimate: backup.eps.estimate,
-    estimateSource: backup.eps.estimateSource,
-    estimateCount: '',
-    actualSource: 'sec_company_release',
-    comparisonSource: ''
-  };
-  if (!Number.isFinite(backup.eps.actual)) return result;
-  if (nearlyEqual(secEps.value, backup.eps.actual)) {
-    result.actual = secEps.value;
-    result.actualSource = 'sec_company_release';
-    result.comparisonSource = comparisonSource;
-    return result;
-  }
-  if (adjustment && nearlyEqual(adjustment.comparableEps, backup.eps.actual)) {
-    result.actual = adjustment.comparableEps;
-    result.basis = 'comparable_adjusted';
-    result.actualSource = 'sec_company_release_adjusted_to_earningsapi_basis';
-    result.comparisonSource = comparisonSource;
-    return result;
-  }
-  result.comparisonSource = `unreconciled_${backup.eps.estimateSource}`;
-  result.estimate = null;
-  result.estimateSource = '';
-  result.estimateCount = '';
-  return result;
-}
-
-function extractRevenue(text) {
-  const patterns = [
-    /Fourth quarter revenues were[^$]{0,120}\$\s*([\d,.]+)\s*(billion|million)/i,
-    /Revenues? for [^.]{0,120}?(?:were|was)[^$]{0,120}\$\s*([\d,.]+)\s*(billion|million)/i,
-    /(?:Revenue|Revenues|Net sales)(?:\s+for [^.]{0,100})?(?:\s+were|\s+was|\s+of|\s+totaled)?[^$]{0,140}\$\s*([\d,.]+)\s*(billion|million)/i
-  ];
-  for (const regex of patterns) {
-    const match = text.match(regex);
-    if (match) return moneyNumber(match[1], match[2]);
-  }
-  return null;
-}
-
-async function resolveReaction(task, reportTiming, args) {
-  const yahoo = await fetchYahooBars(task.symbol, task.reportDate, task.reportDate, args, fetchJson);
-  const bars = yahoo.bars || [];
-  const { basis, fromBar, toBar } = reactionWindow(bars, task.reportDate, reportTiming);
-  const pct = fromBar && toBar && earningsCloseAvailable(toBar) ? pctChange(fromBar.close, toBar.close) : null;
-  const status = pct !== null ? 'computed' : reportTiming === 'unknown' ? 'unavailable' : 'awaiting_close';
-  return {
-    basis,
-    percent: pct,
-    fromDate: status === 'computed' ? fromBar.date : '',
-    fromClose: status === 'computed' ? fromBar.close : null,
-    toDate: status === 'computed' ? toBar.date : '',
-    toClose: status === 'computed' ? toBar.close : null,
-    status,
-    note: '',
-    source: 'Yahoo Finance Chart API',
-    sourceAudit: {
-      status: yahoo.status,
-      rowCount: bars.length,
-      error: yahoo.error
-    }
-  };
-}
-
-async function resolveTask(task, tickerMap, args, row = {}) {
-  const ticker = tickerMap.get(task.symbol);
-  if (!ticker) {
-    return unresolved(task, 'ticker_not_found_in_sec_company_tickers');
-  }
-  const submissionsUrl = `https://data.sec.gov/submissions/CIK${cikPadded(ticker.cik)}.json`;
-  const submissions = await fetchJson(submissionsUrl, args);
-  if (!submissions.ok || !submissions.data?.filings?.recent) {
-    return unresolved(task, 'sec_submissions_unavailable', { submissionsUrl, status: submissions.status, error: submissions.error || submissions.parseError });
-  }
-
-  const filing = chooseEarningsFiling(task, submissions.data.filings.recent);
-  if (!filing) {
-    return unresolved(task, 'earnings_8k_not_found', { submissionsUrl });
-  }
-
-  const filingIndex = await fetchFilingIndex(ticker.cik, filing.accessionNumber, args);
-  if (!filingIndex.ok || !filingIndex.data) {
-    return unresolved(task, 'filing_index_unavailable', { filingIndexUrl: filingIndex.url, status: filingIndex.status, error: filingIndex.error || filingIndex.parseError });
-  }
-
-  const exhibitName = chooseExhibit(filingIndex.data);
-  if (!exhibitName) {
-    return unresolved(task, 'earnings_exhibit_not_found', { filingIndexUrl: filingIndex.url });
-  }
-
-  const accessionPath = filing.accessionNumber.replace(/-/g, '');
-  const sourceUrl = `https://www.sec.gov/Archives/edgar/data/${cikPath(ticker.cik)}/${accessionPath}/${exhibitName}`;
-  const exhibit = await fetchText(sourceUrl, args);
-  if (!exhibit.ok) {
-    return unresolved(task, 'earnings_exhibit_unavailable', { sourceUrl, status: exhibit.status, error: exhibit.error });
-  }
-
-  const text = cleanText(exhibit.body);
-  const eps = extractEps(text);
-  // Company releases may report GAAP, adjusted, and special-item EPS in the
-  // same exhibit; reconcile to the queued task before classifying beat/miss.
-  const comparableEps = resolveComparableEps(eps, task, text, row);
-  const backup = earningsApiBackup(task, row);
-  const revenueActual = extractRevenue(text);
-  const reportTiming = extractReportTiming(filing);
-  const officialReport = { ...task, reportDate: filing.filingDate };
-  const reaction = await resolveReaction(officialReport, reportTiming, args);
-  const status = Number.isFinite(comparableEps.actual) && Number.isFinite(revenueActual) ? 'resolved' : 'needs_review';
-  const notes = [
-    Number.isFinite(comparableEps.estimate)
-      ? `${backup.eps.estimateSource === 'finnhub' ? 'Finnhub' : 'EarningsAPI company endpoint'} supplied the retained consensus estimates for comparison.`
-      : 'Company release supplied reported actuals; consensus estimates remain unavailable unless supplied by another deterministic source.'
-  ];
-  if (comparableEps.adjustment?.note) notes.push(comparableEps.adjustment.note);
-  if (comparableEps.comparisonSource.startsWith('unreconciled_')) {
-    notes.push('The retained provider EPS actual did not reconcile to the SEC/company-release EPS basis; avoid EPS beat/miss classification without review.');
-  }
-
-  return {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: filing.filingDate,
-    status,
-    sourceType: 'sec_8k_exhibit_99_1',
-    sourceUrl,
-    secFilingUrl: `https://www.sec.gov/Archives/edgar/data/${cikPath(ticker.cik)}/${accessionPath}/${filing.primaryDocument}`,
-    confidence: status === 'resolved' ? 'high' : 'medium',
-    fields: {
-      company: task.company,
-      fiscalPeriod: extractFiscalPeriod(text, filing.filingDate),
-      reportTiming,
-      eps: {
-        actual: comparableEps.actual,
-        basis: comparableEps.basis,
-        gaapActual: comparableEps.gaapActual,
-        gaapBasis: comparableEps.gaapBasis,
-        adjustment: comparableEps.adjustment,
-        actualSource: comparableEps.actualSource,
-        estimate: comparableEps.estimate,
-        estimateSource: comparableEps.estimateSource,
-        estimateCount: comparableEps.estimateCount,
-        comparisonSource: comparableEps.comparisonSource
-      },
-      revenue: {
-        actual: revenueActual,
-        estimate: backup.revenue.estimate,
-        estimateSource: backup.revenue.estimateSource
-      }
-    },
-    reaction,
-    notes,
-    sourceAudit: {
-      cik: ticker.cik,
-      secCompanyTitle: ticker.title,
-      filing,
-      exhibitName,
-      alphaVantageCalendar: task.sourceAudit?.alphaVantageCalendar || null,
-      extractedTextPreview: text.slice(0, 800)
-    }
-  };
-}
-
-function unresolved(task, reason, audit = {}) {
-  return {
-    taskId: task.id,
-    symbol: task.symbol,
-    company: task.company,
-    reportDate: task.reportDate,
-    status: 'unresolved',
-    sourceType: '',
-    sourceUrl: '',
-    secFilingUrl: '',
-    confidence: 'low',
-    fields: {
-      company: task.company,
-      fiscalPeriod: '',
-      reportTiming: 'unknown',
-      eps: {
-        actual: null,
-        basis: '',
-        gaapActual: null,
-        gaapBasis: '',
-        adjustment: null,
-        actualSource: '',
-        estimate: null,
-        estimateSource: '',
-        estimateCount: '',
-        comparisonSource: ''
-      },
-      revenue: {
-        actual: null,
-        estimate: null,
-        estimateSource: ''
-      }
-    },
-    reaction: {
-      basis: 'unavailable',
-      percent: null,
-      fromDate: '',
-      fromClose: null,
-      toDate: '',
-      toClose: null,
-      status: 'unavailable',
-      note: '',
-      source: '',
-      sourceAudit: {}
-    },
-    notes: [reason],
-    sourceAudit: audit
-  };
-}
-
-return { loadTickerMap, resolveTask };
-}
-
-const companyReleaseResolver = createCompanyReleaseResolver();
 
 
 async function main() {
@@ -2321,7 +1317,6 @@ module.exports = {
   earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
   mergeFinnhubConflictCandidates: refreshCommand.mergeFinnhubConflictCandidates,
-  pendingEarningsScheduleReviews,
   repairRecoveredEarningsSourceAudit,
   refreshEarningsResults: refreshCommand.refreshEarningsResults,
   refreshTargetRows: refreshCommand.refreshTargetRows,
