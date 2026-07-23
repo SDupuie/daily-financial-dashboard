@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { isIsoDateTime } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
 
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'crypto_stats.json');
@@ -12,6 +13,7 @@ const FEAR_GREED_URL = 'https://api.alternative.me/fng/?limit=2';
 const COINGECKO_GLOBAL_URL = 'https://api.coingecko.com/api/v3/global';
 const ALTCOIN_SEASON_PAGE_URL = 'https://coinmarketcap.com/charts/altcoin-season-index/';
 const ALTCOIN_SEASON_API_URL = 'https://api.coinmarketcap.com/data-api/v3/altcoin-season/chart';
+const CRYPTO_STAT_SYMBOLS = ['F&G', 'ALTSEASON', 'TOTAL'];
 
 function parseArgs(argv) {
   const args = {
@@ -188,6 +190,20 @@ function signedUsdCompact(value) {
   return `${prefix}$${formatUsdCompact(Math.abs(value))}`;
 }
 
+function dominanceFromCoinGecko(payload) {
+  const btc = Number(payload?.data?.market_cap_percentage?.btc);
+  const eth = Number(payload?.data?.market_cap_percentage?.eth);
+  if (![btc, eth].every(Number.isFinite) || btc < 0 || eth < 0 || btc + eth > 100) {
+    throw new Error('CoinGecko response was missing valid BTC and ETH market-cap dominance data.');
+  }
+  const percent = (value) => `${value.toFixed(2)}%`;
+  return {
+    btc: percent(btc),
+    eth: percent(eth),
+    others: percent(100 - btc - eth)
+  };
+}
+
 function classifyFearGreed(score, fallbackClassification = '') {
   const direct = String(fallbackClassification || '').trim();
   if (direct) return direct;
@@ -294,7 +310,8 @@ function normalizeTotalMarketCap(payload) {
     },
     totalMarketCapUsd,
     marketCapChange24hPct: changePct,
-    previousMarketCapUsd: Number.isFinite(priorMarketCap) ? priorMarketCap : null
+    previousMarketCapUsd: Number.isFinite(priorMarketCap) ? priorMarketCap : null,
+    dominance: dominanceFromCoinGecko(payload)
   };
 }
 
@@ -372,11 +389,33 @@ function canonicalCryptoState(input) {
     const data = match ? JSON.parse(match[1]) : null;
     return {
       stats: Array.isArray(data?.crypto?.stats) ? data.crypto.stats : [],
+      dominance: data?.crypto?.dominance,
       lastValidatedAt: String(data?.crypto?.statsFetchedAt || data?.editionId || '').trim()
     };
   } catch (_error) {
-    return { stats: [], lastValidatedAt: '' };
+    return { stats: [], dominance: null, lastValidatedAt: '' };
   }
+}
+
+function dominanceValuesValid(dominance) {
+  if (!dominance || typeof dominance !== 'object' || Array.isArray(dominance)) return false;
+  const values = ['btc', 'eth', 'others'].map((key) => {
+    const text = String(dominance[key] || '').trim();
+    return /^\d+(?:\.\d+)?%$/.test(text) ? Number(text.slice(0, -1)) : NaN;
+  });
+  return values.every((value) => Number.isFinite(value) && value >= 0 && value <= 100)
+    && Math.abs(values.reduce((sum, value) => sum + value, 0) - 100) <= 0.02;
+}
+
+function unavailableCryptoDominance(checkedAt, error = null) {
+  return {
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: new Date(checkedAt).toISOString(),
+      ...(error ? { message: error?.message || String(error) } : {})
+    }
+  };
 }
 
 function unavailableCryptoStat(symbol, name, checkedAt, error) {
@@ -451,9 +490,25 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
     stats.push(stat);
     details[task.key] = { source: 'Unavailable', stat };
   });
+  const totalResult = settled[tasks.findIndex((task) => task.key === 'totalMarketCap')];
+  let dominance = totalResult?.status === 'fulfilled' && dominanceValuesValid(totalResult.value?.dominance)
+    ? totalResult.value.dominance
+    : unavailableCryptoDominance(checkedAt, totalResult?.status === 'rejected' ? totalResult.reason : 'dominance unavailable');
+  if (totalResult?.status === 'rejected' && dominanceValuesValid(canonical.dominance)) {
+    dominance = {
+      ...structuredClone(canonical.dominance),
+      availability: {
+        status: 'carried_forward',
+        reason: 'source_refresh_failed',
+        checkedAt: checkedAt.toISOString(),
+        ...(canonical.lastValidatedAt ? { lastValidatedAt: canonical.lastValidatedAt } : {})
+      }
+    };
+  }
   return {
     fetchedAt: checkedAt.toISOString(),
     stats,
+    dominance,
     ...details,
     ...(failures.length ? {
       availability: {
@@ -495,6 +550,7 @@ async function fetchCryptoStats(options = {}) {
       altcoinSeason.stat,
       totalMarketCap.stat
     ],
+    dominance: totalMarketCap.dominance,
     fearGreed,
     altcoinSeason,
     totalMarketCap
@@ -522,9 +578,21 @@ function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reaso
         }
       })
     : [];
+  const dominance = dominanceValuesValid(canonicalCrypto?.dominance)
+    ? {
+      ...structuredClone(canonicalCrypto.dominance),
+      availability: {
+        status: 'carried_forward',
+        reason,
+        checkedAt: timestamp,
+        ...(canonicalLastValidatedAt ? { lastValidatedAt: canonicalLastValidatedAt } : {})
+      }
+    }
+    : unavailableCryptoDominance(timestamp);
   return {
     fetchedAt: timestamp,
     stats,
+    dominance,
     availability: {
       status: stats.length ? 'carried_forward' : 'unavailable',
       reason,
@@ -537,11 +605,99 @@ function validateCryptoStatsPayload(payload) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Crypto stats staging payload must be an object.'];
   const unavailable = payload.availability?.status === 'unavailable';
+  const partial = payload.availability?.status === 'partial';
+  const carriedForward = payload.availability?.status === 'carried_forward';
+  if (!isIsoDateTime(payload.fetchedAt)) errors.push('Crypto stats staging fetchedAt must be an offset-bearing ISO timestamp.');
   if (!Array.isArray(payload.stats)) return ['Crypto stats staging stats must be an array.'];
-  if (!unavailable) {
-    for (const symbol of ['F&G', 'ALTSEASON', 'TOTAL']) {
-      if (!payload.stats.some((row) => row?.sym === symbol)) errors.push(`Crypto stats staging is missing ${symbol}.`);
+  if (unavailable) {
+    if (payload.stats.length) errors.push('Unavailable Crypto stats staging must contain no rows.');
+  } else {
+    const seen = new Set();
+    if (payload.stats.length !== CRYPTO_STAT_SYMBOLS.length) errors.push(`Crypto stats staging must contain exactly ${CRYPTO_STAT_SYMBOLS.length} rows.`);
+    payload.stats.forEach((row, index) => {
+      const label = `Crypto stats staging stats[${index}]`;
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        errors.push(`${label} must be an object.`);
+        return;
+      }
+      const symbol = String(row.sym || '');
+      if (!CRYPTO_STAT_SYMBOLS.includes(symbol)) errors.push(`${label}.sym is unexpected: ${symbol || '(blank)'}.`);
+      else if (seen.has(symbol)) errors.push(`Crypto stats staging contains duplicate symbol ${symbol}.`);
+      else seen.add(symbol);
+      const rowUnavailable = row.availability?.status === 'unavailable';
+      for (const field of ['name', 'sub', 'price', 'delta', 'chg']) {
+        if (typeof row[field] !== 'string') errors.push(`${label}.${field} must be a string.`);
+      }
+      for (const field of ['name', 'sub', 'price', 'delta']) {
+        if (typeof row[field] === 'string' && !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
+      }
+      if (!rowUnavailable && typeof row.chg === 'string' && !row.chg.trim()) errors.push(`${label}.chg must be populated.`);
+      if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
+      if (!rowUnavailable && ['F&G', 'ALTSEASON'].includes(symbol)) {
+        const score = Number(row.price);
+        if (!Number.isFinite(score) || score < 0 || score > 100) errors.push(`${label}.price must be a score from 0 to 100.`);
+      }
+      if (!rowUnavailable && symbol === 'TOTAL' && ['price', 'delta', 'chg'].some((field) => typeof row[field] !== 'string' || !row[field].trim())) {
+        errors.push(`${label} must contain populated price, delta, and chg values.`);
+      }
+      if (!rowUnavailable) {
+        const directionText = symbol === 'TOTAL' ? row.chg : row.delta;
+        const directionValue = Number.parseFloat(String(directionText || '').replace(/[^0-9+.-]/g, ''));
+        const expectedDirection = Number.isFinite(directionValue)
+          ? directionValue > 0 ? 'up' : directionValue < 0 ? 'down' : 'flat'
+          : 'flat';
+        if (row.dir !== expectedDirection) errors.push(`${label}.dir must match ${symbol === 'TOTAL' ? 'chg' : 'delta'}.`);
+      }
+      if (row.availability !== undefined) {
+        if (!['carried_forward', 'unavailable'].includes(row.availability?.status)) errors.push(`${label}.availability.status must be carried_forward or unavailable.`);
+        if (row.availability?.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+        if (!isIsoDateTime(row.availability?.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+      }
+    });
+    for (const symbol of CRYPTO_STAT_SYMBOLS) {
+      if (!seen.has(symbol)) errors.push(`Crypto stats staging is missing ${symbol}.`);
     }
+  }
+  if (payload.availability !== undefined) {
+    if (!['partial', 'carried_forward', 'unavailable'].includes(payload.availability?.status)) errors.push('Crypto stats staging availability.status must be partial, carried_forward, or unavailable.');
+    if (payload.availability?.reason !== 'source_refresh_failed') errors.push('Crypto stats staging availability.reason must be source_refresh_failed.');
+    if (!isIsoDateTime(payload.availability?.checkedAt)) errors.push('Crypto stats staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+    if (partial && (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length)) errors.push('Partial Crypto stats staging availability.failures must be a non-empty array.');
+    if (!partial && payload.availability.failures !== undefined) errors.push('Non-partial Crypto stats staging availability.failures is not allowed.');
+  }
+  const dominanceUnavailable = payload.dominance?.availability?.status === 'unavailable';
+  if (!dominanceUnavailable && !dominanceValuesValid(payload.dominance)) errors.push('Crypto stats staging dominance must contain BTC, ETH, and others percentages totaling 100%.');
+  if (payload.dominance?.availability !== undefined) {
+    if (!['carried_forward', 'unavailable'].includes(payload.dominance.availability?.status)) errors.push('Crypto stats staging dominance availability.status must be carried_forward or unavailable.');
+    if (payload.dominance.availability?.reason !== 'source_refresh_failed') errors.push('Crypto stats staging dominance availability.reason must be source_refresh_failed.');
+    if (!isIsoDateTime(payload.dominance.availability?.checkedAt)) errors.push('Crypto stats staging dominance availability.checkedAt must be an offset-bearing ISO timestamp.');
+  }
+  const degradedRows = payload.stats.filter((row) => row?.availability !== undefined);
+  if (payload.availability === undefined) {
+    if (degradedRows.length) errors.push('Healthy Crypto stats staging cannot contain row availability markers.');
+    if (payload.dominance?.availability !== undefined) errors.push('Healthy Crypto stats staging cannot contain a dominance availability marker.');
+  }
+  if (carriedForward) {
+    if (degradedRows.length !== payload.stats.length) errors.push('Carried-forward Crypto stats staging requires an availability marker on every row.');
+    if (payload.dominance?.availability === undefined) errors.push('Carried-forward Crypto stats staging requires a dominance availability marker.');
+  }
+  if (unavailable && payload.dominance?.availability?.status !== 'unavailable') {
+    errors.push('Unavailable Crypto stats staging requires unavailable dominance.');
+  }
+  if (partial && Array.isArray(payload.availability?.failures)) {
+    const symbolByProvider = new Map([['fearGreed', 'F&G'], ['altcoinSeason', 'ALTSEASON'], ['totalMarketCap', 'TOTAL']]);
+    const failedSymbols = new Set();
+    for (const failure of payload.availability.failures) {
+      const symbol = symbolByProvider.get(failure?.provider);
+      if (!symbol) errors.push(`Crypto stats staging availability failure names unknown provider ${failure?.provider || '(blank)'}.`);
+      else if (failedSymbols.has(symbol)) errors.push(`Crypto stats staging availability contains duplicate provider ${failure.provider}.`);
+      else failedSymbols.add(symbol);
+      if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`Crypto stats staging availability failure ${failure?.provider || '(blank)'} must include a message.`);
+    }
+    for (const row of payload.stats) {
+      if (Boolean(row?.availability) !== failedSymbols.has(row?.sym)) errors.push(`Crypto stats staging availability failure must correspond to degraded row ${row?.sym || '(blank)'}.`);
+    }
+    if (Boolean(payload.dominance?.availability) !== failedSymbols.has('TOTAL')) errors.push('Crypto stats staging dominance availability must correspond to the TOTAL provider result.');
   }
   return errors;
 }

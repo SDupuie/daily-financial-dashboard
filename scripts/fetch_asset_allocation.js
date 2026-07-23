@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const { isIsoDate } = require('./calendar_contract');
+const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
 
 const REQUEST_TIMEOUT_MS = 10000;
@@ -577,10 +577,62 @@ function validateAssetAllocationPortfolioPayload(payload) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Asset Allocation portfolio staging payload must be an object.'];
   const unavailable = payload.availability?.status === 'unavailable';
+  const partial = payload.availability?.status === 'partial';
+  const carriedForward = payload.availability?.status === 'carried_forward';
+  if (!isIsoDateTime(payload.compiledAt)) errors.push('Asset Allocation portfolio staging compiledAt must be an offset-bearing ISO timestamp.');
+  if (typeof payload.source !== 'string' || !payload.source.trim()) errors.push('Asset Allocation portfolio staging source must be populated.');
+  if (!/^\d{4}-\d{2}$/.test(String(payload.month || ''))) errors.push('Asset Allocation portfolio staging month must be YYYY-MM.');
+  if (payload.availability !== undefined) {
+    if (!['partial', 'carried_forward', 'unavailable'].includes(payload.availability?.status)) errors.push('Asset Allocation portfolio staging availability.status must be partial, carried_forward, or unavailable.');
+    if (payload.availability?.reason !== 'source_refresh_failed') errors.push('Asset Allocation portfolio staging availability.reason must be source_refresh_failed.');
+    if (!isIsoDateTime(payload.availability?.checkedAt)) errors.push('Asset Allocation portfolio staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+    if (partial && (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length)) errors.push('Partial Asset Allocation portfolio staging availability.failures must be a non-empty array.');
+    if (!partial && payload.availability.failures !== undefined) errors.push('Non-partial Asset Allocation portfolio staging availability.failures is not allowed.');
+  }
   if (!Array.isArray(payload.rows)) return ['Asset Allocation portfolio staging rows must be an array.'];
   if (!unavailable) {
+    const expectedTickers = new Set(HOLDINGS.map((holding) => holding.symbol));
+    const seenTickers = new Set();
+    const requiredFields = ['sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR'];
+    if (payload.rows.length !== HOLDINGS.length) {
+      errors.push(`Asset Allocation portfolio staging must contain exactly ${HOLDINGS.length} rows.`);
+    }
+    payload.rows.forEach((row, index) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        errors.push(`Asset Allocation portfolio staging rows[${index}] must be an object.`);
+        return;
+      }
+      const ticker = String(row.ticker || '').trim();
+      if (!expectedTickers.has(ticker)) errors.push(`Asset Allocation portfolio staging rows[${index}].ticker is unexpected: ${ticker || '(blank)'}.`);
+      else if (seenTickers.has(ticker)) errors.push(`Asset Allocation portfolio staging contains duplicate ticker ${ticker}.`);
+      else seenTickers.add(ticker);
+      for (const field of requiredFields) {
+        if (typeof row[field] !== 'string' || !row[field].trim()) {
+          errors.push(`Asset Allocation portfolio staging rows[${index}].${field} must be a populated string.`);
+        }
+      }
+      if (row.availability !== undefined) {
+        if (!['carried_forward', 'unavailable'].includes(row.availability?.status)) errors.push(`Asset Allocation portfolio staging rows[${index}].availability.status must be carried_forward or unavailable.`);
+        if (row.availability?.reason !== 'source_refresh_failed') errors.push(`Asset Allocation portfolio staging rows[${index}].availability.reason must be source_refresh_failed.`);
+        if (!isIsoDateTime(row.availability?.checkedAt)) errors.push(`Asset Allocation portfolio staging rows[${index}].availability.checkedAt must be an offset-bearing ISO timestamp.`);
+      }
+    });
     for (const holding of HOLDINGS) {
-      if (!payload.rows.some((row) => row?.ticker === holding.symbol)) errors.push(`Asset Allocation portfolio staging is missing ${holding.symbol}.`);
+      if (!seenTickers.has(holding.symbol)) errors.push(`Asset Allocation portfolio staging is missing ${holding.symbol}.`);
+    }
+    const degradedRows = payload.rows.filter((row) => row?.availability !== undefined);
+    if (!partial && !carriedForward && degradedRows.length) errors.push('Healthy Asset Allocation portfolio staging cannot contain row availability markers.');
+    if (partial && Array.isArray(payload.availability?.failures)) {
+      const failureTickers = new Set();
+      for (const failure of payload.availability.failures) {
+        if (!expectedTickers.has(failure?.ticker)) errors.push(`Asset Allocation portfolio staging availability failure names unknown ticker ${failure?.ticker || '(blank)'}.`);
+        else if (failureTickers.has(failure.ticker)) errors.push(`Asset Allocation portfolio staging availability contains duplicate ticker ${failure.ticker}.`);
+        else failureTickers.add(failure.ticker);
+        if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`Asset Allocation portfolio staging availability failure ${failure?.ticker || '(blank)'} must include a message.`);
+      }
+      for (const row of payload.rows) {
+        if (Boolean(row?.availability) !== failureTickers.has(row?.ticker)) errors.push(`Asset Allocation portfolio staging availability failure must correspond to degraded row ${row?.ticker || '(blank)'}.`);
+      }
     }
   } else if (payload.rows.length) {
     errors.push('Unavailable Asset Allocation portfolio staging must contain no rows.');
@@ -589,12 +641,14 @@ function validateAssetAllocationPortfolioPayload(payload) {
 }
 
 function validateAssetAllocationSummaryPayload(payload) {
-  try {
-    normalizedSummary(payload, Boolean(payload?.stale), payload?.refreshError || '');
-    return [];
-  } catch (error) {
-    return [error.message];
-  }
+  const errors = [];
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Asset Allocation summary staging payload must be an object.'];
+  if (!isIsoDate(payload.asOf)) errors.push('Asset Allocation summary asOf must be YYYY-MM-DD.');
+  if (!['available', 'unavailable'].includes(payload.status)) errors.push('Asset Allocation summary status must be available or unavailable.');
+  if (typeof payload.stale !== 'boolean') errors.push('Asset Allocation summary stale must be boolean.');
+  if (payload.status === 'available' && !Number.isFinite(payload.portfolioMtdReturnValue)) errors.push('Asset Allocation summary portfolioMtdReturnValue must be finite when status is available.');
+  if (payload.status === 'unavailable' && payload.portfolioMtdReturnValue !== null) errors.push('Asset Allocation summary portfolioMtdReturnValue must be null when status is unavailable.');
+  return errors;
 }
 
 async function fetchPortfolioSummary(args) {

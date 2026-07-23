@@ -3,11 +3,11 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const os = require('os');
 const { atomicWriteJson } = require('./staging_writer');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
-  buildCompanyReleaseTasks,
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
@@ -32,6 +32,7 @@ const {
   dateFromIso,
   displayDatesForRange,
   isIsoDate,
+  isIsoDateTime,
   isoFromDate,
   isSupportedFiveTradingDayRange
 } = require('./calendar_contract');
@@ -50,7 +51,24 @@ const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
 const DEFAULT_EARNINGSAPI_RESERVE = 20;
 const DEFAULT_SCHEDULE_CONFIRMATIONS = path.resolve(process.cwd(), 'generated', 'earnings_schedule_confirmations.json');
 const DEFAULT_SCHEDULE_REVIEW = path.resolve(process.cwd(), 'generated', 'earnings_schedule_review.json');
-const SECONDARY_RECOVERY_MIN_MARKET_CAP = DISPLAY_MIN_MARKET_CAP;
+const ZACKS_ENDPOINT = 'https://www.zacks.com/data_handler/earnings_calendar/calendar_handlers.php';
+const ZACKS_REFERER = 'https://www.zacks.com/earnings/earnings-calendar?icid=earnings-earnings-nav_tracking-zcom-main_menu_wrapper-earnings_calendar';
+const ZACKS_BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36';
+const ZACKS_PAGE_READY_TIMEOUT_MS = 12000;
+const ZACKS_MONTHS = new Map([
+  ['JAN', 0],
+  ['FEB', 1],
+  ['MAR', 2],
+  ['APR', 3],
+  ['MAY', 4],
+  ['JUN', 5],
+  ['JUL', 6],
+  ['AUG', 7],
+  ['SEP', 8],
+  ['OCT', 9],
+  ['NOV', 10],
+  ['DEC', 11]
+]);
 const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
 const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 14;
 const REACTION_LOOKBACK_DAYS = 5;
@@ -399,6 +417,409 @@ function fetchText(url, args, headers = {}) {
     });
     req.setTimeout(args.timeoutMs, () => req.destroy(new Error('request timeout')));
   });
+}
+
+function htmlDecode(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)));
+}
+
+function cleanHtmlText(value) {
+  return htmlDecode(String(value || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function zacksDateTimestamp(isoDate) {
+  return Math.floor(Date.parse(`${isoDate}T00:00:00-04:00`) / 1000);
+}
+
+function zacksUrl(date, type) {
+  return zacksUrlForEndpointDate(zacksDateTimestamp(date), type);
+}
+
+function zacksUrlForEndpointDate(endpointDate, type) {
+  const url = new URL(ZACKS_ENDPOINT);
+  url.searchParams.set('calltype', 'eventscal');
+  url.searchParams.set('date', String(endpointDate));
+  url.searchParams.set('type', String(type));
+  url.searchParams.set('search_trigger', '0');
+  return url.toString();
+}
+
+function zacksUnavailableResult(date, type, url, error, started = Date.now()) {
+  return {
+    date,
+    type,
+    provider: 'zacks',
+    url,
+    ok: false,
+    status: 0,
+    responseMs: Date.now() - started,
+    body: '',
+    error
+  };
+}
+
+function resolvePlaywrightModule(args = {}) {
+  if (args.playwright) return args.playwright;
+  const candidates = [
+    process.env.PLAYWRIGHT_MODULE_PATH,
+    'playwright',
+    path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'node_modules', 'playwright')
+  ].filter(Boolean);
+  const failures = [];
+  for (const candidate of candidates) {
+    try {
+      return require(candidate);
+    } catch (error) {
+      failures.push(`${candidate}: ${error.message}`);
+    }
+  }
+  throw new Error(`Playwright is unavailable for Zacks browser fetch. ${failures.join(' | ')}`);
+}
+
+function zacksMonthDayKey(isoDate) {
+  const date = dateFromIso(isoDate);
+  return `${date.getUTCMonth()}:${date.getUTCDate()}`;
+}
+
+function zacksVisibleDateFromButtonText(text, displayDates) {
+  const match = String(text || '').toUpperCase().match(/\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+([A-Z]{3})\s+(\d{1,2})\b/);
+  if (!match) return '';
+  const month = ZACKS_MONTHS.get(match[1]);
+  const day = Number(match[2]);
+  if (!Number.isInteger(month) || !Number.isInteger(day)) return '';
+  const targetKey = `${month}:${day}`;
+  return displayDates.find((date) => zacksMonthDayKey(date) === targetKey) || '';
+}
+
+async function zacksCalendarButtons(page, displayDates) {
+  const buttons = await page.locator('button.cal_link').evaluateAll((nodes) => nodes.map((button, index) => ({
+    index,
+    text: button.innerText || button.textContent || '',
+    active: button.classList.contains('event_select')
+  })));
+  return buttons
+    .map((button) => ({
+      ...button,
+      visibleDate: zacksVisibleDateFromButtonText(button.text, displayDates)
+    }))
+    .filter((button) => button.visibleDate);
+}
+
+function isZacksEventscalUrl(value, type = 1) {
+  try {
+    const url = new URL(value);
+    return url.hostname === 'www.zacks.com'
+      && url.pathname === '/data_handler/earnings_calendar/calendar_handlers.php'
+      && url.searchParams.get('calltype') === 'eventscal'
+      && url.searchParams.get('type') === String(type);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function zacksEndpointDateFromUrl(value) {
+  try {
+    const date = new URL(value).searchParams.get('date') || '';
+    return /^\d+$/.test(date) ? date : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+async function zacksClickCalendarButton(page, buttonIndex, args) {
+  const waitMs = Math.max(3000, Math.min(args.timeoutMs, ZACKS_PAGE_READY_TIMEOUT_MS));
+  const responsePromise = page.waitForResponse((response) => isZacksEventscalUrl(response.url(), 1), { timeout: waitMs })
+    .catch(() => null);
+  await page.locator('button.cal_link').nth(buttonIndex).click();
+  return responsePromise;
+}
+
+async function zacksCaptureEndpointDate(page, button, buttons, args) {
+  const active = await page.locator('button.cal_link').nth(button.index).evaluate((node) => node.classList.contains('event_select'))
+    .catch(() => false);
+  if (active && buttons.length > 1) {
+    const alternate = buttons.find((candidate) => candidate.index !== button.index);
+    if (alternate) await zacksClickCalendarButton(page, alternate.index, args);
+  }
+  const response = await zacksClickCalendarButton(page, button.index, args);
+  const endpointDate = response ? zacksEndpointDateFromUrl(response.url()) : '';
+  if (!endpointDate) {
+    throw new Error(`Zacks did not expose an eventscal endpoint request for ${button.visibleDate}.`);
+  }
+  return endpointDate;
+}
+
+async function discoverZacksEndpointDates(page, args) {
+  const buttons = await zacksCalendarButtons(page, args.displayDates);
+  const byDate = new Map(buttons.map((button) => [button.visibleDate, button]));
+  const missingDates = args.displayDates.filter((date) => !byDate.has(date));
+  if (missingDates.length) {
+    throw new Error(`Zacks calendar page is missing visible date button(s): ${missingDates.join(', ')}.`);
+  }
+  const endpointDateByVisibleDate = new Map();
+  for (const visibleDate of args.displayDates) {
+    endpointDateByVisibleDate.set(visibleDate, await zacksCaptureEndpointDate(page, byDate.get(visibleDate), buttons, args));
+  }
+  return endpointDateByVisibleDate;
+}
+
+async function openZacksBrowserSession(args) {
+  const playwright = resolvePlaywrightModule(args);
+  const browser = await playwright.chromium.launch({ headless: true });
+  let context = null;
+  let page = null;
+  try {
+    context = await browser.newContext({
+      viewport: { width: 1365, height: 900 },
+      userAgent: ZACKS_BROWSER_USER_AGENT
+    });
+    page = await context.newPage();
+    await page.goto(ZACKS_REFERER, {
+      waitUntil: 'domcontentloaded',
+      timeout: args.timeoutMs
+    });
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || '';
+      return /Pardon Our Interruption/i.test(document.title)
+        || /Pardon Our Interruption/i.test(text)
+        || Boolean(document.querySelector('#earnings_rel_data_all_table, table.ec-ear-sales-table, button.buttons-csv'));
+    }, null, { timeout: Math.max(3000, Math.min(args.timeoutMs, ZACKS_PAGE_READY_TIMEOUT_MS)) }).catch(() => {});
+    const pageState = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      return {
+        title: document.title,
+        url: location.href,
+        hasInterruption: /Pardon Our Interruption/i.test(document.title) || /Pardon Our Interruption/i.test(text),
+        hasCalendarTable: Boolean(document.querySelector('#earnings_rel_data_all_table, table.ec-ear-sales-table')),
+        hasCsvButton: Boolean(document.querySelector('button.buttons-csv')),
+        tableCount: document.querySelectorAll('table').length
+      };
+    });
+    if (pageState.hasInterruption) {
+      throw new Error('Zacks browser page returned an interstitial challenge.');
+    }
+    if (!pageState.hasCalendarTable && !pageState.hasCsvButton) {
+      throw new Error(`Zacks browser page did not expose the earnings calendar table or CSV control. Title: ${pageState.title || 'unknown'}`);
+    }
+    const endpointDateByVisibleDate = await discoverZacksEndpointDates(page, args);
+    return { browser, context, pageState, endpointDateByVisibleDate };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
+}
+
+async function fetchZacksEventTable(date, type, args, session) {
+  const endpointDate = session?.endpointDateByVisibleDate?.get(date);
+  const url = endpointDate ? zacksUrlForEndpointDate(endpointDate, type) : zacksUrl(date, type);
+  const started = Date.now();
+  if (!endpointDate) {
+    return zacksUnavailableResult(date, type, url, `Zacks endpoint date mapping is unavailable for ${date}.`, started);
+  }
+  if (!session?.context?.request) {
+    return zacksUnavailableResult(date, type, url, 'Zacks browser context is unavailable.', started);
+  }
+  let response;
+  try {
+    response = await session.context.request.get(url, {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,text/plain,*/*',
+        Referer: ZACKS_REFERER,
+        'X-Requested-With': 'XMLHttpRequest'
+      },
+      timeout: args.timeoutMs
+    });
+  } catch (error) {
+    return zacksUnavailableResult(date, type, url, error.message, started);
+  }
+  const body = await response.text();
+  return {
+    date,
+    type,
+    provider: 'zacks',
+    url,
+    ok: response.ok(),
+    status: response.status(),
+    responseMs: Date.now() - started,
+    body,
+    error: response.ok() ? '' : body.slice(0, 240) || `HTTP ${response.status()}`
+  };
+}
+
+function extractHtmlCells(rowHtml, tag) {
+  return [...String(rowHtml || '').matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi'))]
+    .map((match) => ({ html: match[1], text: cleanHtmlText(match[1]) }));
+}
+
+function extractHtmlRowCells(rowHtml) {
+  return [...String(rowHtml || '').matchAll(/<(?:th|td)\b[^>]*>([\s\S]*?)<\/(?:th|td)>/gi)]
+    .map((match) => ({ html: match[1], text: cleanHtmlText(match[1]) }));
+}
+
+function normalizeHeader(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function zacksColumnIndexes(headers, metric) {
+  const normalized = headers.map(normalizeHeader);
+  const find = (...patterns) => normalized.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
+  return {
+    symbol: find(/^symbol$/, /^ticker$/),
+    company: find(/^company$/, /^companyname$/, /^name$/),
+    marketCap: find(/^marketcap/, /^mktcap/),
+    time: find(/^time$/, /^reporttime$/, /^earningstime$/, /^salesstime$/),
+    estimate: find(/estimate/, /expected/, /consensus/),
+    actual: find(/reported/, /actual/),
+    surprise: find(/surprise/),
+    date: find(/^date$/, /^reportdate$/),
+    metric
+  };
+}
+
+function zacksRequiredColumns(indexes) {
+  return ['symbol', 'marketCap', 'time', 'estimate', 'actual'].filter((field) => indexes[field] < 0);
+}
+
+function parseZacksSymbol(cell) {
+  const hrefMatch = String(cell?.html || '').match(/\/stock\/quote\/([A-Z0-9.-]+)/i)
+    || String(cell?.html || '').match(/quote\/([A-Z0-9.-]+)/i);
+  if (hrefMatch) return hrefMatch[1].toUpperCase();
+  const text = String(cell?.text || '').toUpperCase();
+  const tokens = text.match(/\b[A-Z][A-Z0-9.-]{0,9}\b/g) || [];
+  return tokens.find((token) => !['QUICK', 'QUOTE', 'ADD', 'TO', 'PORTFOLIO'].includes(token)) || '';
+}
+
+function parseZacksNumber(value) {
+  const raw = String(value || '').trim();
+  if (!raw || /^-+$/.test(raw) || /^n\/a$/i.test(raw)) return null;
+  const paren = /^\((.*)\)$/.exec(raw);
+  const sign = paren ? -1 : 1;
+  const cleaned = (paren ? paren[1] : raw).replace(/[$,%]/g, '').replace(/,/g, '').trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(cleaned)) return null;
+  return sign * Number(cleaned);
+}
+
+function parseZacksMoney(value, { millions = false } = {}) {
+  const raw = String(value || '').trim();
+  if (!raw || /^-+$/.test(raw) || /^n\/a$/i.test(raw)) return null;
+  const suffix = raw.match(/([tmb])\b/i)?.[1]?.toLowerCase() || '';
+  const numeric = parseZacksNumber(raw.replace(/[tmb]\b/i, ''));
+  if (!Number.isFinite(numeric)) return null;
+  if (suffix === 't') return numeric * 1000000000000;
+  if (suffix === 'b') return numeric * 1000000000;
+  if (suffix === 'm') return numeric * 1000000;
+  return millions ? numeric * 1000000 : numeric;
+}
+
+function normalizeZacksTiming(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === '--' || raw === '-') return 'unknown';
+  if (['bmo', 'before market open', 'before open', 'pre-market', 'premarket'].includes(raw)) return 'bmo';
+  if (['amc', 'after market close', 'after close', 'post-market', 'postmarket'].includes(raw)) return 'amc';
+  if (['dmh', 'during market hours', 'during market'].includes(raw)) return 'dmh';
+  const time = raw.match(/\b(\d{1,2}):(\d{2})\b/);
+  if (!time) return 'unknown';
+  const minutes = Number(time[1]) * 60 + Number(time[2]);
+  if (minutes < 9 * 60 + 30) return 'bmo';
+  if (minutes >= 16 * 60) return 'amc';
+  return 'dmh';
+}
+
+function parseZacksTable(result, metric) {
+  if (!result.ok) return { ...result, ok: false, rows: [], rowCount: 0, error: result.error || `HTTP ${result.status}` };
+  if (/Pardon Our Interruption|initializeProtection|reese/i.test(result.body)) {
+    return { ...result, ok: false, rows: [], rowCount: 0, error: 'Zacks returned an interstitial challenge instead of the calendar table.' };
+  }
+  const tableMatch = String(result.body || '').match(/<table\b[\s\S]*?<\/table>/i);
+  if (!tableMatch) return { ...result, ok: false, rows: [], rowCount: 0, error: 'Zacks response is missing a calendar table.' };
+  const rowHtml = [...tableMatch[0].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((match) => match[1]);
+  const headerRow = rowHtml.find((row) => /<th\b/i.test(row)) || '';
+  const headers = extractHtmlCells(headerRow, 'th').map((cell) => cell.text);
+  const indexes = zacksColumnIndexes(headers, metric);
+  const missingColumns = zacksRequiredColumns(indexes);
+  if (missingColumns.length) {
+    return {
+      ...result,
+      ok: false,
+      rows: [],
+      rowCount: 0,
+      error: `Zacks ${metric} table is missing required columns: ${missingColumns.join(', ')}.`
+    };
+  }
+  const rows = rowHtml
+    .filter((row) => /<td\b/i.test(row))
+    .map(extractHtmlRowCells)
+    .map((cells) => {
+      const symbol = parseZacksSymbol(cells[indexes.symbol]);
+      const reportDate = indexes.date >= 0 && cells[indexes.date]?.text ? String(cells[indexes.date].text).trim() : result.date;
+      return {
+        symbol,
+        company: indexes.company >= 0 ? cells[indexes.company]?.text || '' : symbol,
+        reportDate,
+        reportTiming: normalizeZacksTiming(cells[indexes.time]?.text),
+        marketCap: parseZacksMoney(cells[indexes.marketCap]?.text, { millions: true }),
+        estimate: metric === 'revenue'
+          ? parseZacksMoney(cells[indexes.estimate]?.text, { millions: true })
+          : parseZacksNumber(cells[indexes.estimate]?.text),
+        actual: metric === 'revenue'
+          ? parseZacksMoney(cells[indexes.actual]?.text, { millions: true })
+          : parseZacksNumber(cells[indexes.actual]?.text),
+        surprisePercent: indexes.surprise >= 0 ? parseZacksNumber(cells[indexes.surprise]?.text) : null,
+        raw: Object.fromEntries(headers.map((header, index) => [header || `column${index}`, cells[index]?.text || '']))
+      };
+    })
+    .filter((row) => /^[A-Z0-9.-]+$/.test(row.symbol) && isIsoDate(row.reportDate) && row.reportDate === result.date);
+  return {
+    ...result,
+    ok: rows.length > 0,
+    rows,
+    rowCount: rows.length,
+    headers,
+    error: rows.length ? '' : `Zacks ${metric} table contains no parseable rows for ${result.date}.`
+  };
+}
+
+async function fetchZacksCalendar(args) {
+  const days = [];
+  let session = null;
+  try {
+    session = await openZacksBrowserSession(args);
+    for (const date of args.displayDates) {
+      const [epsResult, revenueResult] = await Promise.all([
+        fetchZacksEventTable(date, 1, args, session),
+        fetchZacksEventTable(date, 9, args, session)
+      ]);
+      days.push({
+        date,
+        eps: parseZacksTable(epsResult, 'eps'),
+        revenue: parseZacksTable(revenueResult, 'revenue')
+      });
+    }
+  } catch (error) {
+    for (const date of args.displayDates) {
+      days.push({
+        date,
+        eps: parseZacksTable(zacksUnavailableResult(date, 1, zacksUrl(date, 1), error.message), 'eps'),
+        revenue: parseZacksTable(zacksUnavailableResult(date, 9, zacksUrl(date, 9), error.message), 'revenue')
+      });
+    }
+  } finally {
+    if (session?.browser) await session.browser.close().catch(() => {});
+  }
+  return days;
 }
 
 function ensureFinnhubPrimaryUsable(finnhubCalendar) {
@@ -786,12 +1207,12 @@ function profileIsDisplayEligible(profile, listing) {
   if (!profile) return false;
   if (!isEligibleFinnhubUsListing(listing, profile.symbol)) return false;
   if ((profile.industry || '').toUpperCase() === 'N/A') return false;
-  return Number.isFinite(profile.marketCap) && profile.marketCap >= SECONDARY_RECOVERY_MIN_MARKET_CAP;
+  return Number.isFinite(profile.marketCap) && profile.marketCap >= DISPLAY_MIN_MARKET_CAP;
 }
 
 function secondaryRecoveryPriority(row, profile) {
   const marketCap = Number.isFinite(profile?.marketCap) ? profile.marketCap : row.marketCap;
-  if (Number.isFinite(marketCap) && marketCap >= 10000000000) return 'high';
+  if (Number.isFinite(marketCap) && marketCap >= DISPLAY_MIN_MARKET_CAP) return 'high';
   return 'normal';
 }
 
@@ -1604,7 +2025,7 @@ function profileRecoveryForRow(calendarRow, profile, metricsBySymbol, secondaryC
   if (profileHasIdentity(profile)) return null;
   const metric = metricsBySymbol.get(calendarRow.symbol);
   const secondaryCalendarRow = secondaryCalendarByKey.get(`${calendarRow.reportDate}:${calendarRow.symbol}`);
-  if (!Number.isFinite(metric?.marketCap) || metric.marketCap < SECONDARY_RECOVERY_MIN_MARKET_CAP) return null;
+  if (!Number.isFinite(metric?.marketCap) || metric.marketCap < DISPLAY_MIN_MARKET_CAP) return null;
   if (!secondaryCalendarRow?.company) return null;
   // Identity-only recovery: Finnhub remains the source for the earnings row.
   // These fallback fields only decide whether a profile-empty row can be displayed.
@@ -1725,6 +2146,276 @@ function buildRows(calendarRows, profiles, options = {}) {
       }
     };
   });
+}
+
+function zacksRowsByKey(days, metric) {
+  const byKey = new Map();
+  for (const day of days) {
+    for (const row of day[metric]?.rows || []) {
+      const key = `${row.reportDate}:${row.symbol}`;
+      const current = byKey.get(key);
+      if (!current || rowCompletenessScore({
+        reportTiming: row.reportTiming,
+        eps: metric === 'eps' ? { estimate: row.estimate, actual: row.actual } : {},
+        revenue: metric === 'revenue' ? { estimate: row.estimate, actual: row.actual } : {}
+      }) > rowCompletenessScore(current)) {
+        byKey.set(key, row);
+      }
+    }
+  }
+  return byKey;
+}
+
+function zacksGate(days, displayDates) {
+  const failures = [];
+  for (const day of days) {
+    for (const metric of ['eps', 'revenue']) {
+      const table = day[metric];
+      if (!table?.ok) {
+        failures.push({
+          code: `zacks_${metric}_table_unavailable`,
+          date: day.date,
+          status: table?.status || 0,
+          message: table?.error || `Zacks ${metric} table is unavailable.`
+        });
+      }
+    }
+  }
+  const epsRows = zacksRowsByKey(days, 'eps');
+  const revenueRows = zacksRowsByKey(days, 'revenue');
+  const missingRevenue = [...epsRows.keys()].filter((key) => !revenueRows.has(key));
+  const missingEps = [...revenueRows.keys()].filter((key) => !epsRows.has(key));
+  if (missingRevenue.length) failures.push({
+    code: 'zacks_sales_alignment_failure',
+    message: `Zacks sales table is missing ${missingRevenue.length} EPS row(s).`,
+    examples: missingRevenue.slice(0, 10)
+  });
+  if (missingEps.length) failures.push({
+    code: 'zacks_eps_alignment_failure',
+    message: `Zacks EPS table is missing ${missingEps.length} sales row(s).`,
+    examples: missingEps.slice(0, 10)
+  });
+  const invalidDates = [...epsRows.values(), ...revenueRows.values()]
+    .filter((row) => !displayDates.includes(row.reportDate))
+    .map((row) => `${row.reportDate}:${row.symbol}`);
+  if (invalidDates.length) failures.push({
+    code: 'zacks_invalid_dates',
+    message: `Zacks returned ${invalidDates.length} row(s) outside the active range.`,
+    examples: invalidDates.slice(0, 10)
+  });
+  const eligibleRows = [...epsRows.values()]
+    .filter((row) => revenueRows.has(`${row.reportDate}:${row.symbol}`))
+    .filter((row) => Number.isFinite(row.marketCap) && row.marketCap >= DISPLAY_MIN_MARKET_CAP);
+  if (!eligibleRows.length) failures.push({
+    code: 'zacks_empty_eligible_slate',
+    message: 'Zacks returned no display-eligible rows after market-cap filtering.'
+  });
+  return {
+    ok: failures.length === 0,
+    providerMode: 'zacks',
+    checkedAt: new Date().toISOString(),
+    failures,
+    rowCounts: {
+      eps: epsRows.size,
+      revenue: revenueRows.size,
+      eligible: eligibleRows.length
+    }
+  };
+}
+
+function zacksSourceFor(value) {
+  return Number.isFinite(value) ? 'zacks' : 'none';
+}
+
+function zacksMetricAudit(row) {
+  return {
+    estimate: row.estimate,
+    actual: row.actual,
+    surprisePercent: row.surprisePercent,
+    raw: row.raw
+  };
+}
+
+function zacksScheduleAudit(row) {
+  return {
+    symbol: row.symbol,
+    company: row.company || row.symbol,
+    reportDate: row.reportDate,
+    reportTiming: row.reportTiming,
+    marketCap: row.marketCap
+  };
+}
+
+function zacksListingFilterFailure(row, listing) {
+  const symbol = row?.symbol || '';
+  if (!listing) return { reason: 'missing_exact_finnhub_us_listing' };
+  if (listing.market !== 'US') return { reason: 'non_us_market', market: listing.market || '' };
+  if (listing.symbol !== symbol) return { reason: 'symbol_mismatch', listingSymbol: listing.symbol || '' };
+  if (!listing.mic) return { reason: 'missing_mic' };
+  if (/OTC|PIN[XML]/i.test(listing.mic)) return { reason: 'otc_or_pink_mic', mic: listing.mic };
+  return null;
+}
+
+function filterZacksRowsByFinnhubUsListings(rows, directory) {
+  const inputRows = Array.isArray(rows) ? rows : [];
+  const unavailableSummary = (reason, error = '') => ({
+    mode: 'unavailable_unfiltered',
+    inputRows: inputRows.length,
+    keptRows: inputRows.length,
+    droppedRows: 0,
+    reason,
+    error
+  });
+  if (!directory?.ok || !Array.isArray(directory.listings) || !directory.listings.length) {
+    return {
+      rows: inputRows,
+      summary: unavailableSummary('finnhub_us_symbol_directory_unavailable', directory?.error || ''),
+      dropped: []
+    };
+  }
+
+  const listingsBySymbol = new Map(directory.listings.map((listing) => [listing.symbol, listing]));
+  const kept = [];
+  const dropped = [];
+  for (const row of inputRows) {
+    const listing = listingsBySymbol.get(row.symbol);
+    const sourceAudit = {
+      ...row.sourceAudit,
+      finnhubUsListing: listing || null
+    };
+    const auditedRow = { ...row, sourceAudit };
+    const failure = zacksListingFilterFailure(row, listing);
+    if (failure || !isDisplayEligibleEarningsRow(auditedRow)) {
+      dropped.push({
+        symbol: row.symbol,
+        company: row.company,
+        marketCap: row.marketCap,
+        marketCapDisplay: row.marketCapDisplay,
+        ...(failure || { reason: 'not_display_eligible' }),
+        ...(listing ? {
+          mic: listing.mic || '',
+          type: listing.type || '',
+          currency: listing.currency || ''
+        } : {})
+      });
+    } else {
+      kept.push(auditedRow);
+    }
+  }
+
+  return {
+    rows: kept,
+    summary: {
+      mode: 'classified',
+      inputRows: inputRows.length,
+      keptRows: kept.length,
+      droppedRows: dropped.length,
+      dropped
+    },
+    dropped
+  };
+}
+
+function buildZacksRows(days, options = {}) {
+  const epsRows = zacksRowsByKey(days, 'eps');
+  const revenueRows = zacksRowsByKey(days, 'revenue');
+  const observedAt = isIsoDateTime(options.observedAt) ? options.observedAt : '';
+  return [...epsRows.values()]
+    .filter((epsRow) => revenueRows.has(`${epsRow.reportDate}:${epsRow.symbol}`))
+    .filter((epsRow) => Number.isFinite(epsRow.marketCap) && epsRow.marketCap >= DISPLAY_MIN_MARKET_CAP)
+    .map((epsRow) => {
+      const revenueRow = revenueRows.get(`${epsRow.reportDate}:${epsRow.symbol}`);
+      const eps = metricPayload('eps', epsRow.estimate, epsRow.actual, {
+        basis: '',
+        note: ''
+      });
+      const revenue = metricPayload('revenue', revenueRow.estimate, revenueRow.actual, {
+        note: ''
+      });
+      const sourceRow = {
+        reportTiming: epsRow.reportTiming,
+        eps: { estimate: epsRow.estimate, actual: epsRow.actual },
+        revenue: { estimate: revenueRow.estimate, actual: revenueRow.actual }
+      };
+      const row = {
+        symbol: epsRow.symbol,
+        company: epsRow.company || revenueRow.company || epsRow.symbol,
+        exchange: '',
+        country: '',
+        currency: '',
+        marketCap: epsRow.marketCap,
+        marketCapDisplay: marketCapDisplay(epsRow.marketCap),
+        reportDate: epsRow.reportDate,
+        reportTiming: epsRow.reportTiming,
+        ...((Number.isFinite(eps.actual) || Number.isFinite(revenue.actual)) && observedAt ? { actualsObservedAt: observedAt } : {}),
+        fiscalQuarterEnding: '',
+        fiscalQuarter: null,
+        fiscalYear: null,
+        eps,
+        revenue,
+        outcome: {
+          overall: combinedOutcome(eps.result, revenue.result),
+          guide: '',
+          interpretation: ''
+        },
+        reaction: null,
+        sourceStatus: computeEarningsSourceStatus(sourceRow, { requireComputedReaction: false }),
+        sourceSummary: sourceSummary('zacks'),
+        sourceAudit: {
+          zacks: {
+            schedule: zacksScheduleAudit(epsRow),
+            eps: zacksMetricAudit(epsRow),
+            revenue: zacksMetricAudit(revenueRow)
+          },
+          selectedSources: {
+            slate: 'zacks',
+            company: 'zacks',
+            marketCap: Number.isFinite(epsRow.marketCap) ? 'zacks' : 'none',
+            timing: epsRow.reportTiming === 'unknown' ? 'none' : 'zacks',
+            eps: {
+              estimate: zacksSourceFor(epsRow.estimate),
+              actual: zacksSourceFor(epsRow.actual)
+            },
+            revenue: {
+              estimate: zacksSourceFor(revenueRow.estimate),
+              actual: zacksSourceFor(revenueRow.actual)
+            },
+            reaction: 'none'
+          }
+        }
+      };
+      return row;
+    })
+    .filter(isDisplayEligibleEarningsRow)
+    .sort((left, right) => {
+      const dateCompare = left.reportDate.localeCompare(right.reportDate);
+      if (dateCompare) return dateCompare;
+      return (right.marketCap || 0) - (left.marketCap || 0) || left.symbol.localeCompare(right.symbol);
+    });
+}
+
+async function fetchZacksListingDirectory(args, token) {
+  if (token) return fetchFinnhubUsSymbols(args, token);
+  const cached = readFinnhubUsSymbolCache(args.finnhubUsSymbolCache);
+  if (cached) {
+    return {
+      ok: true,
+      status: 0,
+      responseMs: 0,
+      cacheHit: true,
+      listings: cached.listings,
+      cacheUpdatedAt: cached.updatedAt,
+      error: ''
+    };
+  }
+  return {
+    ok: false,
+    status: 0,
+    responseMs: 0,
+    cacheHit: false,
+    listings: [],
+    error: 'FINNHUB_API_KEY unavailable and no cached Finnhub U.S. symbol directory exists.'
+  };
 }
 
 function companyRowCompletenessScore(row) {
@@ -1850,9 +2541,11 @@ function buildEarningsApiRows(tasks, companyFetches) {
   }).filter(Boolean);
 }
 
-function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTasks) {
-  const counts = computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks);
+function summarizeLegacy(rows, fetches, secondaryRecoveryCandidates) {
+  const counts = computeEarningsWeekCounts(rows, secondaryRecoveryCandidates);
   return {
+    providerMode: 'legacy_backup',
+    zacksGate: fetches.zacksGate || null,
     counts,
     fetches: {
       finnhubCalendar: {
@@ -1929,6 +2622,54 @@ function summarize(rows, fetches, secondaryRecoveryCandidates, companyReleaseTas
   };
 }
 
+function summarizeZacks(rows, fetches) {
+  const fetchSummary = {
+    zacks: {
+      requests: fetches.zacksDays.length * 2,
+      ok: fetches.zacksDays.reduce((sum, day) => sum + (day.eps.ok ? 1 : 0) + (day.revenue.ok ? 1 : 0), 0),
+      rows: {
+        eps: fetches.zacksDays.reduce((sum, day) => sum + day.eps.rowCount, 0),
+        revenue: fetches.zacksDays.reduce((sum, day) => sum + day.revenue.rowCount, 0)
+      },
+      errors: fetches.zacksDays.flatMap((day) => ['eps', 'revenue']
+        .filter((metric) => !day[metric].ok)
+        .map((metric) => ({
+          date: day.date,
+          metric,
+          status: day[metric].status,
+          error: day[metric].error
+        })))
+    },
+    yahoo: {
+      requests: fetches.yahooFetches.length,
+      ok: fetches.yahooFetches.filter((item) => item.ok).length,
+      errors: fetches.yahooFetches.filter((item) => !item.ok).map((item) => ({
+        symbol: item.symbol,
+        status: item.status,
+        error: item.error
+      }))
+    }
+  };
+  if (fetches.finnhubUsSymbols) {
+    fetchSummary.finnhubUsSymbols = {
+      ok: fetches.finnhubUsSymbols.ok,
+      status: fetches.finnhubUsSymbols.status,
+      rows: fetches.finnhubUsSymbols.listings.length,
+      cacheHit: Boolean(fetches.finnhubUsSymbols.cacheHit),
+      error: fetches.finnhubUsSymbols.error
+    };
+  }
+  if (fetches.zacksListingFilter) {
+    fetchSummary.zacksListingFilter = fetches.zacksListingFilter;
+  }
+  return {
+    providerMode: 'zacks',
+    zacksGate: fetches.zacksGate,
+    counts: computeEarningsWeekCounts(rows, []),
+    fetches: fetchSummary
+  };
+}
+
 function printReport(payload, compact = false) {
   const { counts } = payload.summary;
   process.stdout.write(`Earnings Week Fetch Summary
@@ -1942,7 +2683,6 @@ Missing timing: ${counts.missingTiming}
 Missing revenue: ${counts.missingRevenue}
 Missing market cap: ${counts.missingMarketCap}
 Secondary recovery candidates: ${counts.secondaryRecoveryCandidates}
-Company-release tasks: ${counts.companyReleaseTasks}
 Output: ${payload.outputPath}
 `);
 
@@ -1978,11 +2718,53 @@ function formatSignedPct(value) {
 async function runBuild(argv = process.argv.slice(2)) {
   loadEnv();
   const args = parseArgs(argv);
+  const generatedAt = new Date(args.asOf);
+  const zacksDays = await fetchZacksCalendar(args);
+  const zacksSchemaGate = zacksGate(zacksDays, args.displayDates);
+  let payload;
+
+  if (zacksSchemaGate.ok) {
+    const token = process.env.FINNHUB_API_KEY;
+    const zacksRows = buildZacksRows(zacksDays, { observedAt: generatedAt.toISOString() });
+    const finnhubUsSymbols = await fetchZacksListingDirectory(args, token);
+    const listingFilter = filterZacksRowsByFinnhubUsListings(zacksRows, finnhubUsSymbols);
+    const yahooFetches = await fetchYahooBarsForRows(listingFilter.rows.filter(needsYahooReactionFetch), args, fetchJson);
+    const rows = attachReactions(listingFilter.rows, yahooFetches, { asOf: generatedAt });
+    payload = {
+      schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+      generatedAt: generatedAt.toISOString(),
+      range: {
+        from: args.from,
+        to: args.to
+      },
+      rows,
+      summary: summarizeZacks(rows, {
+        zacksDays,
+        zacksGate: zacksSchemaGate,
+        finnhubUsSymbols,
+        zacksListingFilter: listingFilter.summary,
+        yahooFetches
+      }),
+      outputPath: args.output
+    };
+    atomicWriteJson(args.scheduleReview, {
+      schemaVersion: 1,
+      generatedAt: args.asOf,
+      range: { from: args.from, to: args.to },
+      rows: [],
+      diagnostics: [],
+      outputPath: args.scheduleReview
+    });
+    atomicWriteJson(args.output, payload);
+    printReport(payload, args.compact);
+    return;
+  }
+
   const token = process.env.FINNHUB_API_KEY;
   const alphaVantageToken = process.env.ALPHA_VANTAGE_API_KEY;
   const earningsApiToken = process.env.EARNINGSAPI_API_KEY;
   if (!token) {
-    throw new Error('FINNHUB_API_KEY is required in .env or the environment.');
+    throw new Error(`Zacks gate failed and FINNHUB_API_KEY is unavailable for legacy backup. ${zacksSchemaGate.failures.map((failure) => failure.message).join(' ')}`);
   }
 
   const earningsApiUsage = earningsApiUsageForBuild(args);
@@ -2053,13 +2835,11 @@ async function runBuild(argv = process.argv.slice(2)) {
     if (dateCompare) return dateCompare;
     return left.symbol.localeCompare(right.symbol);
   });
-  const generatedAt = new Date(args.asOf);
   const yahooFetches = await fetchYahooBarsForRows(mergedRows.filter(needsYahooReactionFetch), args, fetchJson);
   const rows = attachReactions(mergedRows, yahooFetches, { asOf: generatedAt });
-  const companyReleaseTasks = buildCompanyReleaseTasks(rows, generatedAt);
   const earningsApiEntry = earningsApiDayEntry(earningsApiUsage, generatedAt);
 
-  const payload = {
+  payload = {
     schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
     generatedAt: generatedAt.toISOString(),
     range: {
@@ -2068,8 +2848,8 @@ async function runBuild(argv = process.argv.slice(2)) {
     },
     rows,
     secondaryRecoveryCandidates,
-    companyReleaseTasks,
-    summary: summarize(rows, {
+    summary: summarizeLegacy(rows, {
+      zacksGate: zacksSchemaGate,
       finnhubCalendar,
       finnhubUsSymbols,
       finnhubProfiles,
@@ -2086,7 +2866,7 @@ async function runBuild(argv = process.argv.slice(2)) {
         skipped: !args.useEarningsApi || args.skipEarningsApi || !earningsApiToken
       },
       yahooFetches
-    }, secondaryRecoveryCandidates, companyReleaseTasks),
+    }, secondaryRecoveryCandidates),
     outputPath: args.output
   };
 
@@ -2104,6 +2884,7 @@ module.exports = {
   buildEarningsApiRows,
   buildSecondaryRecoveryCandidates,
   buildRows,
+  buildZacksRows,
   calendarVerificationDates,
   ensureFinnhubPrimaryUsable,
   earningsApiUsageForBuild,
@@ -2111,16 +2892,22 @@ module.exports = {
   fetchAlphaVantageCalendar,
   fetchEarningsApiCalendar,
   fetchFinnhubUsSymbols,
+  fetchZacksCalendar,
+  filterZacksRowsByFinnhubUsListings,
   finnhubCalendarFromResponse,
   finnhubUsSymbolsFromResponse,
   fetchFinnhubMetrics,
   fetchYahooBars,
   fetchYahooBarsForRows,
+  parseZacksTable,
   profileFromCache,
   isEligibleFinnhubUsListing,
   readScheduleConfirmations,
   resolveProviderDateConflicts,
   runBuild,
+  zacksEndpointDateFromUrl,
+  zacksGate,
+  zacksVisibleDateFromButtonText,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
   storeProfileInCache

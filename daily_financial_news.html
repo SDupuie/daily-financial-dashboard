@@ -14646,7 +14646,10 @@
 
       function formatEarningsRevenue(value) {
         if (!Number.isFinite(value)) return '';
-        if (Math.abs(value) >= 1000000000) return formatEarningsCurrency(value, 1000000000, 2, 'B');
+        if (Math.abs(value) >= 1000000000) {
+          const billions = Math.abs(value) / 1000000000;
+          return formatEarningsCurrency(value, 1000000000, billions >= 100 ? 1 : 2, 'B');
+        }
         if (Math.abs(value) >= 1000000) return formatEarningsCurrency(value, 1000000, 1, 'M');
         return formatEarningsCurrency(value, 1, 0);
       }

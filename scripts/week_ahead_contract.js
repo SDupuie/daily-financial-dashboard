@@ -369,7 +369,10 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
     && canonicalWeek.days.length === 5;
   if (sameRange) {
     const week = applyWeekAheadLifecycle(structuredClone(canonicalWeek), null, { now: new Date(timestamp) });
-    if (week.source) delete week.source.timeInterpretation;
+    if (week.source) {
+      delete week.source.timeInterpretation;
+      week.source.status = 'cached';
+    }
     week.availability = {
       status: 'carried_forward',
       reason: 'source_refresh_failed',
@@ -947,6 +950,17 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
       errors.push('weekAhead.availability must be an object.');
     } else {
       if (!['carried_forward', 'partial', 'unavailable'].includes(payload.availability.status)) errors.push('weekAhead.availability.status must be carried_forward, partial, or unavailable.');
+      if (payload.availability.reason !== 'source_refresh_failed') errors.push('weekAhead.availability.reason must be source_refresh_failed.');
+      if (!isIsoDateTime(payload.availability.checkedAt)) errors.push('weekAhead.availability.checkedAt must be an offset-bearing ISO timestamp.');
+      if (payload.availability.status === 'partial' && (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length)) errors.push('weekAhead.availability.failures must be a non-empty array when partial.');
+      if (payload.availability.status !== 'partial' && payload.availability.failures !== undefined) errors.push('weekAhead.availability.failures is allowed only when partial.');
+      if (Array.isArray(payload.availability.failures)) {
+        payload.availability.failures.forEach((failure, index) => {
+          for (const field of ['source', 'item', 'message']) {
+            if (typeof failure?.[field] !== 'string' || !failure[field].trim()) errors.push(`weekAhead.availability.failures[${index}].${field} must be populated.`);
+          }
+        });
+      }
     }
   }
   if (payload.source?.status === 'unavailable' && payload.availability?.status !== 'unavailable') {
@@ -957,6 +971,15 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
   }
   if (payload.source?.status === 'partial' && payload.availability?.status !== 'partial') {
     errors.push('weekAhead.source.status partial requires weekAhead.availability.status partial.');
+  }
+  if (payload.availability?.status === 'partial' && payload.source?.status !== 'partial') {
+    errors.push('weekAhead.availability.status partial requires weekAhead.source.status partial.');
+  }
+  if (payload.source?.status === 'cached' && payload.availability?.status !== 'carried_forward') {
+    errors.push('weekAhead.source.status cached requires weekAhead.availability.status carried_forward.');
+  }
+  if (payload.availability?.status === 'carried_forward' && payload.source?.status !== 'cached') {
+    errors.push('weekAhead.availability.status carried_forward requires weekAhead.source.status cached.');
   }
   if (!Array.isArray(payload.days) || payload.days.length !== 5) {
     errors.push('weekAhead.days must contain exactly five weekdays.');

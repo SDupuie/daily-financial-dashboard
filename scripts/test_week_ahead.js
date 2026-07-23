@@ -362,6 +362,12 @@ async function testProducerAndScheduleNormalization() {
   assert.equal(partialPayload.availability.status, 'partial');
   assert.equal(partialPayload.availability.failures.length, 2);
   assert.deepEqual(validateWeekAheadPayload(partialPayload), []);
+  const missingPartialFailures = structuredClone(partialPayload);
+  delete missingPartialFailures.availability.failures;
+  assert.match(validateWeekAheadPayload(missingPartialFailures).join('\n'), /failures must be a non-empty array when partial/);
+  const malformedPartialFailure = structuredClone(partialPayload);
+  malformedPartialFailure.availability.failures = [{}];
+  assert.match(validateWeekAheadPayload(malformedPartialFailure).join('\n'), /failures\[0\]\.source must be populated/);
 
   const partialValues = await requestFxMacroValues(builtSchedule, 1000, {
     requestJson: async (url) => {
@@ -667,10 +673,14 @@ function testWeekAheadPreparationFallbacks() {
   });
   assert.equal(carried.mode, 'carried_forward');
   assert.equal(carried.week.availability.status, 'carried_forward');
+  assert.equal(carried.week.source.status, 'cached');
   assert.equal(carried.week.availability.checkedAt, '2026-07-10T21:05:00.000Z');
   assert.equal(carried.week.source.fetchedAt, payload.source.fetchedAt, 'Fallback must preserve the last successful source timestamp.');
   assert.deepEqual(carried.week.days, payload.days, 'Fallback must preserve the existing Week Ahead values and events.');
   assert.deepEqual(validateWeekAheadPayload(carried.week), []);
+  const mismatchedCarry = structuredClone(carried.week);
+  mismatchedCarry.source.status = 'fresh';
+  assert.match(validateWeekAheadPayload(mismatchedCarry).join('\n'), /carried_forward requires weekAhead\.source\.status cached/);
 
   const unavailable = buildWeekAheadPreparationFallback(payload, {
     from: '2026-07-17',
@@ -695,7 +705,7 @@ function testWeekAheadPreparationFallbacks() {
   assert.deepEqual(validateWeekAheadPayload(recovered), []);
 
   unavailable.week.availability.reason = 'unknown';
-  assert.deepEqual(validateWeekAheadPayload(unavailable.week), []);
+  assert.match(validateWeekAheadPayload(unavailable.week).join('\n'), /availability\.reason must be source_refresh_failed/);
 }
 
 function testCalendarAndTransientCases() {

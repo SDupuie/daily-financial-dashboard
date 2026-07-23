@@ -142,6 +142,8 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
       if (!unavailable && !partial) errors.push('Futures staging availability.status must be partial or unavailable.');
       if (payload.availability.reason !== 'source_refresh_failed') errors.push('Futures staging availability.reason must be source_refresh_failed.');
       if (!isOffsetIsoTimestamp(payload.availability.checkedAt)) errors.push('Futures staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+      if (partial && (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length)) errors.push('Partial Futures staging availability.failures must be a non-empty array.');
+      if (!partial && payload.availability.failures !== undefined) errors.push('Non-partial Futures staging availability.failures is not allowed.');
     }
   }
   if (!Array.isArray(payload.futures)) {
@@ -163,7 +165,12 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
       continue;
     }
     if (row.symbol !== spec.symbol) errors.push(`${label}.symbol must be ${spec.symbol}.`);
+    if (row.availability !== undefined && row.availability?.status !== 'unavailable') {
+      errors.push(`${label}.availability.status must be unavailable.`);
+    }
     if (row.availability?.status === 'unavailable') {
+      if (row.availability.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+      if (!isOffsetIsoTimestamp(row.availability.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
       if (typeof row.label !== 'string' || !row.label.trim()) errors.push(`${label}.label must be populated.`);
       if (row.value !== 'Unavailable') errors.push(`${label}.value must be Unavailable when the row is unavailable.`);
       if (typeof row.body !== 'string' || !row.body.trim()) errors.push(`${label}.body must explain unavailable data.`);
@@ -193,6 +200,22 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
     }
     const expectedDir = row.raw.pct > 0 ? 'up' : row.raw.pct < 0 ? 'down' : 'flat';
     if (Number.isFinite(row.raw.pct) && row.dir !== expectedDir) errors.push(`${label}.dir must match raw.pct.`);
+  }
+  const unavailableRows = payload.futures.filter((row) => row?.availability?.status === 'unavailable');
+  if (partial && unavailableRows.length === FUTURES.length) errors.push('Partial Futures staging must contain at least one available current-run row.');
+  if (!partial && unavailableRows.length) errors.push('Unavailable Futures rows require partial section availability diagnostics.');
+  if (partial && Array.isArray(payload.availability?.failures)) {
+    const failedSymbols = new Set();
+    for (const failure of payload.availability.failures) {
+      if (!FUTURES.some((spec) => spec.symbol === failure?.symbol)) errors.push(`Futures staging availability failure names unknown symbol ${failure?.symbol || '(blank)'}.`);
+      else if (failedSymbols.has(failure.symbol)) errors.push(`Futures staging availability contains duplicate symbol ${failure.symbol}.`);
+      else failedSymbols.add(failure.symbol);
+      if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`Futures staging availability failure ${failure?.symbol || '(blank)'} must include a message.`);
+    }
+    for (const row of payload.futures) {
+      const rowUnavailable = row?.availability?.status === 'unavailable';
+      if (rowUnavailable !== failedSymbols.has(row?.symbol)) errors.push(`Futures staging availability failure must correspond to unavailable row ${row?.symbol || '(blank)'}.`);
+    }
   }
   return errors;
 }
@@ -662,6 +685,7 @@ async function fetchFuture(spec, args, runAt = new Date()) {
 }
 
 function futuresOutput(args, checkedAt, results, failures) {
+  if (failures.length === FUTURES.length) return buildUnavailableFuturesPayload(args.mode, checkedAt);
   return {
     compiledAt: checkedAt.toISOString(),
     source: 'Yahoo Finance Chart API',
@@ -1100,6 +1124,7 @@ function compactChartPayload(payload) {
 }
 
 function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
+  if (canonicalChartData?.availability?.status === 'unavailable') return buildUnavailableChartData(checkedAt);
   const timestamp = new Date(checkedAt).toISOString();
   const rounded = roundChartPayload(canonicalChartData);
   // Mark the payload and each series stale so renderers and validators cannot
@@ -1113,6 +1138,20 @@ function buildChartDataFallback(canonicalChartData, checkedAt = new Date()) {
     },
     series: (Array.isArray(rounded.series) ? rounded.series : [])
       .map((series) => carriedForwardChartSeries(series, timestamp))
+  };
+}
+
+function buildUnavailableChartData(checkedAt = new Date()) {
+  const timestamp = new Date(checkedAt).toISOString();
+  return {
+    schemaVersion: 1,
+    generatedAt: timestamp,
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: timestamp
+    },
+    series: []
   };
 }
 
@@ -1145,8 +1184,16 @@ function validateChartStagingPayload(payload, expectedRows = []) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
   if (payload.schemaVersion !== 1) errors.push('Chart staging schemaVersion must be 1.');
+  if (!isChartQuoteRevision(payload.generatedAt)) errors.push('Chart staging generatedAt must be an offset-bearing ISO timestamp.');
   if (payload.quoteRows !== undefined) errors.push('Chart staging quoteRows is no longer stored; derive quote rows from series.');
   if (!Array.isArray(payload.series)) return [...errors, 'Chart staging series must be an array.'];
+  if (payload.availability?.status === 'unavailable') {
+    if (payload.availability.reason !== 'source_refresh_failed') errors.push('Unavailable Chart staging availability.reason must be source_refresh_failed.');
+    if (!isChartQuoteRevision(payload.availability.checkedAt)) errors.push('Unavailable Chart staging availability.checkedAt must be an offset-bearing ISO timestamp.');
+    if (payload.availability.failures !== undefined) errors.push('Unavailable Chart staging availability.failures is not allowed.');
+    if (payload.series.length) errors.push('Unavailable Chart staging must contain no series.');
+    return errors;
+  }
   const byTicker = new Map();
   for (const [index, item] of payload.series.entries()) {
     const ticker = String(item?.ticker || '').trim().toUpperCase();
@@ -1206,8 +1253,9 @@ function validateChartStagingPayload(payload, expectedRows = []) {
           if (!failureTickers.has(ticker)) errors.push(`Chart staging carried_forward series ${ticker} must have a matching availability failure.`);
         }
       }
-    } else if (availability.failures !== undefined) {
-      errors.push('Chart staging carried_forward availability.failures is not allowed.');
+    } else {
+      if (availability.failures !== undefined) errors.push('Chart staging carried_forward availability.failures is not allowed.');
+      if (carriedTickers.size !== byTicker.size) errors.push('Chart staging carried_forward availability requires every series to be marked carried_forward.');
     }
   }
   try {
@@ -1848,6 +1896,7 @@ module.exports = {
   REQUEST_TIMEOUT_MS,
   acceptedFreshChartTickers,
   buildChartDataFallback,
+  buildUnavailableChartData,
   buildUnavailableFuturesPayload: futuresModule.buildUnavailableFuturesPayload,
   CHART_ROW_CONCURRENCY,
     easternCashOpen: futuresModule.easternCashOpen,

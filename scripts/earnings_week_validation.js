@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   earningsCloseAvailable,
+  earningsReactionBasisForRow,
   earningsRowKey: rowKey,
   metricResult,
   validEarningsCommentaryDisposition,
@@ -61,7 +62,6 @@ const TOP_LEVEL_FIELDS = new Set([
   'availability',
   'rows',
   'secondaryRecoveryCandidates',
-  'companyReleaseTasks',
   'summary',
   'outputPath',
   'narrativeApply'
@@ -76,6 +76,7 @@ const ROW_FIELDS = new Set([
   'marketCapDisplay',
   'reportDate',
   'reportTiming',
+  'actualsObservedAt',
   'fiscalQuarterEnding',
   'fiscalQuarter',
   'fiscalYear',
@@ -206,6 +207,10 @@ function validateReaction(errors, row, label) {
     return;
   }
   if (!REACTION_BASES.has(reaction.basis)) errors.push(`${label}.reaction.basis is invalid.`);
+  const expectedBasis = earningsReactionBasisForRow(row);
+  if (REACTION_BASES.has(reaction.basis) && reaction.basis !== expectedBasis) {
+    errors.push(`${label}.reaction.basis must be ${expectedBasis}.`);
+  }
   if (!nullableNumber(reaction.percent)) errors.push(`${label}.reaction.percent must be numeric or null.`);
   if (!REACTION_STATUSES.has(reaction.status)) errors.push(`${label}.reaction.status is invalid.`);
   if (typeof reaction.note !== 'string') errors.push(`${label}.reaction.note must be a string.`);
@@ -277,6 +282,50 @@ function validateSelectedSources(errors, selected, expected, label, row = null, 
 
 function companyReleaseSource(value) {
   return String(value || '').startsWith('sec_company_release');
+}
+
+function validateZacksMetricAudit(errors, audit, row, metric, label) {
+  const item = audit?.zacks?.[metric];
+  if (!isObject(item)) {
+    errors.push(`${label}.sourceAudit.zacks.${metric} must be populated.`);
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(item, 'reportDate')) errors.push(`${label}.sourceAudit.zacks.${metric}.reportDate is not part of the Zacks metric audit contract.`);
+  if (Object.prototype.hasOwnProperty.call(item, 'reportTiming')) errors.push(`${label}.sourceAudit.zacks.${metric}.reportTiming is not part of the Zacks metric audit contract.`);
+  if (!nearlyEqualNullable(item.estimate, row[metric]?.estimate)) errors.push(`${label}.sourceAudit.zacks.${metric}.estimate must match ${metric}.estimate.`);
+  if (!nearlyEqualNullable(item.actual, row[metric]?.actual)) errors.push(`${label}.sourceAudit.zacks.${metric}.actual must match ${metric}.actual.`);
+}
+
+function validateZacksRowSourceAudit(errors, row, audit, selected, label) {
+  const schedule = audit?.zacks?.schedule;
+  if (!isObject(schedule)) {
+    errors.push(`${label}.sourceAudit.zacks.schedule must be populated.`);
+  } else {
+    if (schedule.symbol !== row.symbol) errors.push(`${label}.sourceAudit.zacks.schedule.symbol must match row.symbol.`);
+    if (schedule.company !== row.company) errors.push(`${label}.sourceAudit.zacks.schedule.company must match row.company.`);
+    if (schedule.reportDate !== row.reportDate) errors.push(`${label}.sourceAudit.zacks.schedule.reportDate must match row.reportDate.`);
+    if (schedule.reportTiming !== row.reportTiming) errors.push(`${label}.sourceAudit.zacks.schedule.reportTiming must match row.reportTiming.`);
+    if (!nearlyEqualNullable(schedule.marketCap ?? null, row.marketCap)) errors.push(`${label}.sourceAudit.zacks.schedule.marketCap must match row.marketCap.`);
+  }
+  validateZacksMetricAudit(errors, audit, row, 'eps', label);
+  validateZacksMetricAudit(errors, audit, row, 'revenue', label);
+  if (Object.prototype.hasOwnProperty.call(audit?.zacks || {}, 'marketCap')) errors.push(`${label}.sourceAudit.zacks.marketCap is not part of the Zacks audit contract; use sourceAudit.zacks.schedule.marketCap.`);
+  const expectedSources = {
+    slate: 'zacks',
+    company: 'zacks',
+    marketCap: expectedSource(row.marketCap, 'zacks'),
+    timing: row.reportTiming === 'unknown' ? 'none' : 'zacks',
+    eps: {
+      estimate: expectedSource(row.eps?.estimate, 'zacks'),
+      actual: expectedSource(row.eps?.actual, 'zacks')
+    },
+    revenue: {
+      estimate: expectedSource(row.revenue?.estimate, 'zacks'),
+      actual: expectedSource(row.revenue?.actual, 'zacks')
+    },
+    reaction: row.reaction?.status === 'computed' ? 'yahoo' : 'none'
+  };
+  validateSelectedSources(errors, selected, expectedSources, label, row, audit);
 }
 
 function validateCompanyReleaseResolutionEvidence(errors, resolution, label) {
@@ -596,6 +645,13 @@ function validateRow(errors, rowRaw, index, range, options = {}) {
     }
   }
   if (!TIMINGS.has(row.reportTiming)) errors.push(`${label}.reportTiming is invalid.`);
+  const hasActual = isFiniteNumber(row.eps?.actual) || isFiniteNumber(row.revenue?.actual);
+  if (row.actualsObservedAt !== undefined && !isIsoDateTime(row.actualsObservedAt)) {
+    errors.push(`${label}.actualsObservedAt must be an ISO timestamp when present.`);
+  }
+  if (row.reportTiming === 'unknown' && hasActual && !isIsoDateTime(row.actualsObservedAt)) {
+    errors.push(`${label}.actualsObservedAt is required when a TIME UNKNOWN row has reported actuals.`);
+  }
   if (!LIFECYCLES.has(row.lifecycle)) errors.push(`${label}.lifecycle is invalid.`);
   if (!nullableNumber(row.fiscalQuarter)) errors.push(`${label}.fiscalQuarter must be numeric or null.`);
   if (!nullableNumber(row.fiscalYear)) errors.push(`${label}.fiscalYear must be numeric or null.`);
@@ -625,6 +681,8 @@ function validateRow(errors, rowRaw, index, range, options = {}) {
       errors.push(`${label}.sourceAudit must be populated.`);
     } else if (!isObject(selected)) {
       errors.push(`${label}.sourceAudit.selectedSources must be populated.`);
+    } else if (selected.slate === 'zacks') {
+      validateZacksRowSourceAudit(errors, row, audit, selected, label);
     } else if (selected.slate === 'finnhub') {
       validateFinnhubRowSourceAudit(errors, row, audit, selected, label);
     } else if (SECONDARY_CALENDAR_SOURCES.has(selected.slate)) {
@@ -739,7 +797,7 @@ function validateNarrativeApply(errors, data, options = {}) {
 }
 
 function validatePublishedInternalQueues(errors, data) {
-  for (const field of ['secondaryRecoveryCandidates', 'companyReleaseTasks']) {
+  for (const field of ['secondaryRecoveryCandidates']) {
     if (data[field] === undefined) continue;
     if (!Array.isArray(data[field])) {
       errors.push(`${field} must be an array when present in published dashboard data.`);

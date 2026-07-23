@@ -7,6 +7,7 @@ const { isDeepStrictEqual } = require('util');
 const {
   acceptedFreshChartTickers,
   buildChartDataFallback,
+  buildUnavailableChartData,
   buildUnavailableFuturesPayload,
   compactChartPayload,
   deriveQuoteRowsFromSeries,
@@ -27,7 +28,7 @@ const {
   applyEarningsLifecycle,
   combinedOutcome,
   computeEarningsWeekCounts,
-  earningsReactionBasis,
+  earningsReactionBasisForRow,
   isDisplayEligibleEarningsRow,
   narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
@@ -499,12 +500,21 @@ function runWithSectionFallback(runFresh, buildFallback, options = {}) {
         // Continue to the section fallback when the latest staged artifact is absent or invalid.
       }
     }
-    // Fallbacks must validate like fresh payloads because Apply consumes both
-    // paths through the same staged-data contract.
-    const fallback = buildFallback(error);
-    const fallbackErrors = options.validateFallback ? options.validateFallback(fallback) : [];
+    // Prepare accepts fresh and fallback payloads through the same domain contract.
+    let fallback;
+    let fallbackErrors;
+    try {
+      fallback = buildFallback(error);
+      fallbackErrors = options.validateFallback ? options.validateFallback(fallback) : [];
+    } catch (fallbackError) {
+      fallbackErrors = [`Fallback construction failed: ${fallbackError.message}`];
+    }
     if (fallbackErrors?.length) {
-      process.stderr.write(`${options.label || 'Section'} fallback warning after ${error.message}: ${fallbackErrors.join(' ')}\n`);
+      fallback = options.buildUnavailable?.(error, fallbackErrors);
+      fallbackErrors = fallback && options.validateFallback ? options.validateFallback(fallback) : ['No terminal unavailable fallback was provided.'];
+      if (fallbackErrors?.length) {
+        throw new Error(`${options.label || 'Section'} could not construct a valid unavailable fallback after ${error.message}: ${fallbackErrors.join(' ')}`);
+      }
     }
     return { error, fallback, payload: fallback };
   }
@@ -959,26 +969,8 @@ function replaceJsonBlock(html, id, serializedJson) {
   );
 }
 
-function normalizeTapeCommentaryForPublication(data, chartData) {
-  const revisions = new Map((Array.isArray(chartData?.series) ? chartData.series : [])
-    .map((series) => [String(series?.ticker || '').toUpperCase(), series?.quoteRevision])
-    .filter(([ticker, quoteRevision]) => ticker && isIsoDateTime(quoteRevision)));
-  if (!revisions.size || !Array.isArray(data?.tape?.rows)) return;
-  data.tape.rows = data.tape.rows.map((row) => {
-    const ticker = String(row?.ticker || '').toUpperCase();
-    const quoteRevision = revisions.get(ticker);
-    if (!quoteRevision || row?.noteDisposition?.quoteRevision === quoteRevision) return row;
-    return unavailableTapeCommentary(row, quoteRevision);
-  });
-}
-
 function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, reviewChartData = null, { stampEdition = true, selectEarningsRows = false } = {}) {
   const stampedData = structuredClone(stampEdition ? stampDashboardEdition(dashboardData) : dashboardData);
-  try {
-    normalizeTapeCommentaryForPublication(stampedData, readJsonBlock(html, 'chart-data'));
-  } catch (_error) {
-    // Broken/missing chart-data is still caught by final validation.
-  }
   if (selectEarningsRows) prepareEarningsRowsForPublication(stampedData);
   stripPublishedEarningsStagingState(stampedData);
   delete stampedData.editorialReview;
@@ -1133,12 +1125,10 @@ function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null, syst
 
 function applyCryptoStats(data, payload) {
   if (!data.crypto || typeof data.crypto !== 'object' || Array.isArray(data.crypto)) data.crypto = {};
-  const stats = Array.isArray(payload?.stats) ? payload.stats : [];
-  const unavailable = payload?.availability?.status === 'unavailable';
-  data.crypto.stats = stats;
+  data.crypto.stats = payload.stats;
+  data.crypto.dominance = payload.dominance;
   if (payload.fetchedAt) data.crypto.statsFetchedAt = payload.fetchedAt;
   if (payload.availability) data.crypto.availability = payload.availability;
-  else if (!stats.length || unavailable) data.crypto.availability = { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: scheduledNow().toISOString() };
   else delete data.crypto.availability;
 }
 
@@ -1279,9 +1269,6 @@ function prepareCandidateNews(data, now = scheduledNow()) {
 }
 
 function applyFuturesModule(data, futuresPayload, windowMode) {
-  const expectedMode = windowMode === 'afternoon' ? 'session' : 'premarket';
-  const errors = validateFuturesPayload(futuresPayload, { expectedMode });
-  if (errors.length) futuresPayload = buildUnavailableFuturesPayload(expectedMode, scheduledNow());
   const labels = WINDOW_LABELS[windowMode];
   data.futuresModule = {
     ...data.futuresModule,
@@ -1294,14 +1281,6 @@ function applyFuturesModule(data, futuresPayload, windowMode) {
 }
 
 function applyAssetAllocationPortfolio(data, portfolioPayload) {
-  const unavailable = portfolioPayload?.availability?.status === 'unavailable';
-  if (!Array.isArray(portfolioPayload?.rows) || (!portfolioPayload.rows.length && !unavailable)) {
-    portfolioPayload = buildAssetAllocationFallback(data.assetAllocationPortfolio, {
-      month: chicagoDateParts(scheduledNow()).isoDate.slice(0, 7),
-      asOf: chicagoDateParts(scheduledNow()).isoDate,
-      checkedAt: scheduledNow()
-    });
-  }
   data.assetAllocationPortfolio = {
     ...data.assetAllocationPortfolio,
     compiledAt: portfolioPayload.compiledAt,
@@ -1335,6 +1314,20 @@ function syncDashboardPricesFromChartData(data, chartData, {
 } = {}) {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
+  if (chartData?.availability?.status === 'unavailable') {
+    data.tape = {
+      ...data.tape,
+      rows: [],
+      availability: structuredClone(chartData.availability)
+    };
+    if (data.weekAhead) {
+      data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { now });
+      normalizeWeekAheadReactionButtons(data, chartData);
+      data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead, { now });
+    }
+    return { commentaryResetCount: 0 };
+  }
+  if (data.tape) delete data.tape.availability;
   const derivedQuoteRows = deriveQuoteRowsFromSeries(Array.isArray(chartData?.series) ? chartData.series : []);
   applyTapeQuoteRows(data, derivedQuoteRows.tape);
   applyCryptoQuoteRows(data, derivedQuoteRows.crypto);
@@ -1589,7 +1582,6 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
     ? editorialDashboardData.earnings.week.rows
     : []).map((row) => [earningsNarrativeRowKey(row), row]));
   const rows = (candidateWeek.rows || [])
-    .filter(renderSafePublishedEarningsRow)
     .map((row) => earningsNarrativeItem(editorialRowsByKey.get(earningsNarrativeRowKey(row)) || {
       symbol: row.symbol,
       reportDate: row.reportDate,
@@ -1612,19 +1604,6 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
       })
     : structuredClone(candidateWeek);
   finalWeek = preserveSafePriorEarningsNarrative(finalWeek, previousDashboardData?.earnings?.week);
-  const finalized = { earnings: { week: finalWeek } };
-  recoverEmptyEarningsWeek(finalized, candidateWeek, previousDashboardData?.earnings?.week, {
-    incomingRows: Array.isArray(candidateWeek?.rows) ? candidateWeek.rows.length : 0,
-    checkedAt: scheduledNow(),
-    useSidecarEvidence: true
-  });
-  // Apply does not rebuild the slate here. The recovery above only prevents a
-  // same-range zero-row publish when staged sidecars prove rows existed.
-  finalWeek = finalized.earnings.week;
-  if ((finalWeek.rows || []).some((row) => row?.sourceAudit)) {
-    const errors = validateEarningsWeekPayload(finalWeek);
-    if (errors.length) process.stderr.write(`Editorial Earnings narrative warning: ${errors.join(' ')}\n`);
-  }
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
@@ -1702,8 +1681,8 @@ function sanitizeStoryList(editorial, options = {}) {
     if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: options.path, action: 'omitted', reason: 'editorial_content_unavailable' });
     return [];
   }
-  // Stage 3 does not search for replacements; candidate maps only prove the
-  // selected URLs came from Stage 1's generated inventory.
+  // Apply does not search for replacements; candidate maps only prove the
+  // selected URLs came from Prepare's generated inventory.
   const seenUrls = new Set();
   const candidateByUrl = options.candidateByUrl instanceof Map ? options.candidateByUrl : null;
   const blockedUrls = options.blockedUrls instanceof Set ? options.blockedUrls : new Set();
@@ -1787,20 +1766,14 @@ function newsSelection(manifest, key) {
   return Array.isArray(selection?.[key]) ? selection[key] : [];
 }
 
-function readNewsCandidateSource(preparedAt) {
-  // Missing, malformed, or stale inventory is not replaced from prior cards.
-  // Empty candidate maps make Apply omit selections it can no longer prove.
-  const generatedAt = new Date(preparedAt);
+function readNewsCandidateSource(reviewManifest) {
+  // The editorial handoff seals the reviewed candidate inventory. Apply must
+  // not depend on mutable staging files that can change after Prepare.
+  const generatedAt = new Date(reviewManifest?.preparedAt);
   if (Number.isNaN(generatedAt.getTime())) {
     return null;
   }
-  let artifact;
-  try {
-    artifact = readJson(NEWS_CANDIDATES_PATH);
-  } catch (error) {
-    void error;
-    return null;
-  }
+  const artifact = reviewManifest?.newsSearch;
   if (!validNewsCandidateArtifact(artifact, generatedAt)) {
     return null;
   }
@@ -1827,7 +1800,7 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFall
       || !candidateDispositionValid
       || quoteRevision !== previous?.noteDisposition?.quoteRevision;
 
-    if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(previous);
+    if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(row);
 
     if (editorial && text) {
       return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
@@ -1852,73 +1825,6 @@ function usableWeekAheadOutcome(outcome) {
     && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
 }
 
-function renderSafeFutureRows(rows) {
-  const priceAt = (point) => Number(Array.isArray(point) ? point[1] : point?.price ?? point?.value);
-  const timeAt = (point) => Number(Array.isArray(point) ? point[0] : point?.time);
-  return Array.isArray(rows)
-    && rows.length === 4
-    && rows.every((row) => row && typeof row === 'object' && !Array.isArray(row)
-      && typeof row.label === 'string'
-      && row.label.trim()
-      && typeof row.value === 'string'
-      && row.value.trim()
-      && typeof row.body === 'string'
-      && row.body.trim()
-      && ['up', 'down', 'flat'].includes(row.dir)
-      && Array.isArray(row.series)
-      && row.series.length >= 2
-      && row.series.every((point) => Number.isFinite(priceAt(point)) && priceAt(point) > 0 && Number.isFinite(timeAt(point)))
-      && row.raw
-      && typeof row.raw === 'object'
-      && !Array.isArray(row.raw)
-      && ['price', 'regularMarketTime', 'referencePrice', 'previousClose', 'delta', 'pct'].every((field) => Number.isFinite(Number(row.raw[field]))));
-}
-
-function renderSafeCryptoStats(stats) {
-  if (!Array.isArray(stats) || !stats.every((row) => row && typeof row === 'object' && !Array.isArray(row))) return false;
-  const unavailable = (row) => row?.availability?.status === 'unavailable';
-  const total = stats.find((row) => row.sym === 'TOTAL' || /(?:total )?crypto market cap/i.test(String(row?.name || '')));
-  const fng = stats.find((row) => row.sym === 'F&G');
-  const altcoin = stats.find((row) => row.sym === 'ALTSEASON' || /altcoin season/i.test(String(row?.name || '')));
-  const scoreOk = (row) => unavailable(row) || (/^\d{1,3}$/.test(String(row?.price || '').trim()) && Number(row.price) >= 0 && Number(row.price) <= 100);
-  return Boolean(total && fng && altcoin
-    && (unavailable(total) || (String(total.price || '').trim() && String(total.delta || '').trim()))
-    && scoreOk(fng)
-    && scoreOk(altcoin));
-}
-
-function renderSafePortfolioRows(rows) {
-  const required = new Set(['VTI', 'VEA', 'VWO', 'VNQ', 'DBC', 'GLD', 'IEF', 'BOXX']);
-  if (!Array.isArray(rows) || !rows.every((row) => row && typeof row === 'object' && !Array.isArray(row))) return false;
-  const tickers = new Set(rows.map((row) => String(row.ticker || '').toUpperCase()));
-  return [...required].every((ticker) => tickers.has(ticker))
-    && rows.every((row) => ['ticker', 'sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']
-      .every((key) => typeof row[key] === 'string'));
-}
-
-function normalizePublishedStorySections(data) {
-  const futuresStories = sanitizeStoryList(data.futuresModule?.stories, {
-    futures: true,
-    requirePublishedAt: true,
-    requireSourceLabel: true,
-    path: 'futuresModule.stories'
-  });
-  data.futuresModule.stories = futuresStories;
-
-  const stories = sanitizeStoryList(data.stories, {
-    requireSourceLabel: true,
-    path: 'stories',
-    ...storyBlockSets(futuresStories)
-  });
-  data.stories = stories;
-
-  data.crypto.notes = sanitizeStoryList(data.crypto?.notes, {
-    requireSourceLabel: true,
-    path: 'crypto.notes',
-    ...storyBlockSets(futuresStories, stories)
-  });
-}
-
 function clearEarningsInternalQueues(week) {
   // Published Earnings keeps compact display state only. Recovery queues,
   // provider fetch diagnostics, and narrative-apply receipts remain staging data.
@@ -1926,7 +1832,6 @@ function clearEarningsInternalQueues(week) {
   if (!Array.isArray(week.rows)) week.rows = [];
   const rows = week.rows;
   delete week.secondaryRecoveryCandidates;
-  delete week.companyReleaseTasks;
   delete week.narrativeApply;
   const summary = week.summary && typeof week.summary === 'object' && !Array.isArray(week.summary)
     ? { ...week.summary }
@@ -1934,7 +1839,7 @@ function clearEarningsInternalQueues(week) {
   delete summary.fetches;
   week.summary = {
     ...summary,
-    counts: computeEarningsWeekCounts(rows, [], [])
+    counts: computeEarningsWeekCounts(rows, [])
   };
 }
 
@@ -1971,14 +1876,15 @@ function repairPublishedEarningsReaction(row) {
   const reaction = objectRecord(row.reaction) ? row.reaction : null;
   if (validComputedEarningsReaction(reaction)) return row;
   const hasActuals = earningsHasActual(row);
+  const basis = earningsReactionBasisForRow(row);
   const status = !hasActuals
     ? 'pending'
-    : row.reportTiming === 'unknown' ? 'unavailable' : 'awaiting_close';
+    : basis === 'unavailable' ? 'unavailable' : 'awaiting_close';
   return {
     ...row,
     reaction: {
       ...(reaction || {}),
-      basis: earningsReactionBasis(row.reportTiming),
+      basis,
       percent: null,
       fromDate: '',
       fromClose: null,
@@ -2052,49 +1958,6 @@ function normalizeEarningsCommentaryForPublication(row) {
   return next;
 }
 
-function normalizePublicationDisplaySections(data, { now = scheduledNow() } = {}) {
-  // Publication normalization is render-safety only: keep the static dashboard
-  // bootable with explicit degraded sections, without fetching or selecting data.
-  const checkedAt = new Date(now);
-  const asOf = chicagoDateParts(checkedAt).isoDate;
-  const month = asOf.slice(0, 7);
-  const safeWindowMode = windowModeFromDashboard(data) || 'afternoon';
-
-  if (!Array.isArray(data.stories)) data.stories = [];
-
-  if (!data.futuresModule || typeof data.futuresModule !== 'object' || Array.isArray(data.futuresModule)) {
-    data.futuresModule = {};
-  }
-  if (!Array.isArray(data.futuresModule.stories)) data.futuresModule.stories = [];
-  if (!renderSafeFutureRows(data.futuresModule.futures)) {
-    applyFuturesModule(
-      data,
-      buildUnavailableFuturesPayload(safeWindowMode === 'afternoon' ? 'session' : 'premarket', checkedAt),
-      safeWindowMode
-    );
-  }
-
-  if (!data.crypto || typeof data.crypto !== 'object' || Array.isArray(data.crypto)) data.crypto = {};
-  if (!data.crypto.dominance || typeof data.crypto.dominance !== 'object' || Array.isArray(data.crypto.dominance)) {
-    data.crypto.dominance = {};
-  }
-  if (!Array.isArray(data.crypto.notes)) data.crypto.notes = [];
-  if (!renderSafeCryptoStats(data.crypto.stats)) {
-    applyCryptoStats(data, buildCryptoStatsFallback({}, checkedAt));
-  }
-
-  if (!data.assetAllocationPortfolio || typeof data.assetAllocationPortfolio !== 'object' || Array.isArray(data.assetAllocationPortfolio)) {
-    data.assetAllocationPortfolio = {};
-  }
-  if (!renderSafePortfolioRows(data.assetAllocationPortfolio.rows)) {
-    applyAssetAllocationPortfolio(data, buildAssetAllocationFallback(data.assetAllocationPortfolio, { month, asOf, checkedAt }));
-  }
-
-  normalizePublishedStorySections(data);
-  applyNewsCoverageState(data, { now: checkedAt });
-  return data;
-}
-
 function applyDashboardDataJson(args) {
   const canonicalHtml = loadDashboardBase(args.dashboard).html;
   const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
@@ -2103,7 +1966,7 @@ function applyDashboardDataJson(args) {
   if (args.scheduled) validateScheduledFinalization(args.dashboard, windowMode);
   const previousDashboardData = assertCandidateMatchesCanonical(args, candidateDashboardData);
   const candidateChartData = roundChartPayload(readJsonBlock(candidateHtml, 'chart-data'));
-  // Apply publishes staged chart-data as-is; Stage 1 and focused chart repairs
+  // Apply publishes staged chart-data as-is; Prepare and focused chart repairs
   // own revision validation, quote derivation, and Week Ahead lifecycle updates.
   const editorialDashboardData = readJson(args.applyDashboardDataJson);
   let reviewManifest = { ...editorialDashboardData.editorialReview, reviewedAt: scheduledNow().toISOString() };
@@ -2114,7 +1977,7 @@ function applyDashboardDataJson(args) {
   if (!isIsoDateTime(editorialDashboardData.editionId)) {
     throw new Error('Editorial dashboard-data editionId must be the prepared run edition timestamp; regenerate the editorial handoff.');
   }
-  const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
+  const newsSource = readNewsCandidateSource(reviewManifest);
   const dashboardData = structuredClone(candidateDashboardData);
   // The prepared edition timestamp owns editorial freshness and story windows;
   // wall-clock apply time may drift outside the original handoff window.
@@ -2209,8 +2072,6 @@ function applyDashboardDataJson(args) {
     editorialDashboardData,
     previousDashboardData
   );
-  if (windowMode) applyEditionMetadata(dashboardData, windowMode, editorialNow);
-  normalizePublicationDisplaySections(dashboardData, { now: editorialNow });
   normalizeMarketLensReview(dashboardData, reviewManifest);
   normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
   const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
@@ -2319,6 +2180,8 @@ function applyEarningsWeekJson(args) {
   let earningsWeek;
   try {
     earningsWeek = readJson(args.applyEarningsWeekJson);
+    const errors = validateEarningsWeekPayload(earningsWeek);
+    if (errors.length) throw new Error(errors.join(' '));
     applyEarningsWeek(dashboardData, earningsWeek, { requireNarrative: false, previousWeek: dashboardData.earnings?.week, useSidecarEvidence: true });
   } catch (error) {
     reportPreparationStatus('skipped', `Earnings focused preparation input was unusable; candidate and canonical dashboard unchanged: ${error.message}`);
@@ -2479,7 +2342,8 @@ function main() {
       readFresh: () => readJson(path.join(GENERATED_DIR, 'futures_module.json')),
       readFreshOnError: () => readCurrentFuturesModuleArtifact(futuresMode, checkedAt),
       validateFresh: (payload) => validateFuturesPayload(payload, { expectedMode: futuresMode }),
-      validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: futuresMode })
+      validateFallback: (payload) => validateFuturesPayload(payload, { expectedMode: futuresMode }),
+      buildUnavailable: () => buildUnavailableFuturesPayload(futuresMode, checkedAt)
     }
   );
   args.futuresPayload = futuresPreparation.payload;
@@ -2506,7 +2370,8 @@ function main() {
         ...validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard)),
         ...chartSeriesRevisionErrors(canonicalChartData, payload)
       ],
-      validateFallback: (payload) => validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard))
+      validateFallback: (payload) => validateChartStagingPayload(payload, readChartableRows(args.sourceDashboard)),
+      buildUnavailable: () => buildUnavailableChartData(checkedAt)
     }
   );
   args.chartDataPayload = chartPreparation.payload;
@@ -2515,7 +2380,7 @@ function main() {
       process.stderr.write(`Chart and Tape preparation did not finish; continuing with partial staged chart data: ${chartPreparation.error.message}\n`);
     } else {
       args.chartDataFallbackPayload = chartPreparation.fallback;
-      reportSectionFallback('Chart and Tape', 'carried_forward', chartPreparation.error);
+      reportSectionFallback('Chart and Tape', chartPreparation.fallback.availability.status, chartPreparation.error);
     }
   }
 
@@ -2526,7 +2391,8 @@ function main() {
       label: 'Crypto stats',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'crypto_stats.json')),
       validateFresh: validateCryptoStatsPayload,
-      validateFallback: validateCryptoStatsPayload
+      validateFallback: validateCryptoStatsPayload,
+      buildUnavailable: () => buildCryptoStatsFallback({}, checkedAt, 'source_refresh_failed', canonicalDashboardData.editionId)
     }
   );
   args.cryptoStatsPayload = cryptoPreparation.payload;
@@ -2546,7 +2412,12 @@ function main() {
       label: 'Asset Allocation portfolio',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_portfolio.json')),
       validateFresh: validateAssetAllocationPortfolioPayload,
-      validateFallback: validateAssetAllocationPortfolioPayload
+      validateFallback: validateAssetAllocationPortfolioPayload,
+      buildUnavailable: () => buildAssetAllocationFallback({}, {
+        month: localDate.slice(0, 7),
+        asOf: localDate,
+        checkedAt
+      })
     }
   );
   args.assetAllocationPortfolioPayload = portfolioPreparation.payload;
@@ -2561,7 +2432,8 @@ function main() {
       label: 'Asset Allocation summary',
       readFresh: () => readJson(path.join(GENERATED_DIR, 'asset_allocation_summary.json')),
       validateFresh: validateAssetAllocationSummaryPayload,
-      validateFallback: validateAssetAllocationSummaryPayload
+      validateFallback: validateAssetAllocationSummaryPayload,
+      buildUnavailable: () => buildAssetAllocationSummaryFallback({}, { asOf: localDate })
     }
   );
   args.assetAllocationSummaryPayload = summaryPreparation.payload;
@@ -2582,7 +2454,8 @@ function main() {
       label: 'Week Ahead',
       readFresh: () => readJson(WEEK_AHEAD_PATH),
       validateFresh: validateWeekAheadPayload,
-      validateFallback: (payload) => validateWeekAheadPayload(payload.week)
+      validateFallback: (payload) => validateWeekAheadPayload(payload.week),
+      buildUnavailable: () => buildWeekAheadPreparationFallback(null, weekAheadRange, { checkedAt })
     }
   );
   args.weekAheadPayload = weekAheadPreparation.error ? weekAheadPreparation.fallback.week : weekAheadPreparation.payload;
@@ -2632,7 +2505,8 @@ function main() {
     readFresh: () => readJson(EARNINGS_WEEK_PATH),
     readFreshOnError: () => readCurrentEarningsWeekArtifact(earningsRange, checkedAt),
     validateFresh: (payload) => validateEarningsWeekPayload(payload),
-    validateFallback: (payload) => validateEarningsWeekPayload(payload.week)
+    validateFallback: (payload) => validateEarningsWeekPayload(payload.week),
+    buildUnavailable: () => buildEarningsPreparationFallback(null, earningsRange, { checkedAt })
   });
   if (earningsPreparation.error) {
     if (earningsPreparation.recovered) {
@@ -2694,7 +2568,6 @@ module.exports = {
   patchDashboard,
   parseArgs,
   prepareEditorialWorkspace,
-  normalizePublicationDisplaySections,
   loadDashboardBase,
   readJsonBlock,
   replaceJsonBlock,

@@ -9,7 +9,6 @@ const {
   attachReactions,
   buildEarningsNarrativeSidecar,
   buildEarningsPreparationFallback,
-  buildCompanyReleaseTasks,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
   earningsRowKey,
@@ -18,6 +17,7 @@ const {
   metricResult,
   mergeUnchangedEarningsNarrative,
   narrativeEditorialComplete,
+  reportWindowArrived,
   resetRepeatedEarningsNarrativeForEditorial,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
@@ -26,18 +26,24 @@ const {
   alphaVantageCalendarFromResponse,
   buildEarningsApiRows,
   buildSecondaryRecoveryCandidates,
+  buildZacksRows,
   buildRows,
   calendarVerificationDates,
   earningsApiUsageForBuild,
   ensureFinnhubPrimaryUsable,
   fetchEarningsApiCalendar,
+  filterZacksRowsByFinnhubUsListings,
   finnhubUsSymbolsFromResponse,
   finnhubCalendarFromResponse,
   fetchYahooBarsForRows,
+  parseZacksTable,
   readScheduleConfirmations,
   resolveProviderDateConflicts,
   verifyEarningsApiRecoveryRows,
-  verifyFinnhubScheduleRows
+  verifyFinnhubScheduleRows,
+  zacksEndpointDateFromUrl,
+  zacksVisibleDateFromButtonText,
+  zacksGate
 } = require('./earnings_week_build');
 const {
   applyCompanyReleaseResolutions,
@@ -221,7 +227,6 @@ function deterministicVerifiedWeekFixture() {
     },
     rows,
     secondaryRecoveryCandidates: [],
-    companyReleaseTasks: [],
     summary: {
       counts: computeEarningsWeekCounts(rows),
       fetches: {}
@@ -344,16 +349,16 @@ function testUsListingEligibilityUsesExactDirectorySymbol() {
   const [otc] = buildRows([finnhubRow('OTCADR')], [profile('OTCADR')], { usListings: directory.listings });
   assert.equal(isDisplayEligibleEarningsRow(otc), false, 'An exact OTC directory match must remain ineligible.');
 
-  const [smallCap] = buildRows([finnhubRow('SMALL')], [profile('SMALL', 9999999999)], { usListings: [usListing('SMALL')] });
-  assert.equal(isDisplayEligibleEarningsRow(smallCap), false, 'A sub-$10B market-cap row must remain ineligible.');
+  const [smallCap] = buildRows([finnhubRow('SMALL')], [profile('SMALL', 24999999999)], { usListings: [usListing('SMALL')] });
+  assert.equal(isDisplayEligibleEarningsRow(smallCap), false, 'A sub-$25B market-cap row must remain ineligible.');
   assert.equal(verifyFinnhubScheduleRows([smallCap], [], {
     from: '2026-01-05',
     to: '2026-01-09'
-  }).rows.length, 0, 'Stage 1 must not admit primary rows that can never display.');
+  }).rows.length, 0, 'Prepare must not admit primary rows that can never display.');
   assert.equal(verifyEarningsApiRecoveryRows([smallCap], {
     from: '2026-01-05',
     to: '2026-01-09'
-  }).rows.length, 0, 'Stage 1 must not admit recovered rows that can never display.');
+  }).rows.length, 0, 'Prepare must not admit recovered rows that can never display.');
 
   const receiptBound = deterministicVerifiedWeekFixture();
   receiptBound.summary.fetches.finnhubUsSymbols = { ok: true, status: 200, rows: 2, cacheHit: false, error: '' };
@@ -546,7 +551,7 @@ function testPrimaryScheduleVerification() {
     company: 'Recovery Corp',
     country: 'US',
     exchange: 'NASDAQ NMS - GLOBAL MARKET',
-    marketCap: 20000000000,
+    marketCap: 30000000000,
     reportDate: '2026-01-06',
     sourceAudit: { selectedSources: { slate: 'alphaVantageCalendar' } }
   };
@@ -855,7 +860,6 @@ function testSecondaryRecoveryAndRevenueComparison() {
   ];
   const recoveredRows = buildEarningsApiRows(secondaryRecoveryCandidates, companyFetches);
   const enrichedSecondaryCandidates = attachEarningsApiCompanyAuditToSecondaryRecoveryCandidates(secondaryRecoveryCandidates, companyFetches);
-  const companyReleaseTasks = buildCompanyReleaseTasks(recoveredRows, '2026-01-07T15:00:00.000Z');
   const full = recoveredRows.find((row) => row.symbol === 'RECOVERFULL');
   const epsOnly = recoveredRows.find((row) => row.symbol === 'RECOVEREPS');
 
@@ -885,11 +889,234 @@ function testSecondaryRecoveryAndRevenueComparison() {
   assert.equal(epsOnly.eps.result, 'beat');
   assert.equal(epsOnly.revenue.result, 'not_compared');
   assert.equal(epsOnly.outcome.overall, 'eps_only_beat', 'EPS-only outcome should appear only when revenue estimate is unavailable.');
-  assert.equal(companyReleaseTasks.length, 0, 'Complete recovered rows should not create company-release tasks.');
+}
+
+function zacksTable(headers, rows) {
+  return `<table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+function testZacksPrimaryBuildContract() {
+  const headers = ['Symbol', 'Company', 'Market Cap', 'Time', 'Expected', 'Reported', 'Surprise'];
+  const eps = parseZacksTable({
+    ok: true,
+    status: 200,
+    responseMs: 1,
+    date: '2026-01-06',
+    body: zacksTable(headers, [[
+      '<a href="/stock/quote/ZZZZ">ZZZZ Quick Quote</a>',
+      'Zeta Zacks Corp',
+      '$150.25B',
+      '06:30',
+      '1.25',
+      '1.50',
+      '20.00%'
+    ]])
+  }, 'eps');
+  const revenue = parseZacksTable({
+    ok: true,
+    status: 200,
+    responseMs: 1,
+    date: '2026-01-06',
+    body: zacksTable(headers, [[
+      '<a href="/stock/quote/ZZZZ">ZZZZ Quick Quote</a>',
+      'Zeta Zacks Corp',
+      '$150.25B',
+      'amc',
+      '1,100.00',
+      '1,250.50',
+      '13.68%'
+    ]])
+  }, 'revenue');
+  const days = [{ date: '2026-01-06', eps, revenue }];
+  assert.equal(eps.ok, true);
+  assert.equal(revenue.ok, true);
+  assert.deepEqual(zacksGate(days, ['2026-01-06']).failures, []);
+  const rows = attachReactions(buildZacksRows(days, { observedAt: '2026-01-06T15:00:00.000Z' }), [], { asOf: '2026-01-06T15:00:00.000Z' });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].symbol, 'ZZZZ');
+  assert.equal(rows[0].reportTiming, 'bmo');
+  assert.equal(rows[0].actualsObservedAt, '2026-01-06T15:00:00.000Z');
+  assert.equal(rows[0].marketCap, 150250000000);
+  assert.equal(rows[0].revenue.actual, 1250500000);
+  assert.equal(rows[0].sourceAudit.zacks.schedule.reportTiming, 'bmo');
+  assert.equal(rows[0].sourceAudit.zacks.revenue.raw.Time, 'amc');
+  assert.equal(Object.prototype.hasOwnProperty.call(rows[0].sourceAudit.zacks.revenue, 'reportTiming'), false);
+  assert.equal(rows[0].sourceAudit.selectedSources.slate, 'zacks');
+  assert.equal(rows[0].sourceAudit.selectedSources.revenue.actual, 'zacks');
+  assert.deepEqual(validateEarningsWeekPayload({
+    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+    generatedAt: '2026-01-06T15:00:00.000Z',
+    range: { from: '2026-01-05', to: '2026-01-09' },
+    rows,
+    summary: { counts: computeEarningsWeekCounts(rows) },
+    outputPath: 'generated/earnings_week.json'
+  }), []);
+
+  const misaligned = zacksGate([{ date: '2026-01-06', eps, revenue: { ...revenue, rows: [] } }], ['2026-01-06']);
+  assert.equal(misaligned.ok, false);
+  assert.equal(misaligned.failures.some((failure) => failure.code === 'zacks_revenue_table_unavailable' || failure.code === 'zacks_sales_alignment_failure'), true);
+
+  const liveShape = parseZacksTable({
+    ok: true,
+    status: 200,
+    responseMs: 1,
+    date: '2026-07-22',
+    body: `<table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join('')}</tr></thead><tbody><tr>
+      <th><button rel="SCHW">SCHW Quick Quote</button><a href="//www.zacks.com/stock/quote/SCHW" rel="SCHW">SCHW</a></th>
+      <td>Charles Schwab</td>
+      <td>178,330.95</td>
+      <td>bmo</td>
+      <td>1.53</td>
+      <td>1.62</td>
+      <td>5.88%</td>
+    </tr></tbody></table>`
+  }, 'eps');
+  assert.equal(liveShape.rows[0].symbol, 'SCHW');
+  assert.equal(liveShape.rows[0].company, 'Charles Schwab');
+  assert.equal(liveShape.rows[0].reportTiming, 'bmo');
+  assert.equal(liveShape.rows[0].marketCap, 178330950000);
+  assert.equal(liveShape.rows[0].actual, 1.62);
+}
+
+function testZacksListingFilterUsesFinnhubDirectory() {
+  const headers = ['Symbol', 'Company', 'Market Cap', 'Time', 'Expected', 'Reported', 'Surprise'];
+  const symbolCell = (symbol) => `<a href="/stock/quote/${symbol}">${symbol} Quick Quote</a>`;
+  const tableRows = [
+    [symbolCell('LISTADR'), 'Listed ADR Corp', '$50.00B', 'bmo', '1.00', '--', '--'],
+    [symbolCell('OTCADR'), 'OTC ADR Corp', '$60.00B', 'bmo', '1.00', '--', '--'],
+    [symbolCell('OTCCOM'), 'OTC Common Corp', '$70.00B', 'bmo', '1.00', '--', '--'],
+    [symbolCell('MISSING'), 'Missing Directory Corp', '$80.00B', 'bmo', '1.00', '--', '--']
+  ];
+  const eps = parseZacksTable({
+    ok: true,
+    status: 200,
+    responseMs: 1,
+    date: '2026-01-06',
+    body: zacksTable(headers, tableRows)
+  }, 'eps');
+  const revenue = parseZacksTable({
+    ok: true,
+    status: 200,
+    responseMs: 1,
+    date: '2026-01-06',
+    body: zacksTable(headers, tableRows.map((row) => [...row.slice(0, 4), '1,000.00', '--', '--']))
+  }, 'revenue');
+  const rows = buildZacksRows([{ date: '2026-01-06', eps, revenue }], { observedAt: '2026-01-06T15:00:00.000Z' });
+  assert.deepEqual(rows.map((row) => row.symbol), ['MISSING', 'OTCCOM', 'OTCADR', 'LISTADR']);
+
+  const result = filterZacksRowsByFinnhubUsListings(rows, {
+    ok: true,
+    listings: [
+      usListing('LISTADR', { type: 'ADR', mic: 'XNYS' }),
+      usListing('OTCADR', { type: 'ADR', mic: 'OOTC' }),
+      usListing('OTCCOM', { type: 'Common Stock', mic: 'OOTC' })
+    ]
+  });
+  assert.deepEqual(result.rows.map((row) => row.symbol), ['LISTADR']);
+  assert.deepEqual(result.rows[0].sourceAudit.finnhubUsListing, usListing('LISTADR', { type: 'ADR', mic: 'XNYS' }));
+  assert.equal(result.summary.mode, 'classified');
+  assert.equal(result.summary.inputRows, 4);
+  assert.equal(result.summary.keptRows, 1);
+  assert.equal(result.summary.droppedRows, 3);
+  assert.deepEqual(
+    result.summary.dropped.map((row) => [row.symbol, row.reason, row.mic || '']),
+    [
+      ['MISSING', 'missing_exact_finnhub_us_listing', ''],
+      ['OTCCOM', 'otc_or_pink_mic', 'OOTC'],
+      ['OTCADR', 'otc_or_pink_mic', 'OOTC']
+    ]
+  );
+
+  const unfiltered = filterZacksRowsByFinnhubUsListings(rows, {
+    ok: false,
+    listings: [],
+    error: 'directory unavailable'
+  });
+  assert.deepEqual(unfiltered.rows.map((row) => row.symbol), rows.map((row) => row.symbol));
+  assert.equal(unfiltered.summary.mode, 'unavailable_unfiltered');
+  assert.equal(unfiltered.summary.reason, 'finnhub_us_symbol_directory_unavailable');
+}
+
+function unknownTimingReactionRow(actualsObservedAt) {
+  return {
+    symbol: 'ADR',
+    company: 'ADR Fixture PLC',
+    exchange: 'NYSE',
+    country: 'US',
+    currency: 'USD',
+    marketCap: 30000000000,
+    marketCapDisplay: '$30.00B',
+    reportDate: '2026-01-06',
+    reportTiming: 'unknown',
+    actualsObservedAt,
+    fiscalQuarterEnding: '',
+    fiscalQuarter: null,
+    fiscalYear: null,
+    eps: { estimate: 1, actual: 1.1, surprisePercent: 10, result: 'beat', basis: '', note: '' },
+    revenue: { estimate: 1000000000, actual: 1100000000, surprisePercent: 10, result: 'beat', note: '' },
+    outcome: { overall: 'beat', guide: '', interpretation: '' },
+    reaction: { basis: 'unavailable', percent: null, fromDate: '', fromClose: null, toDate: '', toClose: null, status: 'unavailable', note: '', source: '' },
+    sourceStatus: 'partial',
+    sourceSummary: { primary: 'zacks', fallbacks: [], reaction: 'none' },
+    sourceAudit: {
+      zacks: {
+        schedule: { symbol: 'ADR', company: 'ADR Fixture PLC', reportDate: '2026-01-06', reportTiming: 'unknown', marketCap: 30000000000 },
+        eps: { estimate: 1, actual: 1.1, surprisePercent: 10, raw: {} },
+        revenue: { estimate: 1000000000, actual: 1100000000, surprisePercent: 10, raw: {} }
+      },
+      selectedSources: {
+        slate: 'zacks',
+        company: 'zacks',
+        marketCap: 'zacks',
+        timing: 'none',
+        eps: { estimate: 'zacks', actual: 'zacks' },
+        revenue: { estimate: 'zacks', actual: 'zacks' },
+        reaction: 'none'
+      }
+    }
+  };
+}
+
+function testUnknownTimingActualObservationDrivesReactionBasis() {
+  const bars = [
+    { date: '2026-01-05', close: 100 },
+    { date: '2026-01-06', close: 110 },
+    { date: '2026-01-07', close: 121 }
+  ];
+  const yahooFetches = [{ symbol: 'ADR', ok: true, status: 200, responseMs: 1, error: '', bars }];
+  const sameDay = attachReactions([unknownTimingReactionRow('2026-01-06T15:00:00.000Z')], yahooFetches, { asOf: '2026-01-06T22:00:00.000Z' })[0];
+  assert.equal(sameDay.reportTiming, 'unknown');
+  assert.equal(sameDay.reaction.basis, 'same_day_close');
+  assert.equal(sameDay.reaction.status, 'computed');
+  assert.equal(sameDay.reaction.fromDate, '2026-01-05');
+  assert.equal(sameDay.reaction.toDate, '2026-01-06');
+  assert.ok(Math.abs(sameDay.reaction.percent - 10) < 0.0001);
+  assert.deepEqual(validateEarningsWeekPayload({
+    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+    generatedAt: '2026-01-06T22:00:00.000Z',
+    range: { from: '2026-01-05', to: '2026-01-09' },
+    rows: [sameDay],
+    summary: { counts: computeEarningsWeekCounts([sameDay]) },
+    outputPath: 'generated/earnings_week.json'
+  }), []);
+
+  const nextSession = attachReactions([unknownTimingReactionRow('2026-01-07T13:00:00.000Z')], yahooFetches, { asOf: '2026-01-07T22:00:00.000Z' })[0];
+  assert.equal(nextSession.reaction.basis, 'next_session_close');
+  assert.equal(nextSession.reaction.status, 'computed');
+  assert.equal(nextSession.reaction.fromDate, '2026-01-06');
+  assert.equal(nextSession.reaction.toDate, '2026-01-07');
+  assert.ok(Math.abs(nextSession.reaction.percent - 10) < 0.0001);
+}
+
+function testZacksVisibleDateMapping() {
+  const displayDates = ['2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24'];
   assert.equal(
-    buildCompanyReleaseTasks([], '2026-01-08T15:00:00.000Z').length,
-    0,
-    'An EarningsAPI-only candidate omitted from canonical rows must remain audit-only.'
+    zacksVisibleDateFromButtonText('WED JUL 22 Earnings & Sales 154 Reported', displayDates),
+    '2026-07-22'
+  );
+  assert.equal(
+    zacksEndpointDateFromUrl('https://www.zacks.com/data_handler/earnings_calendar/calendar_handlers.php?calltype=eventscal&date=1784782800&type=1&search_trigger=0'),
+    '1784782800'
   );
 }
 
@@ -1298,7 +1525,6 @@ async function testResultRefreshDoesNotRebuildSlate() {
       }
     }],
     secondaryRecoveryCandidates: [],
-    companyReleaseTasks: [],
     summary: {
       counts: {
         total: 1,
@@ -1308,8 +1534,7 @@ async function testResultRefreshDoesNotRebuildSlate() {
         missingTiming: 0,
         missingRevenue: 0,
         missingMarketCap: 0,
-        secondaryRecoveryCandidates: 0,
-        companyReleaseTasks: 0
+        secondaryRecoveryCandidates: 0
       }
     },
     narrativeApply: {
@@ -1547,6 +1772,8 @@ function testResultRefreshWaitsForReportWindow() {
     [row.symbol],
     'The row becomes eligible after its report window arrives.'
   );
+  const unknown = { ...row, reportTiming: 'unknown', eps: { ...row.eps, actual: null }, revenue: { ...row.revenue, actual: null } };
+  assert.equal(reportWindowArrived(unknown, '2026-01-06T13:00:00.000Z'), true, 'TIME UNKNOWN rows are eligible on their report date so same-day actuals can be observed.');
 }
 
 async function testMixedResultRefreshAppliesSuccessfulRows() {
@@ -1972,23 +2199,14 @@ function companyReleaseTaskFixture(source) {
   };
 }
 
-function testTaskPolicyMetadataDoesNotBlockValidation() {
+function testCompanyReleaseTasksAreRetiredFromCanonicalWeek() {
   const source = embeddedWeekFixture();
   const task = companyReleaseTaskFixture(source);
   source.companyReleaseTasks = [task];
-  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
-
-  for (const item of [source.companyReleaseTasks[0]]) {
-    delete item.neededFields;
-    delete item.preferredSources;
-    delete item.doNotUseForOverrides;
-    delete item.permittedUses;
-    delete item.instructions;
-    item.priority = 'not-a-display-contract';
-  }
-  delete source.companyReleaseTasks[0].reason;
-
-  assert.deepEqual(validateEarningsWeekPayload(source), []);
+  assert.match(
+    validateEarningsWeekPayload(source).join(' '),
+    /companyReleaseTasks is not part of the canonical Earnings week contract/
+  );
 }
 
 function testWeekValidatorAcceptsDeterministicVerifiedRow() {
@@ -2000,7 +2218,7 @@ function testWeekValidatorAcceptsDeterministicVerifiedRow() {
   source.rows[0].scheduleVerificationStatus = 'primary_only';
   source.rows[0].sourceStatus = computeEarningsSourceStatus(source.rows[0]);
   assert.equal(source.rows[0].sourceStatus, 'partial', 'Top-level unconfirmed schedule status cannot compute as verified.');
-  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates, source.companyReleaseTasks);
+  source.summary.counts = computeEarningsWeekCounts(source.rows, source.secondaryRecoveryCandidates);
   validateWeekPayload(source);
 }
 
@@ -2092,7 +2310,7 @@ function testNewEarningsNarrativeRowsStagePendingEditorialCompletion() {
       reportDate: '2026-07-09',
       country: 'US',
       exchange: 'NASDAQ',
-      marketCap: 20000000000,
+      marketCap: 30000000000,
       sourceAudit: { finnhubProfile: { industry: 'Technology' } },
       lifecycle: 'close_available',
       outcome: { overall: 'beat' },
@@ -2388,24 +2606,22 @@ async function main() {
   testAlphaVantageCalendarBackupFlow();
   testSkipEarningsApiDoesNotReadUsageLedger();
   await testRefreshEarningsApiIsOptIn();
+  testZacksPrimaryBuildContract();
+  testZacksListingFilterUsesFinnhubDirectory();
+  testUnknownTimingActualObservationDrivesReactionBasis();
+  testZacksVisibleDateMapping();
   testSecondaryRecoveryAndRevenueComparison();
-  testApplyCompanyReleaseResolution();
   testApplyEarningsNarrative();
   testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization();
   testUnavailableNarrativeDispositionsRequireAuditFields();
-  await testNeedsReviewPromotesOfficialMetricsIndependently();
-  testTaskPolicyMetadataDoesNotBlockValidation();
+  testCompanyReleaseTasksAreRetiredFromCanonicalWeek();
   testWeekValidatorAcceptsDeterministicVerifiedRow();
-  testCompanyReleaseResolutionValidatorRejectsCalendarEstimates();
   testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
   await testResultRefreshFailuresAreRowScoped();
   await testManualRecoverySourceAuditRepair();
   await testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder();
   await testMixedResultRefreshAppliesSuccessfulRows();
-  await testResultRefreshRetriesPostWindowCompanyReleaseTasks();
-  await testResultRefreshRecomputesLifecycleWhenCompanyReleaseRetryFails();
-  await testPrimaryFinnhubRefreshCreatesCompanyReleaseTask();
   testNewEarningsNarrativeRowsStagePendingEditorialCompletion();
   testEarningsNarrativeCarryForwardIsRowScoped();
   testRepeatedEarningsNarrativeResetsSameFieldOnly();

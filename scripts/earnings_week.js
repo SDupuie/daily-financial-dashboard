@@ -19,7 +19,13 @@ const {
   pctChange,
   reportWindowArrived
 } = require('./earnings_week_contract');
-const { fetchYahooBars, runBuild } = require('./earnings_week_build');
+const {
+  buildZacksRows,
+  fetchYahooBars,
+  fetchZacksCalendar,
+  runBuild,
+  zacksGate
+} = require('./earnings_week_build');
 const {
   runValidation,
   validateCompanyReleaseResolutionsPayload,
@@ -524,10 +530,9 @@ function applyPartialResolutionMetrics(row, resolution) {
 function updateSummary(source) {
   const rows = Array.isArray(source.rows) ? source.rows : [];
   const secondaryRecoveryCandidates = Array.isArray(source.secondaryRecoveryCandidates) ? source.secondaryRecoveryCandidates : [];
-  const companyReleaseTasks = Array.isArray(source.companyReleaseTasks) ? source.companyReleaseTasks : [];
   source.summary = {
     ...(source.summary || {}),
-    counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks)
+    counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates)
   };
 }
 
@@ -716,7 +721,6 @@ const path = require('path');
 const https = require('https');
 const {
   attachReactions,
-  buildCompanyReleaseTasks,
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
@@ -733,7 +737,7 @@ const {
   recordEarningsApiRequest,
   recordEarningsApiResponse
 } = require('./earnings_week_contract');
-const { compareIsoDate, displayDatesForRange, isIsoDate } = require('./calendar_contract');
+const { compareIsoDate, displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 
 const root = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
@@ -1027,6 +1031,7 @@ async function fetchEarningsApiCompanyRows(symbol, args, token, usage) {
 
 function deterministicSnapshot(row) {
   return JSON.stringify({
+    actualsObservedAt: row.actualsObservedAt,
     reportTiming: row.reportTiming,
     fiscalQuarter: row.fiscalQuarter,
     fiscalYear: row.fiscalYear,
@@ -1055,6 +1060,16 @@ function deterministicSnapshot(row) {
       source: row.reaction?.source
     }
   });
+}
+
+function hasActual(row) {
+  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
+}
+
+function actualsObservedAtForRefresh(currentRow, providerRow) {
+  if (!hasActual(providerRow)) return '';
+  if (hasActual(currentRow) && isIsoDateTime(currentRow.actualsObservedAt)) return currentRow.actualsObservedAt;
+  return isIsoDateTime(providerRow.actualsObservedAt) ? providerRow.actualsObservedAt : '';
 }
 
 function clearNarrative(row) {
@@ -1207,6 +1222,31 @@ function applyFinnhubRefresh(row, providerRow) {
   });
 }
 
+function applyZacksRefresh(row, providerRow) {
+  if (!providerRow) return row;
+  const actualsObservedAt = actualsObservedAtForRefresh(row, providerRow);
+  const next = {
+    ...providerRow,
+    outcome: {
+      ...providerRow.outcome,
+      guide: row.outcome?.guide || '',
+      interpretation: row.outcome?.interpretation || ''
+    },
+    reaction: row.reaction,
+    eps: {
+      ...providerRow.eps,
+      note: row.eps?.note || ''
+    },
+    revenue: {
+      ...providerRow.revenue,
+      note: row.revenue?.note || ''
+    }
+  };
+  if (actualsObservedAt) next.actualsObservedAt = actualsObservedAt;
+  else delete next.actualsObservedAt;
+  return finalizeRow(next);
+}
+
 function finnhubConflictCandidate(row) {
   return {
     reportDate: row.reportDate,
@@ -1273,10 +1313,9 @@ function applyEarningsApiCompanyRefresh(row, providerRow) {
 function updateSummary(output) {
   const rows = Array.isArray(output.rows) ? output.rows : [];
   const secondaryRecoveryCandidates = Array.isArray(output.secondaryRecoveryCandidates) ? output.secondaryRecoveryCandidates : [];
-  const companyReleaseTasks = Array.isArray(output.companyReleaseTasks) ? output.companyReleaseTasks : [];
   output.summary = {
     ...(output.summary || {}),
-    counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks)
+    counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates)
   };
 }
 
@@ -1325,6 +1364,10 @@ function selectFinnhubRefreshRow(rows, target) {
       const rightActuals = Number.isFinite(right.eps?.actual) + Number.isFinite(right.revenue?.actual);
       return rightActuals - leftActuals || right.reportDate.localeCompare(left.reportDate);
     })[0] || null;
+}
+
+function selectZacksRefreshRow(rows, target) {
+  return rows.find((row) => rowKey(row) === rowKey(target)) || null;
 }
 
 function refreshTargetRows(source, asOf) {
@@ -1479,7 +1522,9 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     const before = deterministicSnapshot(row);
     let next = row;
     const selectedSlate = row.sourceAudit?.selectedSources?.slate;
-    if (selectedSlate === 'finnhub') {
+    if (selectedSlate === 'zacks') {
+      next = applyZacksRefresh(row, selectZacksRefreshRow(refreshData.zacksRows || [], row));
+    } else if (selectedSlate === 'finnhub') {
       next = applyFinnhubRefresh(row, selectFinnhubRefreshRow(refreshData.finnhubRows || [], row));
     } else if (isSecondaryCalendarSlate(selectedSlate)) {
       next = applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyBySymbol.get(row.symbol) || [], row));
@@ -1524,18 +1569,8 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
     ? applyResultRefreshDiagnostics(row, rowDiagnosticsByKey[rowKey(row)] || [], asOf)
     : row);
 
-  output.companyReleaseTasks = buildCompanyReleaseTasks(output.rows, asOf);
-  const retrySnapshots = new Map(output.rows.map((row) => [rowKey(row), deterministicSnapshot(row)]));
-  // Company-release retry reuses the existing promotion path so source audit,
-  // narrative invalidation, and disposition handling stay in one place.
-  output = await retryCompanyReleaseTasks(output, asOf, options);
-  for (const row of output.rows) {
-    if (deterministicSnapshot(row) !== retrySnapshots.get(rowKey(row))) {
-      changedKeys.add(rowKey(row));
-    }
-  }
-  output.companyReleaseTasks = buildCompanyReleaseTasks(output.rows, asOf);
-  const activeTaskIds = new Set(output.companyReleaseTasks.map((task) => task.id));
+  delete output.companyReleaseTasks;
+  const activeTaskIds = new Set();
   output.rows = output.rows.map((row) => {
     const resolution = row.sourceAudit?.companyReleaseResolution;
     if (!['needs_review', 'unresolved'].includes(resolution?.status) || activeTaskIds.has(resolution.taskId)) return row;
@@ -1570,6 +1605,7 @@ function refreshFailure(provider, code, message) {
 
 async function collectRefreshData(source, args, dependencies = {}) {
   const targetRows = refreshTargetRows(source, args.asOf);
+  const zacksTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'zacks');
   const finnhubTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub');
   const earningsApiTargets = targetRows
     .filter((row) => isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate))
@@ -1590,6 +1626,32 @@ async function collectRefreshData(source, args, dependencies = {}) {
       rowDiagnostics.set(key, current);
     }
   };
+
+  let zacksRows = [];
+  if (zacksTargets.length) {
+    try {
+      const zacksArgs = {
+        ...args,
+        from: source.range.from,
+        to: source.range.to,
+        displayDates: displayDatesForRange(source.range.from, source.range.to)
+      };
+      const zacksDays = await fetchZacksCalendar(zacksArgs);
+      const gate = zacksGate(zacksDays, zacksArgs.displayDates);
+      if (gate.ok) {
+        zacksRows = buildZacksRows(zacksDays, { observedAt: args.asOf });
+        for (const row of zacksTargets) {
+          if (!selectZacksRefreshRow(zacksRows, row)) {
+            addFailure([row], refreshFailure('zacks', 'provider_row_unavailable', 'Zacks returned no matching result row; prior Zacks row facts were retained.'));
+          }
+        }
+      } else {
+        addFailure(zacksTargets, refreshFailure('zacks', 'schema_gate_failed', gate.failures.map((failure) => failure.message).join(' ')));
+      }
+    } catch (error) {
+      addFailure(zacksTargets, refreshFailure('zacks', 'provider_request_failed', error.message));
+    }
+  }
 
   let finnhubRows = [];
   if (finnhubTargets.length && !finnhubToken) {
@@ -1653,9 +1715,11 @@ async function collectRefreshData(source, args, dependencies = {}) {
   }
 
   const yahooTargets = targetRows
-    .map((row) => row.sourceAudit?.selectedSources?.slate === 'finnhub'
-      ? applyFinnhubRefresh(row, selectFinnhubRefreshRow(finnhubRows, row))
-      : isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate)
+    .map((row) => row.sourceAudit?.selectedSources?.slate === 'zacks'
+      ? applyZacksRefresh(row, selectZacksRefreshRow(zacksRows, row))
+      : row.sourceAudit?.selectedSources?.slate === 'finnhub'
+        ? applyFinnhubRefresh(row, selectFinnhubRefreshRow(finnhubRows, row))
+        : isSecondaryCalendarSlate(row.sourceAudit?.selectedSources?.slate)
         ? applyEarningsApiCompanyRefresh(row, selectCompanyRow(earningsApiCompanyRowsBySymbol[row.symbol] || [], row))
         : row)
     .filter(needsYahooReactionFetch);
@@ -1684,6 +1748,7 @@ async function collectRefreshData(source, args, dependencies = {}) {
   await Promise.all(Array.from({ length: Math.min(4, yahooSymbols.length) }, fetchNextYahoo));
 
   return {
+    zacksRows,
     finnhubRows,
     earningsApiCompanyRowsBySymbol,
     yahooFetches: yahooFetches.filter(Boolean),
@@ -2249,7 +2314,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  applyCompanyReleaseResolutions,
   applyEarningsNarrative,
   applyEarningsApiCompanyRefresh: refreshCommand.applyEarningsApiCompanyRefresh,
   applyFinnhubRefresh: refreshCommand.applyFinnhubRefresh,

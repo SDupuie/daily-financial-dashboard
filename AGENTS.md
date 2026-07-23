@@ -8,7 +8,9 @@ This is a personal static financial dashboard. Optimize for a reliable daily upd
 
 At the start of every new Codex task in this repository, read `AGENTS.md` and `README.md` before making recommendations, running update workflows, editing files, or performing reviews.
 
-After any context compaction, model switch, resume, or interrupted turn, reread `AGENTS.md` and `README.md` before continuing work or answering repository-specific questions. Treat the reread as mandatory even if a summary of prior context is present.
+After any context compaction or model switch, reread `AGENTS.md` and `README.md` before continuing work or answering repository-specific questions. Treat the reread as mandatory even if a summary of prior context is present.
+
+After an interrupted or resumed turn, re-check the current files needed for the next action before relying on prior context. Reread `AGENTS.md` and `README.md` only when the interruption or resume may have changed task scope, workflow state, or the applicable repository instructions.
 
 ## Sources of Authority
 

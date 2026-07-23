@@ -5,7 +5,7 @@ const {
 } = require('./calendar_contract');
 
 const EARNINGS_WEEK_SCHEMA_VERSION = 2;
-const DISPLAY_MIN_MARKET_CAP = 10000000000;
+const DISPLAY_MIN_MARKET_CAP = 25000000000;
 const COMMENTARY_DISPOSITION_STATUSES = new Set(['verified', 'commentary_unavailable', 'pending_review']);
 const GUIDANCE_DISPOSITION_STATUSES = new Set(['verified', 'not_provided', 'unverified', 'pending_review']);
 const EDITORIAL_UNAVAILABLE_REASON = 'not_verified_for_current_run';
@@ -527,7 +527,6 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
     // cross-range failure publishes an explicit unavailable week instead.
     const rows = (canonicalWeek.rows || []).map((row) => applyEarningsLifecycle(row, new Date(checkedAt)));
     const secondaryRecoveryCandidates = canonicalWeek.secondaryRecoveryCandidates || [];
-    const companyReleaseTasks = canonicalWeek.companyReleaseTasks || [];
     return {
       mode: 'carried_forward',
       week: {
@@ -541,7 +540,7 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
         rows,
         summary: {
           ...(canonicalWeek.summary || {}),
-          counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates, companyReleaseTasks)
+          counts: computeEarningsWeekCounts(rows, secondaryRecoveryCandidates)
         }
       }
     };
@@ -562,7 +561,6 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
       },
       rows: [],
       secondaryRecoveryCandidates: [],
-      companyReleaseTasks: [],
       summary: {
         counts: computeEarningsWeekCounts([])
       }
@@ -634,6 +632,23 @@ function earningsReactionBasis(reportTiming) {
   return 'unavailable';
 }
 
+function earningsHasActual(row) {
+  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
+}
+
+function actualsObservedDate(row) {
+  if (!isIsoDateTime(row?.actualsObservedAt)) return '';
+  return easternClock(new Date(row.actualsObservedAt))?.date || '';
+}
+
+function earningsReactionBasisForRow(row) {
+  const basis = earningsReactionBasis(row?.reportTiming);
+  if (basis !== 'unavailable' || row?.reportTiming !== 'unknown' || !earningsHasActual(row)) return basis;
+  const observedDate = actualsObservedDate(row);
+  if (!observedDate || !isIsoDate(row?.reportDate)) return 'unavailable';
+  return compareIsoDate(observedDate, row.reportDate) <= 0 ? 'same_day_close' : 'next_session_close';
+}
+
 function earningsRowKey(row) {
   return `${row?.reportDate || ''}:${row?.symbol || ''}`;
 }
@@ -666,6 +681,7 @@ function reportWindowArrived(row, asOf = new Date()) {
   if (row.reportTiming === 'bmo') return clock.minutes >= 8 * 60;
   if (row.reportTiming === 'dmh') return clock.minutes >= 9 * 60 + 30;
   if (row.reportTiming === 'amc') return clock.minutes >= 16 * 60;
+  if (row.reportTiming === 'unknown') return true;
   return false;
 }
 
@@ -685,7 +701,7 @@ function earningsCloseAvailable(bar, asOf = new Date()) {
 // These counts are embedded in the canonical earnings-week artifact and must
 // stay identical anywhere the payload is generated, refreshed, applied, or
 // validated.
-function computeEarningsWeekCounts(rows, secondaryRecoveryCandidates = [], companyReleaseTasks = []) {
+function computeEarningsWeekCounts(rows, secondaryRecoveryCandidates = []) {
   return {
     total: rows.length,
     verified: rows.filter((row) => row?.sourceStatus === 'verified').length,
@@ -694,8 +710,7 @@ function computeEarningsWeekCounts(rows, secondaryRecoveryCandidates = [], compa
     missingTiming: rows.filter((row) => row?.reportTiming === 'unknown').length,
     missingRevenue: rows.filter((row) => row?.revenue?.estimate === null && row?.revenue?.actual === null).length,
     missingMarketCap: rows.filter((row) => row?.marketCap === null).length,
-    secondaryRecoveryCandidates: secondaryRecoveryCandidates.length,
-    companyReleaseTasks: companyReleaseTasks.length
+    secondaryRecoveryCandidates: secondaryRecoveryCandidates.length
   };
 }
 
@@ -705,9 +720,10 @@ function computeEarningsSourceStatus(row, options = {}) {
   const requireComputedReaction = options.requireComputedReaction !== false;
   const scheduleVerificationStatus = row?.scheduleVerificationStatus || row?.sourceAudit?.scheduleVerification?.status;
   const companyReleaseStatus = row?.companyReleaseStatus || row?.sourceAudit?.companyReleaseResolution?.status;
+  const selectedSlate = row?.sourceAudit?.selectedSources?.slate;
   if (row?.sourceAudit?.resultRefresh?.status === 'partial') return 'partial';
   if (['needs_review', 'unresolved'].includes(companyReleaseStatus)) return 'partial';
-  if (!['corroborated', 'official_confirmed'].includes(scheduleVerificationStatus)) return 'partial';
+  if (selectedSlate !== 'zacks' && !['corroborated', 'official_confirmed'].includes(scheduleVerificationStatus)) return 'partial';
   if (row?.reportTiming === 'unknown') return 'partial';
   if (!Number.isFinite(row?.eps?.estimate) || !Number.isFinite(row?.eps?.actual)) return 'partial';
   if (!Number.isFinite(row?.revenue?.estimate) || !Number.isFinite(row?.revenue?.actual)) return 'partial';
@@ -717,7 +733,7 @@ function computeEarningsSourceStatus(row, options = {}) {
 
 function applyEarningsLifecycle(row, asOf = new Date()) {
   const output = { ...row };
-  const hasActual = Number.isFinite(output.eps?.actual) || Number.isFinite(output.revenue?.actual);
+  const hasActual = earningsHasActual(output);
   // Providers can expose a dated daily bar before its session has closed.
   // Treat reaction fields as computed only after that bar's required close.
   const computed = hasActual
@@ -726,12 +742,13 @@ function applyEarningsLifecycle(row, asOf = new Date()) {
     && Number.isFinite(output.reaction?.fromClose)
     && Number.isFinite(output.reaction?.toClose)
     && earningsCloseAvailable({ date: output.reaction?.toDate }, asOf);
+  const basis = earningsReactionBasisForRow(output);
   const status = computed
     ? 'computed'
-    : !hasActual ? 'pending' : output.reportTiming === 'unknown' ? 'unavailable' : 'awaiting_close';
+    : !hasActual ? 'pending' : basis === 'unavailable' ? 'unavailable' : 'awaiting_close';
   output.reaction = {
     ...(output.reaction || {}),
-    basis: earningsReactionBasis(output.reportTiming),
+    basis,
     percent: computed ? output.reaction.percent : null,
     fromDate: computed ? output.reaction.fromDate : '',
     fromClose: computed ? output.reaction.fromClose : null,
@@ -892,17 +909,34 @@ function barAfter(bars, date) {
   return bars.find((bar) => compareIsoDate(bar.date, date) > 0) || null;
 }
 
-function reactionWindow(bars, reportDate, reportTiming) {
+function reactionWindow(bars, row) {
+  const reportDate = row?.reportDate;
+  const reportTiming = row?.reportTiming;
+  const basis = earningsReactionBasisForRow(row);
   if (reportTiming === 'bmo' || reportTiming === 'dmh') {
     return {
-      basis: earningsReactionBasis(reportTiming),
+      basis,
       fromBar: previousBar(bars, reportDate),
       toBar: barOnOrAfter(bars, reportDate)
     };
   }
   if (reportTiming === 'amc') {
     return {
-      basis: earningsReactionBasis(reportTiming),
+      basis,
+      fromBar: barOnOrAfter(bars, reportDate),
+      toBar: barAfter(bars, reportDate)
+    };
+  }
+  if (basis === 'same_day_close') {
+    return {
+      basis,
+      fromBar: previousBar(bars, reportDate),
+      toBar: barOnOrAfter(bars, reportDate)
+    };
+  }
+  if (basis === 'next_session_close') {
+    return {
+      basis,
       fromBar: barOnOrAfter(bars, reportDate),
       toBar: barAfter(bars, reportDate)
     };
@@ -915,14 +949,14 @@ function attachReactions(rows, yahooFetches, { asOf = new Date() } = {}) {
   return rows.map((row) => {
     const yahoo = yahooBySymbol.get(row.symbol);
     const bars = yahoo?.bars || [];
-    const { basis, fromBar, toBar } = reactionWindow(bars, row.reportDate, row.reportTiming);
-    const hasReportedActual = Number.isFinite(row.eps.actual) || Number.isFinite(row.revenue.actual);
+    const { basis, fromBar, toBar } = reactionWindow(bars, row);
+    const hasReportedActual = earningsHasActual(row);
     const reactionPct = hasReportedActual && fromBar && toBar && earningsCloseAvailable(toBar, asOf)
       ? pctChange(fromBar.close, toBar.close)
       : null;
     const reactionStatus = reactionPct !== null
       ? 'computed'
-      : !hasReportedActual ? 'pending' : row.reportTiming === 'unknown' ? 'unavailable' : 'awaiting_close';
+      : !hasReportedActual ? 'pending' : basis === 'unavailable' ? 'unavailable' : 'awaiting_close';
     const computed = reactionStatus === 'computed';
     const output = {
       ...row,
@@ -962,65 +996,12 @@ function attachReactions(rows, yahooFetches, { asOf = new Date() } = {}) {
   });
 }
 
-function companyReleaseReason(row) {
-  if (!row) return '';
-  if (row.sourceAudit?.companyReleaseResolution?.status === 'needs_review') return 'company_release_needs_review';
-  if (row.reportTiming === 'unknown') return 'missing_report_timing';
-  if (!Number.isFinite(row.eps?.actual)) return 'missing_eps_actual';
-  if (!Number.isFinite(row.revenue?.actual)) return 'missing_revenue_actual';
-  return '';
-}
-
-function companyReleaseTask(row, reason) {
-  return {
-    id: `${row.reportDate}:${row.symbol}:company-release`,
-    symbol: row.symbol,
-    company: row.company,
-    reportDate: row.reportDate,
-    reason,
-    priority: Number(row.marketCap) >= 10000000000 ? 'high' : 'normal',
-    marketCap: row.marketCap,
-    marketCapDisplay: row.marketCapDisplay,
-    fiscalQuarterEnding: row.fiscalQuarterEnding || '',
-    neededFields: [
-      'reportTiming',
-      'fiscalPeriod',
-      'eps.actual',
-      'revenue.actual',
-      'companyReleaseUrl',
-      'secFilingUrl'
-    ],
-    preferredSources: [
-      'SEC 8-K Exhibit 99.1',
-      'Company investor relations earnings release'
-    ],
-    doNotUseForOverrides: ['finnhub_calendar_row'],
-    permittedUses: [
-      'official_actuals_resolution',
-      'timing_resolution',
-      'fiscal_period_resolution',
-      'eps_basis_resolution'
-    ],
-    instructions: 'Use an official company release to resolve missing timing or actuals. Keep the row\'s deterministic estimates for comparison.',
-    sourceAudit: row.sourceAudit
-  };
-}
-
-function buildCompanyReleaseTasks(rows, asOf = new Date()) {
-  return rows.flatMap((row) => {
-    if (!isDisplayEligibleEarningsRow(row) || !reportWindowArrived(row, asOf)) return [];
-    const reason = companyReleaseReason(row);
-    return reason ? [companyReleaseTask(row, reason)] : [];
-  });
-}
-
 module.exports = {
   EARNINGS_WEEK_SCHEMA_VERSION,
   applyEarningsLifecycle,
   attachReactions,
   buildEarningsNarrativeSidecar,
   buildEarningsPreparationFallback,
-  buildCompanyReleaseTasks,
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
@@ -1032,6 +1013,8 @@ module.exports = {
   earningsRowKey,
   earningsRowLifecycle,
   earningsReactionBasis,
+  earningsReactionBasisForRow,
+  earningsHasActual,
   earningsScheduleReviewRows,
   earningsNarrativeDispositions,
   earningsNarrativeFingerprint,

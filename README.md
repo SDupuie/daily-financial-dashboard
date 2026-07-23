@@ -35,11 +35,16 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 | Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the section contracts below. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
 | Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the section contracts below. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
 
+### Codex command execution
+
+- When Codex runs Prepare, use escalated local command execution. Zacks uses Playwright Chromium during Earnings preparation, and Chromium may not launch in the default managed sandbox.
+- This changes only how the Prepare command is invoked from Codex; the commands remain `node scripts/run_daily_update.js prepare --morning`, `node scripts/run_daily_update.js prepare --afternoon`, `node scripts/run_daily_update.js prepare --scheduled --morning`, or `node scripts/run_daily_update.js prepare --scheduled --afternoon`.
+
 ### Core guarantees
 
-- **Prepare Handoff:** validates staging and writes the handoff/candidate while leaving the canonical dashboard unchanged.
+- **Prepare Handoff:** validates deterministic staging, resolves each failed section to validated carried-forward data or an explicit unavailable state, and writes the handoff/candidate while leaving the canonical dashboard unchanged.
 - **AI Editorial Work:** happens only in `generated/editorial/dashboard-data.json`; refreshed quotes need reviewed commentary, while failed quote downloads retain their prior validated quote and commentary together.
-- **Apply Handoff:** merges editorial work, applies documented publication fallbacks, verifies the assembled dashboard artifact is renderable, and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
+- **Apply Handoff:** merges editorial work without revalidating or replacing deterministic candidate data, runs one top-level render-safety check, and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
 
 ## AI Editorial Instructions
 
@@ -49,12 +54,16 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 
 Blank fields or decisions marked `pending_review` are active AI assignments unless the section contract explicitly says they are system-provided carry-forward state.
 
+- `masthead`: leave the generated edition and date unchanged.
 - `opening`: write the current edition's `headline`, `deck`, and exactly 4 catalyst cards. Each catalyst must have a short `label` and a current, evidence-supported `body` summarizing one of the update's main market drivers.
-- `news`: use `editorialReview.newsSearch` as read-only source material. The only News field the AI edits is `editorialReview.newsSelection`; follow the News-card contract and Story selection policy below.
-- `tape`: leave generated quote fields unchanged. Each refreshed Tape row needs current reviewed commentary; failed quote downloads retain their prior quote and commentary.
-- `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
+- `news inventory`: use `editorialReview.newsSearch` as read-only source material; do not edit, delete, reorder, prune, summarize, or mark candidates unavailable.
+- `futuresModule`: leave generated futures rows and session labels unchanged; select Futures cards through `editorialReview.newsSelection.futures` under the News-card contract.
+- `tape`: leave generated quote fields unchanged; update the editorial roster only when intentionally changing coverage, and rewrite each refreshed Tape note. Each note must summarize the relevant market commentary or catalyst without carrying prior commentary forward or restating quote values. Before Apply Handoff, compare every refreshed Tape note against that row's generated direction, delta, and percent; rewrite any note that contradicts the displayed move. Every Crypto-group ticker needs its own current note for the collapsed Tape Crypto tab; do not reuse generic copy across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible Crypto tickers. Failed quote downloads retain their last validated quote and bound commentary.
+- `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Leave deterministic values unchanged, including any carried-forward or unavailable state resolved during Prepare.
+- `stories`: select the broad-market news collection through `editorialReview.newsSelection.stories` under the News-card contract.
+- `crypto`: leave generated `crypto.stats[]` and `crypto.dominance` values unchanged, and select only the crypto news collection through `editorialReview.newsSelection.crypto` under the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial under the Tape contract.
 - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged. Complete every visible Earnings row under the Earnings editorial contract below.
-- `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions.
+- `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. Complete Market Lens and Outcome fields under the Week Ahead / Market Lens editorial contract below.
 - `footer`: leave the generated footer unchanged.
 
 ### AI Editorial Work checklist
@@ -95,16 +104,16 @@ Blank fields or decisions marked `pending_review` are active AI assignments unle
    - Earnings color rule: use muted styling for consensus/pending estimates, neutral styling for reported fundamentals such as EPS/revenue/guidance, and red/green only for market reactions or clearly labeled beat/miss surprises.
 
 5. Editorialize the generated handoff in this order.
-   - `masthead`: leave the generated edition and date unchanged.
+   - `masthead`: complete the Masthead contract above.
    - `opening`: complete the Opening contract above.
-   - `futuresModule`: leave the four generated futures rows and session labels unchanged; select the active window’s stories through `editorialReview.newsSelection.futures`. Use each story’s descriptive `tag` for its visible badge.
-   - `tape`: leave generated quote fields unchanged; update the editorial roster only when intentionally changing coverage, and rewrite each refreshed Tape note. Each note must summarize the relevant market commentary or catalyst without carrying prior commentary forward or restating quote values. Before Apply Handoff, compare every refreshed Tape note against that row's generated direction, delta, and percent; rewrite any note that contradicts the displayed move. Every Crypto-group ticker needs its own current note for the collapsed Tape Crypto tab; do not reuse generic copy across BTC, ETH, SOL, XRP, IBIT, ETHA, MSTR, or other visible Crypto tickers. Leave failed-download rows on their last validated quote and bound commentary.
-   - `assetAllocationPortfolio`: review the generated ETF rows and sanitized portfolio summary. Use the Asset Allocation fallback only if that refresh fails.
-   - `stories`: select the broad-market news collection through `editorialReview.newsSelection.stories` per the News-card contract.
-   - `crypto`: leave generated `crypto.stats[]` values unchanged and select only the crypto news collection through `editorialReview.newsSelection.crypto` per the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial.
+   - `futuresModule`: complete the Futures contract above.
+   - `tape`: complete the Tape contract above.
+   - `assetAllocationPortfolio`: complete the Asset Allocation contract above.
+   - `stories`: complete the Stories contract above.
+   - `crypto`: complete the Crypto contract above.
    - `earnings.week`: complete the Earnings editorial contract below.
-   - `weekAhead`: complete the Week Ahead and Market Lens editorial contract below.
-   - `footer`: leave the generated footer unchanged.
+   - `weekAhead`: complete the Week Ahead / Market Lens editorial contract below.
+   - `footer`: complete the Footer contract above.
 
 6. Run the final pre-Apply editorial gate.
    - Confirm the handoff has no unresolved active AI assignments: no `pending_review` remains in Tape, Market Lens, Earnings, Week Ahead Outcome, or guidance unless the section contract explicitly identifies that field as system-provided carry-forward state. Complete, fix, or repair the handoff before Apply.
@@ -198,9 +207,10 @@ Compact Earnings monitor writing rules:
 - Keep the post-release business takeaway to 120 characters or fewer.
 - Keep the guidance summary to 130 characters or fewer.
 - Keep the stock-reaction note to 100 characters or fewer.
-- For reported rows, explain the business takeaway rather than restating an EPS or revenue beat or miss.
+- Do not start Earnings commentary with the company name, ticker, or a generic reference to the company; the row already supplies that context.
+- For reported rows, explain the business takeaway rather than restating whether EPS or revenue beat, missed, or matched.
 - Name at least one concrete business driver and explain why it matters to the earnings read.
-- When guidance is provided, summarize only the official company outlook and identify whether it is next-quarter or full-year guidance. If both are provided, lead with the quarterly outlook.
+- When guidance is provided, summarize only the company outlook and identify whether it is next-quarter or full-year guidance. If both are provided, lead with the quarterly outlook.
 - For stock-reaction notes, explain the earnings driver behind the move rather than repeating the displayed percentage change.
 
 ### Week Ahead / Market Lens editorial contract
@@ -217,7 +227,7 @@ Scheduled or awaiting days may retain generated Market Lens copy or use a valid 
 
 ### Required daily checks
 
-Publication validation is a final artifact safety check. It blocks malformed HTML, unparsable embedded JSON, missing required runtime blocks, render-surface shapes that would break dashboard initialization, and core published-file safety issues. It does not block publication solely for incomplete editorial work, partial sections, unavailable dispositions, omitted cards, blank fallback copy, or recoverable section-level data issues handled by Apply fallbacks and later handoffs.
+Publication validation is a final artifact safety check. It blocks malformed HTML, unparsable embedded JSON, missing required runtime blocks, render-surface shapes that would break dashboard initialization, and core published-file safety issues. It does not block publication solely for incomplete editorial work, partial sections, unavailable dispositions, omitted cards, blank fallback copy, or recoverable section-level data issues already resolved during Prepare or deferred to later handoffs.
 
 - Before committing a content-only update, run only `node scripts/validate_dashboard.js readiness --skip-tests --allow daily_financial_news.html`. The `--allow` option hides expected dirty files from the warning list; readiness reports but does not block on other dirty files.
 - For quick iteration or an ordinary non-publish check, run `node scripts/validate_dashboard.js daily_financial_news.html`.
@@ -245,7 +255,7 @@ Normal daily updates stop here. The Reference Appendix is not AI Editorial Work 
 
 ### Data Contracts
 
-This section is the canonical human-readable contract for dashboard data. Data contracts describe canonical ownership and expected payload shape. Some contracts are enforced during Prepare/source validation, some through Apply normalization, and some through focused regression tests. The final publication gate enforces only artifact renderability and core published-file safety unless this appendix explicitly says a condition is publication-blocking. Keep validation, normalization, tests, and fetch-script output in sync with the relevant owner whenever a payload shape changes.
+This section is the canonical human-readable contract for dashboard data. Data contracts describe canonical ownership and expected payload shape. Deterministic contracts are enforced during Prepare/source validation; Apply owns only editorial and publication-state normalization. The final publication gate enforces only artifact renderability and core published-file safety unless this appendix explicitly says a condition is publication-blocking. Keep validation, normalization, tests, and fetch-script output in sync with the relevant owner whenever a payload shape changes.
 
 #### Published payload boundary
 
@@ -262,32 +272,40 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 - Boundary rules: `chart-data.series[]` is the canonical market-data store; visible Tape quote fields are derived from it; every displayed Tape ticker must have matching embedded source, chart series, and derived quote data.
 - Each published compact chart bar contains exactly `[time, open, high, low, close]` or, when volume is included, `[time, open, high, low, close, volume]`. Additional values are not supported.
 - Tape commentary binds to the accepted quote revision. Refreshed quotes need reviewed commentary; failed quote downloads retain their last validated quote and bound commentary.
+- If neither refreshed nor prior canonical Chart/Tape data validates, Prepare emits an atomic unavailable bundle with empty `chart-data.series[]` and `tape.rows[]`; Apply copies that bundle unchanged.
 
 #### Asset Allocation
 
-- Owner: `scripts/fetch_asset_allocation.js` supplies instrument-level ETF market data and sanitized portfolio summary data.
-- Boundary rules: never embed tactical weights, signals, or allocation calculations; lookahead dividend events never enter current MTD dividend totals.
+- Owner: `scripts/fetch_asset_allocation.js` supplies two independently prepared inputs: instrument-level ETF rows and the sanitized portfolio summary. Prepare validates and resolves each independently, so failure of one does not discard valid data from the other.
 
 #### Crypto
 
 - Owner: `scripts/fetch_crypto_stats.js` supplies crypto stat cards; Crypto news cards follow the News-card contract.
-- Boundary rules: `crypto.stats[]` is for section stat cards, `crypto.notes[]` is for crypto news, and ticker-level crypto quote rows and commentary live in `tape.rows[]`; `crypto.tape[]` is not supported.
+- Boundary rules: `crypto.stats[]` is for section stat cards, CoinGecko-owned `crypto.dominance` contains BTC, ETH, and other market-cap percentages, `crypto.notes[]` is for crypto news, and ticker-level crypto quote rows and commentary live in `tape.rows[]`; `crypto.tape[]` is not supported.
+- Refresh behavior: the three stat providers resolve independently. A failed provider carries only its validated prior card, or marks that card unavailable, while successful cards remain fresh and the section becomes partial. Because TOTAL and `crypto.dominance` share the CoinGecko response, they carry forward or become unavailable together.
 
 #### Futures
 
 - Owner: `scripts/fetch_chart_data.js` owns Futures payloads.
 - Boundary rules: `futuresModule.futures[]` contains exactly four index-futures rows unless `availability.status` is explicitly `unavailable`; Futures story rules live in the News-card contract.
 
-#### Publication fallback contracts
+#### Prepare fallback contracts
 
-These are Apply/finalization implementation contracts, not AI Editorial Work completion rules. The Daily Runbook and section editorial contracts above remain the authority for what the AI must complete before Apply.
+Prepare validates fresh deterministic payloads. Where a domain permits prior-canonical carry-forward, Prepare validates that fallback before using it. If no permitted fallback validates, it emits the domain's explicit unavailable state and continues. Chart and Tape are resolved as one atomic bundle. Section-level source or contract failures do not block publication.
+
+- `chart-data` and `tape.rows`: failed refreshes retain the complete validated quote/history/commentary bundle; if no valid bundle exists, both publish empty with `availability.status = "unavailable"`.
+- `futuresModule`: individual source failures may produce a validated partial payload from the current preparation run. If no valid current-run payload exists, Futures becomes explicitly unavailable; prior canonical Futures values are not carried forward.
+- `crypto.stats` and `crypto.dominance`, `assetAllocationPortfolio`, `weekAhead` facts, and `earnings.week` facts: invalid fresh data uses validated same-domain carry-forward where allowed, otherwise explicit unavailable state.
+
+#### Apply editorial fallback contracts
+
+These are Apply implementation contracts, not AI Editorial Work completion rules. Apply never revalidates or replaces Prepare-owned deterministic values.
 
 - `opening`: incomplete or invalid editorial Opening fields are omitted from the published payload rather than replaced with generated copy.
 - `news`: missing, invalid, duplicate, outside-inventory, or missing-provenance selected cards are omitted; Apply marks coverage partial where applicable and does not search for replacement stories or infer provenance.
 - `tape`: refreshed quote rows without reviewed commentary publish a blank note with `commentary_unavailable`; failed quote-download rows retain their last validated quote-bound commentary bundle.
 - `weekAhead`: invalid or unavailable released Market Lens commentary uses an unavailable disposition; missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
-- `earnings.week`: narrative fields still marked `pending_review` or carrying a valid unavailable status publish no copy for that field and preserve that disposition for the next handoff. Apply never replaces `pending_review` with prior commentary. For a malformed non-pending narrative/disposition pair, Apply may recover previously verified copy only when the relevant deterministic facts are unchanged; otherwise the field publishes no copy and the invalid state is normalized. Empty-row recovery may carry forward the previous non-empty Earnings week only under the documented recovery contract.
-- `futuresModule`, `crypto.stats`, and `assetAllocationPortfolio`: invalid or unavailable source payloads publish explicit unavailable or carried-forward section state instead of fabricated values.
+- `earnings.week`: narrative fields still marked `pending_review` or carrying a valid unavailable status publish no copy for that field and preserve that disposition for the next handoff. Apply never replaces `pending_review` with prior commentary. For a malformed non-pending narrative/disposition pair, Apply may recover previously verified copy only when the relevant deterministic facts are unchanged; otherwise the field publishes no copy and the invalid state is normalized. Deterministic empty-row recovery occurs during Prepare.
 
 ### Deterministic Source Contracts
 
@@ -298,7 +316,7 @@ The automated routing below describes the sources used by the deterministic fetc
 - Tape and chart series, including U.S. indices and equities, international and sector ETFs, commodity futures, rates-volatility and bond proxies, index futures, and crypto majors: Yahoo Finance chart history through the configured `sourceSymbol`.
 - Finnhub quote data: latest-bar repair only for eligible plain U.S. symbols when Yahoo exposes a newer close but does not provide usable OHLC for that date. Finnhub is not a second quote authority and is not used for futures, Treasury, or crypto symbols.
 - Treasury yields and curve data: Treasury.gov Daily Treasury Yield Curve Rate Data.
-- Total crypto market cap: CoinGecko global market API.
+- Total crypto market cap and BTC/ETH/other market-cap dominance: CoinGecko global market API.
 - Altcoin Season Index: CoinMarketCap chart API; the stat-card `delta` comes from `historicalValues.yesterday`, and is `n/a` when that comparison is unavailable.
 - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2`.
 - Asset Allocation Portfolio rows: Yahoo Finance instrument-level ETF market data only. The portfolio summary may use only the sanitized export from the separate Asset Allocation Dashboard; never import or recreate tactical allocation/model logic.
@@ -326,28 +344,34 @@ The richer earnings monitor uses this contract as the canonical deterministic me
 
 #### Source hierarchy
 
-1. Finnhub primary: calendar slate, company profile, timing, estimates, and actuals when Finnhub has the row.
-2. Alpha Vantage secondary calendar: one full-calendar CSV pull per build for date corroboration and Finnhub-missing candidate discovery. Alpha-only rows are candidates, not published rows.
-3. EarningsAPI company recovery: row-level EPS/revenue recovery only for Alpha-found, Finnhub-missing display candidates that pass the U.S. listing and $10B market-cap gates.
-4. Official company IR or SEC fallback: schedule confirmation and official-result resolution when provider data is incomplete or conflicting.
-5. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
+1. Zacks primary: calendar slate, timing, market cap, EPS estimate, EPS actual, sales estimate, sales actual, surprise, and related row facts.
+2. Legacy backup path: Finnhub -> Alpha Vantage -> EarningsAPI runs only when the Zacks path is unavailable or schema-invalid.
+3. Yahoo Finance Chart API: deterministic market reaction using close-to-close rules.
 
-#### Company-release retry behavior
+The build does not blend Zacks rows with legacy-provider rows. A valid Zacks build uses Zacks only.
 
-During normal Prepare/refresh, every visible row whose report window has arrived and whose actuals are still missing enters the same `companyReleaseTasks` recovery path. A failed retry is non-blocking: the staged row keeps the correct `awaiting_actual` lifecycle, and the task stays active for a later refresh.
+#### Zacks availability and schema gate
+
+- The Zacks path must pass an availability and schema gate before its data is accepted.
+- The gate checks HTTP success, parseable response data, expected EPS and sales table fields, active-week dates, row identity alignment, non-empty eligible slate after the $25B market-cap filter, and sane numeric parsing.
+- After a valid Zacks build, Prepare attempts a narrow Finnhub U.S. symbol-directory classification pass. Exact U.S. exchange-listed securities, including ADRs, remain eligible; OTC/Pink listings and symbols without an exact directory match are excluded from visible rows. If the live directory and cache are both unavailable, Prepare proceeds with the original Zacks market-cap-filtered rows and records the unavailable classification in staging diagnostics.
+- If the Zacks gate fails, the build uses the legacy Finnhub -> Alpha Vantage -> EarningsAPI backup path.
+- Backup use is recorded in staging diagnostics with the Zacks failure reason.
+- If Zacks is valid but an individual row is missing actual EPS or sales, that field remains pending.
 
 #### Published row and narrative state
 
-Published Earnings rows are produced from the Earnings contract owner and Apply normalization. Prepare/source validation owns deterministic contract enforcement; final publication blocks only Earnings states that would make the dashboard fail to render. Display rows keep compact schedule, result, guidance, and reaction status fields; detailed `sourceAudit`, recovery queues, and provider diagnostics are staging/debug state and must not be treated as reader-facing content.
+Published Earnings rows are selected and normalized by the Earnings contract owner during Prepare. Apply merges narrative fields only; final publication blocks only Earnings states that would make the dashboard fail to render. Display rows keep compact schedule, result, guidance, and reaction status fields; detailed source audit, Zacks schema-gate results, selected provider mode, and backup diagnostics are staging/debug state and must not be treated as reader-facing content.
+
+For `TIME UNKNOWN` rows, `reportTiming` remains `unknown`. When actual EPS or sales first appears, the row stores `actualsObservedAt`. If that timestamp falls on or before `reportDate`, Yahoo reaction uses the same-day close basis; if it falls after `reportDate`, Yahoo reaction uses the next-session close basis.
 
 Prepare Handoff treats repeated verified Earnings narrative as stale editorial state: same-field reuse across visible rows representing different underlying companies is reopened as `pending_review` for that field on the next handoff. Same-issuer rows, such as multiple share classes tied to one earnings report, may retain identical verified narrative only when they represent the same underlying company and earnings event; this does not allow reused or generic narrative across different issuers or relax the current-evidence requirement. This is a handoff self-healing check, not an Apply-time rejection gate.
 
 #### EarningsAPI budget policy
 
-- Treat the Free-plan daily quota (100 requests) as a scarce company-recovery budget, not a primary data source.
-- The active earnings build uses Alpha Vantage for the secondary calendar check and must not sweep EarningsAPI calendar days during rollover builds.
-- Query EarningsAPI company rows only for Alpha-found Finnhub-missing display candidates that meet the $10B display-scale market-cap floor.
-- Do not call EarningsAPI reactions in the normal path; Yahoo remains the reaction source.
+- EarningsAPI is quota-limited and is used only inside the legacy backup path after the Zacks gate fails.
+- A successful Zacks build spends no EarningsAPI budget.
+- Do not call EarningsAPI reactions; Yahoo remains the reaction source.
 
 ### Focused Repair Commands
 
@@ -356,7 +380,7 @@ Use focused repair commands only for explicit repairs. They update the current s
 - Market Lens-only correction: no standalone command. Use the current complete candidate when it still matches the canonical dashboard edition, regenerate the editorial handoff, and make the decision there. If no current candidate exists, rerun deterministic preparation first.
 - Chart-only correction: start with a current complete candidate, then use `node scripts/run_daily_update.js --apply-chart-data-json PATH`, `node scripts/run_daily_update.js --merge-chart-data-json PATH`, or `node scripts/run_daily_update.js --sync-chart-quotes`. Regenerate the editorial handoff afterward; successful quote changes require reviewed commentary.
 - Asset Allocation fallback: refresh `http://127.0.0.1:2200/api/asset-market-data`, then use `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. If refresh fails but the export exists, use it as a stale fallback; never import tactical allocation/model logic.
-- Earnings-only repair: first complete deterministic preparation, then run `node scripts/earnings_week.js apply-narrative`, run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`.
+- Earnings-only repair: rebuild the staged Earnings week from the current provider contract, then run `node scripts/earnings_week.js apply-narrative`, run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`. Normal repair uses Zacks. Repair uses the legacy backup path only when the Zacks gate fails, and the staged diagnostics must preserve the reason Zacks was bypassed.
 - Manual calendar rollover: use `node scripts/run_daily_update.js prepare --afternoon --rollover-calendar` for the Friday-through-Thursday bridge, or `node scripts/run_daily_update.js prepare --morning --rollover-calendar` for Monday-through-Friday. On Saturday, either edition rolls to the Friday bridge; on Sunday, either edition rolls to Monday-Friday.
 
 ### Local Refresh Server

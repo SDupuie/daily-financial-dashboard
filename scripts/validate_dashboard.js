@@ -462,6 +462,14 @@ function validateChartPayload(errors, payload, {
   if (payload.schemaVersion !== 1) errors.push(`${prefix}schemaVersion must be 1.`);
   if (!Array.isArray(payload.series)) errors.push(`${prefix}series must be an array.`);
   if (payload.quoteRows !== undefined) errors.push(`${prefix}quoteRows is no longer published; derive quote rows from ${prefix}series.`);
+  if (payload.availability?.status === 'unavailable') {
+    if (!isIsoDateTime(payload.generatedAt)) errors.push(`${prefix}generatedAt must be an offset-bearing ISO timestamp when unavailable.`);
+    if (payload.availability.reason !== 'source_refresh_failed') errors.push(`${prefix}availability.reason must be source_refresh_failed when unavailable.`);
+    if (!isIsoDateTime(payload.availability.checkedAt)) errors.push(`${prefix}availability.checkedAt must be an offset-bearing ISO timestamp when unavailable.`);
+    if (Array.isArray(payload.series) && payload.series.length) errors.push(`${prefix}series must be empty when chart data is unavailable.`);
+    if (expectedByTicker.size) errors.push(`${prefix}unavailable chart data requires an empty dashboard Tape roster.`);
+    return { decodedSeries: [], seriesByTicker: new Map() };
+  }
   validateChartPayloadMetadata(errors, payload, { label });
   const series = Array.isArray(payload.series) ? payload.series : [];
   const result = validateSeries(errors, series, {
