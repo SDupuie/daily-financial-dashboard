@@ -659,6 +659,8 @@ async function fetchEarningsApiCompanyRows(symbol, args, token, usage) {
 }
 
 function deterministicSnapshot(row) {
+  // Narrative validity is tied to these deterministic facts. If any component
+  // changes during refresh, downstream editorial text must be reopened.
   return JSON.stringify({
     actualsObservedAt: row.actualsObservedAt,
     reportTiming: row.reportTiming,
@@ -1049,6 +1051,8 @@ async function refreshEarningsResults(source, refreshData, options = {}) {
   }
 
   if (changedKeys.size) {
+    // Clearing is row-scoped: changed facts invalidate that row's narrative,
+    // while untouched rows keep their existing reviewed copy and dispositions.
     output.rows = output.rows.map((row) => changedKeys.has(rowKey(row))
       ? clearNarrative(row)
       : row);

@@ -8,7 +8,11 @@ const {
   isIsoDate,
   isIsoDateTime,
   isIsoTime,
-  isSupportedFiveTradingDayRange
+  isSupportedFiveTradingDayRange,
+  sameDateTimeParts,
+  validDateTimeParts,
+  zonedDateParts,
+  zonedTimeToUtc
 } = require('./calendar_contract');
 const {
   applyWeekAheadLifecycle,
@@ -716,6 +720,14 @@ function testCalendarAndTransientCases() {
   assert.equal(isIsoDateTime('2026-07-10'), false);
   assert.equal(isIsoTime('08:30'), true);
   assert.equal(isIsoTime('99:99'), false);
+  assert.equal(validDateTimeParts({ year: 2026, month: 7, day: 23, hour: 25, minute: 10, second: 0 }), false);
+  assert.equal(validDateTimeParts({ year: 2026, month: 2, day: 31, hour: 9, minute: 49, second: 0 }), false);
+  const easternMorning = zonedTimeToUtc({ year: 2026, month: 7, day: 23, hour: 9, minute: 49 }, 'America/New_York');
+  assert.equal(easternMorning.toISOString(), '2026-07-23T13:49:00.000Z');
+  assert.equal(sameDateTimeParts(
+    { year: 2026, month: 7, day: 23, hour: 9, minute: 49, second: 0 },
+    zonedDateParts(easternMorning, 'America/New_York')
+  ), true);
   assert.equal(addDays('2026-07-10', 3), '2026-07-13');
   assert.equal(compareIsoDate('2026-07-10', '2026-07-13') < 0, true);
   assert.equal(isSupportedFiveTradingDayRange('2026-07-13', '2026-07-17'), true);

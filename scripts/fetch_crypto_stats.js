@@ -491,6 +491,8 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
     details[task.key] = { source: 'Unavailable', stat };
   });
   const totalResult = settled[tasks.findIndex((task) => task.key === 'totalMarketCap')];
+  // CoinGecko owns both TOTAL and dominance; if that request fails, carry both
+  // forward together so dominance does not imply a fresher source than TOTAL.
   let dominance = totalResult?.status === 'fulfilled' && dominanceValuesValid(totalResult.value?.dominance)
     ? totalResult.value.dominance
     : unavailableCryptoDominance(checkedAt, totalResult?.status === 'rejected' ? totalResult.reason : 'dominance unavailable');
@@ -607,6 +609,8 @@ function validateCryptoStatsPayload(payload) {
   const unavailable = payload.availability?.status === 'unavailable';
   const partial = payload.availability?.status === 'partial';
   const carriedForward = payload.availability?.status === 'carried_forward';
+  // Staging validation accepts partial payloads, but each degraded row must
+  // carry its own availability marker so the UI can explain exactly what is stale.
   if (!isIsoDateTime(payload.fetchedAt)) errors.push('Crypto stats staging fetchedAt must be an offset-bearing ISO timestamp.');
   if (!Array.isArray(payload.stats)) return ['Crypto stats staging stats must be an array.'];
   if (unavailable) {

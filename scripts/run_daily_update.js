@@ -690,6 +690,76 @@ function earningsHasActual(row) {
   return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
 }
 
+function editorialAssignmentStatus(disposition, text = '', required = false) {
+  if (disposition?.status) return disposition.status;
+  if (String(text || '').trim()) return 'verified';
+  return required ? 'missing' : 'not_required';
+}
+
+function earningsGuidanceEvidenceKey(row) {
+  return `${row?.symbol || ''}:${row?.reportDate || ''}`;
+}
+
+function addGuidanceEvidence(assignment, evidenceRowsByKey, row) {
+  const evidence = evidenceRowsByKey.get(earningsGuidanceEvidenceKey(row));
+  if (!evidence) return assignment;
+  return {
+    ...assignment,
+    evidenceStatus: String(evidence.status || ''),
+    documents: Number.isFinite(evidence.documents) ? evidence.documents : 0,
+    guidanceSignalCount: Number.isFinite(evidence.guidanceSignalCount) ? evidence.guidanceSignalCount : 0,
+    primaryUrl: String(evidence.primaryUrl || ''),
+    evidenceRef: String(evidence.evidenceRef || '')
+  };
+}
+
+function buildEarningsChecklist(week, guidanceEvidenceIndex = null) {
+  // Handoff-only assignment index: it points the editorial pass at canonical
+  // earnings.week.rows paths and never becomes visible dashboard UI.
+  const evidenceRowsByKey = new Map((Array.isArray(guidanceEvidenceIndex?.rows) ? guidanceEvidenceIndex.rows : [])
+    .filter((row) => typeof row?.key === 'string' && row.key)
+    .map((row) => [row.key, row]));
+  return (Array.isArray(week?.rows) ? week.rows : []).flatMap((row, index) => {
+    if (!renderSafePublishedEarningsRow(row) || !isDisplayEligibleEarningsRow(row)) return [];
+    const rowPath = `earnings.week.rows[${index}]`;
+    const hasActuals = earningsHasActual(row);
+    const hasComputedReaction = row?.reaction?.status === 'computed';
+    return [{
+      symbol: row.symbol,
+      company: row.company,
+      reportDate: row.reportDate,
+      rowIndex: index,
+      rowPath,
+      lifecycle: String(row.lifecycle || ''),
+      hasActuals,
+      hasComputedReaction,
+      assignments: [
+        {
+          field: 'outcome.interpretation',
+          path: `${rowPath}.outcome.interpretation`,
+          dispositionPath: `${rowPath}.outcome.interpretationDisposition`,
+          status: editorialAssignmentStatus(row.outcome?.interpretationDisposition, row.outcome?.interpretation, true),
+          required: true
+        },
+        addGuidanceEvidence({
+          field: 'outcome.guidance',
+          path: `${rowPath}.outcome.guide`,
+          dispositionPath: `${rowPath}.outcome.guidanceDisposition`,
+          status: editorialAssignmentStatus(row.outcome?.guidanceDisposition, row.outcome?.guide, hasActuals),
+          required: hasActuals
+        }, evidenceRowsByKey, row),
+        {
+          field: 'reaction.note',
+          path: `${rowPath}.reaction.note`,
+          dispositionPath: `${rowPath}.reaction.commentaryDisposition`,
+          status: editorialAssignmentStatus(row.reaction?.commentaryDisposition, row.reaction?.note, hasComputedReaction),
+          required: hasComputedReaction
+        }
+      ]
+    }];
+  });
+}
+
 function prepareEarningsForEditorial(earnings) {
   const week = structuredClone(earnings?.week || { rows: [] });
   delete week.narrativeApply;
@@ -913,6 +983,7 @@ async function prepareEditorialWorkspace(args) {
     sourceArtifact: 'generated/earnings_week.json'
   });
   reviewManifest.earningsGuidanceEvidence = guidanceEvidence.index;
+  reviewManifest.earningsChecklist = buildEarningsChecklist(dashboardData.earnings?.week, guidanceEvidence.index);
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
   reviewManifest.marketLensDecisions = (dashboardData.weekAhead?.days || [])
     .filter((day) => Array.isArray(day?.events) && day.events.length)
@@ -1476,6 +1547,8 @@ function normalizeMarketLensReview(data, reviewManifest) {
     const day = eventDays.find((item) => item.date === decision.date);
     const submittedDecision = submittedByDate.get(decision.date);
     const released = ['released_awaiting_close', 'close_available'].includes(day?.lifecycle);
+    // Released days with actuals need fresh editorial judgment; retaining
+    // generated pre-release copy becomes an explicit unavailable disposition.
     if (released && weekAheadDayHasReleasedActuals(day) && decision.action === 'retain-generated') {
       if (Array.isArray(reviewManifest.systemFallbacks)) {
         reviewManifest.systemFallbacks.push({
@@ -1581,6 +1654,8 @@ function preserveSafePriorEarningsNarrative(finalWeek, previousWeek) {
 function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, editorialDashboardData, previousDashboardData = null) {
   const candidateWeek = candidateDashboardData.earnings?.week;
   if (!candidateWeek) return null;
+  // Deterministic candidate rows remain the base; the edited handoff supplies
+  // only narrative fields keyed by symbol/reportDate.
   const editorialRowsByKey = new Map((Array.isArray(editorialDashboardData.earnings?.week?.rows)
     ? editorialDashboardData.earnings.week.rows
     : []).map((row) => [earningsNarrativeRowKey(row), row]));
@@ -1612,6 +1687,34 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
     week: finalWeek
   };
   return { narrativePayload: rows.length ? narrativePayload : null, week: finalWeek };
+}
+
+function pendingEarningsEditorialFields(week) {
+  return (Array.isArray(week?.rows) ? week.rows : []).flatMap((row) => {
+    if (!renderSafePublishedEarningsRow(row) || !isDisplayEligibleEarningsRow(row)) return [];
+    const symbol = String(row.symbol || row.company || '').trim() || '(unknown)';
+    const pending = [];
+    if (pendingReviewDisposition(row.outcome?.interpretationDisposition)) {
+      pending.push(`${symbol} outcome.interpretation`);
+    }
+    if (earningsHasActual(row) && pendingReviewDisposition(row.outcome?.guidanceDisposition)) {
+      pending.push(`${symbol} outcome.guidance`);
+    }
+    if (row.reaction?.status === 'computed' && pendingReviewDisposition(row.reaction?.commentaryDisposition)) {
+      pending.push(`${symbol} reaction.note`);
+    }
+    return pending;
+  });
+}
+
+function warnPendingEarningsEditorialFields(week) {
+  // Apply stays fail-open by contract, but this terminal warning is the last
+  // operator-visible signal before unresolved Earnings fields are published blank.
+  const pending = pendingEarningsEditorialFields(week);
+  if (pending.length) {
+    process.stderr.write(`Earnings editorial fields still pending: ${pending.join(', ')}\n`);
+  }
+  return pending;
 }
 
 function safeEditorialText(value, fallback) {
@@ -1845,6 +1948,8 @@ function prepareEarningsRowsForPublication(data) {
   const week = data.earnings?.week;
   if (!week || typeof week !== 'object' || Array.isArray(week)) return;
   if (!Array.isArray(week.rows)) week.rows = [];
+  // Publication filtering happens after Apply has normalized narrative
+  // dispositions, so display eligibility cannot leak staging-only row queues.
   week.rows = week.rows
     .map(repairPublishedEarningsReaction)
     .filter(renderSafePublishedEarningsRow)
@@ -2070,6 +2175,7 @@ function applyDashboardDataJson(args) {
     editorialDashboardData,
     previousDashboardData
   );
+  if (finalizedEarnings?.week) warnPendingEarningsEditorialFields(finalizedEarnings.week);
   normalizeMarketLensReview(dashboardData, reviewManifest);
   normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
   const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });

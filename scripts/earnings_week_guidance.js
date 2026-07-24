@@ -328,6 +328,8 @@ function isIgnoredDocument(name, primaryDocument, options = {}) {
 function chooseExhibitDocuments(indexData, filing = {}, primaryHtml = '', detailHtml = '') {
   const items = Array.isArray(indexData?.directory?.item) ? indexData.directory.item : [];
   const itemByName = new Map(items.map((item) => [String(item.name || ''), item]));
+  // Prefer SEC filing-detail metadata when available; filename heuristics are
+  // only a fallback when the detail table cannot identify exhibits cleanly.
   const tableCandidates = extractFilingDetailDocuments(detailHtml)
     .filter((record) => !isIgnoredDocument(record.name, filing.primaryDocument, {
       allowPrimaryDocument: filing.form === '6-K'

@@ -2,3 +2,4 @@
 .env
 generated/
 mockups/
+.codex/

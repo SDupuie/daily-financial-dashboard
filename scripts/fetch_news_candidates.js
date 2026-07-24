@@ -2,7 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { isIsoDateTime } = require('./calendar_contract');
+const {
+  isIsoDateTime,
+  sameDateTimeParts,
+  validDateTimeParts,
+  zonedDateParts,
+  zonedTimeToUtc
+} = require('./calendar_contract');
 const {
   allowedNewsDates,
   candidateInFuturesPublicationWindow,
@@ -27,6 +33,40 @@ const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const ALPHA_VANTAGE_PACING_MS = 1250;
 const PROVENANCE_PRIORITY = Object.freeze({ 'msn-reuters': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const FIXED_ZONE_OFFSETS = Object.freeze({
+  UT: 0,
+  UTC: 0,
+  GMT: 0,
+  EST: -5 * 60,
+  EDT: -4 * 60,
+  CST: -6 * 60,
+  CDT: -5 * 60,
+  MST: -7 * 60,
+  MDT: -6 * 60,
+  PST: -8 * 60,
+  PDT: -7 * 60
+});
+const GENERIC_ZONE_NAMES = Object.freeze({
+  ET: 'America/New_York',
+  CT: 'America/Chicago',
+  MT: 'America/Denver',
+  PT: 'America/Los_Angeles'
+});
+const NAMED_ZONE_PATTERN = '(?:UT|UTC|GMT|EST|EDT|CST|CDT|MST|MDT|PST|PDT|ET|CT|MT|PT)';
+const MONTH_NAMES = Object.freeze({
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12
+});
 
 function parseArgs(argv) {
   const args = {
@@ -83,14 +123,6 @@ function chicagoIsoDate(date) {
   }).formatToParts(date);
   const value = (type) => parts.find((part) => part.type === type)?.value || '';
   return `${value('year')}-${value('month')}-${value('day')}`;
-}
-
-function zonedDateParts(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-  }).formatToParts(date);
-  const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
-  return { year: value('year'), month: value('month'), day: value('day'), hour: value('hour') % 24, minute: value('minute'), second: value('second') };
 }
 
 function chicagoMidnight(isoDate) {
@@ -313,6 +345,148 @@ function parseAlphaPublishedAt(value) {
   return `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
 }
 
+function hasExplicitTimestampZone(value) {
+  if (value instanceof Date) return true;
+  const text = String(value || '').trim();
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) || new RegExp(`\\b${NAMED_ZONE_PATTERN}\\b`, 'i').test(text);
+}
+
+function normalizeMeridiemSpacing(value) {
+  return String(value || '').replace(/(\d)(AM|PM)\b/gi, '$1 $2');
+}
+
+function adjustedHour(hour, meridiem) {
+  if (!meridiem) return hour;
+  if (hour < 1 || hour > 12) return 24;
+  const upper = meridiem.toUpperCase();
+  if (upper === 'AM') return hour === 12 ? 0 : hour;
+  return hour === 12 ? 12 : hour + 12;
+}
+
+function structuredTimestampParts(value) {
+  // Match only the timestamp shapes this fetcher intentionally supports. A null
+  // result lets genuinely unstructured strings reach Date fallback; a matched
+  // but invalid result is rejected before Date can roll it to another day.
+  const text = normalizeMeridiemSpacing(value).trim();
+  let match = text.match(new RegExp(`^(\\d{4})-(\\d{2})-(\\d{2})(?:[T\\s](\\d{1,2}):(\\d{2})(?::(\\d{2}))?(?:\\.\\d+)?(?:\\s*(?:Z|[+-]\\d{2}:?\\d{2}|${NAMED_ZONE_PATTERN}))?)?$`, 'i'));
+  if (match) {
+    return {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+      hour: Number(match[4] || 0),
+      minute: Number(match[5] || 0),
+      second: Number(match[6] || 0)
+    };
+  }
+  match = text.match(new RegExp(`^(?:[A-Za-z]{3},\\s*)?(\\d{1,2})\\s+([A-Za-z]{3,9})\\s+(\\d{4})(?:\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(AM|PM)?(?:\\s*(?:Z|[+-]\\d{2}:?\\d{2}|${NAMED_ZONE_PATTERN}))?)?$`, 'i'));
+  if (match) {
+    const month = MONTH_NAMES[match[2].toLowerCase()];
+    if (!month) return null;
+    return {
+      year: Number(match[3]),
+      month,
+      day: Number(match[1]),
+      hour: adjustedHour(Number(match[4] || 0), match[7]),
+      minute: Number(match[5] || 0),
+      second: Number(match[6] || 0)
+    };
+  }
+  match = text.match(new RegExp(`^(?:[A-Za-z]{3},\\s*)?([A-Za-z]{3,9})\\s+(\\d{1,2}),\\s*(\\d{4})(?:\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(AM|PM)?(?:\\s*(?:Z|[+-]\\d{2}:?\\d{2}|${NAMED_ZONE_PATTERN}))?)?$`, 'i'));
+  if (!match) return null;
+  const month = MONTH_NAMES[match[1].toLowerCase()];
+  if (!month) return null;
+  return {
+    year: Number(match[3]),
+    month,
+    day: Number(match[2]),
+    hour: adjustedHour(Number(match[4] || 0), match[7]),
+    minute: Number(match[5] || 0),
+    second: Number(match[6] || 0)
+  };
+}
+
+function structuredTimestampIsMalformed(value) {
+  const parts = structuredTimestampParts(value);
+  return parts ? !validDateTimeParts(parts) : false;
+}
+
+function dateForNamedZone(parts, zone) {
+  if (!validDateTimeParts(parts)) return null;
+  const upperZone = String(zone || '').toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(FIXED_ZONE_OFFSETS, upperZone)) {
+    return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second)
+      - FIXED_ZONE_OFFSETS[upperZone] * 60000);
+  }
+  const timeZone = GENERIC_ZONE_NAMES[upperZone];
+  if (!timeZone) return null;
+  const date = zonedTimeToUtc(parts, timeZone);
+  return sameDateTimeParts(parts, zonedDateParts(date, timeZone)) ? date : null;
+}
+
+function parseNamedZoneTimestamp(value) {
+  const text = normalizeMeridiemSpacing(value).trim();
+  const isoMatch = text.match(new RegExp(`^(\\d{4})-(\\d{2})-(\\d{2})[T\\s](\\d{1,2}):(\\d{2})(?::(\\d{2}))?(?:\\.\\d+)?\\s*(${NAMED_ZONE_PATTERN})$`, 'i'));
+  if (isoMatch) {
+    return dateForNamedZone({
+      year: Number(isoMatch[1]),
+      month: Number(isoMatch[2]),
+      day: Number(isoMatch[3]),
+      hour: Number(isoMatch[4]),
+      minute: Number(isoMatch[5]),
+      second: Number(isoMatch[6] || 0)
+    }, isoMatch[7]);
+  }
+  const rfcDayMonthMatch = text.match(new RegExp(`^(?:[A-Za-z]{3},\\s*)?(\\d{1,2})\\s+([A-Za-z]{3,9})\\s+(\\d{4})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(AM|PM)?\\s*(${NAMED_ZONE_PATTERN})$`, 'i'));
+  if (rfcDayMonthMatch) {
+    const month = MONTH_NAMES[rfcDayMonthMatch[2].toLowerCase()];
+    if (!month) return null;
+    return dateForNamedZone({
+      year: Number(rfcDayMonthMatch[3]),
+      month,
+      day: Number(rfcDayMonthMatch[1]),
+      hour: adjustedHour(Number(rfcDayMonthMatch[4]), rfcDayMonthMatch[7]),
+      minute: Number(rfcDayMonthMatch[5]),
+      second: Number(rfcDayMonthMatch[6] || 0)
+    }, rfcDayMonthMatch[8]);
+  }
+  const monthMatch = text.match(new RegExp(`^(?:[A-Za-z]{3},\\s*)?([A-Za-z]{3,9})\\s+(\\d{1,2}),\\s*(\\d{4})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(AM|PM)?\\s*(${NAMED_ZONE_PATTERN})$`, 'i'));
+  if (!monthMatch) return null;
+  const month = MONTH_NAMES[monthMatch[1].toLowerCase()];
+  if (!month) return null;
+  return dateForNamedZone({
+    year: Number(monthMatch[3]),
+    month,
+    day: Number(monthMatch[2]),
+    hour: adjustedHour(Number(monthMatch[4]), monthMatch[7]),
+    minute: Number(monthMatch[5]),
+    second: Number(monthMatch[6] || 0)
+  }, monthMatch[8]);
+}
+
+function parseNewsTimestamp(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
+  }
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (structuredTimestampIsMalformed(text)) return null;
+  const namedZoneDate = parseNamedZoneTimestamp(text);
+  if (namedZoneDate && !Number.isNaN(namedZoneDate.getTime())) return namedZoneDate;
+  if (hasExplicitTimestampZone(text)) {
+    const explicitDate = new Date(normalizeMeridiemSpacing(text));
+    if (!Number.isNaN(explicitDate.getTime())) return explicitDate;
+  }
+  const isoWithoutZone = text.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)$/);
+  if (isoWithoutZone) {
+    const utcDate = new Date(`${isoWithoutZone[1]}T${isoWithoutZone[2]}Z`);
+    if (!Number.isNaN(utcDate.getTime())) return utcDate;
+  }
+  const assumedGmtDate = new Date(`${normalizeMeridiemSpacing(text)} GMT`);
+  if (!Number.isNaN(assumedGmtDate.getTime())) return assumedGmtDate;
+  return null;
+}
+
 function decodeHtml(value) {
   const entities = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
   return String(value || '').replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity) => {
@@ -386,9 +560,11 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const source = acquisitionPath.provider === 'msn-reuters' && item?.providerVerified === true
     ? APPROVED_NEWS_SOURCES.find((entry) => entry.id === 'reuters')
     : sourceForUrl(url);
-  const publishedAt = new Date(String(item?.publishedAt || '').trim());
+  // Normalize before the Chicago-date freshness check; malformed structured
+  // provider timestamps must be rejected instead of rolling into an eligible day.
+  const publishedAt = parseNewsTimestamp(item?.publishedAt);
   const title = plainText(item?.title);
-  if (!url || !source || Number.isNaN(publishedAt.getTime()) || !title) return null;
+  if (!url || !source || !publishedAt || !title) return null;
   if (new URL(url).protocol !== 'https:') return null;
   const publishedOn = chicagoIsoDate(publishedAt);
   if (!eligibleDates.has(publishedOn)) return null;
@@ -427,9 +603,15 @@ function metaContent(html, key) {
 }
 
 function firstValidDate(values) {
-  for (const value of values) {
-    const date = new Date(String(value || '').trim());
-    if (!Number.isNaN(date.getTime())) return date;
+  // Page metadata often has several date fields. Prefer offset-bearing values so
+  // an ambiguous JSON-LD datePublished cannot override a precise article time.
+  const candidates = values.filter((value) => value instanceof Date || String(value || '').trim());
+  for (const value of [
+    ...candidates.filter(hasExplicitTimestampZone),
+    ...candidates.filter((value) => !hasExplicitTimestampZone(value))
+  ]) {
+    const date = parseNewsTimestamp(value);
+    if (date) return date;
   }
   return null;
 }
@@ -878,6 +1060,7 @@ module.exports = {
   parseApNewsSitemap,
   parseArgs,
   parseNewsFeed,
+  parseNewsTimestamp,
   priorNewsCandidates,
   sourceForUrl,
   titleEquivalent

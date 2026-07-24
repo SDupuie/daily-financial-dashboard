@@ -24,8 +24,10 @@ const {
   extractArticleMetadata,
   fetchAcquisitionPath,
   msnReutersReaderUrl,
+  normalizeProviderCandidate,
   parseApNewsSitemap,
   parseNewsFeed,
+  parseNewsTimestamp,
   priorNewsCandidates
 } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
@@ -556,6 +558,59 @@ function testArticleMetadataExtraction() {
   assert.equal(metadata.description, 'A useful fixture description.');
   assert.equal(metadata.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
   assert.match(metadata.excerpt, /mechanical page extractor/);
+
+  const decryptMetadata = extractArticleMetadata(`<!doctype html>
+    <meta property="article:published_time" content="2026-07-23T10:24:09">
+    <script type="application/ld+json">{"datePublished":"2026-07-23T10:24:09"}</script>
+    <time dateTime="2026-07-23T10:24:09Z">Jul 23, 2026</time>
+    <p>This fixture paragraph contains enough article text to be retained by the mechanical page extractor.</p>`);
+  assert.equal(
+    decryptMetadata.publishedAt.toISOString(),
+    '2026-07-23T10:24:09.000Z',
+    'Offset-bearing page metadata must win over ambiguous datePublished values.'
+  );
+}
+
+function testNewsTimestampParsing() {
+  assert.equal(
+    parseNewsTimestamp('2026-07-23 13:49:54').toISOString(),
+    '2026-07-23T13:49:54.000Z',
+    'Offset-less feed timestamps must be treated as GMT.'
+  );
+  assert.equal(parseNewsTimestamp('Jul 23, 2026 09:49AM ET').toISOString(), '2026-07-23T13:49:00.000Z');
+  assert.equal(parseNewsTimestamp('2026-07-23 10:24:09 CDT').toISOString(), '2026-07-23T15:24:09.000Z');
+  assert.equal(parseNewsTimestamp('23 Jul 2026 09:49 ET').toISOString(), '2026-07-23T13:49:00.000Z');
+  assert.equal(parseNewsTimestamp('Fri, 10 Jul 2026 3:30 PM CT').toISOString(), '2026-07-10T20:30:00.000Z');
+  assert.equal(parseNewsTimestamp('Fri, 10 Jul 2026 20:00:00 GMT').toISOString(), '2026-07-10T20:00:00.000Z');
+  assert.equal(parseNewsTimestamp('2026-07-23 25:10:00 GMT'), null);
+  assert.equal(parseNewsTimestamp('2026-03-08 02:30:00 ET'), null);
+  assert.equal(parseNewsTimestamp('2026-02-31 09:49:00'), null);
+  assert.equal(parseNewsTimestamp('2026-02-31 09:49:00 GMT'), null);
+  assert.equal(parseNewsTimestamp('2026-02-31T09:49:00Z'), null);
+  assert.equal(parseNewsTimestamp('2026-02-31T09:49:00-05:00'), null);
+  assert.equal(parseNewsTimestamp('Feb 31, 2026 09:49 GMT'), null);
+  assert.equal(parseNewsTimestamp('31 Feb 2026 09:49 ET'), null);
+
+  const candidate = normalizeProviderCandidate({
+    title: 'Investing no-zone fixture',
+    url: 'https://www.investing.com/news/stock-market-news/no-zone-fixture-123',
+    publishedAt: '2026-07-23 13:49:54'
+  }, { id: 'investing-market', provider: 'rss', pool: 'generalCandidates' }, new Set(['2026-07-23']));
+  assert.equal(candidate.publishedAt, '2026-07-23T13:49:54.000Z');
+
+  assert.equal(normalizeProviderCandidate({
+    title: 'Malformed provider timestamp fixture',
+    url: 'https://www.investing.com/news/stock-market-news/malformed-date-fixture-123',
+    publishedAt: '2026-07-23 25:10:00 GMT',
+    publishedAtVerified: true
+  }, { id: 'investing-market', provider: 'rss', pool: 'generalCandidates' }, new Set(['2026-07-23', '2026-07-24'])), null);
+
+  assert.equal(normalizeProviderCandidate({
+    title: 'Impossible provider date fixture',
+    url: 'https://www.investing.com/news/stock-market-news/impossible-date-fixture-123',
+    publishedAt: '2026-02-31 09:49:00 GMT',
+    publishedAtVerified: true
+  }, { id: 'investing-market', provider: 'rss', pool: 'generalCandidates' }, new Set(['2026-03-03'])), null);
 }
 
 function testRssParsing() {
@@ -1027,6 +1082,7 @@ async function main() {
   testNewsCoverageState();
   testMondayMorningFreshnessWindow();
   testArticleMetadataExtraction();
+  testNewsTimestampParsing();
   testRssParsing();
   testApNewsSitemapParsing();
   await testApPublicAcquisitionUsesOneSitemapFetch();

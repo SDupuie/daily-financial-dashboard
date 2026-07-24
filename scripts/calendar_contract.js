@@ -1,5 +1,6 @@
-// Calendar rules shared by generated dashboard sections. Keep these UTC-only
-// so a local timezone or DST transition cannot move an ISO calendar date.
+// Calendar rules shared by generated dashboard sections. ISO-date helpers stay
+// UTC-only; zoned helpers require an explicit IANA zone so host locale never
+// decides which instant a dashboard contract means.
 function isIsoDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split('-').map(Number);
@@ -26,6 +27,65 @@ function isIsoTime(value) {
   if (typeof value !== 'string' || !/^\d{2}:\d{2}$/.test(value)) return false;
   const [hour, minute] = value.split(':').map(Number);
   return hour <= 23 && minute <= 59;
+}
+
+function zonedDateParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const part = (type) => Number(parts.find((item) => item.type === type)?.value || 0);
+  return {
+    year: part('year'),
+    month: part('month'),
+    day: part('day'),
+    hour: part('hour') % 24,
+    minute: part('minute'),
+    second: part('second')
+  };
+}
+
+function validDateTimeParts(parts) {
+  if (!Number.isInteger(parts.year) || parts.year < 1000 || parts.year > 9999
+    || !Number.isInteger(parts.month) || parts.month < 1 || parts.month > 12
+    || !Number.isInteger(parts.day) || parts.day < 1 || parts.day > 31
+    || !Number.isInteger(parts.hour) || parts.hour < 0 || parts.hour > 23
+    || !Number.isInteger(parts.minute) || parts.minute < 0 || parts.minute > 59
+    || !Number.isInteger(parts.second) || parts.second < 0 || parts.second > 59) return false;
+  // Date.UTC rolls impossible calendar dates forward; compare every component
+  // back to the input so structured provider timestamps can fail closed.
+  const probe = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second));
+  return probe.getUTCFullYear() === parts.year
+    && probe.getUTCMonth() === parts.month - 1
+    && probe.getUTCDate() === parts.day
+    && probe.getUTCHours() === parts.hour
+    && probe.getUTCMinutes() === parts.minute
+    && probe.getUTCSeconds() === parts.second;
+}
+
+function sameDateTimeParts(left, right) {
+  return left.year === right.year
+    && left.month === right.month
+    && left.day === right.day
+    && left.hour === right.hour
+    && left.minute === right.minute
+    && left.second === right.second;
+}
+
+function zonedTimeToUtc({ year, month, day, hour, minute, second = 0 }, timeZone) {
+  // This converts one wall-clock reading into UTC. DST-sensitive callers should
+  // round-trip with zonedDateParts/sameDateTimeParts when nonexistent local
+  // times must be rejected rather than shifted.
+  const guess = Date.UTC(year, month - 1, day, hour, minute, second);
+  const observed = zonedDateParts(new Date(guess), timeZone);
+  const observedAsUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
+  return new Date(guess - (observedAsUtc - guess));
 }
 
 function dateFromIso(isoDate) {
@@ -72,5 +132,9 @@ module.exports = {
   isIsoDateTime,
   isIsoTime,
   isSupportedFiveTradingDayRange,
-  isoFromDate
+  isoFromDate,
+  sameDateTimeParts,
+  validDateTimeParts,
+  zonedDateParts,
+  zonedTimeToUtc
 };

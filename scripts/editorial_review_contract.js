@@ -184,6 +184,8 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
   if (!systemFallbacks) {
     errors.push('editorial review systemFallbacks must be an array when present.');
   } else {
+    // systemFallbacks is an operator receipt, not an editorial assignment list;
+    // duplicate entries make fallback diagnosis ambiguous after publication.
     const identities = new Set();
     for (const [index, fallback] of systemFallbacks.entries()) {
       if (!EDITORIAL_SECTION_NAMES.includes(fallback?.section)) errors.push(`editorial review systemFallbacks[${index}].section is invalid.`);
@@ -199,6 +201,8 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
   const verifiedClaims = Array.isArray(manifest.verifiedClaims) ? manifest.verifiedClaims : [];
   const editorialTexts = new Set(data ? editorialTextEntries(data).map((entry) => entry.text) : []);
   for (const [index, claim] of verifiedClaims.entries()) {
+    // Claims are accepted only while their exact text still appears in the
+    // payload, so stale evidence cannot survive a later rewrite.
     if (typeof claim?.text !== 'string' || !claim.text.trim()) errors.push(`editorial review verifiedClaims[${index}].text must be populated.`);
     try {
       const url = new URL(claim?.evidenceUrl);

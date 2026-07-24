@@ -1958,6 +1958,11 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   dashboard.stories = dashboard.stories.slice(0, 8);
   const candidateDashboard = structuredClone(dashboard);
   const candidateChartData = roundChartPayload(chartData);
+  const setEarningsSymbol = (row, symbol) => {
+    row.symbol = symbol;
+    row.sourceAudit.finnhubUsListing.symbol = symbol;
+    return row;
+  };
   const earningsNeedsReview = fixtureReportedEarningsRow();
   earningsNeedsReview.outcome.interpretation = 'Old result interpretation must not enter editorial handoff.';
   delete earningsNeedsReview.outcome.interpretationDisposition;
@@ -1966,14 +1971,14 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   earningsNeedsReview.reaction.note = 'Old reaction note must not enter editorial handoff.';
   delete earningsNeedsReview.reaction.commentaryDisposition;
   const earningsAwaitingResults = structuredClone(earningsNeedsReview);
-  earningsAwaitingResults.symbol = 'WAIT';
+  setEarningsSymbol(earningsAwaitingResults, 'WAIT');
   earningsAwaitingResults.eps = { ...earningsAwaitingResults.eps, actual: null, surprisePercent: null, result: 'pending' };
   earningsAwaitingResults.revenue = { ...earningsAwaitingResults.revenue, actual: null, surprisePercent: null, result: 'pending' };
   earningsAwaitingResults.outcome = { overall: 'pending', interpretation: 'Pre-release focus can remain.' };
   earningsAwaitingResults.reaction = { status: 'pending', note: '' };
   earningsAwaitingResults.lifecycle = 'awaiting_actual';
   const earningsOneActual = structuredClone(earningsNeedsReview);
-  earningsOneActual.symbol = 'ONEACT';
+  setEarningsSymbol(earningsOneActual, 'ONEACT');
   earningsOneActual.revenue = {
     ...earningsOneActual.revenue,
     actual: null,
@@ -1983,7 +1988,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   earningsOneActual.reaction = { status: 'awaiting_close', note: '' };
   earningsOneActual.lifecycle = 'released_awaiting_close';
   const earningsNotComparedActual = structuredClone(earningsNeedsReview);
-  earningsNotComparedActual.symbol = 'NOCOMP';
+  setEarningsSymbol(earningsNotComparedActual, 'NOCOMP');
   earningsNotComparedActual.eps = {
     ...earningsNotComparedActual.eps,
     estimate: null,
@@ -2001,13 +2006,13 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   earningsNotComparedActual.reaction = { status: 'awaiting_close', note: '' };
   earningsNotComparedActual.lifecycle = 'released_awaiting_close';
   const earningsGuidanceNotProvided = fixtureReportedEarningsRow();
-  earningsGuidanceNotProvided.symbol = 'NOGD';
+  setEarningsSymbol(earningsGuidanceNotProvided, 'NOGD');
   const earningsVerifiedGuidance = fixtureReportedEarningsRow();
-  earningsVerifiedGuidance.symbol = 'VGUID';
+  setEarningsSymbol(earningsVerifiedGuidance, 'VGUID');
   earningsVerifiedGuidance.outcome.guide = 'FY outlook was reaffirmed.';
   earningsVerifiedGuidance.outcome.guidanceDisposition = { status: 'verified' };
   const earningsGuidanceRetry = fixtureReportedEarningsRow();
-  earningsGuidanceRetry.symbol = 'GRETRY';
+  setEarningsSymbol(earningsGuidanceRetry, 'GRETRY');
   earningsGuidanceRetry.outcome.interpretation = 'Verified result interpretation can remain.';
   earningsGuidanceRetry.outcome.interpretationDisposition = { status: 'verified' };
   earningsGuidanceRetry.outcome.guide = '';
@@ -2015,7 +2020,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   earningsGuidanceRetry.reaction = { status: 'awaiting_close', note: '' };
   earningsGuidanceRetry.lifecycle = 'released_awaiting_close';
   const earningsCloseReactionOnly = fixtureReportedEarningsRow();
-  earningsCloseReactionOnly.symbol = 'RXN';
+  setEarningsSymbol(earningsCloseReactionOnly, 'RXN');
   earningsCloseReactionOnly.outcome.guide = 'FY outlook was reaffirmed.';
   earningsCloseReactionOnly.outcome.guidanceDisposition = { status: 'verified' };
   earningsCloseReactionOnly.reaction.note = 'Old reaction copy must be refreshed.';
@@ -2136,6 +2141,54 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   const guidanceEvidence = JSON.parse(fs.readFileSync(path.join(editorialDir, 'earnings_week_guidance.json'), 'utf8'));
   assert.equal(handoff.editorialReview.earningsGuidanceEvidence.artifact.endsWith('earnings_week_guidance.json'), true);
   assert.equal(guidanceEvidence.sourceUse, 'editorial_guidance_evidence');
+  assert.equal(handoff.editorialReview.earningsChecklist.length, candidateDashboard.earnings.week.rows.length);
+  const checklistBySymbol = new Map(handoff.editorialReview.earningsChecklist.map((item) => [item.symbol, item]));
+  const assignmentByField = (item, field) => item.assignments.find((assignment) => assignment.field === field);
+  const checklistEarningsNeedsReview = checklistBySymbol.get('EARN');
+  assert.equal(checklistEarningsNeedsReview.rowIndex, 0);
+  assert.equal(checklistEarningsNeedsReview.rowPath, 'earnings.week.rows[0]');
+  assert.equal(checklistEarningsNeedsReview.hasActuals, true);
+  assert.equal(checklistEarningsNeedsReview.hasComputedReaction, true);
+  assert.deepEqual(Object.prototype.hasOwnProperty.call(checklistEarningsNeedsReview, 'eps'), false);
+  assert.deepEqual(assignmentByField(checklistEarningsNeedsReview, 'outcome.interpretation'), {
+    field: 'outcome.interpretation',
+    path: 'earnings.week.rows[0].outcome.interpretation',
+    dispositionPath: 'earnings.week.rows[0].outcome.interpretationDisposition',
+    status: 'pending_review',
+    required: true
+  });
+  assert.deepEqual(assignmentByField(checklistEarningsNeedsReview, 'outcome.guidance'), {
+    field: 'outcome.guidance',
+    path: 'earnings.week.rows[0].outcome.guide',
+    dispositionPath: 'earnings.week.rows[0].outcome.guidanceDisposition',
+    status: 'pending_review',
+    required: true,
+    evidenceStatus: 'network_disabled',
+    documents: 0,
+    guidanceSignalCount: 0,
+    primaryUrl: '',
+    evidenceRef: `${path.relative(root, path.join(editorialDir, 'earnings_week_guidance.json')).replace(/\\/g, '/')}#EARN:2026-07-10`
+  });
+  assert.deepEqual(assignmentByField(checklistEarningsNeedsReview, 'reaction.note'), {
+    field: 'reaction.note',
+    path: 'earnings.week.rows[0].reaction.note',
+    dispositionPath: 'earnings.week.rows[0].reaction.commentaryDisposition',
+    status: 'pending_review',
+    required: true
+  });
+  const checklistAwaitingResults = checklistBySymbol.get('WAIT');
+  assert.equal(assignmentByField(checklistAwaitingResults, 'outcome.guidance').status, 'not_required');
+  assert.equal(assignmentByField(checklistAwaitingResults, 'outcome.guidance').required, false);
+  assert.equal(assignmentByField(checklistAwaitingResults, 'reaction.note').status, 'not_required');
+  assert.equal(assignmentByField(checklistAwaitingResults, 'reaction.note').required, false);
+  const checklistNotProvided = checklistBySymbol.get('NOGD');
+  assert.equal(assignmentByField(checklistNotProvided, 'outcome.guidance').status, 'not_provided');
+  assert.equal(assignmentByField(checklistNotProvided, 'outcome.guidance').required, true);
+  const checklistVerifiedGuidance = checklistBySymbol.get('VGUID');
+  assert.equal(assignmentByField(checklistVerifiedGuidance, 'outcome.guidance').status, 'verified');
+  const checklistReactionOnly = checklistBySymbol.get('RXN');
+  assert.equal(assignmentByField(checklistReactionOnly, 'reaction.note').status, 'pending_review');
+  assert.equal(assignmentByField(checklistReactionOnly, 'reaction.note').required, true);
   assert.equal(handoff.tape.rows[0].noteDisposition.status, 'pending_review');
   assert.equal(handoff.tape.rows[0].note, '');
   const handoffEarningsNeedsReview = handoff.earnings.week.rows.find((row) => row.symbol === 'EARN');
@@ -2595,6 +2648,21 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(pendingOpeningResult.status, 0, pendingOpeningResult.stderr);
   const openingOmitted = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
   assert.deepEqual(openingOmitted.opening, {}, 'Incomplete Opening fields are omitted instead of blocking finalization.');
+
+  fs.writeFileSync(dashboardFile, originalHtml);
+  const pendingEarningsPayload = structuredClone(dashboard);
+  pendingEarningsPayload.earnings.week.rows = [fixtureReportedEarningsRow()];
+  fs.writeFileSync(candidateFile, renderDashboardValidationFixture(pendingEarningsPayload, chartData));
+  pendingEarningsPayload.editorialReview = structuredClone(review);
+  pendingEarningsPayload.earnings.week.rows[0].outcome.guide = '';
+  pendingEarningsPayload.earnings.week.rows[0].outcome.guidanceDisposition = { status: 'pending_review' };
+  fs.writeFileSync(payloadFile, JSON.stringify(pendingEarningsPayload));
+  const pendingEarningsResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(pendingEarningsResult.status, 0, pendingEarningsResult.stderr);
+  assert.match(pendingEarningsResult.stderr, /Earnings editorial fields still pending: EARN outcome\.guidance/);
+  const pendingEarningsFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.equal(pendingEarningsFinalized.earnings.week.rows[0].outcome.guidanceDisposition.status, 'pending_review');
+  assert.equal(pendingEarningsFinalized.editorialReview.earningsChecklist, undefined);
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, '{');

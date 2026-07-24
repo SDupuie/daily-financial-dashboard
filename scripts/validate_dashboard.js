@@ -553,6 +553,8 @@ function runCompleteTestSuite() {
 
 function readinessExecutionPlan(args) {
   const completeSuiteChecksTargetHtml = path.resolve(root, args.dashboard) === defaultDashboard;
+  // The complete suite already validates/tidies the canonical dashboard and
+  // checks diffs; skip duplicate work unless the target is a noncanonical file.
   return {
     tidyTargetBeforeSuite: args.skipTests || !completeSuiteChecksTargetHtml,
     checkDiffsBeforeSuite: args.skipTests,

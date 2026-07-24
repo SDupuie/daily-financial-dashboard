@@ -1186,6 +1186,8 @@ function validateChartStagingPayload(payload, expectedRows = []) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
   if (payload.schemaVersion !== 1) errors.push('Chart staging schemaVersion must be 1.');
   if (!isChartQuoteRevision(payload.generatedAt)) errors.push('Chart staging generatedAt must be an offset-bearing ISO timestamp.');
+  // Quote rows are derived from series during Apply; allowing stored quoteRows
+  // here would create a second editable price surface.
   if (payload.quoteRows !== undefined) errors.push('Chart staging quoteRows is no longer stored; derive quote rows from series.');
   if (!Array.isArray(payload.series)) return [...errors, 'Chart staging series must be an array.'];
   if (payload.availability?.status === 'unavailable') {
@@ -1771,6 +1773,7 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
 
 function chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate }) {
   const chartSeries = series.map((item) => {
+    // Chart data is the market-data payload only; editorial notes stay in dashboard-data.
     const { note: _note, ...chartItem } = item || {};
     return chartItem;
   });

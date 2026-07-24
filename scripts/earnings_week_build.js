@@ -1360,6 +1360,8 @@ function verifyEarningsApiRecoveryRows(rows, range) {
 }
 
 function buildSecondaryRecoveryCandidates(finnhubRows, secondaryCalendarDays, profiles, usListings = []) {
+  // Secondary calendar rows are recovery leads, not display facts. Company
+  // identity/listing checks happen before any lead can become a row candidate.
   const finnhubKeys = new Set(finnhubRows.map((row) => `${row.reportDate}:${row.symbol}`));
   const profilesBySymbol = new Map(profiles.map((profile) => [profile.symbol, profile]));
   const usListingsBySymbol = new Map(usListings.map((listing) => [listing.symbol, listing]));
@@ -1997,6 +1999,8 @@ function zacksRowsByKey(days, metric) {
 }
 
 function zacksGate(days, displayDates) {
+  // Zacks becomes authoritative only when EPS and sales tables align inside the
+  // active display range; otherwise the build falls back to the legacy path.
   const failures = [];
   for (const day of days) {
     for (const metric of ['eps', 'revenue']) {

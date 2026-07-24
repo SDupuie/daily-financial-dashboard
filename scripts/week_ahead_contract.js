@@ -11,7 +11,8 @@ const {
   displayDatesForRange: calendarDisplayDatesForRange,
   isIsoDate,
   isIsoDateTime,
-  isIsoTime
+  isIsoTime,
+  zonedTimeToUtc
 } = require('./calendar_contract');
 
 const MARKET_CLOSURES = {
@@ -608,15 +609,7 @@ function weekAheadReleaseInstant(date, time, sourceTimeZone = SOURCE_TIME_ZONE) 
   if (!isIsoDate(date) || !isIsoTime(time)) return null;
   const [year, month, day] = date.split('-').map(Number);
   const [hour, minute] = time.split(':').map(Number);
-  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: sourceTimeZone,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false
-  }).formatToParts(new Date(utcGuess));
-  const part = (type) => Number(parts.find((item) => item.type === type)?.value || 0);
-  const observedAsUtc = Date.UTC(part('year'), part('month') - 1, part('day'), part('hour') % 24, part('minute'), 0);
-  return new Date(utcGuess - (observedAsUtc - utcGuess));
+  return zonedTimeToUtc({ year, month, day, hour, minute }, sourceTimeZone);
 }
 
 function weekAheadDayFingerprint(day) {

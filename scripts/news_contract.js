@@ -1,5 +1,5 @@
 const SCHEDULED_WINDOW_NAMES = new Set(['morning', 'afternoon']);
-const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const { isIsoDate, isIsoDateTime, zonedTimeToUtc } = require('./calendar_contract');
 
 const NEWS_COVERAGE_REASON = 'insufficient_qualifying_fresh_coverage';
 const NEWS_COVERAGE_POLICIES = Object.freeze({
@@ -42,21 +42,6 @@ function allowedNewsDates(now = new Date()) {
   return allowed;
 }
 
-function zonedDateParts(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-  }).formatToParts(date);
-  const part = (type) => Number(parts.find((item) => item.type === type)?.value || 0);
-  return { year: part('year'), month: part('month'), day: part('day'), hour: part('hour') % 24, minute: part('minute'), second: part('second') };
-}
-
-function zonedDateTime({ year, month, day, hour, minute }, timeZone) {
-  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
-  const offsetParts = zonedDateParts(new Date(utcGuess), timeZone);
-  const observedAsUtc = Date.UTC(offsetParts.year, offsetParts.month - 1, offsetParts.day, offsetParts.hour, offsetParts.minute, offsetParts.second);
-  return new Date(utcGuess - (observedAsUtc - utcGuess));
-}
-
 function sharedFuturesDate(futures, field) {
   const dates = (Array.isArray(futures) ? futures : [])
     .filter((future) => future?.availability?.status !== 'unavailable')
@@ -91,9 +76,9 @@ function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
     const runDate = chicagoDateParts(runAt).isoDate;
     const startDate = addIsoDays(runDate, -1);
     const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
-    const start = zonedDateTime({ year: startYear, month: startMonth, day: startDay, hour: 17, minute: 0 }, 'America/Chicago');
+    const start = zonedTimeToUtc({ year: startYear, month: startMonth, day: startDay, hour: 17, minute: 0 }, 'America/Chicago');
     const [endYear, endMonth, endDay] = runDate.split('-').map(Number);
-    const cashOpen = zonedDateTime({ year: endYear, month: endMonth, day: endDay, hour: 8, minute: 30 }, 'America/Chicago');
+    const cashOpen = zonedTimeToUtc({ year: endYear, month: endMonth, day: endDay, hour: 8, minute: 30 }, 'America/Chicago');
     const end = new Date(Math.min(runAt.getTime(), cashOpen.getTime()));
     const endDate = chicagoIsoDate(end);
     return {
@@ -116,8 +101,8 @@ function futuresStoryPublicationWindow(sectionTitle, editionId, now, futures) {
       startDate: sessionDate,
       endDate: sessionDate,
       dates: [sessionDate],
-      start: zonedDateTime({ year, month, day, hour: 9, minute: 30 }, 'America/New_York'),
-      end: zonedDateTime({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
+      start: zonedTimeToUtc({ year, month, day, hour: 9, minute: 30 }, 'America/New_York'),
+      end: zonedTimeToUtc({ year, month, day, hour: 16, minute: 0 }, 'America/New_York'),
       description: 'the displayed U.S. regular-session futures window'
     };
   }

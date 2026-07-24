@@ -559,6 +559,8 @@ function buildAssetAllocationFallback(canonicalPortfolio, { month, asOf, checked
 
 function buildAssetAllocationSummaryFallback(canonicalPortfolio, { asOf } = {}) {
   const priorAsOf = String(canonicalPortfolio?.portfolioMtdReturnAsOf || '');
+  // MTD portfolio return can carry forward only inside the same calendar month;
+  // crossing months would mix incompatible return bases.
   const sameMonth = /^\d{4}-\d{2}-\d{2}$/.test(priorAsOf) && priorAsOf.slice(0, 7) === String(asOf || '').slice(0, 7);
   const priorValue = Number(canonicalPortfolio?.portfolioMtdReturnValue);
   const available = sameMonth
@@ -579,6 +581,8 @@ function validateAssetAllocationPortfolioPayload(payload) {
   const unavailable = payload.availability?.status === 'unavailable';
   const partial = payload.availability?.status === 'partial';
   const carriedForward = payload.availability?.status === 'carried_forward';
+  // ETF rows resolve independently; partial payloads are valid only when every
+  // failed ticker has matching row-level and section-level diagnostics.
   if (!isIsoDateTime(payload.compiledAt)) errors.push('Asset Allocation portfolio staging compiledAt must be an offset-bearing ISO timestamp.');
   if (typeof payload.source !== 'string' || !payload.source.trim()) errors.push('Asset Allocation portfolio staging source must be populated.');
   if (!/^\d{4}-\d{2}$/.test(String(payload.month || ''))) errors.push('Asset Allocation portfolio staging month must be YYYY-MM.');

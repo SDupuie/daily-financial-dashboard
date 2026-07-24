@@ -1,4 +1,6 @@
 async function mapConcurrent(items, concurrency, worker, options = {}) {
+  // Preserve input order in results while limiting simultaneous provider calls.
+  // Callers own retry policy; this helper only coordinates execution.
   const results = new Array(items.length);
   const limit = Math.min(Math.max(1, Math.trunc(Number(concurrency)) || 1), items.length);
   const delayMs = Math.max(0, Number(options.delayMs) || 0);
