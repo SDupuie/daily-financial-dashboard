@@ -35,13 +35,13 @@ Work from this order of preference:
 
 ## Architecture and Ownership
 
-Use a single-writer, staged, contract-driven architecture across every dashboard section. The README owns exact commands, payload fields, and detailed data contracts; this section owns the agent behavior boundary.
+Use a single-writer, staged, contract-driven architecture across every dashboard section. `README.md` owns the normal daily runbook and validation/publish workflow; `docs/reference.md` owns payload fields, detailed data contracts, deterministic-source contracts, focused repair commands, local-refresh operation, and the supported-browser baseline; this section owns the agent behavior boundary.
 
 - Each deterministic value has one canonical owner. Derived display values must be rebuilt from that owner during every apply path.
 - `*_contract.js` files own deterministic normalization, payload validation, stable identities, derived-field rules, and domain-specific editorial-completeness policy for domains with a separate contract module.
 - `fetch_*.js` files own external-source retrieval and staging output. Fetchers and domain commands may write only staging/cache artifacts or explicit temporary diagnostic outputs.
 - `scripts/run_daily_update.js` must stay thin application wiring and genuinely cross-section derivation. Domain policy must not live there.
-- Keep approved public operational commands documented in `README.md`. Do not introduce a second public CLI for an existing domain; small CLI adapters belong in their public owner.
+- Keep normal update, validation, and publication commands documented in `README.md`; keep exceptional repair and local-tool commands in `docs/reference.md`. Do not introduce a second public CLI for an existing domain; small CLI adapters belong in their public owner.
 - Do not merge files solely because one has a single caller, and do not split files solely because one is long. Split only for a stable, independently understandable responsibility.
 - No new production file is justified without a documented owner, callers, inputs, outputs, write authority, and public/private status.
 

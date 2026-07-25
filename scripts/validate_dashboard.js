@@ -630,7 +630,7 @@ function parseChartDataArgs(argv) {
 }
 
 function chartableRowsFromDashboardData(data) {
-  // README Data Contracts make tape.rows the only chartable ticker source; section decides derived quote shape.
+  // The Tape and chart data contract in docs/reference.md makes tape.rows the only chartable ticker source; section decides derived quote shape.
   const tapeRows = Array.isArray(data.tape?.rows)
     ? data.tape.rows
       .filter((row) => String(row?.group ?? '') !== 'Crypto')
