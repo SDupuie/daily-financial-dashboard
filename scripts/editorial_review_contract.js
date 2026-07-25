@@ -121,13 +121,10 @@ function editorialTextEntries(data) {
     add(`earnings.week.rows[${index}].reaction.note`, item?.reaction?.note);
   });
   (data?.weekAhead?.days || []).forEach((day, index) => {
-    const lens = day?.marketLens;
-    add(`weekAhead.days[${index}].marketLens.question`, lens?.question);
-    add(`weekAhead.days[${index}].marketLens.title`, lens?.title);
-    add(`weekAhead.days[${index}].marketLens.body`, lens?.body);
-    add(`weekAhead.days[${index}].marketLens.setup.statement`, lens?.setup?.statement);
-    add(`weekAhead.days[${index}].marketLens.scenarios.reinforces`, lens?.scenarios?.reinforces);
-    add(`weekAhead.days[${index}].marketLens.scenarios.challenges`, lens?.scenarios?.challenges);
+    const copy = day?.marketLens?.copy;
+    add(`weekAhead.days[${index}].marketLens.copy.question`, copy?.question);
+    add(`weekAhead.days[${index}].marketLens.copy.title`, copy?.title);
+    add(`weekAhead.days[${index}].marketLens.copy.body`, copy?.body);
     add(`weekAhead.days[${index}].outcome.title`, day?.outcome?.title);
     add(`weekAhead.days[${index}].outcome.body`, day?.outcome?.body);
   });
@@ -165,9 +162,9 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
   if (expectedBaseEditionId && manifest.baseEditionId !== expectedBaseEditionId) {
     errors.push('editorial review baseEditionId must match the dashboard edition being reviewed; regenerate the manifest after every payload rewrite.');
   }
-  const decisions = Array.isArray(manifest.marketLensDecisions) ? manifest.marketLensDecisions : null;
-  if (!decisions) errors.push('editorial review marketLensDecisions must be an array.');
-
+  if (Object.prototype.hasOwnProperty.call(manifest, 'marketLensDecisions')) {
+    errors.push('editorial review marketLensDecisions is no longer supported; edit weekAhead.days[].marketLens instead.');
+  }
   if (manifest.newsSelection !== undefined) {
     if (!manifest.newsSelection || typeof manifest.newsSelection !== 'object' || Array.isArray(manifest.newsSelection)) {
       errors.push('editorial review newsSelection must be an object when present.');
@@ -190,7 +187,7 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
     for (const [index, fallback] of systemFallbacks.entries()) {
       if (!EDITORIAL_SECTION_NAMES.includes(fallback?.section)) errors.push(`editorial review systemFallbacks[${index}].section is invalid.`);
       if (typeof fallback?.path !== 'string' || !fallback.path.trim()) errors.push(`editorial review systemFallbacks[${index}].path must be populated.`);
-      if (!['retained_candidate', 'omitted', 'generated_default', 'unavailable_disposition'].includes(fallback?.action)) errors.push(`editorial review systemFallbacks[${index}].action is invalid.`);
+      if (!['retained_candidate', 'omitted', 'setup_default', 'commentary_unavailable', 'unavailable_disposition'].includes(fallback?.action)) errors.push(`editorial review systemFallbacks[${index}].action is invalid.`);
       if (typeof fallback?.reason !== 'string' || !fallback.reason.trim()) errors.push(`editorial review systemFallbacks[${index}].reason must be populated.`);
       const identity = `${fallback?.section || ''}:${fallback?.path || ''}:${fallback?.action || ''}`;
       if (identities.has(identity)) errors.push(`editorial review systemFallbacks contains duplicate disposition ${identity}.`);
@@ -231,6 +228,19 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
     for (const path of unavailableFallbacksByPath.keys()) {
       if (!unavailableRowsByPath.has(path)) errors.push(`editorial review records an unavailable Tape commentary disposition for ${path}, but the row is not commentary_unavailable.`);
     }
+    const unavailableMarketLensFallbacksByPath = new Map(
+      (systemFallbacks || [])
+        .filter((fallback) => fallback?.section === 'market-lens' && fallback?.action === 'commentary_unavailable')
+        .map((fallback) => [fallback.path, fallback])
+    );
+    const unavailableMarketLensPaths = new Set();
+    for (const day of data?.weekAhead?.days || []) {
+      if (day?.marketLens?.status !== 'commentary_unavailable') continue;
+      unavailableMarketLensPaths.add(`weekAhead.days.${String(day?.date || '').trim()}.marketLens`);
+    }
+    for (const path of unavailableMarketLensFallbacksByPath.keys()) {
+      if (!unavailableMarketLensPaths.has(path)) errors.push(`editorial review records commentary_unavailable for ${path}, but the Market Lens does not have that status.`);
+    }
     if (typeof manifest.reviewedBaseEditionId !== 'string' || !manifest.reviewedBaseEditionId) {
       errors.push('editorial review reviewedBaseEditionId must identify the edition that was reviewed.');
     } else if (manifest.reviewedBaseEditionId === data?.editionId) {
@@ -243,29 +253,6 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
       errors.push('editorial review payloadHash cannot be verified without embedded chart-data.');
     } else if (manifest.payloadHash !== editorialPayloadHash(data, chartData)) {
       errors.push('editorial review payloadHash does not match the embedded dashboard-data and chart-data payloads.');
-    }
-    const eventDays = (data?.weekAhead?.days || []).filter((day) => Array.isArray(day?.events) && day.events.length);
-    const decisionByDate = new Map((decisions || []).map((decision) => [decision?.date, decision]));
-    if (decisionByDate.size !== (decisions || []).length) errors.push('editorial review marketLensDecisions contain duplicate dates.');
-    for (const day of eventDays) {
-      const decision = decisionByDate.get(day.date);
-      if (!decision) {
-        errors.push(`editorial review is missing a Market Lens decision for ${day.date}.`);
-      } else if (decision.action === 'replace' && day.marketLensSource !== 'editorial') {
-        errors.push(`editorial review decision for ${day.date} says replace but the embedded lens is not editorial.`);
-      } else if (decision.action === 'retain-generated' && day.marketLensSource !== 'generated') {
-        errors.push(`editorial review decision for ${day.date} says retain-generated but the embedded lens is not generated.`);
-      } else if (decision.action === 'commentary-unavailable') {
-        if (day.marketLensSource !== 'unavailable') errors.push(`editorial review decision for ${day.date} says commentary-unavailable but the embedded lens is not unavailable.`);
-        if (!isIsoTimestamp(decision.attemptedAt) || typeof decision.reason !== 'string' || !decision.reason.trim()) {
-          errors.push(`editorial review decision for ${day.date} commentary-unavailable must include attemptedAt and reason.`);
-        }
-      } else if (!['replace', 'retain-generated', 'commentary-unavailable'].includes(decision.action)) {
-        errors.push(`editorial review decision for ${day.date} must use replace, retain-generated, or commentary-unavailable.`);
-      }
-    }
-    for (const decision of decisions || []) {
-      if (!eventDays.some((day) => day.date === decision?.date)) errors.push(`editorial review contains a stale Market Lens decision for ${decision?.date || '(missing date)'}.`);
     }
   }
   return errors;
@@ -280,11 +267,6 @@ function buildEditorialReview(data, manifest, chartData) {
     reviewedAt: manifest.reviewedAt,
     reviewedBaseEditionId: manifest.baseEditionId || null,
     reviewedEditionId: data.editionId,
-    marketLensDecisions: manifest.marketLensDecisions.map(({ date, action, attemptedAt, reason }) => ({
-      date,
-      action,
-      ...(action === 'commentary-unavailable' ? { attemptedAt, reason } : {})
-    })),
     verifiedClaims: (manifest.verifiedClaims || []).map(({ text, evidenceUrl }) => ({ text, evidenceUrl })),
     ...((manifest.systemFallbacks || []).length ? {
       systemFallbacks: manifest.systemFallbacks.map(({ section, path, action, reason }) => ({ section, path, action, reason }))

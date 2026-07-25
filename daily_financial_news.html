@@ -2158,21 +2158,14 @@
       text-transform: uppercase;
     }
     .week-value-number {
-      align-items: baseline;
-      display: inline-grid;
-      grid-template-columns: 4ch max-content;
-      justify-content: start;
-      font-family: "SFMono-Regular", Consolas, monospace;
+      display: block;
       font-size: 14px;
+      font-variant-numeric: tabular-nums;
       font-weight: 850;
       overflow: hidden;
+      text-align: right;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .week-value-integer { text-align: right; }
-    .week-value-number.pending {
-      display: block;
-      text-align: center;
     }
     .week-value-number.pending { color: var(--muted); }
     @media (min-width: 761px) {
@@ -13300,7 +13293,7 @@
     }
   },
   "weekAhead": {
-    "schemaVersion": 5,
+    "schemaVersion": 6,
     "range": {
       "from": "2026-07-24",
       "to": "2026-07-30",
@@ -13414,12 +13407,9 @@
           }
         ],
         "marketLens": {
-          "question": "What changed after the release?",
-          "relatedEventIds": [
+          "status": "commentary_unavailable",
+          "eventIds": [
             "tradingview:398604"
-          ],
-          "channels": [
-            "broad-growth"
           ],
           "reactions": [
             {
@@ -13431,10 +13421,12 @@
               "role": "Growth-rate reaction"
             }
           ],
-          "title": "Current release commentary unavailable",
-          "body": "The release has arrived, but current interpretation could not be verified for this update. The listed assets remain the reaction reference points."
+          "copy": {
+            "question": "",
+            "title": "",
+            "body": ""
+          }
         },
-        "marketLensSource": "unavailable",
         "lifecycle": "close_available",
         "marketReaction": {
           "window": "event-day-close-vs-previous-close",
@@ -13466,11 +13458,6 @@
         },
         "outcome": {
           "status": "pending_review"
-        },
-        "marketLensDisposition": {
-          "status": "commentary_unavailable",
-          "attemptedAt": "2026-07-24T21:28:59.163Z",
-          "reason": "editorial_commentary_unavailable"
         }
       },
       {
@@ -13528,14 +13515,11 @@
           }
         ],
         "marketLens": {
-          "question": "Is industrial momentum broadening or weakening?",
-          "relatedEventIds": [
+          "status": "setup",
+          "eventIds": [
             "tradingview:397953",
             "tradingview:398595",
             "tradingview:398765"
-          ],
-          "channels": [
-            "industrial-growth"
           ],
           "reactions": [
             {
@@ -13547,10 +13531,12 @@
               "role": "Materials-demand reaction"
             }
           ],
-          "title": "Industry tests the cyclical pulse",
-          "body": "The factory data will show whether industrial momentum is broadening or weakening. Industrials and copper provide the clearest cyclical reaction."
+          "copy": {
+            "question": "Is industrial momentum broadening or weakening?",
+            "title": "Industry tests the cyclical pulse",
+            "body": "The factory data will show whether industrial momentum is broadening or weakening. Industrials and copper provide the clearest cyclical reaction."
+          }
         },
-        "marketLensSource": "generated",
         "lifecycle": "scheduled"
       },
       {
@@ -13672,13 +13658,9 @@
           }
         ],
         "marketLens": {
-          "question": "Is labor demand changing the balance between inflation and growth?",
-          "relatedEventIds": [
+          "status": "setup",
+          "eventIds": [
             "tradingview:397840"
-          ],
-          "channels": [
-            "labor-demand",
-            "policy-path"
           ],
           "reactions": [
             {
@@ -13690,10 +13672,12 @@
               "role": "Broad growth reaction"
             }
           ],
-          "title": "Labor tests the growth-inflation balance",
-          "body": "The labor data will show whether employment conditions are changing the balance between wage pressure and growth risk. Short rates and broad equities provide the clearest reaction."
+          "copy": {
+            "question": "Is labor demand changing the balance between inflation and growth?",
+            "title": "Labor tests the growth-inflation balance",
+            "body": "The labor data will show whether employment conditions are changing the balance between wage pressure and growth risk. Short rates and broad equities provide the clearest reaction."
+          }
         },
-        "marketLensSource": "generated",
         "lifecycle": "scheduled"
       },
       {
@@ -13783,13 +13767,10 @@
           }
         ],
         "marketLens": {
-          "question": "Has the expected rate path changed?",
-          "relatedEventIds": [
+          "status": "setup",
+          "eventIds": [
             "tradingview:390603",
             "tradingview:390634"
-          ],
-          "channels": [
-            "policy-path"
           ],
           "reactions": [
             {
@@ -13801,10 +13782,12 @@
               "role": "Longer-term policy reaction"
             }
           ],
-          "title": "The expected rate path is the test",
-          "body": "The policy communication matters if it changes expectations for the Fed's next steps. The front and long ends of the Treasury curve provide the clearest reaction."
+          "copy": {
+            "question": "Has the expected rate path changed?",
+            "title": "The expected rate path is the test",
+            "body": "The policy communication matters if it changes expectations for the Fed's next steps. The front and long ends of the Treasury curve provide the clearest reaction."
+          }
         },
-        "marketLensSource": "generated",
         "lifecycle": "scheduled"
       },
       {
@@ -13942,12 +13925,9 @@
           }
         ],
         "marketLens": {
-          "question": "Is broad economic growth changing the market outlook?",
-          "relatedEventIds": [
+          "status": "setup",
+          "eventIds": [
             "tradingview:398050"
-          ],
-          "channels": [
-            "broad-growth"
           ],
           "reactions": [
             {
@@ -13959,10 +13939,12 @@
               "role": "Growth-rate reaction"
             }
           ],
-          "title": "Growth resets the broad outlook",
-          "body": "The growth data will test whether the economy is changing the outlook for earnings and rates. Broad equities and long yields provide the clearest reaction."
+          "copy": {
+            "question": "Is broad economic growth changing the market outlook?",
+            "title": "Growth resets the broad outlook",
+            "body": "The growth data will test whether the economy is changing the outlook for earnings and rates. Broad equities and long yields provide the clearest reaction."
+          }
         },
-        "marketLensSource": "generated",
         "lifecycle": "scheduled"
       }
     ],
@@ -15540,40 +15522,16 @@
     "reviewedAt": "2026-07-24T21:28:59.137Z",
     "reviewedBaseEditionId": "2026-07-24T13:02:33.710Z",
     "reviewedEditionId": "2026-07-24T21:23:01.488Z",
-    "marketLensDecisions": [
-      {
-        "date": "2026-07-24",
-        "action": "commentary-unavailable",
-        "attemptedAt": "2026-07-24T21:28:59.163Z",
-        "reason": "editorial_commentary_unavailable"
-      },
-      {
-        "date": "2026-07-27",
-        "action": "retain-generated"
-      },
-      {
-        "date": "2026-07-28",
-        "action": "retain-generated"
-      },
-      {
-        "date": "2026-07-29",
-        "action": "retain-generated"
-      },
-      {
-        "date": "2026-07-30",
-        "action": "retain-generated"
-      }
-    ],
     "verifiedClaims": [],
     "systemFallbacks": [
       {
         "section": "market-lens",
         "path": "weekAhead.days.2026-07-24.marketLens",
-        "action": "unavailable_disposition",
+        "action": "commentary_unavailable",
         "reason": "editorial_commentary_unavailable"
       }
     ],
-    "payloadHash": "92bce862b223d5eb036c2d34beba8ae9f6d3fcad7933d4920fe041f0bff6177b"
+    "payloadHash": "78c7d78f7239fd842c5edc11bbba7a99e35a1e5f275055dd7d2e47b346176f26"
   }
 }
 </script>
@@ -18699,6 +18657,7 @@
         return `<span class="week-event-kind-line"><span class="week-event-kind">${esc(kind)}</span>${surprise}</span>`;
       }
 
+      /* TEST BLOCK START: week-ahead-values */
       function weekAheadHasValues(event) {
         return [event.actual, event.forecast, event.previous].some((value) => value !== null && value !== undefined && value !== '');
       }
@@ -18715,23 +18674,55 @@
       function weekAheadValueHtml(label, value) {
         const pending = value === null || value === undefined || value === '';
         const text = pending ? '' : String(value);
-        const decimalMatch = text.match(/^([+-]?\d+)(\.[\d]+.*)$/);
-        const numberHtml = pending
-          ? '&mdash;'
-          : decimalMatch
-            ? `<span class="week-value-integer">${esc(decimalMatch[1])}</span><span>${esc(decimalMatch[2])}</span>`
-            : esc(text);
+        const numberHtml = pending ? '&mdash;' : esc(text);
         return `<span class="week-value-pair"><span class="week-value-key">${esc(label)}</span><span class="week-value-number${pending ? ' pending' : ''}">${numberHtml}</span></span>`;
+      }
+
+      function weekAheadValueParts(value) {
+        const text = String(value);
+        const match = text.match(/^([+-]?)(\$?)(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d+))?([A-Za-z%]*)$/);
+        if (!match) return null;
+        return {
+          sign: match[1],
+          currency: match[2],
+          integer: match[3],
+          decimals: match[4] || '',
+          suffix: match[5]
+        };
+      }
+
+      function weekAheadDisplayValues(event) {
+        const values = {
+          previous: event.previous,
+          forecast: event.forecast,
+          actual: event.actual
+        };
+        const available = Object.entries(values)
+          .filter(([, value]) => value !== null && value !== undefined && value !== '')
+          .map(([key, value]) => [key, weekAheadValueParts(value)]);
+        if (!available.length || available.some(([, parts]) => !parts)) return values;
+        const { currency, suffix } = available[0][1];
+        if (available.some(([, parts]) => parts.currency !== currency || parts.suffix !== suffix)) return values;
+        const precision = Math.max(...available.map(([, parts]) => parts.decimals.length));
+        if (!precision) return values;
+        return Object.fromEntries(Object.entries(values).map(([key, value]) => {
+          if (value === null || value === undefined || value === '') return [key, value];
+          const parts = weekAheadValueParts(value);
+          const decimals = parts.decimals.padEnd(precision, '0');
+          return [key, `${parts.sign}${parts.currency}${parts.integer}.${decimals}${parts.suffix}`];
+        }));
       }
 
       function weekAheadEventValuesHtml(event) {
         if (event.valuesApplicable === false) {
           return '<span class="week-event-values week-event-values-na"><span class="visually-hidden">Statistical values do not apply.</span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number">&nbsp;</span></span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number">&nbsp;</span></span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number">&nbsp;</span></span></span>';
         }
+        const displayValues = weekAheadDisplayValues(event);
         return weekAheadHasValues(event)
-          ? `<span class="week-event-values">${weekAheadValueHtml('Previous', event.previous)}${weekAheadValueHtml('Forecast', event.forecast)}${weekAheadValueHtml('Actual', event.actual)}</span>`
+          ? `<span class="week-event-values">${weekAheadValueHtml('Previous', displayValues.previous)}${weekAheadValueHtml('Forecast', displayValues.forecast)}${weekAheadValueHtml('Actual', displayValues.actual)}</span>`
           : '<span class="week-event-values week-event-values-scheduled"><span class="visually-hidden">Scheduled; values not yet available.</span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number pending">&mdash;</span></span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number pending">&mdash;</span></span><span class="week-value-pair" aria-hidden="true"><span class="week-value-number pending">&mdash;</span></span></span>';
       }
+      /* TEST BLOCK END: week-ahead-values */
 
       function weekAheadEventHtml(day, event, week) {
         return `<div class="week-event-row">
@@ -18985,17 +18976,18 @@
               : ''
           ].join('');
           const lens = day.marketLens;
-          const relatedEventIds = new Set(Array.isArray(lens?.relatedEventIds) ? lens.relatedEventIds : []);
+          const lensEventIds = new Set(Array.isArray(lens?.eventIds) ? lens.eventIds : []);
           const lensMatchesVisibleEvents = events.length > 0
-            && (!relatedEventIds.size || events.some((event) => relatedEventIds.has(event.id)));
+            && (!lensEventIds.size || events.some((event) => lensEventIds.has(event.id)));
+          const lensCopy = lens?.copy;
           const lensHtml = !lensMatchesVisibleEvents
             ? ''
             : day.lifecycle === 'close_available'
             ? weekAheadOutcomeHtml(day)
-            : day.marketLensSource === 'unavailable'
+            : lens?.status === 'commentary_unavailable'
             ? weekAheadReactionsHtml(day, lens, weekAheadPendingMarketLensInfoHtml(day))
-            : lens?.title && lens.body
-            ? `<div class="week-market-lens"><strong>${esc(lens.title)}</strong>${esc(lens.body)}${weekAheadReactionsHtml(day, lens)}</div>`
+            : lensCopy?.title && lensCopy.body
+            ? `<div class="week-market-lens"><strong>${esc(lensCopy.title)}</strong>${esc(lensCopy.body)}${weekAheadReactionsHtml(day, lens)}</div>`
             : '';
           return `<article class="week-day-row">
             <div class="week-day-header"><div class="week-day-label">${esc(day.label)}<span class="week-day-count">${esc(count)}</span></div>${weekAheadDayValuesHeaderHtml(events)}</div>

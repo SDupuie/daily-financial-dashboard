@@ -7,6 +7,7 @@ const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_c
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const { deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
+const { validateWeekAheadPayload } = require('./week_ahead_contract');
 
 const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
@@ -58,6 +59,10 @@ function validateEmbeddedEarningsWeekContract(errors, data) {
       ? 'earnings.week must be an object.'
       : `earnings.week.${error}`);
   }
+}
+
+function validateEmbeddedWeekAheadContract(errors, data) {
+  errors.push(...validateWeekAheadPayload(data?.weekAhead, { requireOutcomeDisposition: true }));
 }
 
 function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options = {}) {
@@ -834,6 +839,7 @@ if (!dashboardMatch) {
     if (validationMode === 'staged') {
       const chartableRows = chartableRowsFromDashboardData(data);
       validateCalendarSectionRanges(errors, data);
+      validateEmbeddedWeekAheadContract(errors, data);
       validateEmbeddedEarningsWeekContract(errors, data);
       validateEmbeddedNewsMetadataContract(errors, data);
       validateDashboardTapeCommentary(errors, data);

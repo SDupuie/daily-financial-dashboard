@@ -50,16 +50,13 @@ const {
 } = require('./earnings_week_build');
 const { writeEarningsGuidanceEvidence } = require('./earnings_week_guidance');
 const {
-  applyMarketLensDecisions,
+  applyWeekAheadEditorial,
   applyWeekAheadLifecycle,
   buildWeekAheadPreparationFallback,
   finalizeWeekAheadOutcomes,
   mergeWeekAheadPayload,
-  normalizeMarketLensDecisions,
   prepareWeekAheadForEditorial,
-  validateWeekAheadPayload,
-  weekAheadMarketLensDecision,
-  weekAheadNeedsMarketLensEditorial
+  validateWeekAheadPayload
 } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
@@ -965,8 +962,7 @@ async function prepareEditorialWorkspace(args) {
     verifiedClaims: [],
     newsSearch,
     newsSelection: { futures: [], stories: [], crypto: [] },
-    openingDecision: { action: null },
-    marketLensDecisions: []
+    openingDecision: { action: null }
   };
   dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
   delete dashboardData.storiesCoverage;
@@ -984,9 +980,13 @@ async function prepareEditorialWorkspace(args) {
   reviewManifest.earningsGuidanceEvidence = guidanceEvidence.index;
   reviewManifest.earningsChecklist = buildEarningsChecklist(dashboardData.earnings?.week, guidanceEvidence.index);
   dashboardData.weekAhead = prepareWeekAheadForEditorial(dashboardData.weekAhead);
-  reviewManifest.marketLensDecisions = (dashboardData.weekAhead?.days || [])
-    .filter((day) => Array.isArray(day?.events) && day.events.length)
-    .map(weekAheadMarketLensDecision);
+  const weekAheadHandoffErrors = validateWeekAheadPayload(dashboardData.weekAhead, {
+    allowPendingMarketLens: true,
+    requireOutcomeDisposition: true
+  });
+  if (weekAheadHandoffErrors.length) {
+    throw new Error(`Prepared Week Ahead editorial handoff is invalid: ${weekAheadHandoffErrors.join(' ')}`);
+  }
   dashboardData.editorialReview = reviewManifest;
   fs.mkdirSync(args.prepareEditorialDir, { recursive: true });
   for (const staleName of ['editorial-review.json', 'earnings_narrative.json']) {
@@ -995,6 +995,11 @@ async function prepareEditorialWorkspace(args) {
   }
   writeJson(path.join(args.prepareEditorialDir, 'dashboard-data.json'), dashboardData);
   return { dashboardData, reviewManifest };
+}
+
+function weekAheadEventDayCount(weekAhead) {
+  return (Array.isArray(weekAhead?.days) ? weekAhead.days : [])
+    .filter((day) => Array.isArray(day?.events) && day.events.length).length;
 }
 
 function readJsonBlock(html, id) {
@@ -1396,7 +1401,7 @@ function syncDashboardPricesFromChartData(data, chartData, {
     if (data.weekAhead) {
       data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { now });
       normalizeWeekAheadReactionButtons(data, chartData);
-      data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead, { now });
+      data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead);
     }
     return { commentaryResetCount: 0 };
   }
@@ -1417,7 +1422,7 @@ function syncDashboardPricesFromChartData(data, chartData, {
   if (data.weekAhead) {
     data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { now });
     normalizeWeekAheadReactionButtons(data, chartData);
-    data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead, { now });
+    data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead);
   }
   return { commentaryResetCount };
 }
@@ -1505,7 +1510,7 @@ function patchDashboard(args) {
   applyWeekAhead(dashboardData, args.weekAheadPayload || args.weekAheadFallbackPayload || readJson(WEEK_AHEAD_PATH));
   dashboardData.weekAhead = applyWeekAheadLifecycle(dashboardData.weekAhead, chartData, { now: scheduledNow() });
   normalizeWeekAheadReactionButtons(dashboardData, chartData);
-  dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead, { now: scheduledNow() });
+  dashboardData.weekAhead = finalizeWeekAheadOutcomes(dashboardData.weekAhead);
 
   const previousEarningsWeek = structuredClone(dashboardData.earnings?.week || null);
   if (args.earningsFallbackWeek) {
@@ -1531,52 +1536,6 @@ function normalizeWeekAheadReactionButtons(data, chartData) {
     if (Array.isArray(day?.marketLens?.reactions)) day.marketLens.reactions = day.marketLens.reactions.filter(usable);
     if (Array.isArray(day?.marketReaction?.rows)) day.marketReaction.rows = day.marketReaction.rows.filter(usable);
   }
-}
-
-function applyMarketLensDecisionsData(data, payload) {
-  data.weekAhead = applyMarketLensDecisions(data.weekAhead, payload);
-  return data;
-}
-
-function normalizeMarketLensReview(data, reviewManifest) {
-  const submitted = Array.isArray(reviewManifest.marketLensDecisions) ? reviewManifest.marketLensDecisions : [];
-  const eventDays = (data.weekAhead?.days || []).filter((day) => Array.isArray(day?.events) && day.events.length);
-  const submittedByDate = new Map(submitted.filter((decision) => decision?.date).map((decision) => [decision.date, decision]));
-  const normalized = normalizeMarketLensDecisions(data.weekAhead, submitted).map((decision) => {
-    const day = eventDays.find((item) => item.date === decision.date);
-    const submittedDecision = submittedByDate.get(decision.date);
-    // Prepare owns the editorial assignment. Apply only publishes a safe
-    // unavailable disposition when that prepared assignment is left unresolved.
-    if (submittedDecision?.action === 'pending_review'
-      && weekAheadNeedsMarketLensEditorial(day)
-      && decision.action === 'retain-generated') {
-      if (Array.isArray(reviewManifest.systemFallbacks)) {
-        reviewManifest.systemFallbacks.push({
-          section: 'market-lens',
-          path: `weekAhead.days.${decision.date}.marketLens`,
-          action: 'unavailable_disposition',
-          reason: 'editorial_commentary_unavailable'
-        });
-      }
-      return {
-        date: decision.date,
-        action: 'commentary-unavailable',
-        attemptedAt: scheduledNow().toISOString(),
-        reason: 'editorial_commentary_unavailable'
-      };
-    }
-    if (submittedDecision?.action !== decision.action && Array.isArray(reviewManifest.systemFallbacks)) {
-      reviewManifest.systemFallbacks.push({
-        section: 'market-lens',
-        path: `weekAhead.days.${decision.date}.marketLens`,
-        action: 'generated_default',
-        reason: 'editorial_content_unavailable'
-      });
-    }
-    return decision;
-  });
-  reviewManifest.marketLensDecisions = normalized;
-  return reviewManifest;
 }
 
 function normalizeVerifiedClaims(data, reviewManifest, priorReview = null) {
@@ -1924,13 +1883,6 @@ function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFall
   });
 }
 
-function usableWeekAheadOutcome(outcome) {
-  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) return false;
-  return outcome.status === 'verified'
-    && outcome.source === 'editorial'
-    && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
-}
-
 function clearEarningsInternalQueues(week) {
   // Published Earnings keeps compact display state only. Recovery queues,
   // provider fetch diagnostics, and narrative-apply receipts remain staging data.
@@ -2072,8 +2024,12 @@ function applyDashboardDataJson(args) {
   // Apply publishes staged chart-data as-is; Prepare and focused chart repairs
   // own revision validation, quote derivation, and Week Ahead lifecycle updates.
   const editorialDashboardData = readJson(args.applyDashboardDataJson);
-  let reviewManifest = { ...editorialDashboardData.editorialReview, reviewedAt: scheduledNow().toISOString() };
+  const applyNow = scheduledNow();
+  let reviewManifest = { ...editorialDashboardData.editorialReview, reviewedAt: applyNow.toISOString() };
   reviewManifest.systemFallbacks = [];
+  if (Object.prototype.hasOwnProperty.call(reviewManifest, 'marketLensDecisions')) {
+    throw new Error('editorialReview.marketLensDecisions is no longer supported; edit weekAhead.days[].marketLens instead.');
+  }
   if (reviewManifest.baseEditionId !== candidateDashboardData.editionId) {
     throw new Error('Editorial dashboard-data baseEditionId must match the staged candidate; regenerate the editorial handoff.');
   }
@@ -2176,19 +2132,18 @@ function applyDashboardDataJson(args) {
     previousDashboardData
   );
   if (finalizedEarnings?.week) warnPendingEarningsEditorialFields(finalizedEarnings.week);
-  normalizeMarketLensReview(dashboardData, reviewManifest);
+  dashboardData.weekAhead = applyWeekAheadEditorial(candidateDashboardData.weekAhead, editorialDashboardData.weekAhead, {
+    systemFallbacks: reviewManifest.systemFallbacks
+  });
+  const appliedWeekAheadErrors = validateWeekAheadPayload(dashboardData.weekAhead, {
+    requireOutcomeDisposition: true
+  });
+  if (appliedWeekAheadErrors.length) {
+    throw new Error(`Applied Week Ahead payload is invalid: ${appliedWeekAheadErrors.join(' ')}`);
+  }
   normalizeVerifiedClaims(dashboardData, reviewManifest, previousDashboardData.editorialReview);
   const reviewErrors = validateReviewManifest(reviewManifest, dashboardData, { expectedBaseEditionId: previousDashboardData.editionId });
   if (reviewErrors.length) process.stderr.write(`Editorial review receipt will be best-effort: ${reviewErrors.join(' ')}\n`);
-  // Week Ahead facts and lifecycle already belong to the staged candidate; Apply
-  // merges only editorial decisions and verified Outcome copy onto that state.
-  applyMarketLensDecisionsData(dashboardData, reviewManifest.marketLensDecisions);
-  if (Array.isArray(dashboardData.weekAhead?.days)) {
-    dashboardData.weekAhead.days = dashboardData.weekAhead.days.map((day) => {
-      const editorialDay = editorialWeekAheadDays.get(day.date);
-      return usableWeekAheadOutcome(editorialDay?.outcome) ? { ...day, outcome: editorialDay.outcome } : day;
-    });
-  }
   const reviewChartData = compactChartPayload(candidateChartData);
   let nextHtml = replaceJsonBlock(canonicalHtml, 'chart-data', JSON.stringify(reviewChartData));
   applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: windowMode, now: editorialNow });
@@ -2378,7 +2333,7 @@ async function main() {
 
   if (args.prepareEditorialDir) {
     const workspace = await prepareEditorialWorkspace(args);
-    process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
+    process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${weekAheadEventDayCount(workspace.dashboardData.weekAhead)} event day(s).\n`);
     return;
   }
 
@@ -2615,7 +2570,7 @@ async function main() {
     reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
     args.prepareEditorialDir = DEFAULT_EDITORIAL_DIR;
     const workspace = await prepareEditorialWorkspace(args);
-    process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${workspace.reviewManifest.marketLensDecisions.length} event day(s).\n`);
+    process.stdout.write(`Editorial workspace prepared at ${args.prepareEditorialDir} for ${weekAheadEventDayCount(workspace.dashboardData.weekAhead)} event day(s).\n`);
     return;
   }
   reportPreparationStatus('candidate ready', `staged at ${args.candidate}; canonical dashboard unchanged`);
@@ -2636,7 +2591,6 @@ module.exports = {
   calendarRolloverRange,
   applyDashboardDataJson,
   applyEditorialEarningsNarrative,
-  applyMarketLensDecisionsData,
   applyChartDataJson,
   chartSeriesRevisionErrors,
   manualCalendarRolloverRange,

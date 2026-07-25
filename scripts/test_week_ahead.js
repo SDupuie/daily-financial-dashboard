@@ -7,9 +7,10 @@ const {
   TIME_ZONE,
   TRADINGVIEW_ENDPOINT,
   TRADINGVIEW_PROVIDER,
-  applyMarketLensDecisions,
+  applyWeekAheadEditorial,
   applyWeekAheadLifecycle,
   buildWeekAheadPreparationFallback,
+  defaultMarketLensForEvents,
   displayDatesForRange,
   finalizeWeekAheadOutcomes,
   formatTradingViewValue,
@@ -18,7 +19,6 @@ const {
   prepareWeekAheadForEditorial,
   rangeForDate,
   validateWeekAheadPayload,
-  weekAheadMarketLensDecision,
   weekAheadNeedsOutcomeEditorial
 } = require('./week_ahead_contract');
 const {
@@ -149,6 +149,18 @@ function testTradingViewNormalization() {
     omittedLowImpactEvents: 1
   });
   assert.deepEqual(validateWeekAheadPayload(week, { now: BEFORE_WEEK }), []);
+  const handoff = prepareWeekAheadForEditorial(week);
+  const handoffTuesday = handoff.days.find((day) => day.date === '2026-07-28');
+  const candidateTuesday = week.days.find((day) => day.date === '2026-07-28');
+  assert.equal(handoffTuesday.marketLens.status, 'pending_review');
+  assert.deepEqual(handoffTuesday.marketLens.copy, { question: '', title: '', body: '' });
+  assert.deepEqual(handoffTuesday.marketLens.eventIds, candidateTuesday.marketLens.eventIds);
+  assert.deepEqual(handoffTuesday.marketLens.reactions, candidateTuesday.marketLens.reactions);
+  assert.deepEqual(validateWeekAheadPayload(handoff, {
+    now: BEFORE_WEEK,
+    allowPendingMarketLens: true
+  }), []);
+  assert.match(validateWeekAheadPayload(handoff, { now: BEFORE_WEEK }).join('\n'), /pending_review/);
 
   const cpi = findEvent(week, 'us-cpi-yoy');
   assert.equal(cpi.time, '08:30');
@@ -254,10 +266,13 @@ function testLatestTradingViewValuesOwnRefresh() {
   const tuesday = prior.days.find((day) => day.date === '2026-07-28');
   tuesday.marketLens = {
     ...tuesday.marketLens,
-    title: 'Editorial inflation lens',
-    body: 'Current editorial interpretation.'
+    status: 'verified',
+    copy: {
+      ...tuesday.marketLens.copy,
+      title: 'Editorial inflation lens',
+      body: 'Current editorial interpretation.'
+    }
   };
-  tuesday.marketLensSource = 'editorial';
 
   const refreshedProvider = providerFixture();
   refreshedProvider.result[0].previous = 2.8;
@@ -269,8 +284,8 @@ function testLatestTradingViewValuesOwnRefresh() {
   assert.equal(event.previous, '2.8%');
   assert.equal(event.forecast, null, 'missing latest values must replace prior values');
   assert.equal(event.actual, null);
-  assert.equal(merged.days.find((day) => day.date === '2026-07-28').marketLens.title, 'Editorial inflation lens');
-  assert.equal(merged.days.find((day) => day.date === '2026-07-28').marketLensSource, 'editorial');
+  assert.equal(merged.days.find((day) => day.date === '2026-07-28').marketLens.copy.title, 'Consumer inflation tests the rate path');
+  assert.equal(merged.days.find((day) => day.date === '2026-07-28').marketLens.status, 'setup');
 }
 
 function testStatisticalReleaseReopensMarketLensReview() {
@@ -278,18 +293,24 @@ function testStatisticalReleaseReopensMarketLensReview() {
   const priorTuesday = prior.days.find((day) => day.date === '2026-07-28');
   priorTuesday.marketLens = {
     ...priorTuesday.marketLens,
-    title: 'Pre-release inflation lens',
-    body: 'Forward-looking inflation setup.'
+    status: 'verified',
+    copy: {
+      ...priorTuesday.marketLens.copy,
+      title: 'Pre-release inflation lens',
+      body: 'Forward-looking inflation setup.'
+    }
   };
-  priorTuesday.marketLensSource = 'editorial';
 
   const refreshed = normalizedFixture({ now: new Date('2026-07-28T14:00:00Z') });
   const merged = mergeWeekAheadPayload(prior, refreshed);
   const tuesday = merged.days.find((day) => day.date === '2026-07-28');
   assert.equal(findEvent(merged, 'us-cpi-yoy').status, 'released');
-  assert.equal(tuesday.marketLensSource, 'generated');
-  assert.equal(tuesday.marketLens.title, 'Consumer inflation tests the rate path');
-  assert.equal(weekAheadMarketLensDecision(tuesday).action, 'pending_review');
+  assert.equal(tuesday.marketLens.status, 'commentary_unavailable');
+  assert.equal(tuesday.marketLens.copy.title, '');
+  const preparedTuesday = prepareWeekAheadForEditorial(merged).days.find((day) => day.date === '2026-07-28');
+  assert.equal(preparedTuesday.marketLens.status, 'pending_review');
+  assert.equal(preparedTuesday.marketLens.copy.title, '');
+  assert.equal(preparedTuesday.marketLens.copy.body, '');
 }
 
 function testNonStatisticalReleaseReopensMarketLensReview() {
@@ -297,25 +318,31 @@ function testNonStatisticalReleaseReopensMarketLensReview() {
   const priorWednesday = prior.days.find((day) => day.date === '2026-07-29');
   priorWednesday.marketLens = {
     ...priorWednesday.marketLens,
-    title: 'Pre-release Fed lens',
-    body: 'Forward-looking policy setup.'
+    status: 'verified',
+    copy: {
+      ...priorWednesday.marketLens.copy,
+      title: 'Pre-release Fed lens',
+      body: 'Forward-looking policy setup.'
+    }
   };
-  priorWednesday.marketLensSource = 'editorial';
 
   const refreshed = normalizedFixture({ now: new Date('2026-07-29T18:00:00Z') });
   const merged = mergeWeekAheadPayload(prior, refreshed);
   const wednesday = merged.days.find((day) => day.date === '2026-07-29');
   assert.equal(findEvent(merged, 'fed-chair-speech').status, 'released');
-  assert.equal(wednesday.marketLensSource, 'generated');
-  assert.equal(wednesday.marketLens.title, 'The expected rate path is the test');
-  assert.equal(weekAheadMarketLensDecision(wednesday).action, 'pending_review');
+  assert.equal(wednesday.marketLens.status, 'commentary_unavailable');
+  assert.equal(wednesday.marketLens.copy.title, '');
+  const preparedWednesday = prepareWeekAheadForEditorial(merged).days.find((day) => day.date === '2026-07-29');
+  assert.equal(preparedWednesday.marketLens.status, 'pending_review');
+  assert.equal(preparedWednesday.marketLens.copy.title, '');
+  assert.equal(preparedWednesday.marketLens.copy.body, '');
 
   const carriedForward = applyWeekAheadLifecycle(prior, null, {
     now: new Date('2026-07-29T18:00:00Z')
   });
   const carriedWednesday = carriedForward.days.find((day) => day.date === '2026-07-29');
-  assert.equal(carriedWednesday.marketLensSource, 'generated');
-  assert.equal(weekAheadMarketLensDecision(carriedWednesday).action, 'pending_review');
+  assert.equal(carriedWednesday.marketLens.status, 'setup');
+  assert.equal(prepareWeekAheadForEditorial(carriedForward).days.find((day) => day.date === '2026-07-29').marketLens.copy.title, '');
 }
 
 function testNonStatisticalCloseCreatesOutcomeAssignment() {
@@ -343,9 +370,7 @@ function testNonStatisticalCloseCreatesOutcomeAssignment() {
     prepared.days.find((day) => day.date === '2026-07-29').outcome,
     { status: 'pending_review' }
   );
-  const finalized = finalizeWeekAheadOutcomes(afterClose, {
-    now: new Date('2026-07-29T21:01:00Z')
-  });
+  const finalized = finalizeWeekAheadOutcomes(afterClose);
   assert.deepEqual(
     finalized.days.find((day) => day.date === '2026-07-29').outcome,
     { status: 'pending_review' }
@@ -359,9 +384,7 @@ function testNonStatisticalCloseCreatesOutcomeAssignment() {
   const verifiedWeek = structuredClone(afterClose);
   verifiedWeek.days.find((day) => day.date === '2026-07-29').outcome = verifiedOutcome;
   assert.deepEqual(
-    finalizeWeekAheadOutcomes(verifiedWeek, {
-      now: new Date('2026-07-29T21:02:00Z')
-    }).days.find((day) => day.date === '2026-07-29').outcome,
+    finalizeWeekAheadOutcomes(verifiedWeek).days.find((day) => day.date === '2026-07-29').outcome,
     verifiedOutcome
   );
 
@@ -386,17 +409,20 @@ function testPostReleaseMarketLensSurvivesUnchangedRefresh() {
   const priorTuesday = prior.days.find((day) => day.date === '2026-07-28');
   priorTuesday.marketLens = {
     ...priorTuesday.marketLens,
-    title: 'Post-release inflation lens',
-    body: 'Current inflation interpretation.'
+    status: 'verified',
+    copy: {
+      ...priorTuesday.marketLens.copy,
+      question: 'What changed in the inflation release?',
+      title: 'Post-release inflation lens',
+      body: 'Current inflation interpretation.'
+    }
   };
-  priorTuesday.marketLensSource = 'editorial';
 
   const refreshed = normalizedFixture({ now: new Date('2026-07-28T15:00:00Z') });
   const merged = mergeWeekAheadPayload(prior, refreshed);
   const tuesday = merged.days.find((day) => day.date === '2026-07-28');
-  assert.equal(tuesday.marketLensSource, 'editorial');
-  assert.equal(tuesday.marketLens.title, 'Post-release inflation lens');
-  assert.equal(weekAheadMarketLensDecision(tuesday).action, 'replace');
+  assert.equal(tuesday.marketLens.status, 'verified');
+  assert.equal(tuesday.marketLens.copy.title, 'Post-release inflation lens');
 }
 
 function testCorrectedReleasedFactsReopenMarketLensReview() {
@@ -404,10 +430,14 @@ function testCorrectedReleasedFactsReopenMarketLensReview() {
   const priorTuesday = prior.days.find((day) => day.date === '2026-07-28');
   priorTuesday.marketLens = {
     ...priorTuesday.marketLens,
-    title: 'Post-release inflation lens',
-    body: 'Current inflation interpretation.'
+    status: 'verified',
+    copy: {
+      ...priorTuesday.marketLens.copy,
+      question: 'What changed in the inflation release?',
+      title: 'Post-release inflation lens',
+      body: 'Current inflation interpretation.'
+    }
   };
-  priorTuesday.marketLensSource = 'editorial';
 
   const refreshedProvider = providerFixture();
   refreshedProvider.result[0].actual = 3.2;
@@ -418,23 +448,184 @@ function testCorrectedReleasedFactsReopenMarketLensReview() {
   const merged = mergeWeekAheadPayload(prior, refreshed);
   const tuesday = merged.days.find((day) => day.date === '2026-07-28');
   assert.equal(findEvent(merged, 'us-cpi-yoy').actual, '3.2%');
-  assert.equal(tuesday.marketLensSource, 'generated');
-  assert.equal(weekAheadMarketLensDecision(tuesday).action, 'pending_review');
+  assert.equal(tuesday.marketLens.status, 'commentary_unavailable');
+  assert.equal(prepareWeekAheadForEditorial(merged).days.find((day) => day.date === '2026-07-28').marketLens.copy.title, '');
 }
 
-function testGeneratedLensRegeneration() {
-  const week = normalizedFixture();
-  const tuesday = week.days.find((day) => day.date === '2026-07-28');
-  tuesday.marketLens = {
-    ...tuesday.marketLens,
-    title: 'Stale generated copy'
+function testMarketLensApplyPreservesDeterministicRouting() {
+  const candidate = normalizedFixture();
+  const editorial = structuredClone(candidate);
+  const candidateTuesday = candidate.days.find((day) => day.date === '2026-07-28');
+  const editorialTuesday = editorial.days.find((day) => day.date === '2026-07-28');
+  const expectedReactions = structuredClone(candidateTuesday.marketLens.reactions);
+  const expectedEventIds = structuredClone(candidateTuesday.marketLens.eventIds);
+  editorialTuesday.marketLens = {
+    ...editorialTuesday.marketLens,
+    status: 'verified',
+    eventIds: ['stale-event-id'],
+    reactions: [{ ticker: 'bad', role: 'stale routing' }],
+    copy: {
+      question: 'What is the current inflation read?',
+      title: 'Editorial inflation lens',
+      body: 'Current editorial interpretation.'
+    }
   };
-  tuesday.marketLensSource = 'generated';
-  const refreshed = applyMarketLensDecisions(week, [{
-    date: tuesday.date,
-    action: 'retain-generated'
-  }]);
-  assert.equal(refreshed.days.find((day) => day.date === tuesday.date).marketLens.title, 'Consumer inflation tests the rate path');
+
+  const applied = applyWeekAheadEditorial(candidate, editorial);
+  const tuesday = applied.days.find((day) => day.date === '2026-07-28');
+  assert.equal(tuesday.marketLens.status, 'verified');
+  assert.equal(tuesday.marketLens.copy.question, 'What is the current inflation read?');
+  assert.equal(tuesday.marketLens.copy.title, 'Editorial inflation lens');
+  assert.equal(tuesday.marketLens.copy.body, 'Current editorial interpretation.');
+  assert.deepEqual(tuesday.marketLens.eventIds, expectedEventIds);
+  assert.deepEqual(tuesday.marketLens.reactions, expectedReactions);
+}
+
+function testMalformedPreReleaseMarketLensFallsBackToSetup() {
+  const candidate = normalizedFixture();
+  const candidateTuesday = candidate.days.find((day) => day.date === '2026-07-28');
+  candidateTuesday.marketLens = {
+    ...candidateTuesday.marketLens,
+    status: 'verified',
+    copy: {
+      question: 'Prior editorial question?',
+      title: 'Prior editorial inflation lens',
+      body: 'Prior editorial interpretation.'
+    }
+  };
+  const editorial = structuredClone(candidate);
+  editorial.days.find((day) => day.date === '2026-07-28').marketLens = {};
+  const systemFallbacks = [];
+
+  const applied = applyWeekAheadEditorial(candidate, editorial, { systemFallbacks });
+  const tuesday = applied.days.find((day) => day.date === '2026-07-28');
+  const expectedDefault = defaultMarketLensForEvents(candidateTuesday.events);
+  assert.equal(tuesday.marketLens.status, 'setup');
+  assert.equal(tuesday.marketLens.copy.title, expectedDefault.copy.title);
+  assert.equal(tuesday.marketLens.copy.body, expectedDefault.copy.body);
+  assert.ok(systemFallbacks.some((fallback) => fallback.action === 'setup_default'));
+}
+
+function testReleasedMarketLensMissingHandoffBecomesUnavailable() {
+  const candidate = normalizedFixture({ now: new Date('2026-07-28T14:00:00Z') });
+  const candidateTuesday = candidate.days.find((day) => day.date === '2026-07-28');
+  candidateTuesday.marketLens = {
+    ...candidateTuesday.marketLens,
+    status: 'verified',
+    copy: {
+      question: 'Current inflation question?',
+      title: 'Current inflation read',
+      body: 'Current inflation interpretation.'
+    }
+  };
+  const editorial = {
+    ...candidate,
+    days: candidate.days.filter((day) => day.date !== '2026-07-28')
+  };
+  const systemFallbacks = [];
+
+  const applied = applyWeekAheadEditorial(candidate, editorial, { systemFallbacks });
+  const tuesday = applied.days.find((day) => day.date === '2026-07-28');
+  assert.deepEqual(tuesday.marketLens.copy, {
+    question: '',
+    title: '',
+    body: ''
+  });
+  assert.equal(tuesday.marketLens.status, 'commentary_unavailable');
+  assert.ok(systemFallbacks.some((fallback) => fallback.action === 'commentary_unavailable'));
+}
+
+function testMarketLensValidationRejectsMalformedPublishedStates() {
+  const missingLens = normalizedFixture();
+  delete missingLens.days.find((day) => day.date === '2026-07-28').marketLens;
+  assert.match(validateWeekAheadPayload(missingLens, { now: BEFORE_WEEK }).join('\n'), /marketLens is required/);
+
+  const blankSetup = normalizedFixture();
+  blankSetup.days.find((day) => day.date === '2026-07-28').marketLens.copy.title = ' ';
+  assert.match(validateWeekAheadPayload(blankSetup, { now: BEFORE_WEEK }).join('\n'), /copy\.title must be populated/);
+
+  const legacyShape = normalizedFixture();
+  const legacyLens = legacyShape.days.find((day) => day.date === '2026-07-28').marketLens;
+  legacyLens.relatedEventIds = legacyLens.eventIds;
+  legacyLens.channels = ['consumer-inflation'];
+  assert.match(validateWeekAheadPayload(legacyShape, { now: BEFORE_WEEK }).join('\n'), /relatedEventIds is not supported/);
+  assert.match(validateWeekAheadPayload(legacyShape, { now: BEFORE_WEEK }).join('\n'), /channels is not supported/);
+
+  const nestedLegacyShape = normalizedFixture();
+  nestedLegacyShape.days.find((day) => day.date === '2026-07-28').marketLens.copy.legacyTitle = 'Stale copy';
+  assert.match(validateWeekAheadPayload(nestedLegacyShape, { now: BEFORE_WEEK }).join('\n'), /copy\.legacyTitle is not supported/);
+
+  const released = normalizedFixture({ now: new Date('2026-07-28T14:00:00Z') });
+  const releasedTuesday = released.days.find((day) => day.date === '2026-07-28');
+  releasedTuesday.marketLens = defaultMarketLensForEvents(releasedTuesday.events);
+  assert.match(validateWeekAheadPayload(released).join('\n'), /status setup is not current after an event has completed/);
+
+  releasedTuesday.marketLens.status = 'verified';
+  releasedTuesday.marketLens.copy = { question: '', title: '', body: '' };
+  assert.match(validateWeekAheadPayload(released).join('\n'), /copy\.question must be populated/);
+
+  releasedTuesday.marketLens = {
+    ...defaultMarketLensForEvents(releasedTuesday.events),
+    status: 'commentary_unavailable',
+    copy: { question: '', title: '', body: '' }
+  };
+  releasedTuesday.lifecycle = 'close_available';
+  releasedTuesday.marketReaction = { rows: [{ ticker: 'UST2Y' }] };
+  releasedTuesday.outcome = { status: 'verified' };
+  assert.match(validateWeekAheadPayload(released).join('\n'), /verified status requires populated title and body/);
+}
+
+function testWeekAheadOutcomeApplyIsCloseAvailableOnly() {
+  const scheduledCandidate = normalizedFixture();
+  const scheduledEditorial = structuredClone(scheduledCandidate);
+  const scheduledTuesday = scheduledEditorial.days.find((day) => day.date === '2026-07-28');
+  scheduledTuesday.outcome = {
+    status: 'verified',
+    title: 'Too early',
+    body: 'This scheduled outcome should not publish.'
+  };
+  const scheduledApplied = applyWeekAheadEditorial(scheduledCandidate, scheduledEditorial);
+  assert.equal(scheduledApplied.days.find((day) => day.date === '2026-07-28').outcome, undefined);
+  assert.match(
+    validateWeekAheadPayload(scheduledEditorial, { now: BEFORE_WEEK }).join('\n'),
+    /outcome is supported only when lifecycle is close_available/
+  );
+
+  const released = normalizedFixture({ now: new Date('2026-07-29T18:00:00Z') });
+  const releasedWednesday = released.days.find((day) => day.date === '2026-07-29');
+  const chartData = {
+    series: releasedWednesday.marketLens.reactions.map((reaction, index) => ({
+      ticker: reaction.ticker,
+      unit: 'price',
+      bars: [
+        { time: '2026-07-28', close: 100 + index },
+        { time: '2026-07-29', close: 101 + index }
+      ]
+    }))
+  };
+  const closeCandidate = applyWeekAheadLifecycle(released, chartData, {
+    now: new Date('2026-07-29T21:00:00Z')
+  });
+  const closeEditorial = structuredClone(closeCandidate);
+  closeEditorial.days.find((day) => day.date === '2026-07-29').outcome = {
+    status: 'verified',
+    source: 'typed-by-editor',
+    title: 'Policy reaction settled ',
+    body: ' Rates and the dollar reflected the completed Fed communication. '
+  };
+  const closeApplied = applyWeekAheadEditorial(closeCandidate, closeEditorial);
+  assert.deepEqual(closeApplied.days.find((day) => day.date === '2026-07-29').outcome, {
+    status: 'verified',
+    source: 'editorial',
+    title: 'Policy reaction settled',
+    body: 'Rates and the dollar reflected the completed Fed communication.'
+  });
+
+  closeEditorial.days.find((day) => day.date === '2026-07-29').outcome = { status: 'verified' };
+  assert.deepEqual(
+    applyWeekAheadEditorial(closeCandidate, closeEditorial).days.find((day) => day.date === '2026-07-29').outcome,
+    { status: 'pending_review' }
+  );
 }
 
 function testSameRangeFallbackOnly() {
@@ -580,7 +771,11 @@ async function main() {
   testNonStatisticalCloseCreatesOutcomeAssignment();
   testPostReleaseMarketLensSurvivesUnchangedRefresh();
   testCorrectedReleasedFactsReopenMarketLensReview();
-  testGeneratedLensRegeneration();
+  testMarketLensApplyPreservesDeterministicRouting();
+  testMalformedPreReleaseMarketLensFallsBackToSetup();
+  testReleasedMarketLensMissingHandoffBecomesUnavailable();
+  testMarketLensValidationRejectsMalformedPublishedStates();
+  testWeekAheadOutcomeApplyIsCloseAvailableOnly();
   testSameRangeFallbackOnly();
   testFetcherContract();
   await testFetcherRetriesAndHeaders();

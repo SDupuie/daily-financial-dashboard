@@ -73,7 +73,12 @@ const {
   stageDashboardCandidate,
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
-const { applyWeekAheadLifecycle, buildWeekAheadPreparationFallback, normalizeWeekAhead } = require('./week_ahead_contract');
+const {
+  applyWeekAheadLifecycle,
+  buildWeekAheadPreparationFallback,
+  defaultMarketLensForEvents,
+  normalizeWeekAhead
+} = require('./week_ahead_contract');
 const { buildEarningsPreparationFallback } = require('./earnings_week_contract');
 const { validateEarningsWeekPayload } = require('./earnings_week');
 const { atomicWriteFile } = require('./staging_writer');
@@ -1916,17 +1921,24 @@ function testEditorialReviewContract() {
     schemaVersion: 1,
     reviewedAt: '2026-07-11T17:55:00.000Z',
     baseEditionId: '2026-07-11T17:40:00.000Z',
-    marketLensDecisions: [],
     verifiedClaims: []
   };
   assert.deepEqual(validateReviewManifest(manifest, data), []);
   assert.match(validateReviewManifest({ ...manifest, baseEditionId: '' }, data).join('\n'), /baseEditionId must identify/);
   assert.match(validateReviewManifest(manifest, data, { expectedBaseEditionId: 'newer-edition' }).join('\n'), /baseEditionId must match/);
+  assert.match(
+    validateReviewManifest({ ...manifest, marketLensDecisions: [] }, data).join('\n'),
+    /marketLensDecisions is no longer supported/
+  );
   buildEditorialReview(data, manifest, reviewChartData);
   assert.equal(data.editorialReview.reviewedBaseEditionId, manifest.baseEditionId);
   assert.equal(data.editorialReview.reviewedEditionId, data.editionId);
   assert.equal(data.editorialReview.payloadHash, editorialPayloadHash(data, reviewChartData));
   assert.deepEqual(validateReviewManifest(data.editorialReview, data, { requireEmbedded: true, chartData: reviewChartData }), []);
+  assert.match(validateReviewManifest({
+    ...data.editorialReview,
+    marketLensDecisions: []
+  }, data, { requireEmbedded: true, chartData: reviewChartData }).join('\n'), /marketLensDecisions is no longer supported/);
   assert.match(validateReviewManifest(data.editorialReview, data, {
     requireEmbedded: true,
     chartData: { ...reviewChartData, generatedAt: '2026-07-11T18:01:00.000Z' }
@@ -2209,11 +2221,6 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   ];
   const sourceWeekDay = candidateDashboard.weekAhead.days.find((day) => day.events.length);
   const sourceWeekEvent = structuredClone(sourceWeekDay.events[0]);
-  const sourceWeekLens = structuredClone(sourceWeekDay.marketLens || {
-    title: 'Generated pre-release lens',
-    body: 'Generated pre-release Market Lens commentary.',
-    reactions: [{ ticker: 'UST10Y', role: 'rates response' }]
-  });
   const configureWeekDay = (index, { lifecycle, eventStatus, actual, valuesApplicable = true, editorialLens = false, closeReaction = false }) => {
     const day = candidateDashboard.weekAhead.days[index];
     day.events = [{
@@ -2222,14 +2229,27 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
       date: day.date,
       status: eventStatus,
       actual,
-      valuesApplicable
+      valuesApplicable,
+      ...(!valuesApplicable ? {
+        actual: null,
+        forecast: null,
+        previous: null,
+        forecastType: null
+      } : {})
     }];
     day.lifecycle = lifecycle;
+    const baseLens = defaultMarketLensForEvents(day.events);
     day.marketLens = editorialLens
-      ? { ...sourceWeekLens, title: 'Editorial current lens', body: 'Editorial current release interpretation.' }
-      : structuredClone(sourceWeekLens);
-    day.marketLensSource = editorialLens ? 'editorial' : 'generated';
-    delete day.marketLensDisposition;
+      ? {
+        ...baseLens,
+        status: 'verified',
+        copy: {
+          question: 'What changed in the current release?',
+          title: 'Editorial current lens',
+          body: 'Editorial current release interpretation.'
+        }
+      }
+      : baseLens;
     delete day.outcome;
     delete day.marketReaction;
     if (closeReaction) {
@@ -2399,12 +2419,16 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.equal(handoffDuplicatedInterpretationA.reaction.commentaryDisposition.status, 'verified');
   assert.equal(handoffDuplicatedInterpretationB.reaction.note, duplicatedInterpretationB.reaction.note);
   assert.equal(handoffDuplicatedInterpretationB.reaction.commentaryDisposition.status, 'verified');
-  const marketLensDecisionByDate = new Map(handoff.editorialReview.marketLensDecisions.map((decision) => [decision.date, decision]));
-  assert.equal(marketLensDecisionByDate.get(scheduledWeekDay.date).action, 'retain-generated');
-  assert.equal(marketLensDecisionByDate.get(missingActualsWeekDay.date).action, 'retain-generated');
-  assert.equal(marketLensDecisionByDate.get(releasedNeedsLensWeekDay.date).action, 'pending_review');
-  assert.equal(marketLensDecisionByDate.get(closeCurrentLensWeekDay.date).action, 'replace');
-  assert.equal(marketLensDecisionByDate.get(releasedNonStatNeedsLensWeekDay.date).action, 'pending_review');
+  const handoffWeekDayByDate = new Map(handoff.weekAhead.days.map((day) => [day.date, day]));
+  assert.equal(handoffWeekDayByDate.get(scheduledWeekDay.date).marketLens.status, 'pending_review');
+  assert.equal(handoffWeekDayByDate.get(scheduledWeekDay.date).marketLens.copy.title, '');
+  assert.equal(handoffWeekDayByDate.get(missingActualsWeekDay.date).marketLens.status, 'pending_review');
+  assert.equal(handoffWeekDayByDate.get(releasedNeedsLensWeekDay.date).marketLens.copy.title, '');
+  assert.equal(handoffWeekDayByDate.get(releasedNeedsLensWeekDay.date).marketLens.copy.body, '');
+  assert.equal(handoffWeekDayByDate.get(closeCurrentLensWeekDay.date).marketLens.status, 'verified');
+  assert.equal(handoffWeekDayByDate.get(closeCurrentLensWeekDay.date).marketLens.copy.title, 'Editorial current lens');
+  assert.equal(handoffWeekDayByDate.get(releasedNonStatNeedsLensWeekDay.date).marketLens.copy.title, '');
+  assert.equal(handoffWeekDayByDate.get(releasedNonStatNeedsLensWeekDay.date).marketLens.copy.body, '');
   const handoffCloseWeekDay = handoff.weekAhead.days.find((day) => day.date === closeCurrentLensWeekDay.date);
   assert.deepEqual(handoffCloseWeekDay.outcome, { status: 'pending_review' });
   assert.deepEqual(handoff.tape.rows[1], dashboard.tape.rows[1], 'An unchanged carried quote must retain its complete commentary bundle in the handoff.');
@@ -2483,10 +2507,7 @@ function testUnresolvedMarketLensReviewBecomesUnavailableLens() {
     verifiedClaims: [],
     newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
-    openingDecision: { action: 'reviewed' },
-    marketLensDecisions: dashboard.weekAhead.days
-      .filter((day) => day.events.length)
-      .map((day) => ({ date: day.date, action: 'pending_review' }))
+    openingDecision: { action: 'reviewed' }
   };
   fs.writeFileSync(dashboardFile, html);
   fs.writeFileSync(candidateFile, html);
@@ -2508,9 +2529,9 @@ function testUnresolvedMarketLensReviewBecomesUnavailableLens() {
   assert.equal(result.status, 0, result.stderr);
   const finalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
   const finalizedDay = finalized.weekAhead.days.find((day) => day.events.length);
-  assert.equal(finalizedDay.marketLensSource, 'unavailable');
-  assert.equal(finalizedDay.marketLensDisposition.status, 'commentary_unavailable');
-  assert.equal(finalized.editorialReview.marketLensDecisions[0].action, 'commentary-unavailable');
+  assert.equal(finalizedDay.marketLens.status, 'commentary_unavailable');
+  assert.deepEqual(finalizedDay.marketLens.copy, { question: '', title: '', body: '' });
+  assert.equal(finalized.editorialReview.systemFallbacks.find((item) => item.section === 'market-lens').action, 'commentary_unavailable');
 }
 
 function testStageOneFinalizesWeekAheadOutcomeDisposition() {
@@ -2569,10 +2590,7 @@ function testApplyDoesNotOwnWeekAheadLifecycle() {
     verifiedClaims: [],
     newsSearch: fixtureNewsSearchArtifact(candidate, '2026-07-13T13:00:00.000Z'),
     newsSelection: fixtureNewsSelection(candidate),
-    openingDecision: { action: 'reviewed' },
-    marketLensDecisions: candidate.weekAhead.days
-      .filter((day) => day.events.length)
-      .map((day) => ({ date: day.date, action: 'retain-generated' }))
+    openingDecision: { action: 'reviewed' }
   };
   fs.writeFileSync(dashboardFile, renderDashboardValidationFixture(dashboard, chartData));
   fs.writeFileSync(candidateFile, renderDashboardValidationFixture(candidate, chartData));
@@ -2599,7 +2617,7 @@ function testApplyDoesNotOwnWeekAheadLifecycle() {
   assert.equal(finalizedDay.events[0].status, 'scheduled');
   assert.equal(finalizedDay.events[0].actual, staleDay.events[0].actual);
   assert.equal(finalizedDay.marketReaction.window, 'fixture-apply-must-not-recompute');
-  assert.equal(finalizedDay.marketLensSource, 'generated');
+  assert.equal(finalizedDay.marketLens.status, 'setup');
 }
 
 function testChartSeriesOwnsDerivedQuoteViews() {
@@ -2724,10 +2742,7 @@ function testPreparedEditionIdDrivesFuturesStoryWindow() {
     verifiedClaims: [],
     newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
-    openingDecision: { action: 'reviewed' },
-    marketLensDecisions: dashboard.weekAhead.days
-      .filter((day) => day.events.length)
-      .map((day) => ({ date: day.date, action: 'retain-generated' }))
+    openingDecision: { action: 'reviewed' }
   };
   fs.writeFileSync(dashboardFile, html);
   fs.writeFileSync(candidateFile, html);
@@ -2763,7 +2778,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   invalidPayload.stories[1] = structuredClone(invalidPayload.futuresModule.stories[1]);
   invalidPayload.crypto.notes[0].url = 'http://insecure.example/story';
   invalidPayload.tape.rows[0].note = `Reviewed commentary must not repeat the displayed quote ${invalidPayload.tape.rows[0].last}.`;
-  const eventDays = dashboard.weekAhead.days.filter((day) => day.events.length);
   const review = {
     schemaVersion: 1,
     preparedAt: '2026-07-10T21:00:00.000Z',
@@ -2772,8 +2786,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     verifiedClaims: [],
     newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
-    openingDecision: { action: 'reviewed' },
-    marketLensDecisions: eventDays.map((day) => ({ date: day.date, action: 'retain-generated' }))
+    openingDecision: { action: 'reviewed' }
   };
   invalidPayload.editorialReview = review;
   fs.writeFileSync(dashboardFile, originalHtml);
@@ -3017,8 +3030,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.deepEqual(finalized.assetAllocationPortfolio, dashboard.assetAllocationPortfolio);
   assert.deepEqual(finalized.weekAhead.days.map((day) => day.events), dashboard.weekAhead.days.map((day) => day.events));
   const finalizedEventDay = finalized.weekAhead.days.find((day) => day.date === editorialEventDay.date);
-  assert.equal(finalizedEventDay.outcome.status, 'verified');
-  assert.equal(finalizedEventDay.outcome.title, 'Reviewed outcome');
+  assert.equal(finalizedEventDay.outcome, undefined);
   assert.equal(finalized.masthead.date, 'Friday · July 10, 2026');
   assert.notEqual(finalized.tape.rows[0].last, '99,999.00');
   assert.ok(!(finalized.editorialReview.systemFallbacks || []).some((item) => item.action === 'unavailable_disposition'));
@@ -3340,10 +3352,7 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     verifiedClaims: [],
     newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
-    openingDecision: { action: 'reviewed' },
-    marketLensDecisions: dashboard.weekAhead.days
-      .filter((day) => day.events.length)
-      .map((day) => ({ date: day.date, action: 'retain-generated' }))
+    openingDecision: { action: 'reviewed' }
   };
   editorialDashboard.editorialReview = review;
 
@@ -3968,6 +3977,36 @@ function testDashboardValidatorRejectsCalendarRangeDivergence() {
   assert.match(unsupportedEarningsRangeResult.stderr, /earnings\.week\.range must cover Monday-Friday or Friday plus next Monday-Thursday/);
 }
 
+function testStagedDashboardValidatorEnforcesMarketLensContract() {
+  const missingLens = validationDashboardData();
+  const missingLensDay = missingLens.weekAhead.days.find((day) => day.events.length);
+  delete missingLensDay.marketLens;
+  const missingLensResult = validateStagedDashboardFixture(missingLens);
+  assert.equal(missingLensResult.status, 1);
+  assert.match(missingLensResult.stderr, /marketLens is required when events are present/);
+
+  const blankVerifiedLens = validationDashboardData();
+  const blankVerifiedDay = blankVerifiedLens.weekAhead.days.find((day) => day.events.length);
+  blankVerifiedDay.marketLens.status = 'verified';
+  blankVerifiedDay.marketLens.copy = { question: '', title: '', body: '' };
+  const blankVerifiedResult = validateStagedDashboardFixture(blankVerifiedLens);
+  assert.equal(blankVerifiedResult.status, 1);
+  assert.match(blankVerifiedResult.stderr, /copy\.title must be populated when status is verified/);
+
+  const verifiedOutcomeWithoutCopy = validationDashboardData();
+  const outcomeDay = verifiedOutcomeWithoutCopy.weekAhead.days.find((day) => day.events.length);
+  outcomeDay.events[0].actual = outcomeDay.events[0].forecast || '1.0%';
+  outcomeDay.events[0].status = 'released';
+  outcomeDay.lifecycle = 'close_available';
+  outcomeDay.marketLens.status = 'commentary_unavailable';
+  outcomeDay.marketLens.copy = { question: '', title: '', body: '' };
+  outcomeDay.marketReaction = { rows: [{ ticker: outcomeDay.marketLens.reactions[0].ticker }] };
+  outcomeDay.outcome = { status: 'verified' };
+  const verifiedOutcomeResult = validateStagedDashboardFixture(verifiedOutcomeWithoutCopy);
+  assert.equal(verifiedOutcomeResult.status, 1);
+  assert.match(verifiedOutcomeResult.stderr, /outcome verified status requires populated title and body/);
+}
+
 function testDashboardValidatorKeepsPublishedGateToRenderSurface() {
   const valid = validationDashboardData();
   const validResult = validateDashboardFixture(valid);
@@ -4110,10 +4149,7 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
         path: 'tape.rows.SPX.note',
         action: 'unavailable_disposition',
         reason: 'editorial_commentary_unavailable'
-      }],
-      marketLensDecisions: dashboard.weekAhead.days
-        .filter((day) => day.events.length)
-        .map((day) => ({ date: day.date, action: 'retain-generated' }))
+      }]
     };
     dashboard.editionId = '2026-07-10T21:00:01.000Z';
     buildEditorialReview(dashboard, { ...manifest, baseEditionId }, chartData);
@@ -4220,6 +4256,50 @@ function testTouchTooltipControls() {
   assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /Hide medium impact/);
   assert.match(html, /daily-financial-dashboard:week-medium-impact:v1/);
   assert.match(html, /data-week-impact-toggle/);
+
+  const weekValueSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-values');
+  const { weekAheadDisplayValues, weekAheadEventValuesHtml } = Function(
+    'esc',
+    `${weekValueSource}\nreturn { weekAheadDisplayValues, weekAheadEventValuesHtml };`
+  )((value) => String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char])));
+  assert.deepEqual(weekAheadDisplayValues({
+    previous: '-$105.9B',
+    forecast: '-$98B',
+    actual: null
+  }), {
+    previous: '-$105.9B',
+    forecast: '-$98.0B',
+    actual: null
+  });
+  assert.deepEqual(weekAheadDisplayValues({
+    previous: '0.618M',
+    forecast: '0.61M',
+    actual: '0.628M'
+  }), {
+    previous: '0.618M',
+    forecast: '0.610M',
+    actual: '0.628M'
+  });
+  assert.deepEqual(weekAheadDisplayValues({
+    previous: '-4.3%',
+    forecast: '0.61M',
+    actual: null
+  }), {
+    previous: '-4.3%',
+    forecast: '0.61M',
+    actual: null
+  });
+  assert.match(weekAheadEventValuesHtml({
+    previous: '-$105.9B',
+    forecast: '-$98B',
+    actual: null
+  }), /-\$98\.0B/);
 
   const weekFamilySource = extractDashboardRuntimeTestBlock(html, 'week-ahead-family');
   const { weekAheadEventGroups } = Function(
@@ -4329,7 +4409,7 @@ function testTouchTooltipControls() {
 
   assert.doesNotMatch(html, /week-ledger-status-dot/);
   assert.match(html, /Market Lens commentary was not completed for this update\./);
-  assert.match(html, /day\.marketLensSource === 'unavailable'\s*\?\s*weekAheadReactionsHtml\(day, lens, weekAheadPendingMarketLensInfoHtml\(day\)\)/);
+  assert.match(html, /lens\?\.status === 'commentary_unavailable'\s*\?\s*weekAheadReactionsHtml\(day, lens, weekAheadPendingMarketLensInfoHtml\(day\)\)/);
   assert.match(html, /week-ahead-stale-info \.stale-info-tooltip\s*\{[\s\S]*?right:\s*0;/);
   assert.match(html, /weekAheadAvailabilityState\(week\) === 'unavailable'/);
   assert.doesNotMatch(html, /Week Ahead data unavailable|Calendar cache in use|Official schedules \+ FXMacroData values/);
@@ -4720,6 +4800,7 @@ async function main() {
     testMarketLensReactionOpensChartBelowDay,
     testTapeChartRoutingPassesFocusOptions,
     testDashboardValidatorRejectsCalendarRangeDivergence,
+    testStagedDashboardValidatorEnforcesMarketLensContract,
     testDashboardValidatorKeepsPublishedGateToRenderSurface,
     testDashboardValidatorBlocksStartupCrashSurfaces,
     testDashboardValidatorTapeNotesAreModeSpecific,

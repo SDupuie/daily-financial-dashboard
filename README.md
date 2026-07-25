@@ -56,7 +56,7 @@ Use this section during AI Editorial Work. It is the canonical handoff-editing c
 
 ### AI Editorial Work contracts
 
-Blank fields or decisions marked `pending_review` are active AI assignments unless the section contract explicitly says they are system-provided carry-forward state.
+Blank fields or statuses marked `pending_review` are active AI assignments unless the section contract explicitly says they are system-provided carry-forward state.
 
 - `masthead`: leave the generated edition and date unchanged.
 - `opening`: write the current edition's `headline`, `deck`, and exactly 4 catalyst cards. Each catalyst must have a short `label` and a current, evidence-supported `body` summarizing one of the update's main market drivers.
@@ -67,7 +67,7 @@ Blank fields or decisions marked `pending_review` are active AI assignments unle
 - `stories`: select the broad-market news collection through `editorialReview.newsSelection.stories` under the News-card contract.
 - `crypto`: leave generated `crypto.stats[]` and `crypto.dominance` values unchanged, and select only the crypto news collection through `editorialReview.newsSelection.crypto` under the News-card contract. Crypto ticker quote rows are generated in `tape.rows[]` with `group: "Crypto"`; their ticker-level commentary remains editorial under the Tape contract.
 - `earnings.week`: leave the generated five-trading-day slate, facts, and reactions unchanged. Complete every visible Earnings row under the Earnings editorial contract below.
-- `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, or close reactions. Complete Market Lens and Outcome fields under the Week Ahead / Market Lens editorial contract below.
+- `weekAhead`: do not hand-edit deterministic dates, times, event names, impact levels, actual/forecast/previous values, release states, surprises, close reactions, Market Lens event IDs, or Market Lens reaction tickers. Complete Market Lens `copy` and Outcome fields under the Week Ahead / Market Lens editorial contract below.
 - `footer`: leave the generated footer unchanged.
 
 ### AI Editorial Work checklist
@@ -221,7 +221,7 @@ Compact Earnings monitor writing rules:
 
 ### Week Ahead / Market Lens editorial contract
 
-For each current event day, choose whether to keep generated commentary or replace it. Scheduled and awaiting days may retain generated Market Lens copy or use a valid replacement. Once an event has released, replace all pre-release Market Lens copy with current commentary.
+Every `weekAhead.days[].marketLens` with `status: "pending_review"` is an active assignment. Write populated `copy.question`, `copy.title`, and `copy.body`, then set the Market Lens `status` to `verified`. Do not edit `eventIds` or `reactions`. A Market Lens already marked `verified` may remain only when it still describes the same deterministic event context and remains supported by the current evidence. Once an event has released, replace all pre-release Market Lens copy with current commentary.
 
 Reconsider every event day against the released facts, deterministic market-reaction data, current Opening and Tape, and the full `editorialReview.newsSearch` inventory, not just News cards selected for promotion. Prefer event-specific coverage when available, then related market context such as rates, the dollar, equity indexes, sectors, commodities, or credit. Do not treat carried-over copy as automatically reviewed.
 
@@ -269,11 +269,12 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 #### Week Ahead
 
-- Owners: `scripts/fetch_week_ahead.js` makes one direct TradingView Economic Calendar request for the complete authorized range, and `scripts/week_ahead_contract.js` owns Eastern-time normalization, canonical event identity, the visible slate, Market Lens channel rules, and the Outcome contract.
+- Owners: `scripts/fetch_week_ahead.js` makes one direct TradingView Economic Calendar request for the complete authorized range, and `scripts/week_ahead_contract.js` owns Eastern-time normalization, canonical event identity, the visible slate, Market Lens templates and lifecycle, and the Outcome contract.
 - Source contract: TradingView owns raw U.S. event discovery, release timestamp, impact, Previous, Forecast, and Actual. Prepare includes high- and medium-impact rows, omits low-impact rows, retries transient or malformed responses up to two times after the first attempt, and never combines TradingView with a secondary calendar.
 - Display contract: high-impact events are shown by default. The persisted `Show medium impact` header action reveals the already embedded medium-impact rows. Statistical values that have not arrived display em dashes; policy commentary and other non-statistical events leave those value cells blank.
 - Refresh contract: each successful Prepare replaces the complete authorized TradingView range, including null values. If refresh fails, Prepare may carry forward only the validated same-range canonical calendar and marks it `carried_forward`; a new range becomes explicitly unavailable instead of being synthesized from an older week.
 - Apply boundary: Apply does not fetch, normalize, supplement, or replace deterministic Week Ahead facts. It merges only the documented Market Lens and Outcome editorial state.
+- Market Lens shape: each event day owns one `marketLens` object containing `status`, deterministic `eventIds`, deterministic `reactions`, and editable `copy.question`, `copy.title`, and `copy.body`. Supported statuses are `setup`, handoff-only `pending_review`, `verified`, and `commentary_unavailable`. There are no channel, source, or separate disposition fields.
 - Boundary rules: source time is stored as `America/New_York` wall time and converted to the dashboard time zone on render. Market Lens reactions must use canonical Tape tickers present in both `tape.rows[]` and `chart-data.series[]`; released event days must not publish pre-release Market Lens copy as current commentary; `outcome` exists only at `close_available` and cannot change the preselected reaction ticker set.
 
 #### Tape and chart data
@@ -315,7 +316,7 @@ These are Apply implementation contracts, not AI Editorial Work completion rules
 - `opening`: incomplete or invalid editorial Opening fields are omitted from the published payload rather than replaced with generated copy.
 - `news`: missing, invalid, duplicate, outside-inventory, or missing-provenance selected cards are omitted; Apply marks coverage partial where applicable and does not search for replacement stories or infer provenance.
 - `tape`: refreshed quote rows without reviewed commentary publish a blank note with `commentary_unavailable`; failed quote-download rows retain their last validated quote-bound commentary bundle.
-- `weekAhead`: if a prepared `pending_review` Market Lens assignment reaches Apply unresolved, Apply publishes a system-owned `commentary_unavailable` disposition instead of stale pre-release copy. This is a publication-safety state, not an AI editorial choice or completed editorial work. Apply does not reinterpret an explicit valid non-pending Market Lens decision as a new assignment. Missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
+- `weekAhead`: Apply accepts only populated Market Lens copy marked `verified`, rebuilds `eventIds` and `reactions` from the deterministic candidate, and normalizes every other Market Lens into a publishable system-owned lifecycle state. Missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
 - `earnings.week`: narrative fields still marked `pending_review` or carrying a valid unavailable status publish no copy for that field and preserve that disposition for the next handoff. Apply never replaces `pending_review` with prior commentary. For a malformed non-pending narrative/disposition pair, Apply may recover previously verified copy only when the relevant deterministic facts are unchanged; otherwise the field publishes no copy and the invalid state is normalized. Deterministic empty-row recovery occurs during Prepare.
 
 ### Deterministic Source Contracts
@@ -389,7 +390,7 @@ Prepare Handoff treats repeated verified Earnings narrative as stale editorial s
 
 Use focused repair commands only for explicit repairs. They update the current staged candidate, not the canonical dashboard. After a focused repair, regenerate the editorial handoff from that repaired candidate, then run `apply`; rerun `prepare` only when intentionally replacing the candidate.
 
-- Market Lens-only correction: no standalone command. Use the current complete candidate when it still matches the canonical dashboard edition, regenerate the editorial handoff, and make the decision there. If no current candidate exists, rerun deterministic preparation first.
+- Market Lens-only correction: no standalone command. Use the current complete candidate when it still matches the canonical dashboard edition, regenerate the editorial handoff, and edit the Market Lens there. If no current candidate exists, rerun deterministic preparation first.
 - Chart-only correction: start with a current complete candidate, then use `node scripts/run_daily_update.js --apply-chart-data-json PATH`, `node scripts/run_daily_update.js --merge-chart-data-json PATH`, or `node scripts/run_daily_update.js --sync-chart-quotes`. Regenerate the editorial handoff afterward; successful quote changes require reviewed commentary.
 - Asset Allocation fallback: refresh `http://127.0.0.1:2200/api/asset-market-data`, then use `/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json`. If refresh fails but the export exists, use it as a stale fallback; never import tactical allocation/model logic.
 - Earnings-only repair: rebuild the staged Earnings week from the current provider contract, then run `node scripts/earnings_week.js apply-narrative`, run `node scripts/run_daily_update.js --apply-earnings-week-json generated/earnings_week.json`, regenerate the editorial handoff from the repaired candidate, and run `apply`. Normal repair uses Zacks. Repair uses the legacy backup path only when the Zacks gate fails, and the staged diagnostics must preserve the reason Zacks was bypassed.

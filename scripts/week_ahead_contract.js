@@ -1,7 +1,6 @@
-const { isDeepStrictEqual } = require('util');
 const TIME_ZONE = 'America/Chicago';
 const SOURCE_TIME_ZONE = 'America/New_York';
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const TRADINGVIEW_PROVIDER = 'TradingView Economic Calendar';
 const TRADINGVIEW_ENDPOINT = 'https://economic-calendar.tradingview.com/events';
 const {
@@ -40,42 +39,11 @@ const MARKET_CLOSURES = {
   }
 };
 
-const MARKET_LENS_CHANNELS = new Set([
-  'policy-path',
-  'consumer-inflation',
-  'producer-inflation',
-  'labor-demand',
-  'consumer-demand',
-  'broad-growth',
-  'industrial-growth',
-  'services-activity',
-  'housing',
-  'energy-balance',
-  'external-balance',
-  'fiscal-financing'
-]);
-
-const MARKET_LENS_REACTIONS_BY_CHANNEL = {
-  'policy-path': ['UST2Y', 'UST10Y', 'UUP', 'NDX'],
-  'consumer-inflation': ['UST2Y', 'UST10Y', 'UUP', 'NDX'],
-  'producer-inflation': ['UST2Y', 'UST10Y', 'VDE'],
-  'labor-demand': ['UST2Y', 'SPX', 'HYG', 'UUP'],
-  'consumer-demand': ['VCR', 'SPX', 'UST10Y'],
-  'broad-growth': ['SPX', 'UST10Y', 'HYG'],
-  'industrial-growth': ['VIS', 'HG', 'UST10Y', 'HYG'],
-  'services-activity': ['SPX', 'UST2Y', 'UUP'],
-  housing: ['UST10Y', 'VNQ', 'HG'],
-  'energy-balance': ['CL', 'VDE', 'UST10Y'],
-  'external-balance': ['UUP', 'VEA'],
-  'fiscal-financing': ['UST10Y', 'UST30Y', 'UUP']
-};
-
-// Generated lenses deliberately describe ordinary transmission only. Current
-// market claims belong in a validated editorial replacement.
-const DEFAULT_MARKET_LENS_PATHS = {
+// Setup lenses deliberately describe ordinary transmission only. Current
+// market claims belong in verified editorial copy.
+const MARKET_LENS_TEMPLATES = {
   'consumer-inflation': {
     question: 'Will consumer inflation change the expected policy path?',
-    channels: ['consumer-inflation', 'policy-path'],
     title: 'Consumer inflation tests the rate path',
     body: 'The price data will show whether consumer inflation is changing expectations for the Fed\'s next steps. Short rates and the dollar provide the clearest initial reaction.',
     reactions: [
@@ -85,7 +53,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   'producer-inflation': {
     question: 'Are producer costs reinforcing broader inflation pressure?',
-    channels: ['producer-inflation', 'policy-path'],
     title: 'Producer costs test the inflation signal',
     body: 'The producer-price data will show whether pipeline costs are reinforcing broader inflation pressure. The Treasury curve provides the cleanest initial reaction.',
     reactions: [
@@ -95,7 +62,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   labor: {
     question: 'Is labor demand changing the balance between inflation and growth?',
-    channels: ['labor-demand', 'policy-path'],
     title: 'Labor tests the growth-inflation balance',
     body: 'The labor data will show whether employment conditions are changing the balance between wage pressure and growth risk. Short rates and broad equities provide the clearest reaction.',
     reactions: [
@@ -105,7 +71,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   'consumer-demand': {
     question: 'Is household demand strong enough to affect growth and rates?',
-    channels: ['consumer-demand', 'broad-growth'],
     title: 'Household demand tests growth',
     body: 'The consumer data will show whether household demand is sustaining growth strongly enough to affect rates. Discretionary equities and long yields provide the clearest reaction.',
     reactions: [
@@ -115,7 +80,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   'broad-growth': {
     question: 'Is broad economic growth changing the market outlook?',
-    channels: ['broad-growth'],
     title: 'Growth resets the broad outlook',
     body: 'The growth data will test whether the economy is changing the outlook for earnings and rates. Broad equities and long yields provide the clearest reaction.',
     reactions: [
@@ -125,7 +89,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   manufacturing: {
     question: 'Is industrial momentum broadening or weakening?',
-    channels: ['industrial-growth'],
     title: 'Industry tests the cyclical pulse',
     body: 'The factory data will show whether industrial momentum is broadening or weakening. Industrials and copper provide the clearest cyclical reaction.',
     reactions: [
@@ -135,7 +98,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   services: {
     question: 'Is services activity sustaining growth and price pressure?',
-    channels: ['services-activity', 'policy-path'],
     title: 'Services test growth and price pressure',
     body: 'The services data will show whether activity is sustaining both growth and price pressure. Broad equities and short rates provide the clearest reaction.',
     reactions: [
@@ -145,7 +107,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   housing: {
     question: 'Are financing costs restraining housing activity?',
-    channels: ['housing'],
     title: 'Housing tests the mortgage-rate drag',
     body: 'The housing data will show whether financing costs are restraining activity and supply. Long yields and rate-sensitive real estate provide the clearest reaction.',
     reactions: [
@@ -155,7 +116,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   policy: {
     question: 'Has the expected rate path changed?',
-    channels: ['policy-path'],
     title: 'The expected rate path is the test',
     body: 'The policy communication matters if it changes expectations for the Fed\'s next steps. The front and long ends of the Treasury curve provide the clearest reaction.',
     reactions: [
@@ -165,7 +125,6 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   energy: {
     question: 'Are supply conditions tightening or easing the crude balance?',
-    channels: ['energy-balance'],
     title: 'Supply tests the crude balance',
     body: 'The supply data will show whether oil conditions are tightening or easing. Crude and energy equities provide the clearest reaction.',
     reactions: [
@@ -175,14 +134,12 @@ const DEFAULT_MARKET_LENS_PATHS = {
   },
   external: {
     question: 'Is the external balance changing the dollar backdrop?',
-    channels: ['external-balance'],
     title: 'Trade tests the dollar backdrop',
     body: 'The trade data will show whether the external balance is changing the currency backdrop. The dollar provides the most direct dashboard reaction.',
     reactions: [{ ticker: 'UUP', role: 'Dollar reaction' }]
   },
   fiscal: {
     question: 'Is the fiscal position changing Treasury financing pressure?',
-    channels: ['fiscal-financing'],
     title: 'The budget tests financing pressure',
     body: 'The budget data provides context for Treasury financing pressure. Long-dated yields provide the most direct dashboard reaction.',
     reactions: [
@@ -240,12 +197,12 @@ function normalizeName(value) {
 
 function releaseRule({ key, match, name, agency }) {
   const lensPath = DEFAULT_PATH_BY_EVENT[key];
-  if (!DEFAULT_MARKET_LENS_PATHS[lensPath]) throw new Error(`Missing default Market Lens path for ${key}.`);
+  if (!MARKET_LENS_TEMPLATES[lensPath]) throw new Error(`Missing Market Lens template for ${key}.`);
   return { key, match, name, agency, lensPath };
 }
 
 const EVENT_RULES = [
-  // These rules canonicalize familiar families and Market Lens channels. They
+  // These rules canonicalize familiar families and Market Lens templates. They
   // do not decide inclusion or impact; TradingView owns both of those facts.
   releaseRule({ key: 'core-cpi', match: /core (?:consumer price index|cpi)/i, name: 'Core Consumer Price Index', agency: 'BLS' }),
   releaseRule({ key: 'cpi', match: /(?:consumer price index|\bcpi\b)/i, name: 'Consumer Price Index', agency: 'BLS' }),
@@ -554,6 +511,24 @@ function weekAheadDayFingerprint(day) {
   ]));
 }
 
+function weekAheadEditorialContextFingerprint(day) {
+  return JSON.stringify((Array.isArray(day?.events) ? day.events : []).map((event) => [
+    event.id,
+    event.name,
+    event.agency,
+    event.time,
+    event.period,
+    event.impact,
+    event.actual,
+    event.forecast,
+    event.previous,
+    event.status === 'released' ? 'released' : 'pre_release',
+    event.forecastType,
+    event.valuesApplicable,
+    event.lensPath
+  ]));
+}
+
 function weekAheadDayHasCompletedEvent(day) {
   return (Array.isArray(day?.events) ? day.events : [])
     .some((event) => event?.status === 'released'
@@ -599,10 +574,8 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
         && event.status === 'released'
         && (event.valuesApplicable === false || String(event.actual || '').trim());
     });
-    if (newlyReleasedForMarketLens && day.marketLensSource === 'editorial') {
+    if (newlyReleasedForMarketLens && day.marketLens?.status === 'verified') {
       day.marketLens = defaultMarketLensForEvents(day.events);
-      day.marketLensSource = 'generated';
-      delete day.marketLensDisposition;
     }
 
     const released = day.events.some((event) => event.status === 'released');
@@ -657,24 +630,18 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
   return { ...week, days };
 }
 
-function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
-  const attemptedAt = now instanceof Date && !Number.isNaN(now.getTime()) ? now.toISOString() : new Date().toISOString();
+function finalizeWeekAheadOutcomes(week) {
   const days = (Array.isArray(week?.days) ? week.days : []).map((day) => {
     const next = { ...day };
     const hasEvents = Array.isArray(next.events) && next.events.length;
-    if (hasEvents && validateMarketLens(next.marketLens).length) {
-      if (['released_awaiting_close', 'close_available'].includes(next.lifecycle)) {
+    if (hasEvents) {
+      const completed = weekAheadDayHasCompletedEvent(next);
+      const validLens = !validateMarketLens(next.marketLens).length;
+      const currentVerifiedLens = next.marketLens?.status === 'verified' && validLens;
+      if (completed && !currentVerifiedLens) {
         next.marketLens = unavailableMarketLensForEvents(next.events);
-        next.marketLensSource = 'unavailable';
-        next.marketLensDisposition = {
-          status: 'commentary_unavailable',
-          attemptedAt,
-          reason: 'editorial_commentary_unavailable'
-        };
-      } else {
+      } else if (!completed && (!validLens || !['setup', 'verified'].includes(next.marketLens?.status))) {
         next.marketLens = defaultMarketLensForEvents(next.events);
-        next.marketLensSource = 'generated';
-        delete next.marketLensDisposition;
       }
     }
     if (!weekAheadNeedsOutcomeEditorial(next)) return next;
@@ -705,7 +672,7 @@ function defaultMarketLensForEvents(events) {
   const impactWeight = { high: 2, medium: 1 };
   const groups = new Map();
   for (const event of events) {
-    if (!DEFAULT_MARKET_LENS_PATHS[event.lensPath]) continue;
+    if (!MARKET_LENS_TEMPLATES[event.lensPath]) continue;
     const group = groups.get(event.lensPath) || { path: event.lensPath, events: [] };
     group.events.push(event);
     groups.set(event.lensPath, group);
@@ -718,14 +685,16 @@ function defaultMarketLensForEvents(events) {
     return rightImpact - leftImpact || leftTime.localeCompare(rightTime) || left.path.localeCompare(right.path);
   })[0];
   if (!selected) return null;
-  const path = DEFAULT_MARKET_LENS_PATHS[selected.path];
+  const template = MARKET_LENS_TEMPLATES[selected.path];
   return {
-    question: path.question,
-    relatedEventIds: selected.events.map((event) => event.id).sort(),
-    channels: [...path.channels],
-    reactions: path.reactions.map((reaction) => ({ ...reaction })),
-    title: path.title,
-    body: path.body
+    status: 'setup',
+    eventIds: selected.events.map((event) => event.id).sort(),
+    reactions: template.reactions.map((reaction) => ({ ...reaction })),
+    copy: {
+      question: template.question,
+      title: template.title,
+      body: template.body
+    }
   };
 }
 
@@ -734,9 +703,12 @@ function unavailableMarketLensForEvents(events) {
   if (!fallback) return null;
   return {
     ...fallback,
-    question: 'What changed after the release?',
-    title: 'Current release commentary unavailable',
-    body: 'The release has arrived, but current interpretation could not be verified for this update. The listed assets remain the reaction reference points.'
+    status: 'commentary_unavailable',
+    copy: {
+      question: '',
+      title: '',
+      body: ''
+    }
   };
 }
 
@@ -779,12 +751,11 @@ function normalizeWeekAhead(providerPayload, { range = rangeForDate(), now = new
     };
     if (matchedEvents.length) {
       day.marketLens = defaultMarketLensForEvents(events);
-      day.marketLensSource = 'generated';
     }
     return day;
   });
 
-  const result = applyWeekAheadLifecycle({
+  const result = finalizeWeekAheadOutcomes(applyWeekAheadLifecycle({
     schemaVersion: SCHEMA_VERSION,
     range: { ...range, timeZone: TIME_ZONE, marketTimeZone: SOURCE_TIME_ZONE },
     generatedAt: now.toISOString(),
@@ -802,7 +773,7 @@ function normalizeWeekAhead(providerPayload, { range = rangeForDate(), now = new
       mediumImpactEvents: deduped.filter((event) => event.impact === 'medium').length,
       omittedLowImpactEvents: rows.filter((row) => row?.country === 'US' && row?.importance === -1).length
     }
-  }, null, { now });
+  }, null, { now }));
   const errors = validateWeekAheadPayload(result, { now });
   if (errors.length) throw new Error(`Normalized Week Ahead payload is invalid: ${errors.join(' ')}`);
   return result;
@@ -812,10 +783,34 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function validateMarketLens(lens, prefix = 'marketLens') {
+function validateMarketLens(lens, prefix = 'marketLens', { allowPendingReview = false } = {}) {
   const errors = [];
   if (!isPlainObject(lens)) return [`${prefix} must be an object.`];
-  if (Array.isArray(lens.reactions)) {
+  const allowedStatuses = allowPendingReview
+    ? ['setup', 'pending_review', 'verified', 'commentary_unavailable']
+    : ['setup', 'verified', 'commentary_unavailable'];
+  if (lens.status === 'pending_review' && !allowPendingReview) {
+    errors.push(`${prefix}.status pending_review is supported only in an editorial handoff.`);
+  } else if (!allowedStatuses.includes(lens.status)) {
+    errors.push(`${prefix}.status must be ${allowedStatuses.join(', ')}.`);
+  }
+  const supportedFields = new Set(['status', 'eventIds', 'reactions', 'copy']);
+  for (const field of Object.keys(lens)) {
+    if (!supportedFields.has(field)) errors.push(`${prefix}.${field} is not supported.`);
+  }
+  if (!Array.isArray(lens.eventIds) || !lens.eventIds.length) {
+    errors.push(`${prefix}.eventIds must contain at least one event ID.`);
+  } else {
+    const eventIds = new Set();
+    lens.eventIds.forEach((eventId, index) => {
+      if (typeof eventId !== 'string' || !eventId.trim()) errors.push(`${prefix}.eventIds[${index}] must be populated.`);
+      if (eventIds.has(eventId)) errors.push(`${prefix}.eventIds must not contain duplicates.`);
+      eventIds.add(eventId);
+    });
+  }
+  if (!Array.isArray(lens.reactions)) {
+    errors.push(`${prefix}.reactions must be an array.`);
+  } else {
     lens.reactions.forEach((reaction, index) => {
       const reactionPrefix = `${prefix}.reactions[${index}]`;
       if (!isPlainObject(reaction)) {
@@ -824,12 +819,67 @@ function validateMarketLens(lens, prefix = 'marketLens') {
       }
       const ticker = String(reaction.ticker || '');
       if (!/^[A-Z0-9]+$/.test(ticker)) errors.push(`${reactionPrefix}.ticker must be a canonical uppercase Tape symbol.`);
+      if (typeof reaction.role !== 'string' || !reaction.role.trim()) errors.push(`${reactionPrefix}.role must be populated.`);
     });
+  }
+  if (!isPlainObject(lens.copy)) {
+    errors.push(`${prefix}.copy must be an object.`);
+  } else {
+    const supportedCopyFields = new Set(EDITORIAL_MARKET_LENS_FIELDS);
+    for (const field of Object.keys(lens.copy)) {
+      if (!supportedCopyFields.has(field)) errors.push(`${prefix}.copy.${field} is not supported.`);
+    }
+    for (const field of EDITORIAL_MARKET_LENS_FIELDS) {
+      if (typeof lens.copy[field] !== 'string') errors.push(`${prefix}.copy.${field} must be a string.`);
+    }
+    if (['setup', 'verified'].includes(lens.status)) {
+      for (const field of EDITORIAL_MARKET_LENS_FIELDS) {
+        if (typeof lens.copy[field] === 'string' && !lens.copy[field].trim()) {
+          errors.push(`${prefix}.copy.${field} must be populated when status is ${lens.status}.`);
+        }
+      }
+    }
+    if (lens.status === 'commentary_unavailable'
+      && EDITORIAL_MARKET_LENS_FIELDS.some((field) => String(lens.copy[field] || '').trim())) {
+      errors.push(`${prefix}.copy must be blank when status is commentary_unavailable.`);
+    }
   }
   return errors;
 }
 
-function validateWeekAheadPayload(payload, { now = null, requireOutcomeDisposition = false } = {}) {
+const EDITORIAL_MARKET_LENS_FIELDS = ['question', 'title', 'body'];
+
+function marketLensHasEditableText(lens) {
+  return isPlainObject(lens?.copy)
+    && EDITORIAL_MARKET_LENS_FIELDS.every((field) => typeof lens.copy[field] === 'string' && lens.copy[field].trim());
+}
+
+function overlayEditableMarketLensText(baseLens, editorialLens) {
+  const lens = structuredClone(baseLens);
+  lens.status = 'verified';
+  for (const field of EDITORIAL_MARKET_LENS_FIELDS) {
+    lens.copy[field] = String(editorialLens?.copy?.[field] || '').trim();
+  }
+  return lens;
+}
+
+function clearEditableMarketLensText(baseLens) {
+  const lens = structuredClone(baseLens);
+  lens.status = 'pending_review';
+  for (const field of EDITORIAL_MARKET_LENS_FIELDS) lens.copy[field] = '';
+  return lens;
+}
+
+function validEditorialMarketLens(lens) {
+  return lens?.status === 'verified'
+    && marketLensHasEditableText(lens);
+}
+
+function validateWeekAheadPayload(payload, {
+  now = null,
+  requireOutcomeDisposition = false,
+  allowPendingMarketLens = false
+} = {}) {
   const errors = [];
   if (!isPlainObject(payload)) return ['weekAhead must be an object.'];
   if (payload.schemaVersion !== SCHEMA_VERSION) errors.push(`weekAhead.schemaVersion must be ${SCHEMA_VERSION}.`);
@@ -893,6 +943,10 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
   payload.days.forEach((day, dayIndex) => {
     const expectedDate = displayDates[dayIndex] || '';
     if (!isPlainObject(day) || day.date !== expectedDate) errors.push(`weekAhead.days[${dayIndex}] must match the target weekday.`);
+    const supportedDayFields = new Set(['date', 'label', 'closure', 'events', 'marketLens', 'lifecycle', 'marketReaction', 'outcome']);
+    for (const field of Object.keys(isPlainObject(day) ? day : {})) {
+      if (!supportedDayFields.has(field)) errors.push(`weekAhead.days[${dayIndex}].${field} is not supported.`);
+    }
     if (typeof day?.label !== 'string' || !day.label) errors.push(`weekAhead.days[${dayIndex}].label is required.`);
     if (day?.closure !== null && day?.closure !== undefined && (!isPlainObject(day.closure) || !day.closure.label || !day.closure.reason)) {
       errors.push(`weekAhead.days[${dayIndex}].closure must be null or a labeled closure.`);
@@ -903,17 +957,25 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
     }
     const hasEvents = day.events.length > 0;
     const hasMarketLens = day.marketLens !== undefined && day.marketLens !== null;
-    if (hasEvents && isPlainObject(day.marketLens)) errors.push(...validateMarketLens(day.marketLens, `weekAhead.days[${dayIndex}].marketLens`));
+    if (hasEvents && !hasMarketLens) {
+      errors.push(`weekAhead.days[${dayIndex}].marketLens is required when events are present.`);
+    } else if (hasEvents) {
+      const lensPrefix = `weekAhead.days[${dayIndex}].marketLens`;
+      errors.push(...validateMarketLens(day.marketLens, lensPrefix, { allowPendingReview: allowPendingMarketLens }));
+      const eventIds = new Set(day.events.map((event) => event?.id));
+      for (const eventId of Array.isArray(day.marketLens?.eventIds) ? day.marketLens.eventIds : []) {
+        if (!eventIds.has(eventId)) errors.push(`${lensPrefix}.eventIds contains an ID outside this event day.`);
+      }
+      const completed = weekAheadDayHasCompletedEvent(day);
+      if (day.marketLens?.status === 'setup' && completed) {
+        errors.push(`${lensPrefix}.status setup is not current after an event has completed.`);
+      }
+      if (day.marketLens?.status === 'commentary_unavailable' && !completed) {
+        errors.push(`${lensPrefix}.status commentary_unavailable requires a completed event.`);
+      }
+    }
     if (!hasEvents && hasMarketLens) {
       errors.push(`weekAhead.days[${dayIndex}].marketLens must be omitted when there are no events.`);
-    }
-    if (hasEvents && day?.marketLensSource !== undefined && !['generated', 'editorial', 'unavailable'].includes(day?.marketLensSource)) {
-      errors.push(`weekAhead.days[${dayIndex}].marketLensSource must be generated, editorial, or unavailable.`);
-    }
-    if (day?.marketLensSource === 'unavailable') {
-      if (day?.marketLensDisposition !== undefined && day?.marketLensDisposition?.status !== 'commentary_unavailable') {
-        errors.push(`weekAhead.days[${dayIndex}].marketLensDisposition.status must be commentary_unavailable.`);
-      }
     }
     if (hasEvents && !['scheduled', 'awaiting_actual', 'released_awaiting_close', 'close_available'].includes(day?.lifecycle)) {
       errors.push(`weekAhead.days[${dayIndex}].lifecycle is invalid.`);
@@ -933,6 +995,13 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
     if (day?.outcome !== undefined) {
       if (!isPlainObject(day.outcome)) {
         errors.push(`weekAhead.days[${dayIndex}].outcome must be an object.`);
+      } else if (day.lifecycle !== 'close_available') {
+        errors.push(`weekAhead.days[${dayIndex}].outcome is supported only when lifecycle is close_available.`);
+      } else if (!['pending_review', 'verified'].includes(day.outcome.status)) {
+        errors.push(`weekAhead.days[${dayIndex}].outcome.status must be pending_review or verified.`);
+      } else if (day.outcome.status === 'verified'
+        && (!String(day.outcome.title || '').trim() || !String(day.outcome.body || '').trim())) {
+        errors.push(`weekAhead.days[${dayIndex}].outcome verified status requires populated title and body.`);
       }
     }
     let previousTime = '';
@@ -956,7 +1025,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
       if (!['scheduled', 'awaiting_actual', 'released'].includes(event.status)) errors.push(`${prefix}.status is invalid.`);
       if (![null, 'consensus'].includes(event.forecastType)) errors.push(`${prefix}.forecastType must be consensus or null.`);
       if (typeof event.valuesApplicable !== 'boolean') errors.push(`${prefix}.valuesApplicable must be boolean.`);
-      if (!DEFAULT_MARKET_LENS_PATHS[event.lensPath]) errors.push(`${prefix}.lensPath is invalid.`);
+      if (!MARKET_LENS_TEMPLATES[event.lensPath]) errors.push(`${prefix}.lensPath is invalid.`);
       if (event.valuesApplicable === false && [event.actual, event.forecast, event.previous].some((value) => value !== null)) {
         errors.push(`${prefix} non-statistical values must be null.`);
       }
@@ -967,8 +1036,7 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
 }
 
 function hasEditorialMarketLens(day) {
-  return day?.marketLensSource === 'editorial'
-    && validateMarketLens(day.marketLens).length === 0;
+  return validEditorialMarketLens(day?.marketLens);
 }
 
 function weekAheadHasCurrentMarketLens(day) {
@@ -976,15 +1044,9 @@ function weekAheadHasCurrentMarketLens(day) {
 }
 
 function weekAheadNeedsMarketLensEditorial(day) {
-  return ['released_awaiting_close', 'close_available'].includes(day?.lifecycle)
-    && weekAheadDayHasCompletedEvent(day)
+  return Array.isArray(day?.events)
+    && day.events.length > 0
     && !weekAheadHasCurrentMarketLens(day);
-}
-
-function weekAheadMarketLensDecision(day) {
-  if (weekAheadHasCurrentMarketLens(day)) return { date: day.date, action: 'replace', marketLens: day.marketLens };
-  if (weekAheadNeedsMarketLensEditorial(day)) return { date: day.date, action: 'pending_review' };
-  return { date: day.date, action: 'retain-generated' };
 }
 
 function weekAheadNeedsOutcomeEditorial(day) {
@@ -997,26 +1059,32 @@ function prepareWeekAheadForEditorial(weekAhead) {
   return {
     ...weekAhead,
     days: (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => {
-      if (!weekAheadNeedsOutcomeEditorial(day) || day?.outcome?.status === 'verified') return day;
-      return { ...day, outcome: { status: 'pending_review' } };
+      let next = day;
+      if (weekAheadNeedsMarketLensEditorial(day)) {
+        const baseLens = defaultMarketLensForEvents(day.events);
+        if (baseLens) {
+          next = {
+            ...next,
+            marketLens: clearEditableMarketLensText(baseLens)
+          };
+        }
+      }
+      if (!weekAheadNeedsOutcomeEditorial(day) || day?.outcome?.status === 'verified') return next;
+      return { ...next, outcome: { status: 'pending_review' } };
     })
   };
 }
 
-function shouldPreserveEditorialMarketLens(priorDay, nextDay) {
-  if (!hasEditorialMarketLens(priorDay)) return false;
-  if (!weekAheadDayHasCompletedEvent(nextDay)) return true;
-  return weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(nextDay);
+function reconcileEditorialMarketLens(priorDay, nextDay) {
+  if (!hasEditorialMarketLens(priorDay)) return null;
+  if (weekAheadEditorialContextFingerprint(priorDay) !== weekAheadEditorialContextFingerprint(nextDay)) return null;
+  const baseLens = defaultMarketLensForEvents(nextDay.events);
+  return baseLens ? overlayEditableMarketLensText(baseLens, priorDay.marketLens) : null;
 }
 
 function mergeWeekAheadPayload(existingWeekAhead, payload) {
   const errors = validateWeekAheadPayload(payload);
   if (errors.length) throw new Error(`Generated Week Ahead payload is invalid: ${errors.join(' ')}`);
-  const existingEditorialDays = new Map(
-    (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : [])
-      .filter((day) => typeof day?.date === 'string' && hasEditorialMarketLens(day))
-      .map((day) => [day.date, day])
-  );
   return {
     ...payload,
     days: payload.days.map((day) => {
@@ -1025,12 +1093,11 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
         && ['scheduled', 'awaiting_actual'].includes(next.lifecycle)) {
         next.lifecycle = 'released_awaiting_close';
       }
-      const editorialDay = existingEditorialDays.get(day.date);
       const priorDay = (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : []).find((candidate) => candidate?.date === day.date);
       const deterministicValuesUnchanged = weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(next);
-      if (editorialDay && shouldPreserveEditorialMarketLens(editorialDay, next)) {
-        next.marketLens = editorialDay.marketLens;
-        next.marketLensSource = 'editorial';
+      const reconciledMarketLens = reconcileEditorialMarketLens(priorDay, next);
+      if (reconciledMarketLens) {
+        next.marketLens = reconciledMarketLens;
       }
       // Post-close copy is bound to the complete deterministic fingerprint,
       // including the reaction bars, and must not survive corrected facts.
@@ -1044,105 +1111,80 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
   };
 }
 
-function normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialReferences = () => [] } = {}) {
-  const decisions = Array.isArray(payload) ? payload : payload?.decisions;
-  const eventDays = (Array.isArray(weekAhead?.days) ? weekAhead.days : [])
-    .filter((day) => Array.isArray(day.events) && day.events.length);
-  const expectedDates = new Set(eventDays.map((day) => day.date));
-  const accepted = new Map();
-  const seenDates = new Set();
-  for (const decision of Array.isArray(decisions) ? decisions : []) {
-    const date = String(decision?.date || '');
-    if (!expectedDates.has(date) || seenDates.has(date)) continue;
-    seenDates.add(date);
-    const day = eventDays.find((item) => item.date === date);
-    if (decision.action === 'pending_review') continue;
-    if (decision.action === 'retain-generated') {
-      accepted.set(date, { date, action: 'retain-generated' });
-      continue;
-    }
-    if (decision.action === 'commentary-unavailable'
-      && ['released_awaiting_close', 'close_available'].includes(day.lifecycle)
-      && isIsoDateTime(decision.attemptedAt)
-      && typeof decision.reason === 'string'
-      && decision.reason.trim()) {
-      accepted.set(date, {
-        date,
-        action: 'commentary-unavailable',
-        attemptedAt: decision.attemptedAt,
-        reason: decision.reason
-      });
-      continue;
-    }
-    if (decision.action !== 'replace') continue;
-    if (day.lifecycle === 'close_available'
-      && !isDeepStrictEqual(decision.marketLens?.reactions || [], day.marketLens?.reactions || [])) continue;
-    const lensErrors = validateMarketLens(decision.marketLens, `Market Lens decision for ${date}`);
-    let referenceErrors = [];
-    if (!lensErrors.length) {
-      try {
-        referenceErrors = validateEditorialReferences(decision.marketLens, day) || [];
-      } catch (_error) {
-        referenceErrors = ['Editorial references could not be validated.'];
-      }
-    }
-    if (!lensErrors.length && !referenceErrors.length) accepted.set(date, decision);
-  }
-  return eventDays.map((day) => {
-    if (accepted.has(day.date)) return accepted.get(day.date);
-    if (day.lifecycle === 'close_available' && day.marketLensSource === 'editorial'
-      && validateMarketLens(day.marketLens).length === 0) {
-      return { date: day.date, action: 'replace', marketLens: day.marketLens };
-    }
-    return { date: day.date, action: 'retain-generated' };
+function addWeekAheadEditorialFallback(systemFallbacks, day, action, reason) {
+  if (!Array.isArray(systemFallbacks)) return;
+  systemFallbacks.push({
+    section: 'market-lens',
+    path: `weekAhead.days.${day.date}.marketLens`,
+    action,
+    reason
   });
 }
 
-function applyMarketLensDecisions(weekAhead, payload, { validateEditorialReferences = () => [] } = {}) {
-  const days = (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => ({ ...day }));
-  const eventDays = days.filter((day) => Array.isArray(day.events) && day.events.length);
-  const decisions = normalizeMarketLensDecisions(weekAhead, payload, { validateEditorialReferences });
-  const decisionByDate = new Map(decisions.map((decision) => [decision.date, decision]));
-  for (const day of eventDays) {
-    const decision = decisionByDate.get(day.date);
-    if (decision.action === 'retain-generated') {
-      const generatedLens = defaultMarketLensForEvents(day.events);
-      day.marketLens = generatedLens;
-      day.marketLensSource = 'generated';
-      delete day.marketLensDisposition;
-      continue;
+function usableWeekAheadOutcome(outcome) {
+  return isPlainObject(outcome)
+    && outcome.status === 'verified'
+    && Boolean(String(outcome.title || '').trim() && String(outcome.body || '').trim());
+}
+
+function editorialWeekAheadOutcome(outcome) {
+  if (!usableWeekAheadOutcome(outcome)) return null;
+  return {
+    status: 'verified',
+    source: 'editorial',
+    title: String(outcome.title).trim(),
+    body: String(outcome.body).trim()
+  };
+}
+
+function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { systemFallbacks = null } = {}) {
+  const editorialDays = new Map(
+    (Array.isArray(editorialWeekAhead?.days) ? editorialWeekAhead.days : [])
+      .filter((day) => typeof day?.date === 'string')
+      .map((day) => [day.date, day])
+  );
+  const days = (Array.isArray(candidateWeekAhead?.days) ? candidateWeekAhead.days : []).map((day) => {
+    const next = { ...day };
+    if (!Array.isArray(next.events) || !next.events.length) return next;
+    const editorialDayExists = editorialDays.has(next.date);
+    const editorialDay = editorialDays.get(next.date);
+    const baseLens = defaultMarketLensForEvents(next.events);
+    const editorialLens = editorialDay?.marketLens;
+    const submittedValidLens = validEditorialMarketLens(editorialLens);
+    if (baseLens && submittedValidLens) {
+      next.marketLens = overlayEditableMarketLensText(baseLens, editorialLens);
+    } else if (weekAheadDayHasCompletedEvent(next)) {
+      next.marketLens = unavailableMarketLensForEvents(next.events);
+      addWeekAheadEditorialFallback(systemFallbacks, next, 'commentary_unavailable', 'editorial_commentary_unavailable');
+    } else if (baseLens) {
+      next.marketLens = baseLens;
+      if (editorialDayExists && isPlainObject(editorialLens) && !submittedValidLens) {
+        addWeekAheadEditorialFallback(systemFallbacks, next, 'setup_default', 'editorial_content_unavailable');
+      }
     }
-    if (decision.action === 'commentary-unavailable') {
-      day.marketLens = unavailableMarketLensForEvents(day.events);
-      day.marketLensSource = 'unavailable';
-      day.marketLensDisposition = {
-        status: 'commentary_unavailable',
-        attemptedAt: decision.attemptedAt,
-        reason: decision.reason
-      };
-      continue;
+    if (weekAheadNeedsOutcomeEditorial(next)) {
+      const outcome = editorialWeekAheadOutcome(editorialDay?.outcome);
+      next.outcome = outcome || { status: 'pending_review' };
+    } else {
+      delete next.outcome;
     }
-    day.marketLens = decision.marketLens;
-    day.marketLensSource = 'editorial';
-    delete day.marketLensDisposition;
-  }
-  return { ...weekAhead, days };
+    return next;
+  });
+  return { ...candidateWeekAhead, schemaVersion: SCHEMA_VERSION, days };
 }
 
 module.exports = {
-  DEFAULT_MARKET_LENS_PATHS,
   EVENT_RULES,
   MARKET_CLOSURES,
-  MARKET_LENS_CHANNELS,
-  MARKET_LENS_REACTIONS_BY_CHANNEL,
+  MARKET_LENS_TEMPLATES,
   SCHEMA_VERSION,
   SOURCE_TIME_ZONE,
   TIME_ZONE,
   TRADINGVIEW_ENDPOINT,
   TRADINGVIEW_PROVIDER,
   addDays,
+  applyWeekAheadEditorial,
   applyWeekAheadLifecycle,
-  applyMarketLensDecisions,
   buildWeekAheadPreparationFallback,
   comparableWeekAheadSurprise,
   defaultMarketLensForEvents,
@@ -1151,16 +1193,15 @@ module.exports = {
   formatTradingViewValue,
   mondayForDate,
   mergeWeekAheadPayload,
-  normalizeMarketLensDecisions,
   normalizeWeekAhead,
   prepareWeekAheadForEditorial,
   rangeForDate,
+  reconcileEditorialMarketLens,
   validateMarketLens,
   validateWeekAheadPayload,
   weekAheadDayHasCompletedEvent,
   weekAheadDayFingerprint,
   weekAheadHasCurrentMarketLens,
-  weekAheadMarketLensDecision,
   weekAheadNeedsMarketLensEditorial,
   weekAheadNeedsOutcomeEditorial,
   weekAheadReleaseInstant
