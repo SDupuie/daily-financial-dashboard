@@ -37,7 +37,12 @@ const {
   finnhubCalendarFromResponse,
   fetchYahooBarsForRows,
   parseZacksTable,
+  earningsWeekZacksBrowserRuntimeFailureMode,
+  earningsWeekUsedBackupAfterZacksBrowserFailure,
   resolveProviderDateConflicts,
+  resolvePlaywrightModule,
+  zacksBrowserRuntimeFailureKind,
+  zacksGateIndicatesBrowserRuntimeFailure,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
   zacksEndpointDateFromUrl,
@@ -955,6 +960,106 @@ function testZacksVisibleDateMapping() {
   );
 }
 
+function testZacksBrowserRuntimeDiagnostics() {
+  const previousBrowserPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  try {
+    const injected = { chromium: { launch: async () => null } };
+    assert.equal(resolvePlaywrightModule({ playwright: injected }), injected);
+    delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    try {
+      assert.equal(typeof resolvePlaywrightModule().chromium?.launch, 'function');
+    } catch (error) {
+      assert.match(error.message, /Playwright dependency is unavailable for Zacks browser fetch|Cannot find module/);
+    }
+    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, '0');
+  } finally {
+    if (previousBrowserPath === undefined) {
+      delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    } else {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath;
+    }
+  }
+
+  const zacksGateSummary = {
+    ok: false,
+    failures: [{
+      code: 'zacks_eps_table_unavailable',
+      message: "browserType.launch: Executable doesn't exist at /Users/Scott/Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+    }]
+  };
+  assert.equal(zacksGateIndicatesBrowserRuntimeFailure(zacksGateSummary), true);
+  assert.equal(zacksBrowserRuntimeFailureKind(zacksGateSummary.failures[0].message), 'browser_missing');
+  assert.equal(
+    zacksBrowserRuntimeFailureKind('browserType.launch: Failed to launch browser because Operation not permitted by the managed sandbox.'),
+    'startup_failed'
+  );
+  assert.equal(
+    zacksBrowserRuntimeFailureKind('browserType.launch: Target page, context or browser has been closed. <launching> /repo/node_modules/playwright-core/.local-browsers/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell FATAL: Permission denied (1100)'),
+    'startup_failed'
+  );
+  assert.equal(
+    zacksBrowserRuntimeFailureKind('Playwright dependency is unavailable for Zacks browser fetch. Cannot find module playwright.'),
+    'dependency_missing'
+  );
+  assert.equal(earningsWeekUsedBackupAfterZacksBrowserFailure({
+    summary: {
+      providerMode: 'legacy_backup',
+      zacksGate: zacksGateSummary
+    }
+  }), true);
+  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
+    summary: {
+      providerMode: 'legacy_backup',
+      zacksGate: zacksGateSummary
+    }
+  }), 'backup');
+  assert.equal(earningsWeekUsedBackupAfterZacksBrowserFailure({
+    summary: {
+      providerMode: 'zacks',
+      zacksGate: zacksGateSummary
+    }
+  }), false);
+  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
+    summary: {
+      providerMode: 'zacks',
+      zacksGate: zacksGateSummary
+    },
+    rows: [{
+      sourceAudit: {
+        resultRefresh: {
+          status: 'partial',
+          failures: [{
+            provider: 'zacks',
+            code: 'provider_request_failed',
+            message: "browserType.launch: Executable doesn't exist at /Users/Scott/Projects/Daily Financial Dashboard/node_modules/playwright-core/.local-browsers/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          }]
+        }
+      }
+    }]
+  }), 'retained_prior_facts');
+  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
+    summary: {
+      providerMode: 'zacks'
+    },
+    rows: [{
+      sourceAudit: {
+        resultRefresh: {
+          status: 'partial',
+          failures: [{
+            provider: 'finnhub',
+            code: 'provider_request_failed',
+            message: 'browserType.launch should not matter for a non-Zacks row failure.'
+          }]
+        }
+      }
+    }]
+  }), '');
+  assert.equal(zacksGateIndicatesBrowserRuntimeFailure({
+    ok: false,
+    failures: [{ code: 'zacks_empty_eligible_slate', message: 'Zacks returned no display-eligible rows after market-cap filtering.' }]
+  }), false);
+}
+
 function testEarningsGuidanceChoosesSameEventFiling() {
   const filing = chooseEarningsFiling({
     symbol: 'TXN',
@@ -1159,6 +1264,144 @@ async function testEarningsGuidanceEvidenceIncludesLegacyBackupRows() {
     assert.equal(payload.rows[0].status, 'network_disabled');
     assert.deepEqual(index.rows.map((row) => row.key), ['LEGACY:2026-07-22']);
     assert.deepEqual(legacyRow, before, 'SEC guidance evidence must not mutate deterministic provider facts.');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function response(status, body, headers = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers,
+    text: async () => body
+  };
+}
+
+function secGuidanceFixtureBody(url) {
+  if (url.endsWith('/files/company_tickers.json')) {
+    return JSON.stringify({
+      0: { cik_str: 1234, ticker: 'RETRY', title: 'Retry Corp' }
+    });
+  }
+  if (url.endsWith('/submissions/CIK0000001234.json')) {
+    return JSON.stringify({
+      filings: {
+        recent: {
+          accessionNumber: ['0001234567-26-000001'],
+          primaryDocument: ['retry-20260722.htm'],
+          filingDate: ['2026-07-22'],
+          acceptanceDateTime: ['20260722160100'],
+          form: ['8-K'],
+          items: ['2.02 9.01']
+        }
+      }
+    });
+  }
+  if (url.endsWith('/index.json')) {
+    return JSON.stringify({
+      directory: {
+        item: [
+          { name: 'retry-20260722.htm', size: 10000 },
+          { name: 'retry-ex991.htm', size: 25000 }
+        ]
+      }
+    });
+  }
+  if (url.endsWith('/0001234567-26-000001-index.htm')) {
+    return `
+      <table>
+        <tr><td>1</td><td>8-K</td><td><a href="/Archives/edgar/data/1234/000123456726000001/retry-20260722.htm">retry-20260722.htm</a></td><td>8-K</td><td>10000</td></tr>
+        <tr><td>2</td><td>NEWS RELEASE</td><td><a href="/Archives/edgar/data/1234/000123456726000001/retry-ex991.htm">retry-ex991.htm</a></td><td>EX-99.1</td><td>25000</td></tr>
+      </table>
+    `;
+  }
+  if (url.endsWith('/retry-20260722.htm')) return '<html><a href="retry-ex991.htm">Exhibit 99.1</a></html>';
+  if (url.endsWith('/retry-ex991.htm')) {
+    return `
+      <html><body>
+        Management expects third quarter revenue of $5.1 billion to $5.5 billion and non-GAAP earnings per share of $1.40 to $1.60.
+      </body></html>
+    `;
+  }
+  throw new Error(`Unexpected SEC fixture URL: ${url}`);
+}
+
+function secGuidanceWeek() {
+  return {
+    range: { from: '2026-07-20', to: '2026-07-24' },
+    rows: [{
+      symbol: 'RETRY',
+      company: 'Retry Corp',
+      marketCap: 50000000000,
+      reportDate: '2026-07-22',
+      reportTiming: 'amc',
+      eps: { estimate: 1, actual: 1.25 },
+      revenue: { estimate: 1000000000, actual: 1200000000 },
+      sourceAudit: {
+        finnhubUsListing: { symbol: 'RETRY', market: 'US', mic: 'XNYS' },
+        finnhubProfile: { industry: 'Industrials' }
+      }
+    }]
+  };
+}
+
+async function testEarningsGuidanceEvidenceRetriesSecRateLimits() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-earnings-guidance-sec-retry-'));
+  try {
+    const callsByUrl = new Map();
+    const delays = [];
+    const fetchImpl = async (url) => {
+      callsByUrl.set(url, (callsByUrl.get(url) || 0) + 1);
+      if (url.endsWith('/files/company_tickers.json') && callsByUrl.get(url) === 1) {
+        return response(429, 'Too Many Requests', { 'retry-after': '1' });
+      }
+      return response(200, secGuidanceFixtureBody(url));
+    };
+
+    const { payload } = await writeEarningsGuidanceEvidence(secGuidanceWeek(), path.join(dir, 'earnings_week_guidance.json'), {
+      asOf: '2026-07-23T20:00:00.000Z',
+      fetchImpl,
+      secRetries: 1,
+      secRetryDelayMs: 10,
+      sleep: async (ms) => delays.push(ms)
+    });
+
+    assert.equal(payload.rows[0].status, 'available');
+    assert.equal(payload.rows[0].documents[0].status, 'available');
+    assert.equal(payload.rows[0].guidanceSignalCount, 1);
+    assert.deepEqual(delays, [1000]);
+    assert.equal(callsByUrl.get('https://www.sec.gov/files/company_tickers.json'), 2);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function testEarningsGuidanceEvidenceKeepsUnavailableAfterSecRateLimitExhaustion() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dfd-earnings-guidance-sec-429-'));
+  try {
+    const submissionsUrl = 'https://data.sec.gov/submissions/CIK0000001234.json';
+    const callsByUrl = new Map();
+    const delays = [];
+    const fetchImpl = async (url) => {
+      callsByUrl.set(url, (callsByUrl.get(url) || 0) + 1);
+      if (url === submissionsUrl) return response(429, 'Too Many Requests', { 'retry-after': '1' });
+      return response(200, secGuidanceFixtureBody(url));
+    };
+
+    const { payload } = await writeEarningsGuidanceEvidence(secGuidanceWeek(), path.join(dir, 'earnings_week_guidance.json'), {
+      asOf: '2026-07-23T20:00:00.000Z',
+      fetchImpl,
+      secRetries: 1,
+      secRetryDelayMs: 10,
+      sleep: async (ms) => delays.push(ms)
+    });
+
+    assert.equal(payload.rows[0].status, 'submissions_unavailable');
+    assert.equal(payload.rows[0].message, 'HTTP 429');
+    assert.equal(payload.rows[0].guidanceSignalCount, 0);
+    assert.deepEqual(delays, [1000]);
+    assert.equal(callsByUrl.get(submissionsUrl), 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -2144,11 +2387,14 @@ async function main() {
   testZacksListingFilterUsesFinnhubDirectory();
   testUnknownTimingActualObservationDrivesReactionBasis();
   testZacksVisibleDateMapping();
+  testZacksBrowserRuntimeDiagnostics();
   testEarningsGuidanceChoosesSameEventFiling();
   testEarningsGuidanceExhibitSelectionUsesWrapperLabels();
   testEarningsGuidanceExhibitSelectionPrefersDetailTableMetadata();
   testEarningsGuidanceSignalsAndIndex();
   await testEarningsGuidanceEvidenceIncludesLegacyBackupRows();
+  await testEarningsGuidanceEvidenceRetriesSecRateLimits();
+  await testEarningsGuidanceEvidenceKeepsUnavailableAfterSecRateLimitExhaustion();
   testSecondaryRecoveryAndRevenueComparison();
   testApplyEarningsNarrative();
   testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization();

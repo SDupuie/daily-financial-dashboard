@@ -37,8 +37,12 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 
 ### Codex command execution
 
-- When Codex runs Prepare, use escalated local command execution. Zacks uses Playwright Chromium during Earnings preparation, and Chromium may not launch in the default managed sandbox.
-- This changes only how the Prepare command is invoked from Codex; the commands remain `node scripts/run_daily_update.js prepare --morning`, `node scripts/run_daily_update.js prepare --afternoon`, `node scripts/run_daily_update.js prepare --scheduled --morning`, or `node scripts/run_daily_update.js prepare --scheduled --afternoon`.
+- When Codex runs Prepare, use escalated local command execution. Zacks uses Chromium during Earnings preparation, and Chromium may not launch in the default managed sandbox.
+- Zacks uses the Chromium browser installed for this repository. On a new checkout, run `npm install` and then `npm run install:browsers`. This is a one-time setup or repair step, not something required before every dashboard update.
+- At the start of Prepare, if the repo-local Chromium executable is missing, Prepare runs `npm run install:browsers` once and continues regardless of whether that repair succeeds.
+- If Chromium cannot start because the execution environment blocks browser launch, Prepare continues using backup earnings sources or retained prior Zacks facts and prints a warning. Run Prepare with escalated local command execution for that case; reinstalling Chromium does not repair a sandbox or permission failure.
+- If the Playwright dependency itself is missing, run `npm install`, then `npm run install:browsers`.
+- This changes only how the Prepare command is invoked from Codex; the normal Prepare commands remain `node scripts/run_daily_update.js prepare --morning`, `node scripts/run_daily_update.js prepare --afternoon`, `node scripts/run_daily_update.js prepare --scheduled --morning`, or `node scripts/run_daily_update.js prepare --scheduled --afternoon`.
 
 ### Core guarantees
 
@@ -217,13 +221,13 @@ Compact Earnings monitor writing rules:
 
 ### Week Ahead / Market Lens editorial contract
 
-For each current event day, choose whether to keep generated commentary or replace it. Once an event has released, replace pre-release copy with current commentary.
+For each current event day, choose whether to keep generated commentary or replace it. Scheduled and awaiting days may retain generated Market Lens copy or use a valid replacement. Once an event has released, replace all pre-release Market Lens copy with current commentary.
 
-Reconsider every event day against the current Opening, Tape, and verified news. Do not treat carried-over copy as automatically reviewed.
+Reconsider every event day against the released facts, deterministic market-reaction data, current Opening and Tape, and the full `editorialReview.newsSearch` inventory, not just News cards selected for promotion. Prefer event-specific coverage when available, then related market context such as rates, the dollar, equity indexes, sectors, commodities, or credit. Do not treat carried-over copy as automatically reviewed.
 
-Before the close, the visible Market Lens remains forward-looking. At `close_available`, write verified `Outcome & Close Reaction` editorial copy interpreting the released facts and session response. Prepare Handoff marks Outcome only after released actuals and close-reaction rows are available. Do not scan the Tape after the fact for the largest movers or imply that one release caused the entire session when several catalysts were active.
+Before the close, the visible Market Lens remains forward-looking. At `close_available`, write verified `Outcome & Close Reaction` editorial copy interpreting the completed event and session response. Prepare Handoff marks Outcome only after close-reaction rows are available and either statistical actuals have released or a non-statistical event, such as a policy communication, has completed. Do not scan the Tape after the fact for the largest movers or imply that one release caused the entire session when several catalysts were active.
 
-Scheduled or awaiting days may retain generated Market Lens copy or use a valid replacement. Released days without actuals keep trying deterministic value recovery. Once released actuals are available, supply current Market Lens commentary if a valid current editorial lens is not already present. At `close_available`, supply verified Outcome copy only when Prepare Handoff marks it `pending_review`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
+Statistical releases without actuals continue deterministic value recovery. Once statistical actuals are available, or once a non-statistical event such as policy communication has passed, complete the prepared Market Lens assignment with current commentary. Do not leave an actionable `pending_review` assignment unresolved or use an unavailable disposition as completed AI Editorial Work. At `close_available`, supply verified Outcome copy only when Prepare Handoff marks it `pending_review`. Do not alter calendar facts, restate displayed values, use source/process language, or write tactical-allocation advice.
 
 ## Validation and Publish
 
@@ -265,8 +269,12 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 #### Week Ahead
 
-- Owner: `scripts/week_ahead_contract.js` defines the deterministic slate, Market Lens channel rules, and Outcome contract.
-- Boundary rules: Market Lens reactions must use canonical Tape tickers present in both `tape.rows[]` and `chart-data.series[]`; released events require current replacement commentary; `outcome` exists only at `close_available` and cannot change the preselected reaction ticker set.
+- Owners: `scripts/fetch_week_ahead.js` makes one direct TradingView Economic Calendar request for the complete authorized range, and `scripts/week_ahead_contract.js` owns Eastern-time normalization, canonical event identity, the visible slate, Market Lens channel rules, and the Outcome contract.
+- Source contract: TradingView owns raw U.S. event discovery, release timestamp, impact, Previous, Forecast, and Actual. Prepare includes high- and medium-impact rows, omits low-impact rows, retries transient or malformed responses up to two times after the first attempt, and never combines TradingView with a secondary calendar.
+- Display contract: high-impact events are shown by default. The persisted `Show medium impact` header action reveals the already embedded medium-impact rows. Statistical values that have not arrived display em dashes; policy commentary and other non-statistical events leave those value cells blank.
+- Refresh contract: each successful Prepare replaces the complete authorized TradingView range, including null values. If refresh fails, Prepare may carry forward only the validated same-range canonical calendar and marks it `carried_forward`; a new range becomes explicitly unavailable instead of being synthesized from an older week.
+- Apply boundary: Apply does not fetch, normalize, supplement, or replace deterministic Week Ahead facts. It merges only the documented Market Lens and Outcome editorial state.
+- Boundary rules: source time is stored as `America/New_York` wall time and converted to the dashboard time zone on render. Market Lens reactions must use canonical Tape tickers present in both `tape.rows[]` and `chart-data.series[]`; released event days must not publish pre-release Market Lens copy as current commentary; `outcome` exists only at `close_available` and cannot change the preselected reaction ticker set.
 
 #### Tape and chart data
 
@@ -297,7 +305,8 @@ Prepare validates fresh deterministic payloads. Where a domain permits prior-can
 
 - `chart-data` and `tape.rows`: failed refreshes retain the complete validated quote/history/commentary bundle; if no valid bundle exists, both publish empty with `availability.status = "unavailable"`.
 - `futuresModule`: individual source failures may produce a validated partial payload from the current preparation run. If no valid current-run payload exists, Futures becomes explicitly unavailable; prior canonical Futures values are not carried forward.
-- `crypto.stats` and `crypto.dominance`, `assetAllocationPortfolio`, `weekAhead` facts, and `earnings.week` facts: invalid fresh data uses validated same-domain carry-forward where allowed, otherwise explicit unavailable state.
+- `crypto.stats`, `crypto.dominance`, and `assetAllocationPortfolio`: invalid fresh data uses validated same-domain carry-forward where allowed; otherwise Prepare emits explicit unavailable state.
+- `earnings.week` and `weekAhead`: a failed refresh carries forward only a validated canonical payload for the exact requested calendar range. Without one, Prepare emits that requested range as unavailable.
 
 #### Apply editorial fallback contracts
 
@@ -306,14 +315,14 @@ These are Apply implementation contracts, not AI Editorial Work completion rules
 - `opening`: incomplete or invalid editorial Opening fields are omitted from the published payload rather than replaced with generated copy.
 - `news`: missing, invalid, duplicate, outside-inventory, or missing-provenance selected cards are omitted; Apply marks coverage partial where applicable and does not search for replacement stories or infer provenance.
 - `tape`: refreshed quote rows without reviewed commentary publish a blank note with `commentary_unavailable`; failed quote-download rows retain their last validated quote-bound commentary bundle.
-- `weekAhead`: invalid or unavailable released Market Lens commentary uses an unavailable disposition; missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
+- `weekAhead`: if a prepared `pending_review` Market Lens assignment reaches Apply unresolved, Apply publishes a system-owned `commentary_unavailable` disposition instead of stale pre-release copy. This is a publication-safety state, not an AI editorial choice or completed editorial work. Apply does not reinterpret an explicit valid non-pending Market Lens decision as a new assignment. Missing verified close Outcome remains `pending_review` and publishes no Outcome copy.
 - `earnings.week`: narrative fields still marked `pending_review` or carrying a valid unavailable status publish no copy for that field and preserve that disposition for the next handoff. Apply never replaces `pending_review` with prior commentary. For a malformed non-pending narrative/disposition pair, Apply may recover previously verified copy only when the relevant deterministic facts are unchanged; otherwise the field publishes no copy and the invalid state is normalized. Deterministic empty-row recovery occurs during Prepare.
 
 ### Deterministic Source Contracts
 
 The automated routing below describes the sources used by the deterministic fetchers. Use the normal Prepare Handoff / Apply Handoff workflow; this reference is not an alternate daily workflow.
 
-#### Automated price-source routing
+#### Automated deterministic-source routing
 
 - Tape and chart series, including U.S. indices and equities, international and sector ETFs, commodity futures, rates-volatility and bond proxies, index futures, and crypto majors: Yahoo Finance chart history through the configured `sourceSymbol`.
 - Finnhub quote data: latest-bar repair only for eligible plain U.S. symbols when Yahoo exposes a newer close but does not provide usable OHLC for that date. Finnhub is not a second quote authority and is not used for futures, Treasury, or crypto symbols.
@@ -322,6 +331,7 @@ The automated routing below describes the sources used by the deterministic fetc
 - Altcoin Season Index: CoinMarketCap chart API; the stat-card `delta` comes from `historicalValues.yesterday`, and is `n/a` when that comparison is unavailable.
 - Crypto Fear & Greed: Alternative.me API endpoint `https://api.alternative.me/fng/?limit=2`.
 - Asset Allocation Portfolio rows: Yahoo Finance instrument-level ETF market data only. The portfolio summary may use only the sanitized export from the separate Asset Allocation Dashboard; never import or recreate tactical allocation/model logic.
+- Week Ahead: TradingView Economic Calendar at `https://economic-calendar.tradingview.com/events`, requested directly with `Origin: https://www.tradingview.com`. This private-dashboard integration uses no API key or automated secondary source.
 
 #### Manual research/cross-check references
 

@@ -3,7 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const os = require('os');
 const { atomicWriteJson } = require('./staging_writer');
 const { mapConcurrent } = require('./fetch_concurrency');
 const {
@@ -41,6 +40,7 @@ const {
 
 const REQUEST_TIMEOUT_MS = 20000;
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'earnings_week.json');
+const REPO_PLAYWRIGHT_MODULE = path.join(__dirname, '..', 'node_modules', 'playwright');
 const DEFAULT_FINNHUB_DELAY_MS = 700;
 const DEFAULT_FINNHUB_PROFILE_RETRIES = 3;
 const DEFAULT_FINNHUB_METRIC_DELAY_MS = 2000;
@@ -443,20 +443,77 @@ function zacksUnavailableResult(date, type, url, error, started = Date.now()) {
 
 function resolvePlaywrightModule(args = {}) {
   if (args.playwright) return args.playwright;
-  const candidates = [
-    process.env.PLAYWRIGHT_MODULE_PATH,
-    'playwright',
-    path.join(os.homedir(), '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies', 'node', 'node_modules', 'playwright')
-  ].filter(Boolean);
-  const failures = [];
-  for (const candidate of candidates) {
-    try {
-      return require(candidate);
-    } catch (error) {
-      failures.push(`${candidate}: ${error.message}`);
-    }
+  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+  try {
+    return require(REPO_PLAYWRIGHT_MODULE);
+  } catch (error) {
+    throw new Error(`Playwright dependency is unavailable for Zacks browser fetch. Run npm install. ${REPO_PLAYWRIGHT_MODULE}: ${error.message}`);
   }
-  throw new Error(`Playwright is unavailable for Zacks browser fetch. ${failures.join(' | ')}`);
+}
+
+function zacksBrowserRuntimeFailureKind(message) {
+  const text = String(message || '');
+  if (/Playwright dependency is unavailable for Zacks browser fetch/i.test(text)
+    || /Cannot find module/i.test(text)
+    || /MODULE_NOT_FOUND/i.test(text)) {
+    return 'dependency_missing';
+  }
+  if (/\b(?:EPERM|EACCES)\b/i.test(text)
+    || /Operation not permitted/i.test(text)
+    || /Permission denied/i.test(text)
+    || /sandbox/i.test(text)) {
+    return 'startup_failed';
+  }
+  if (/Executable doesn't exist/i.test(text)
+    || /playwright install chromium/i.test(text)) {
+    return 'browser_missing';
+  }
+  if (/browserType\.launch/i.test(text)
+    || /Failed to launch browser/i.test(text)) {
+    return 'startup_failed';
+  }
+  return '';
+}
+
+function zacksBrowserRuntimeFailureFromFailures(failures) {
+  if (!Array.isArray(failures)) return null;
+  for (const failure of failures) {
+    const kind = zacksBrowserRuntimeFailureKind(failure?.message);
+    if (kind) return { kind, message: String(failure?.message || '').trim() };
+  }
+  return null;
+}
+
+function zacksGateIndicatesBrowserRuntimeFailure(zacksGateSummary) {
+  return Boolean(zacksBrowserRuntimeFailureFromFailures(zacksGateSummary?.failures));
+}
+
+function zacksRefreshBrowserRuntimeFailure(rows) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const failures = (Array.isArray(row?.sourceAudit?.resultRefresh?.failures) ? row.sourceAudit.resultRefresh.failures : [])
+      .filter((failure) => failure?.provider === 'zacks');
+    const failure = zacksBrowserRuntimeFailureFromFailures(failures);
+    if (failure) return failure;
+  }
+  return null;
+}
+
+function earningsWeekZacksBrowserRuntimeFailure(payload) {
+  const zacksGateFailure = zacksBrowserRuntimeFailureFromFailures(payload?.summary?.zacksGate?.failures);
+  if (payload?.summary?.providerMode === 'legacy_backup' && zacksGateFailure) {
+    return { mode: 'backup', ...zacksGateFailure };
+  }
+  const refreshFailure = zacksRefreshBrowserRuntimeFailure(payload?.rows);
+  if (refreshFailure) return { mode: 'retained_prior_facts', ...refreshFailure };
+  return null;
+}
+
+function earningsWeekZacksBrowserRuntimeFailureMode(payload) {
+  return earningsWeekZacksBrowserRuntimeFailure(payload)?.mode || '';
+}
+
+function earningsWeekUsedBackupAfterZacksBrowserFailure(payload) {
+  return earningsWeekZacksBrowserRuntimeFailureMode(payload) === 'backup';
 }
 
 function zacksMonthDayKey(isoDate) {
@@ -2714,8 +2771,14 @@ module.exports = {
   parseZacksTable,
   profileFromCache,
   isEligibleFinnhubUsListing,
+  earningsWeekZacksBrowserRuntimeFailure,
+  earningsWeekZacksBrowserRuntimeFailureMode,
+  earningsWeekUsedBackupAfterZacksBrowserFailure,
   resolveProviderDateConflicts,
+  resolvePlaywrightModule,
   runBuild,
+  zacksBrowserRuntimeFailureKind,
+  zacksGateIndicatesBrowserRuntimeFailure,
   zacksEndpointDateFromUrl,
   zacksGate,
   zacksVisibleDateFromButtonText,

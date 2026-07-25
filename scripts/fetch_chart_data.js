@@ -4,7 +4,12 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { atomicWriteJson } = require('./staging_writer');
-const { mapConcurrent } = require('./fetch_concurrency');
+const {
+  mapConcurrent,
+  retryAfterDelayMs,
+  sleep,
+  withRetry
+} = require('./fetch_concurrency');
 
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
@@ -24,16 +29,6 @@ const TREASURY_FIELDS = new Map([
   ['TREASURY:30Y', 'BC_30YEAR']
 ]);
 let envLoaded = false;
-function retryAfterDelayMs(headers = {}, fallbackMs = DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS) {
-  const raw = headers['retry-after'] || headers['Retry-After'];
-  if (raw !== undefined) {
-    const seconds = Number(raw);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-    const retryDate = Date.parse(raw);
-    if (!Number.isNaN(retryDate)) return Math.max(0, retryDate - Date.now());
-  }
-  return Math.max(0, Number(fallbackMs) || 0);
-}
 
 function errorStatusCode(error) {
   if (Number.isFinite(error?.statusCode)) return Number(error.statusCode);
@@ -49,7 +44,6 @@ function isRetryableYahooError(error) {
 
 async function fetchYahooJsonWithRetry(url, args = {}, headers = {}, dependencies = {}) {
   const fetchJsonFn = dependencies.fetchJson || fetchJson;
-  const sleepFn = dependencies.sleep || sleep;
   const configuredRetries = Number(args.yahooRateLimitRetries ?? DEFAULT_YAHOO_RATE_LIMIT_RETRIES);
   const configuredDelayMs = Number(args.yahooRateLimitDelayMs ?? DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS);
   const retries = Number.isFinite(configuredRetries)
@@ -58,16 +52,15 @@ async function fetchYahooJsonWithRetry(url, args = {}, headers = {}, dependencie
   const fallbackDelayMs = Number.isFinite(configuredDelayMs)
     ? Math.max(0, configuredDelayMs)
     : DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS;
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fetchJsonFn(url, args, headers);
-    } catch (error) {
-      if (attempt >= retries || !isRetryableYahooError(error)) throw error;
-      attempt += 1;
-      await sleepFn(retryAfterDelayMs(error.headers, fallbackDelayMs));
+  return withRetry(
+    () => fetchJsonFn(url, args, headers),
+    {
+      retries,
+      delayMs: fallbackDelayMs,
+      sleep: dependencies.sleep,
+      shouldRetryError: isRetryableYahooError
     }
-  }
+  );
 }
 
 async function fetchYahooChartJson(urlForHost, args = {}, headers = {}) {
@@ -946,10 +939,6 @@ function readEmbeddedChartPayload(input) {
   } catch (_error) {
     return null;
   }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isoDateFromDate(date) {

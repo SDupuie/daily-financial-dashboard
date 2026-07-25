@@ -63,6 +63,8 @@ const {
   readJsonBlock,
   readCurrentEarningsWeekArtifact,
   readCurrentFuturesModuleArtifact,
+  repairMissingZacksBrowserBeforePrepare,
+  reportZacksBrowserFallbackWarning,
   requiresUnavailableRolloverRetry,
   runCommand,
   runWithSectionFallback,
@@ -89,6 +91,28 @@ const {
 const root = path.resolve(__dirname, '..');
 // Complete synthetic dashboard used as the valid baseline for validator mutation tests.
 const FIXTURE_NOW = '2026-07-10T13:30:00Z';
+
+function tradingViewCalendarFixture(rows = []) {
+  return { status: 'ok', result: rows };
+}
+
+function tradingViewCalendarRow(overrides = {}) {
+  return {
+    id: 'fixture-retail-sales',
+    title: 'Retail Sales MoM',
+    country: 'US',
+    indicator: 'Retail Sales',
+    source: 'U.S. Census Bureau',
+    actual: null,
+    previous: 0.2,
+    forecast: 0.3,
+    unit: '%',
+    scale: '',
+    importance: 1,
+    date: '2026-07-13T12:30:00.000Z',
+    ...overrides
+  };
+}
 
 async function testFetchConcurrencyHelperContract() {
   const active = { count: 0, max: 0 };
@@ -325,15 +349,10 @@ function createDashboardValidationFixture() {
         notes: cryptoNotes
       },
       earnings: { week: fixtureEarningsWeek() },
-      weekAhead: normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+      weekAhead: normalizeWeekAhead(tradingViewCalendarFixture([
+        tradingViewCalendarRow()
+      ]), {
         range: { from: '2026-07-10', to: '2026-07-16' },
-        officialSchedule: {
-          events: [{
-            date: '2026-07-13', time: '08:30', keys: ['retail-sales'],
-            authority: 'fixture', authorityName: 'Fixture schedule', authorityUrl: 'https://fixture.test/schedule'
-          }],
-          authorities: []
-        },
         now: new Date(FIXTURE_NOW)
       }),
       footer: {
@@ -477,6 +496,10 @@ function testArchitectureSingleWriterAndCliBoundaries() {
   assert.deepEqual(offenders, [], 'Only run_daily_update.js may edit dashboard HTML.');
   const publishSource = fs.readFileSync(path.join(scriptsDir, 'publish_main.sh'), 'utf8');
   assert.match(publishSource, /node scripts\/validate_dashboard\.js readiness/, 'Publishing must run the complete readiness entry point.');
+  assert.match(publishSource, /Timed out waiting for Pages run to appear/, 'Publishing must distinguish missing Pages runs from incomplete Pages runs.');
+  assert.match(publishSource, /wait_rc"\s+-eq\s+3[\s\S]*verify_pages_content/, 'Missing Pages runs must check live content before retriggering.');
+  assert.match(publishSource, /LAST_PAGES_CONCLUSION="missing_run"/, 'Missing Pages runs must use the existing empty-commit retrigger path.');
+  assert.match(publishSource, /fields\.join\("\\u001f"\)[\s\S]*IFS=\$'\\037' read -r run_id run_status run_conclusion run_url/, 'Pages run parsing must preserve empty conclusion fields.');
   const updaterSource = fs.readFileSync(path.join(scriptsDir, 'run_daily_update.js'), 'utf8');
   assert.equal((updaterSource.match(/\bcommitEditorialCandidate\(/g) || []).length, 2,
     'Only dashboard-data finalization may invoke the canonical editorial commit boundary.');
@@ -884,28 +907,155 @@ function testEarningsCalendarBuildAuthorization() {
   );
 }
 
+function testZacksBrowserFallbackWarningIsSoftNotice() {
+  const messages = [];
+  const browserFailurePayload = {
+    summary: {
+      providerMode: 'legacy_backup',
+      zacksGate: {
+        ok: false,
+        failures: [{
+          code: 'zacks_eps_table_unavailable',
+          message: "browserType.launch: Executable doesn't exist at /Users/Scott/Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+        }]
+      }
+    }
+  };
+  assert.equal(reportZacksBrowserFallbackWarning(browserFailurePayload, (message) => messages.push(message)), true);
+  assert.deepEqual(messages, ['Zacks Chromium unavailable; Earnings used backup providers. Run npm run install:browsers.\n']);
+
+  const zacksRefreshFailurePayload = {
+    summary: {
+      providerMode: 'zacks'
+    },
+    rows: [{
+      sourceAudit: {
+        resultRefresh: {
+          status: 'partial',
+          failures: [{
+            provider: 'zacks',
+            code: 'provider_request_failed',
+            message: "browserType.launch: Executable doesn't exist at /Users/Scott/Projects/Daily Financial Dashboard/node_modules/playwright-core/.local-browsers/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          }]
+        }
+      }
+    }]
+  };
+  assert.equal(reportZacksBrowserFallbackWarning(zacksRefreshFailurePayload, (message) => messages.push(message)), true);
+  assert.equal(messages[1], 'Zacks Chromium unavailable; Earnings retained prior Zacks facts. Run npm run install:browsers.\n');
+
+  const startupFailurePayload = {
+    summary: {
+      providerMode: 'legacy_backup',
+      zacksGate: {
+        ok: false,
+        failures: [{
+          code: 'zacks_eps_table_unavailable',
+          message: 'browserType.launch: Target page, context or browser has been closed. <launching> /repo/node_modules/playwright-core/.local-browsers/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell FATAL: Permission denied (1100)'
+        }]
+      }
+    }
+  };
+  assert.equal(reportZacksBrowserFallbackWarning(startupFailurePayload, (message) => messages.push(message)), true);
+  assert.match(messages[2], /Run Prepare with escalated local command execution\./);
+  assert.match(messages[2], /Permission denied/);
+
+  const ordinaryZacksFailurePayload = {
+    summary: {
+      providerMode: 'legacy_backup',
+      zacksGate: {
+        ok: false,
+        failures: [{ code: 'zacks_empty_eligible_slate', message: 'Zacks returned no display-eligible rows after market-cap filtering.' }]
+      }
+    }
+  };
+  assert.equal(reportZacksBrowserFallbackWarning(ordinaryZacksFailurePayload, (message) => messages.push(message)), false);
+  assert.equal(messages.length, 3);
+}
+
+async function testZacksBrowserSoftRepairBeforePrepareIsFailOpen() {
+  const missingMessages = [];
+  let installCalls = 0;
+  const missing = await repairMissingZacksBrowserBeforePrepare({
+    checkBrowser: async () => ({
+      ok: false,
+      kind: 'browser_missing',
+      message: "Executable doesn't exist at node_modules/playwright-core/.local-browsers/chromium/chrome"
+    }),
+    installBrowsers: async () => { installCalls += 1; },
+    write: (message) => missingMessages.push(message)
+  });
+  assert.equal(missing.repairAttempted, true);
+  assert.equal(missing.repairSucceeded, true);
+  assert.equal(installCalls, 1);
+  assert.deepEqual(missingMessages, ['Zacks Chromium missing; running npm run install:browsers before Prepare.\n']);
+
+  const failedInstallMessages = [];
+  const failedInstall = await repairMissingZacksBrowserBeforePrepare({
+    checkBrowser: async () => ({
+      ok: false,
+      kind: 'browser_missing',
+      message: "Executable doesn't exist at node_modules/playwright-core/.local-browsers/chromium/chrome"
+    }),
+    installBrowsers: async () => { throw new Error('fixture install failure'); },
+    write: (message) => failedInstallMessages.push(message)
+  });
+  assert.equal(failedInstall.repairAttempted, true);
+  assert.equal(failedInstall.repairSucceeded, false);
+  assert.equal(failedInstall.repairError, 'fixture install failure');
+  assert.deepEqual(failedInstallMessages, [
+    'Zacks Chromium missing; running npm run install:browsers before Prepare.\n',
+    'Zacks Chromium auto-repair failed; continuing Prepare. fixture install failure\n'
+  ]);
+
+  const sandboxMessages = [];
+  let sandboxInstallCalls = 0;
+  const sandbox = await repairMissingZacksBrowserBeforePrepare({
+    checkBrowser: async () => ({
+      ok: false,
+      kind: 'startup_failed',
+      message: 'Operation not permitted by the managed sandbox.'
+    }),
+    installBrowsers: async () => { sandboxInstallCalls += 1; },
+    write: (message) => sandboxMessages.push(message)
+  });
+  assert.equal(sandbox.repairAttempted, false);
+  assert.equal(sandboxInstallCalls, 0);
+  assert.deepEqual(sandboxMessages, [
+    'Zacks Chromium unavailable; continuing Prepare. Run Prepare with escalated local command execution. Diagnostic: Operation not permitted by the managed sandbox.\n'
+  ]);
+
+  const dependencyMessages = [];
+  let dependencyInstallCalls = 0;
+  const dependency = await repairMissingZacksBrowserBeforePrepare({
+    checkBrowser: async () => ({
+      ok: false,
+      kind: 'dependency_missing',
+      message: 'Playwright dependency is unavailable for Zacks browser fetch.'
+    }),
+    installBrowsers: async () => { dependencyInstallCalls += 1; },
+    write: (message) => dependencyMessages.push(message)
+  });
+  assert.equal(dependency.repairAttempted, false);
+  assert.equal(dependencyInstallCalls, 0);
+  assert.deepEqual(dependencyMessages, [
+    'Zacks Chromium unavailable; continuing Prepare. Run npm install, then npm run install:browsers. Diagnostic: Playwright dependency is unavailable for Zacks browser fetch.\n'
+  ]);
+}
+
 function testWeekAheadPreparationUsesCanonicalRangeForManualRefresh() {
   const canonicalRange = { from: '2026-07-13', to: '2026-07-17' };
   const rolloverRange = { from: '2026-07-17', to: '2026-07-23' };
-  const canonicalWeekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+  const canonicalWeekAhead = normalizeWeekAhead(tradingViewCalendarFixture(), {
     range: canonicalRange,
-    officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-13T12:00:00Z')
   });
-  const preRolledWeekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
-    range: rolloverRange,
-    officialSchedule: { events: [], authorities: [] },
-    now: new Date('2026-07-17T18:00:00Z')
-  });
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'week-ahead-range-');
-  const stagingPath = path.join(dir, 'week_ahead.json');
-  fs.writeFileSync(stagingPath, `${JSON.stringify(preRolledWeekAhead, null, 2)}\n`);
 
   const manualPreparation = weekAheadPreparationCommandArgs({
     scheduled: false,
     rolloverCalendar: false,
     calendarRolloverRange: rolloverRange
-  }, canonicalWeekAhead, { filePath: stagingPath });
+  }, canonicalWeekAhead);
   assert.deepEqual(manualPreparation.targetRange, canonicalWeekAhead.range);
   assert.deepEqual(
     manualPreparation.commandArgs,
@@ -913,19 +1063,22 @@ function testWeekAheadPreparationUsesCanonicalRangeForManualRefresh() {
     'A normal manual refresh must not reuse a pre-rolled Week Ahead staging artifact.'
   );
 
-  fs.writeFileSync(stagingPath, `${JSON.stringify(canonicalWeekAhead, null, 2)}\n`);
   const matchingManualPreparation = weekAheadPreparationCommandArgs({
     scheduled: false,
     rolloverCalendar: false,
     calendarRolloverRange: rolloverRange
-  }, canonicalWeekAhead, { filePath: stagingPath });
-  assert.deepEqual(matchingManualPreparation.commandArgs, ['scripts/fetch_week_ahead.js', '--refresh-values', '--input', stagingPath]);
+  }, canonicalWeekAhead);
+  assert.deepEqual(
+    matchingManualPreparation.commandArgs,
+    ['scripts/fetch_week_ahead.js', '--date', canonicalRange.from],
+    'Every Prepare refresh must replace the complete TradingView range.'
+  );
 
   const rolloverPreparation = weekAheadPreparationCommandArgs({
     scheduled: false,
     rolloverCalendar: true,
     calendarRolloverRange: rolloverRange
-  }, canonicalWeekAhead, { filePath: stagingPath });
+  }, canonicalWeekAhead);
   assert.deepEqual(rolloverPreparation.targetRange, rolloverRange);
   assert.deepEqual(rolloverPreparation.commandArgs, ['scripts/fetch_week_ahead.js', '--date', rolloverRange.from]);
 }
@@ -2061,14 +2214,15 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
     body: 'Generated pre-release Market Lens commentary.',
     reactions: [{ ticker: 'UST10Y', role: 'rates response' }]
   });
-  const configureWeekDay = (index, { lifecycle, eventStatus, actual, editorialLens = false, closeReaction = false }) => {
+  const configureWeekDay = (index, { lifecycle, eventStatus, actual, valuesApplicable = true, editorialLens = false, closeReaction = false }) => {
     const day = candidateDashboard.weekAhead.days[index];
     day.events = [{
       ...sourceWeekEvent,
       id: `fixture-week-ahead-${index}`,
       date: day.date,
       status: eventStatus,
-      actual
+      actual,
+      valuesApplicable
     }];
     day.lifecycle = lifecycle;
     day.marketLens = editorialLens
@@ -2084,7 +2238,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
         asOf: day.date,
         rows: [{ ticker: 'UST10Y', role: 'rates response', delta: 0.02, percentChange: 0.2, unit: 'percent_yield' }]
       };
-      day.outcome = { title: 'Old outcome copy must not enter editorial handoff.', body: 'Old outcome body.' };
+      if (actual) day.outcome = { title: 'Old outcome copy must not enter editorial handoff.', body: 'Old outcome body.' };
     }
     return day;
   };
@@ -2092,7 +2246,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   let missingActualsWeekDay;
   let releasedNeedsLensWeekDay;
   let closeCurrentLensWeekDay;
-  let closeNeedsLensWeekDay;
+  let releasedNonStatNeedsLensWeekDay;
   candidateChartData.series.find((series) => series.ticker === 'SPX').quoteRevision = FIXTURE_NOW;
   syncDashboardPricesFromChartData(candidateDashboard, candidateChartData, {
     resetCommentary: true,
@@ -2108,11 +2262,11 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
     editorialLens: true,
     closeReaction: true
   });
-  closeNeedsLensWeekDay = configureWeekDay(4, {
-    lifecycle: 'close_available',
+  releasedNonStatNeedsLensWeekDay = configureWeekDay(4, {
+    lifecycle: 'released_awaiting_close',
     eventStatus: 'released',
-    actual: '1.0%',
-    closeReaction: true
+    actual: null,
+    valuesApplicable: false
   });
   const html = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, html);
@@ -2250,7 +2404,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
   assert.equal(marketLensDecisionByDate.get(missingActualsWeekDay.date).action, 'retain-generated');
   assert.equal(marketLensDecisionByDate.get(releasedNeedsLensWeekDay.date).action, 'pending_review');
   assert.equal(marketLensDecisionByDate.get(closeCurrentLensWeekDay.date).action, 'replace');
-  assert.equal(marketLensDecisionByDate.get(closeNeedsLensWeekDay.date).action, 'pending_review');
+  assert.equal(marketLensDecisionByDate.get(releasedNonStatNeedsLensWeekDay.date).action, 'pending_review');
   const handoffCloseWeekDay = handoff.weekAhead.days.find((day) => day.date === closeCurrentLensWeekDay.date);
   assert.deepEqual(handoffCloseWeekDay.outcome, { status: 'pending_review' });
   assert.deepEqual(handoff.tape.rows[1], dashboard.tape.rows[1], 'An unchanged carried quote must retain its complete commentary bundle in the handoff.');
@@ -2309,7 +2463,7 @@ function testMalformedFocusedEarningsIsNoOp() {
   assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml);
 }
 
-function testReleasedEventRetainGeneratedBecomesUnavailableLens() {
+function testUnresolvedMarketLensReviewBecomesUnavailableLens() {
   const dir = makeTemporaryDirectory(path.join(root, 'generated'), 'dfd-released-event-editorial-');
   const dashboardFile = path.join(dir, 'dashboard.html');
   const candidateFile = path.join(dir, 'dashboard-candidate.html');
@@ -2332,7 +2486,7 @@ function testReleasedEventRetainGeneratedBecomesUnavailableLens() {
     openingDecision: { action: 'reviewed' },
     marketLensDecisions: dashboard.weekAhead.days
       .filter((day) => day.events.length)
-      .map((day) => ({ date: day.date, action: 'retain-generated' }))
+      .map((day) => ({ date: day.date, action: 'pending_review' }))
   };
   fs.writeFileSync(dashboardFile, html);
   fs.writeFileSync(candidateFile, html);
@@ -3767,9 +3921,8 @@ function testDashboardValidatorRejectsCalendarRangeDivergence() {
   const staleRange = { from: '2026-07-06', to: '2026-07-10' };
   const alignedStaleCalendar = validationDashboardData();
   alignedStaleCalendar.earnings.week.range = staleRange;
-  alignedStaleCalendar.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+  alignedStaleCalendar.weekAhead = normalizeWeekAhead(tradingViewCalendarFixture(), {
     range: staleRange,
-    officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-10T18:00:00Z')
   });
   const alignedStaleResult = validateStagedDashboardFixture(alignedStaleCalendar);
@@ -3782,9 +3935,8 @@ function testDashboardValidatorRejectsCalendarRangeDivergence() {
   assert.match(staleEarningsResult.stderr, /weekAhead\.range must match earnings\.week\.range/);
 
   const staleWeekAhead = validationDashboardData();
-  staleWeekAhead.weekAhead = normalizeWeekAhead({ announcements: {}, predictions: {} }, {
+  staleWeekAhead.weekAhead = normalizeWeekAhead(tradingViewCalendarFixture(), {
     range: staleRange,
-    officialSchedule: { events: [], authorities: [] },
     now: new Date('2026-07-10T18:00:00Z')
   });
   const staleWeekAheadResult = validateStagedDashboardFixture(staleWeekAhead);
@@ -3990,7 +4142,7 @@ function testTouchTooltipControls() {
     setAttribute(name, value) { this.attributes[name] = value; },
     blur() { this.blurred = true; }
   });
-  const makeWrap = (buttonSelector, button, tooltip = null) => {
+  const makeWrap = (buttonSelector, button) => {
     const names = new Set();
     return {
       classList: {
@@ -4003,35 +4155,21 @@ function testTouchTooltipControls() {
       },
       querySelector: (selector) => selector === buttonSelector
         ? button
-        : selector === '.week-forecast-tooltip' ? tooltip : null
+        : null
     };
   };
   const localButton = makeButton();
-  const forecastButton = makeButton();
   const cryptoButton = makeButton();
   const localWrap = makeWrap('[data-local-refresh-toggle]', localButton);
   const cryptoWrap = makeWrap('[data-stale-button]', cryptoButton);
-  let forecastShift = 0;
-  const forecastTooltip = {
-    style: {
-      setProperty(name, value) {
-        if (name === '--week-forecast-tooltip-shift-x') forecastShift = Number.parseFloat(value);
-      }
-    },
-    getBoundingClientRect: () => ({ left: -15 + forecastShift, right: 245 + forecastShift })
-  };
-  const forecastWrap = makeWrap('[data-week-forecast-button]', forecastButton, forecastTooltip);
   const document = {
-    documentElement: { clientWidth: 390 },
     querySelectorAll: (selector) => {
       if (selector === '.local-refresh-indicator.is-open') return [localWrap];
-      if (selector === '.week-forecast-qualifier.is-open') return [forecastWrap];
       if (selector === '.stale-info.is-open') return [cryptoWrap];
       return [];
     }
   };
-  const window = { innerWidth: 390 };
-  const runtime = Function('document', 'window', `${source}\nreturn { clampWeekForecastTooltip, routeLocalRefreshTooltipClick, routeWeekForecastTooltipClick, routeStaleInfoTooltipClick, closeTouchTooltipsOnEscape };`)(document, window);
+  const runtime = Function('document', `${source}\nreturn { routeLocalRefreshTooltipClick, routeStaleInfoTooltipClick, closeTouchTooltipsOnEscape };`)(document);
   const eventFor = (wrapSelector, wrap, buttonSelector, button) => ({
     target: {
       closest: (selector) => {
@@ -4042,7 +4180,6 @@ function testTouchTooltipControls() {
     }
   });
   const localEvent = eventFor('[data-local-refresh-indicator]', localWrap, '[data-local-refresh-toggle]', localButton);
-  const forecastEvent = eventFor('[data-week-forecast-info]', forecastWrap, '[data-week-forecast-button]', forecastButton);
   const cryptoEvent = eventFor('[data-stale-info]', cryptoWrap, '[data-stale-button]', cryptoButton);
 
   assert.equal(runtime.routeLocalRefreshTooltipClick(localEvent), true);
@@ -4053,26 +4190,51 @@ function testTouchTooltipControls() {
   assert.equal(localButton.attributes['aria-expanded'], 'false');
   assert.equal(localButton.blurred, true);
 
-  assert.equal(runtime.routeWeekForecastTooltipClick(forecastEvent), true);
-  assert.equal(forecastWrap.classList.contains('is-open'), true);
-  assert.equal(forecastButton.attributes['aria-expanded'], 'true');
-  assert.deepEqual(runtime.clampWeekForecastTooltip(forecastWrap), { left: 16, right: 276, shift: 31 });
-  assert.ok(runtime.clampWeekForecastTooltip(forecastWrap).left >= 16, 'An open mobile forecast tooltip must remain inside the left viewport margin.');
-  assert.ok(runtime.clampWeekForecastTooltip(forecastWrap).right <= 374, 'An open mobile forecast tooltip must remain inside the right viewport margin.');
   assert.equal(runtime.routeStaleInfoTooltipClick(cryptoEvent), true);
   assert.equal(cryptoWrap.classList.contains('is-open'), true);
   assert.equal(cryptoButton.attributes['aria-expanded'], 'true');
   runtime.closeTouchTooltipsOnEscape({ key: 'Escape', target: { closest: () => null } });
-  assert.equal(forecastWrap.classList.contains('is-open'), false);
-  assert.equal(forecastButton.attributes['aria-expanded'], 'false');
   assert.equal(cryptoWrap.classList.contains('is-open'), false);
   assert.equal(cryptoButton.attributes['aria-expanded'], 'false');
 
   assert.match(html, /\.local-refresh-indicator\.is-open \.local-refresh-tooltip/);
-  assert.match(html, /\.week-forecast-qualifier\.is-open \.week-forecast-tooltip/);
   assert.match(html, /\.stale-info\.is-open \.stale-info-tooltip/);
   assert.match(html, /\.stale-info-button\s*\{[\s\S]*?width: 16px;[\s\S]*?height: 16px;/);
-  assert.match(html, /transform: translateX\(var\(--week-forecast-tooltip-shift-x, 0px\)\)/);
+  assert.doesNotMatch(html, /week-forecast-(?:qualifier|pill|tooltip)|data-week-forecast/);
+
+  const weekImpactSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-impact-filter');
+  const impactEvents = [{ id: 'high', impact: 'high' }, { id: 'medium', impact: 'medium' }];
+  const highOnlyRuntime = Function(
+    'showMediumImpact',
+    `${weekImpactSource}\nreturn { visibleWeekAheadEvents, weekAheadImpactCueHtml };`
+  )(false);
+  assert.deepEqual(highOnlyRuntime.visibleWeekAheadEvents(impactEvents), [impactEvents[0]]);
+  assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /aria-pressed="false"/);
+  assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /Show medium impact/);
+  const allImpactRuntime = Function(
+    'showMediumImpact',
+    `${weekImpactSource}\nreturn { visibleWeekAheadEvents, weekAheadImpactCueHtml };`
+  )(true);
+  assert.deepEqual(allImpactRuntime.visibleWeekAheadEvents(impactEvents), impactEvents);
+  assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /aria-pressed="true"/);
+  assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /Hide medium impact/);
+  assert.match(html, /daily-financial-dashboard:week-medium-impact:v1/);
+  assert.match(html, /data-week-impact-toggle/);
+
+  const weekFamilySource = extractDashboardRuntimeTestBlock(html, 'week-ahead-family');
+  const { weekAheadEventGroups } = Function(
+    `${weekFamilySource}\nreturn { weekAheadEventGroups };`
+  )();
+  const rateDecision = { id: 'rate', time: '14:00', name: 'Fed Interest Rate Decision', agency: 'Federal Reserve', impact: 'high' };
+  const interveningEvent = { id: 'other', time: '14:15', name: 'Treasury Statement', agency: 'Treasury', impact: 'medium' };
+  const pressConference = { id: 'press', time: '14:30', name: 'Fed Press Conference', agency: 'Federal Reserve', impact: 'high' };
+  const policyGroups = weekAheadEventGroups(
+    [rateDecision, interveningEvent, pressConference],
+    [rateDecision, interveningEvent, pressConference]
+  );
+  assert.equal(policyGroups.length, 2);
+  assert.deepEqual(policyGroups[0].events.map((event) => event.id), ['rate', 'press']);
+  assert.equal(policyGroups[0].family.title, 'Federal Reserve Decision');
 
   const earningsProvenanceSource = extractDashboardRuntimeTestBlock(html, 'earnings-provenance');
   const { earningsRowNoticeHtml } = Function(
@@ -4121,25 +4283,21 @@ function testTouchTooltipControls() {
     source: { ...weekStatusFixture.source, status: 'cached' }
   });
   assert.match(cachedWeekMarkup, /data-stale-button/);
-  assert.match(cachedWeekMarkup, /Week Ahead numeric data is stale/);
+  assert.match(cachedWeekMarkup, /Week Ahead calendar is carried forward/);
+  assert.match(cachedWeekMarkup, /validated calendar is carried forward for the same displayed range/);
   assert.match(cachedWeekMarkup, /Last validated Jul 10, 8:30 AM CT\./);
   const carriedWeek = {
     ...weekStatusFixture,
+    source: { ...weekStatusFixture.source, status: 'cached' },
     availability: { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
   };
   assert.equal(weekAheadAvailabilityState(carriedWeek), 'carried_forward', 'Current availability must override retained source provenance.');
-  assert.match(weekAheadAvailabilityInfoHtml(carriedWeek), /Week Ahead numeric data is stale/);
-  const partialWeekMarkup = weekAheadAvailabilityInfoHtml({
-    ...weekStatusFixture,
-    availability: { status: 'partial', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
-  });
-  assert.match(partialWeekMarkup, /Week Ahead numeric data is partial/);
-  assert.match(partialWeekMarkup, /Last checked Jul 10, 8:30 AM CT\./);
+  assert.match(weekAheadAvailabilityInfoHtml(carriedWeek), /Week Ahead calendar is carried forward/);
   assert.equal(weekAheadAvailabilityInfoHtml({
     ...weekStatusFixture,
     availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: FIXTURE_NOW }
   }), '');
-  assert.doesNotMatch(`${cachedWeekMarkup}${partialWeekMarkup}`, /FXMacroData|HTTP|retry/i);
+  assert.doesNotMatch(cachedWeekMarkup, /FXMacroData|HTTP|retry/i);
 
   const weekOutcomeSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-outcome');
   const { weekAheadOutcomeHtml } = Function(
@@ -4509,6 +4667,8 @@ const architectureContractTests = Object.freeze([
   testYahooFetchRetriesRateLimits,
   testFuturesDownloaderStagesProgressSequentially,
   testEarningsCalendarBuildAuthorization,
+  testZacksBrowserFallbackWarningIsSoftNotice,
+  testZacksBrowserSoftRepairBeforePrepareIsFailOpen,
   testWeekAheadPreparationUsesCanonicalRangeForManualRefresh,
   testLastGoodDashboardRecovery,
   testAtomicCommitKeepsValidatedDashboardWhenSnapshotRefreshFails,
@@ -4517,7 +4677,7 @@ const architectureContractTests = Object.freeze([
   testScheduledPreparationRefusalSkipsCleanly,
   testEditorialPreparationCreatesOnePendingHandoff,
   testMalformedFocusedEarningsIsNoOp,
-  testReleasedEventRetainGeneratedBecomesUnavailableLens,
+  testUnresolvedMarketLensReviewBecomesUnavailableLens,
   testStageOneFinalizesWeekAheadOutcomeDisposition,
   testApplyDoesNotOwnWeekAheadLifecycle,
   testPreparedEditionIdDrivesFuturesStoryWindow,

@@ -5,13 +5,15 @@ const path = require('path');
 const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
 const { isIsoDate } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
-const { mapConcurrent } = require('./fetch_concurrency');
+const { mapConcurrent, withRetry } = require('./fetch_concurrency');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.join(ROOT, 'generated', 'earnings_week.json');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'editorial', 'earnings_week_guidance.json');
 const DEFAULT_TIMEOUT_MS = 12000;
 const DEFAULT_GUIDANCE_CONCURRENCY = 3;
+const DEFAULT_SEC_RETRIES = 2;
+const DEFAULT_SEC_RETRY_DELAY_MS = 3000;
 const MAX_DOCUMENTS_PER_ROW = 2;
 const MAX_SNIPPETS_PER_DOCUMENT = 8;
 const MAX_SNIPPET_LENGTH = 620;
@@ -56,22 +58,59 @@ function fetchWithTimeout(fetchImpl, url, options) {
   }).finally(() => clearTimeout(timeout));
 }
 
+function headersToObject(headers = {}) {
+  if (!headers || typeof headers.forEach !== 'function') return headers || {};
+  const output = {};
+  headers.forEach((value, key) => {
+    output[key.toLowerCase()] = value;
+  });
+  return output;
+}
+
+function isRetryableSecStatus(status) {
+  return [408, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function isRetryableSecError(error) {
+  if (isRetryableSecStatus(error?.status || error?.statusCode)) return true;
+  if (error?.name === 'AbortError') return true;
+  return /(?:timed out|timeout|ECONNRESET|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|network)/i.test(String(error?.message || ''));
+}
+
+function secRetryOptions(options = {}) {
+  return {
+    retries: Number.isFinite(Number(options.secRetries))
+      ? Math.max(0, Math.floor(Number(options.secRetries)))
+      : DEFAULT_SEC_RETRIES,
+    delayMs: Number.isFinite(Number(options.secRetryDelayMs))
+      ? Math.max(0, Number(options.secRetryDelayMs))
+      : DEFAULT_SEC_RETRY_DELAY_MS,
+    sleep: options.sleep,
+    shouldRetryError: isRetryableSecError,
+    shouldRetryResult: (result) => isRetryableSecStatus(result?.status)
+  };
+}
+
 async function fetchText(url, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   if (typeof fetchImpl !== 'function') throw new Error('fetch is unavailable in this Node runtime.');
-  const started = Date.now();
-  const response = await fetchWithTimeout(fetchImpl, url, {
-    timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
-    headers: options.headers || {}
-  });
-  const body = await response.text();
-  return {
-    ok: response.ok,
-    status: response.status,
-    ms: Date.now() - started,
-    body,
-    error: response.ok ? '' : `HTTP ${response.status}`
-  };
+  return withRetry(async () => {
+    const started = Date.now();
+    const response = await fetchWithTimeout(fetchImpl, url, {
+      timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS,
+      headers: options.headers || {}
+    });
+    const body = await response.text();
+    const headers = headersToObject(response.headers);
+    return {
+      ok: response.ok,
+      status: response.status,
+      ms: Date.now() - started,
+      headers,
+      body,
+      error: response.ok ? '' : `HTTP ${response.status}`
+    };
+  }, secRetryOptions(options));
 }
 
 async function fetchJson(url, options = {}) {

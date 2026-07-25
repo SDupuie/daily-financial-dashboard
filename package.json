@@ -1,0 +1,10 @@
+{
+  "name": "daily-financial-dashboard",
+  "private": true,
+  "scripts": {
+    "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.61.0"
+  }
+}

@@ -229,7 +229,7 @@ const runs = payload.workflow_runs || [];
 const run = runs.find(r => r.head_sha === targetSha && r.name === wfName);
 if (!run) process.exit(2);
 const fields = [String(run.id), run.status || "", run.conclusion || "", run.html_url || ""];
-process.stdout.write(fields.join("\t"));
+process.stdout.write(fields.join("\u001f"));
 ' <<<"$runs_json"
 }
 
@@ -268,6 +268,7 @@ process.stdout.write(transient ? "yes" : "no");
 wait_for_pages_run_and_deploy() {
   local sha="$1"
   local attempt=1
+  local saw_run=0
 
   while [[ "$attempt" -le "$PAGES_POLL_ATTEMPTS" ]]; do
     local run_row=""
@@ -286,7 +287,8 @@ wait_for_pages_run_and_deploy() {
     fi
 
     local run_id run_status run_conclusion run_url
-    IFS=$'\t' read -r run_id run_status run_conclusion run_url <<<"$run_row"
+    IFS=$'\037' read -r run_id run_status run_conclusion run_url <<<"$run_row"
+    saw_run=1
     echo "Pages run ${run_id} status=${run_status} conclusion=${run_conclusion:-pending}" >&2
 
     if [[ "$run_status" != "completed" ]]; then
@@ -304,6 +306,11 @@ wait_for_pages_run_and_deploy() {
     LAST_PAGES_CONCLUSION="$run_conclusion"
     return 2
   done
+
+  if [[ "$saw_run" -eq 0 ]]; then
+    echo "Timed out waiting for Pages run to appear for ${sha}." >&2
+    return 3
+  fi
 
   echo "Timed out waiting for Pages run completion for ${sha}." >&2
   return 1
@@ -396,11 +403,20 @@ while true; do
     LAST_PAGES_CONCLUSION="stale_content"
   else
     wait_rc=$?
-    if [[ "$wait_rc" -ne 2 ]]; then
+    if [[ "$wait_rc" -eq 3 ]]; then
+      if verify_pages_content "$pages_url" "$expected_edition_id" "$expected_date" "$expected_edition"; then
+        break
+      fi
+      echo "Pages run never appeared and live content is still stale." >&2
+      LAST_PAGES_RUN_ID=""
+      LAST_PAGES_RUN_URL=""
+      LAST_PAGES_CONCLUSION="missing_run"
+    elif [[ "$wait_rc" -ne 2 ]]; then
       echo "Pages verification failed before completion check." >&2
       exit 1
+    else
+      echo "Pages run failed (${LAST_PAGES_CONCLUSION:-unknown}): ${LAST_PAGES_RUN_URL:-no-url}" >&2
     fi
-    echo "Pages run failed (${LAST_PAGES_CONCLUSION:-unknown}): ${LAST_PAGES_RUN_URL:-no-url}" >&2
   fi
 
   if [[ "$retrigger_count" -ge "$PAGES_RETRIGGER_MAX" ]]; then
@@ -408,7 +424,7 @@ while true; do
     exit 1
   fi
 
-  if [[ "${LAST_PAGES_CONCLUSION:-}" != "stale_content" ]] && ! run_has_transient_pages_fetch_failure "${LAST_PAGES_RUN_ID:-0}"; then
+  if [[ "${LAST_PAGES_CONCLUSION:-}" != "stale_content" && "${LAST_PAGES_CONCLUSION:-}" != "missing_run" ]] && ! run_has_transient_pages_fetch_failure "${LAST_PAGES_RUN_ID:-0}"; then
     echo "Pages failure does not match transient fetch pattern; manual review required." >&2
     exit 1
   fi

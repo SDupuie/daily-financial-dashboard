@@ -43,6 +43,11 @@ const {
   earningsCalendarNeedsBuild,
   validateEarningsWeekPayload
 } = require('./earnings_week');
+const {
+  earningsWeekZacksBrowserRuntimeFailure,
+  resolvePlaywrightModule,
+  zacksBrowserRuntimeFailureKind
+} = require('./earnings_week_build');
 const { writeEarningsGuidanceEvidence } = require('./earnings_week_guidance');
 const {
   applyMarketLensDecisions,
@@ -51,8 +56,10 @@ const {
   finalizeWeekAheadOutcomes,
   mergeWeekAheadPayload,
   normalizeMarketLensDecisions,
-  validateMarketLens,
-  validateWeekAheadPayload
+  prepareWeekAheadForEditorial,
+  validateWeekAheadPayload,
+  weekAheadMarketLensDecision,
+  weekAheadNeedsMarketLensEditorial
 } = require('./week_ahead_contract');
 const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
@@ -91,6 +98,8 @@ const NEWS_CANDIDATES_PATH = path.join(GENERATED_DIR, 'news_candidates.json');
 const SECTION_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const NEWS_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const EARNINGS_COMMAND_TIMEOUT_MS = 20 * 60_000;
+const ZACKS_BROWSER_INSTALL_NOTICE = 'Zacks Chromium missing; running npm run install:browsers before Prepare.';
+const ZACKS_BROWSER_INSTALL_FAILED_NOTICE = 'Zacks Chromium auto-repair failed; continuing Prepare.';
 const SCHEDULED_WINDOWS = {
   morning: { startMinutes: 7 * 60 + 45, endMinutes: 9 * 60 },
   afternoon: { startMinutes: 15 * 60 + 45, endMinutes: 17 * 60 }
@@ -523,6 +532,71 @@ function reportSectionFallback(section, mode, error) {
   process.stderr.write(`${section} preparation failed; continuing with ${mode} section fallback: ${error.message}\n`);
 }
 
+function shortDiagnostic(message) {
+  return String(message || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function zacksBrowserRepairAdvice(kind) {
+  if (kind === 'dependency_missing') return 'Run npm install, then npm run install:browsers.';
+  if (kind === 'browser_missing') return 'Run npm run install:browsers.';
+  return 'Run Prepare with escalated local command execution.';
+}
+
+function zacksBrowserOutcomeText(mode) {
+  return mode === 'retained_prior_facts'
+    ? 'Earnings retained prior Zacks facts'
+    : 'Earnings used backup providers';
+}
+
+function reportZacksBrowserFallbackWarning(earningsWeekPayload, write = (message) => process.stderr.write(message)) {
+  const failure = earningsWeekZacksBrowserRuntimeFailure(earningsWeekPayload);
+  if (!failure) return false;
+  const diagnostic = failure.kind === 'startup_failed' && failure.message
+    ? ` Diagnostic: ${shortDiagnostic(failure.message)}`
+    : '';
+  write(`Zacks Chromium unavailable; ${zacksBrowserOutcomeText(failure.mode)}. ${zacksBrowserRepairAdvice(failure.kind)}${diagnostic}\n`);
+  return true;
+}
+
+async function checkZacksBrowserRuntime({ resolvePlaywright = resolvePlaywrightModule } = {}) {
+  let browser = null;
+  try {
+    const playwright = resolvePlaywright();
+    browser = await playwright.chromium.launch({ headless: true });
+    return { ok: true, kind: '', message: '' };
+  } catch (error) {
+    return {
+      ok: false,
+      kind: zacksBrowserRuntimeFailureKind(error.message) || 'startup_failed',
+      message: error.message
+    };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+async function repairMissingZacksBrowserBeforePrepare({
+  checkBrowser = checkZacksBrowserRuntime,
+  installBrowsers = () => runCommand('npm', ['run', 'install:browsers'], { timeoutMs: EARNINGS_COMMAND_TIMEOUT_MS }),
+  write = (message) => process.stderr.write(message)
+} = {}) {
+  const status = await checkBrowser();
+  if (status.ok) return { ...status, repairAttempted: false, repairSucceeded: false };
+  if (status.kind !== 'browser_missing') {
+    const diagnostic = shortDiagnostic(status.message);
+    write(`Zacks Chromium unavailable; continuing Prepare. ${zacksBrowserRepairAdvice(status.kind)}${diagnostic ? ` Diagnostic: ${diagnostic}` : ''}\n`);
+    return { ...status, repairAttempted: false, repairSucceeded: false };
+  }
+  write(`${ZACKS_BROWSER_INSTALL_NOTICE}\n`);
+  try {
+    await installBrowsers();
+    return { ...status, repairAttempted: true, repairSucceeded: true };
+  } catch (error) {
+    write(`${ZACKS_BROWSER_INSTALL_FAILED_NOTICE} ${shortDiagnostic(error.message)}\n`);
+    return { ...status, repairAttempted: true, repairSucceeded: false, repairError: error.message };
+  }
+}
+
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
@@ -591,48 +665,14 @@ function earningsCalendarBuildDecision(args, {
   return { build: false, blocked: true, reason: 'scheduled_build_not_authorized' };
 }
 
-function weekAheadStagingNeedsRebuild(filePath = WEEK_AHEAD_PATH) {
-  if (!fs.existsSync(filePath)) return false;
-  try {
-    return validateWeekAheadPayload(readJson(filePath))?.length > 0;
-  } catch (_error) {
-    return true;
-  }
-}
-
-function weekAheadStagingMatchesRange(targetRange, filePath = WEEK_AHEAD_PATH) {
-  if (!targetRange?.from || !targetRange?.to || !fs.existsSync(filePath)) return false;
-  try {
-    const payload = readJson(filePath);
-    if (validateWeekAheadPayload(payload)?.length > 0) return false;
-    return rangesMatch(payload.range, targetRange);
-  } catch (_error) {
-    return false;
-  }
-}
-
-function weekAheadPreparationCommandArgs(args, canonicalWeekAhead, { filePath = WEEK_AHEAD_PATH } = {}) {
+function weekAheadPreparationCommandArgs(args, canonicalWeekAhead) {
   const targetRange = activeCalendarRange(args, canonicalWeekAhead?.range);
   if (!targetRange?.from || !targetRange?.to) throw new Error('Week Ahead target range is unavailable.');
-  const invalidPersistedWeekAhead = weekAheadStagingNeedsRebuild(filePath);
-  const authorizedRollover = Boolean((args.scheduled || args.rolloverCalendar) && args.calendarRolloverRange);
-  const unavailableRetry = requiresUnavailableRolloverRetry(canonicalWeekAhead);
-  const stagingMatchesTarget = weekAheadStagingMatchesRange(targetRange, filePath);
-  const commandArgs = ['scripts/fetch_week_ahead.js'];
-  // generated/week_ahead.json is an optimization source, not range authority:
-  // reuse it only when it already matches the canonical or authorized target.
-  if (authorizedRollover || unavailableRetry || invalidPersistedWeekAhead || !stagingMatchesTarget) {
-    commandArgs.push('--date', targetRange.from);
-  } else {
-    commandArgs.push('--refresh-values', '--input', filePath);
-  }
+  // TradingView owns both the slate and its values, so every Prepare refreshes
+  // the complete authorized range rather than freezing a prior schedule.
   return {
-    commandArgs,
-    targetRange,
-    invalidPersistedWeekAhead,
-    stagingMatchesTarget,
-    authorizedRollover,
-    unavailableRetry
+    commandArgs: ['scripts/fetch_week_ahead.js', '--date', targetRange.from],
+    targetRange
   };
 }
 
@@ -787,47 +827,6 @@ function prepareEarningsForEditorial(earnings) {
   // This cross-row check follows lifecycle cleanup so any cleared text becomes
   // an explicit editorial assignment in the handoff rather than a publication fallback.
   return { ...earnings, week: resetRepeatedEarningsNarrativeForEditorial(week) };
-}
-
-function weekAheadDayHasReleasedActuals(day) {
-  return (Array.isArray(day?.events) ? day.events : [])
-    .some((event) => event?.status === 'released' && String(event.actual || '').trim());
-}
-
-function weekAheadHasCloseReactionRows(day) {
-  return Array.isArray(day?.marketReaction?.rows) && day.marketReaction.rows.length > 0;
-}
-
-function weekAheadHasCurrentMarketLens(day) {
-  return day?.marketLensSource === 'editorial' && validateMarketLens(day.marketLens).length === 0;
-}
-
-function weekAheadNeedsMarketLensEditorial(day) {
-  return ['released_awaiting_close', 'close_available'].includes(day?.lifecycle)
-    && weekAheadDayHasReleasedActuals(day)
-    && !weekAheadHasCurrentMarketLens(day);
-}
-
-function weekAheadMarketLensDecision(day) {
-  if (weekAheadHasCurrentMarketLens(day)) return { date: day.date, action: 'replace', marketLens: day.marketLens };
-  if (weekAheadNeedsMarketLensEditorial(day)) return { date: day.date, action: 'pending_review' };
-  return { date: day.date, action: 'retain-generated' };
-}
-
-function weekAheadNeedsOutcomeEditorial(day) {
-  return day?.lifecycle === 'close_available'
-    && weekAheadDayHasReleasedActuals(day)
-    && weekAheadHasCloseReactionRows(day);
-}
-
-function prepareWeekAheadForEditorial(weekAhead) {
-  return {
-    ...weekAhead,
-    days: (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => {
-      if (!weekAheadNeedsOutcomeEditorial(day) || day?.outcome?.status === 'verified') return day;
-      return { ...day, outcome: { status: 'pending_review' } };
-    })
-  };
 }
 
 function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
@@ -1546,10 +1545,11 @@ function normalizeMarketLensReview(data, reviewManifest) {
   const normalized = normalizeMarketLensDecisions(data.weekAhead, submitted).map((decision) => {
     const day = eventDays.find((item) => item.date === decision.date);
     const submittedDecision = submittedByDate.get(decision.date);
-    const released = ['released_awaiting_close', 'close_available'].includes(day?.lifecycle);
-    // Released days with actuals need fresh editorial judgment; retaining
-    // generated pre-release copy becomes an explicit unavailable disposition.
-    if (released && weekAheadDayHasReleasedActuals(day) && decision.action === 'retain-generated') {
+    // Prepare owns the editorial assignment. Apply only publishes a safe
+    // unavailable disposition when that prepared assignment is left unresolved.
+    if (submittedDecision?.action === 'pending_review'
+      && weekAheadNeedsMarketLensEditorial(day)
+      && decision.action === 'retain-generated') {
       if (Array.isArray(reviewManifest.systemFallbacks)) {
         reviewManifest.systemFallbacks.push({
           section: 'market-lens',
@@ -2408,6 +2408,7 @@ async function main() {
   }
 
   reportPreparationStatus('preparing');
+  await repairMissingZacksBrowserBeforePrepare();
 
   const canonicalBase = loadDashboardBase(args.dashboard);
   args.baseDashboardHtml = canonicalBase.html;
@@ -2536,9 +2537,6 @@ async function main() {
   const canonicalWeekAhead = canonicalDashboardData.weekAhead || null;
   const weekAheadCommand = weekAheadPreparationCommandArgs(args, canonicalWeekAhead);
   const weekAheadRange = weekAheadCommand.targetRange;
-  if (weekAheadCommand.invalidPersistedWeekAhead) {
-    process.stderr.write('Week Ahead staging artifact is invalid under the current contract; rebuilding the active range.\n');
-  }
   const weekAheadPreparation = runWithSectionFallback(
     () => runCommand('node', weekAheadCommand.commandArgs),
     () => buildWeekAheadPreparationFallback(canonicalWeekAhead, weekAheadRange, { checkedAt }),
@@ -2610,6 +2608,7 @@ async function main() {
   } else {
     args.earningsWeekPayload = earningsPreparation.payload;
   }
+  reportZacksBrowserFallbackWarning(args.earningsWeekPayload);
 
   stageDashboardCandidate(args, patchDashboard(args));
   if (args.prepareEditorialAfterStaging) {
@@ -2662,14 +2661,15 @@ module.exports = {
   replaceJsonBlock,
   requiresUnavailableRolloverRetry,
   earningsStagingNeedsRebuild,
+  checkZacksBrowserRuntime,
+  repairMissingZacksBrowserBeforePrepare,
   readCurrentEarningsWeekArtifact,
   readCurrentFuturesModuleArtifact,
+  reportZacksBrowserFallbackWarning,
   activeCalendarRange,
   earningsTargetRange,
   earningsCalendarBuildDecision,
   isEmptyEarningsRecoveryWeek,
-  weekAheadStagingNeedsRebuild,
-  weekAheadStagingMatchesRange,
   weekAheadPreparationCommandArgs,
   runCommand,
   runWithSectionFallback,

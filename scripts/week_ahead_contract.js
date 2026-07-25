@@ -1,11 +1,9 @@
 const { isDeepStrictEqual } = require('util');
 const TIME_ZONE = 'America/Chicago';
 const SOURCE_TIME_ZONE = 'America/New_York';
-const SCHEMA_VERSION = 4;
-// These source labels are serialized into the dashboard, so they are contract
-// constants rather than display copy that a fetcher or cache may freely alter.
-const FX_MACRO_PROVIDER = 'FXMacroData';
-const FX_MACRO_ENDPOINT = '/v1/announcements/{currency}/{indicator} + /v1/predictions/{currency}/{indicator}';
+const SCHEMA_VERSION = 5;
+const TRADINGVIEW_PROVIDER = 'TradingView Economic Calendar';
+const TRADINGVIEW_ENDPOINT = 'https://economic-calendar.tradingview.com/events';
 const {
   addDays,
   displayDatesForRange: calendarDisplayDatesForRange,
@@ -212,6 +210,7 @@ const DEFAULT_PATH_BY_EVENT = {
   'consumer-confidence': 'consumer-demand',
   'michigan-sentiment': 'consumer-demand',
   gdp: 'broad-growth',
+  'gdp-price-index': 'consumer-inflation',
   'durable-goods': 'manufacturing',
   'industrial-production': 'manufacturing',
   'factory-orders': 'manufacturing',
@@ -239,71 +238,49 @@ function normalizeName(value) {
     .toLowerCase();
 }
 
-function releaseRule({ key, names, name, agency, period, impact, variants }) {
+function releaseRule({ key, match, name, agency }) {
   const lensPath = DEFAULT_PATH_BY_EVENT[key];
   if (!DEFAULT_MARKET_LENS_PATHS[lensPath]) throw new Error(`Missing default Market Lens path for ${key}.`);
-  return {
-    key,
-    names: names.map(normalizeName),
-    name,
-    agency,
-    period,
-    impact,
-    lensPath,
-    variants: variants || null
-  };
+  return { key, match, name, agency, lensPath };
 }
 
 const EVENT_RULES = [
-  releaseRule({
-    key: 'cpi', names: ['CPI'], name: 'Consumer Price Index', agency: 'BLS', impact: 'high',
-    variants: [{ key: 'mom', period: 'MoM' }, { key: 'yoy', period: 'YoY' }]
-  }),
-  releaseRule({
-    key: 'core-cpi', names: ['Core CPI'], name: 'Core Consumer Price Index', agency: 'BLS', impact: 'high',
-    variants: [{ key: 'mom', period: 'MoM' }, { key: 'yoy', period: 'YoY' }]
-  }),
-  releaseRule({
-    key: 'ppi', names: ['PPI'], name: 'Producer Price Index', agency: 'BLS', impact: 'medium',
-    variants: [{ key: 'yoy', period: 'YoY' }, { key: 'mom', period: 'MoM' }]
-  }),
-  releaseRule({
-    key: 'core-ppi', names: ['Core PPI'], name: 'Core Producer Price Index', agency: 'BLS', impact: 'medium',
-    variants: [{ key: 'mom', period: 'MoM' }, { key: 'yoy', period: 'YoY' }]
-  }),
-  releaseRule({ key: 'pce', names: ['PCE Price Index'], name: 'PCE Price Index', agency: 'BEA', period: 'YoY', impact: 'high' }),
-  releaseRule({ key: 'core-pce', names: ['Core PCE Price Index'], name: 'Core PCE Price Index', agency: 'BEA', period: 'YoY', impact: 'high' }),
-  releaseRule({ key: 'nonfarm-payrolls', names: ['Nonfarm Payrolls'], name: 'Nonfarm Payrolls', agency: 'BLS', period: 'Monthly', impact: 'high' }),
-  releaseRule({ key: 'unemployment-rate', names: ['Unemployment Rate'], name: 'Unemployment Rate', agency: 'BLS', period: 'Monthly', impact: 'high' }),
-  releaseRule({ key: 'average-hourly-earnings', names: ['Average Hourly Earnings'], name: 'Average Hourly Earnings', agency: 'BLS', period: 'YoY', impact: 'high' }),
-  releaseRule({ key: 'adp-employment', names: ['ADP Employment Change'], name: 'ADP Employment Change', agency: 'ADP', period: 'Monthly', impact: 'medium' }),
-  releaseRule({ key: 'jobless-claims', names: ['Initial Jobless Claims'], name: 'Initial Jobless Claims', agency: 'DOL', period: 'Weekly', impact: 'medium' }),
-  releaseRule({ key: 'jolts', names: ['JOLTs Job Openings', 'JOLTS Job Openings'], name: 'JOLTS Job Openings', agency: 'BLS', period: 'Monthly', impact: 'medium' }),
-  releaseRule({ key: 'retail-sales', names: ['Retail Sales'], name: 'Retail Sales', agency: 'Census', period: 'MoM', impact: 'high' }),
-  releaseRule({ key: 'core-retail-sales', names: ['Core Retail Sales'], name: 'Core Retail Sales', agency: 'Census', period: 'MoM', impact: 'medium' }),
-  releaseRule({
-    key: 'gdp', names: ['GDP Growth Rate', 'GDP Price Index'], name: 'Gross Domestic Product', agency: 'BEA', impact: 'high',
-    variants: [{ key: 'level', period: 'Level' }, { key: 'growth', period: 'QoQ SAAR' }]
-  }),
-  releaseRule({ key: 'durable-goods', names: ['Durable Goods Orders'], name: 'Durable Goods Orders', agency: 'Census', period: 'MoM', impact: 'medium' }),
-  releaseRule({ key: 'industrial-production', names: ['Industrial Production'], name: 'Industrial Production', agency: 'Federal Reserve', period: 'MoM', impact: 'medium' }),
-  releaseRule({ key: 'factory-orders', names: ['Factory Orders'], name: 'Factory Orders', agency: 'Census', period: 'MoM', impact: 'low' }),
-  releaseRule({ key: 'ism-manufacturing', names: ['ISM Manufacturing PMI'], name: 'ISM Manufacturing', agency: 'ISM', period: 'Index', impact: 'high' }),
-  releaseRule({ key: 'ism-services', names: ['ISM Non-Manufacturing PMI', 'ISM Services PMI'], name: 'ISM Services', agency: 'ISM', period: 'Index', impact: 'high' }),
-  releaseRule({ key: 'empire-state', names: ['NY Empire State Manufacturing Index'], name: 'Empire State Manufacturing', agency: 'New York Fed', period: 'Index', impact: 'medium' }),
-  releaseRule({ key: 'philly-fed', names: ['Philadelphia Fed Manufacturing Index'], name: 'Philadelphia Fed Manufacturing', agency: 'Philadelphia Fed', period: 'Index', impact: 'medium' }),
-  releaseRule({ key: 'consumer-confidence', names: ['CB Consumer Confidence'], name: 'Consumer Confidence', agency: 'Conference Board', period: 'Index', impact: 'medium' }),
-  releaseRule({ key: 'michigan-sentiment', names: ['Michigan Consumer Sentiment'], name: 'University of Michigan Sentiment', agency: 'University of Michigan', period: 'Index', impact: 'medium' }),
-  releaseRule({ key: 'housing-starts', names: ['Housing Starts'], name: 'Housing Starts', agency: 'Census', period: 'Annualized', impact: 'low' }),
-  releaseRule({ key: 'building-permits', names: ['Building Permits'], name: 'Building Permits', agency: 'Census', period: 'Annualized', impact: 'low' }),
-  releaseRule({ key: 'existing-home-sales', names: ['Existing Home Sales'], name: 'Existing Home Sales', agency: 'NAR', period: 'Annualized', impact: 'low' }),
-  releaseRule({ key: 'new-home-sales', names: ['New Home Sales'], name: 'New Home Sales', agency: 'Census', period: 'Annualized', impact: 'low' }),
-  releaseRule({ key: 'trade-balance', names: ['Trade Balance'], name: 'Trade Balance', agency: 'BEA', period: 'Monthly', impact: 'medium' }),
-  releaseRule({ key: 'federal-budget', names: ['Federal Budget Balance'], name: 'Federal Budget Balance', agency: 'Treasury', period: 'Monthly', impact: 'low' }),
-  releaseRule({ key: 'crude-oil-inventories', names: ['Crude Oil Inventories'], name: 'EIA Crude Oil Inventories', agency: 'EIA', period: 'Weekly', impact: 'low' }),
-  releaseRule({ key: 'opec-meeting', names: ['OPEC Meeting'], name: 'OPEC Meeting', agency: 'OPEC', period: 'Policy', impact: 'medium' }),
-  releaseRule({ key: 'fomc-minutes', names: ['FOMC Meeting Minutes'], name: 'FOMC Minutes', agency: 'Federal Reserve', period: 'Policy', impact: 'high' }),
-  releaseRule({ key: 'fed-rate-decision', names: ['Fed Interest Rate Decision', 'FOMC Statement'], name: 'Federal Reserve Decision', agency: 'Federal Reserve', period: 'Policy', impact: 'high' })
+  // These rules canonicalize familiar families and Market Lens channels. They
+  // do not decide inclusion or impact; TradingView owns both of those facts.
+  releaseRule({ key: 'core-cpi', match: /core (?:consumer price index|cpi)/i, name: 'Core Consumer Price Index', agency: 'BLS' }),
+  releaseRule({ key: 'cpi', match: /(?:consumer price index|\bcpi\b)/i, name: 'Consumer Price Index', agency: 'BLS' }),
+  releaseRule({ key: 'core-ppi', match: /core (?:producer price index|ppi)/i, name: 'Core Producer Price Index', agency: 'BLS' }),
+  releaseRule({ key: 'ppi', match: /(?:producer price index|\bppi\b)/i, name: 'Producer Price Index', agency: 'BLS' }),
+  releaseRule({ key: 'core-pce', match: /core pce/i, name: 'Core PCE Price Index', agency: 'BEA' }),
+  releaseRule({ key: 'pce', match: /\bpce (?:price|prices)/i, name: 'PCE Price Index', agency: 'BEA' }),
+  releaseRule({ key: 'nonfarm-payrolls', match: /nonfarm payroll/i, name: 'Nonfarm Payrolls', agency: 'BLS' }),
+  releaseRule({ key: 'unemployment-rate', match: /unemployment rate/i, name: 'Unemployment Rate', agency: 'BLS' }),
+  releaseRule({ key: 'average-hourly-earnings', match: /average hourly earnings/i, name: 'Average Hourly Earnings', agency: 'BLS' }),
+  releaseRule({ key: 'adp-employment', match: /\badp employment/i, name: 'ADP Employment Change', agency: 'ADP' }),
+  releaseRule({ key: 'jobless-claims', match: /initial jobless claims/i, name: 'Initial Jobless Claims', agency: 'DOL' }),
+  releaseRule({ key: 'jolts', match: /jolts.*job openings|job openings.*jolts/i, name: 'JOLTS Job Openings', agency: 'BLS' }),
+  releaseRule({ key: 'core-retail-sales', match: /retail sales.*(?:ex autos|excluding autos|control group)/i, name: 'Core Retail Sales', agency: 'Census' }),
+  releaseRule({ key: 'retail-sales', match: /\bretail sales\b/i, name: 'Retail Sales', agency: 'Census' }),
+  releaseRule({ key: 'gdp-price-index', match: /\bgdp price index\b/i, name: 'GDP Price Index', agency: 'BEA' }),
+  releaseRule({ key: 'gdp', match: /\bgdp (?:growth|price|sales)/i, name: 'Gross Domestic Product', agency: 'BEA' }),
+  releaseRule({ key: 'durable-goods', match: /durable goods orders ex transp/i, name: 'Core Durable Goods Orders', agency: 'Census' }),
+  releaseRule({ key: 'durable-goods', match: /durable goods orders/i, name: 'Durable Goods Orders', agency: 'Census' }),
+  releaseRule({ key: 'industrial-production', match: /industrial production/i, name: 'Industrial Production', agency: 'Federal Reserve' }),
+  releaseRule({ key: 'factory-orders', match: /factory orders/i, name: 'Factory Orders', agency: 'Census' }),
+  releaseRule({ key: 'ism-manufacturing', match: /manufacturing pmi|manufacturing index/i, name: null, agency: null }),
+  releaseRule({ key: 'ism-services', match: /services pmi|non-manufacturing pmi/i, name: null, agency: null }),
+  releaseRule({ key: 'consumer-confidence', match: /consumer confidence/i, name: 'Consumer Confidence', agency: null }),
+  releaseRule({ key: 'michigan-sentiment', match: /michigan consumer sentiment/i, name: 'University of Michigan Sentiment', agency: 'University of Michigan' }),
+  releaseRule({ key: 'housing-starts', match: /housing starts/i, name: 'Housing Starts', agency: 'Census' }),
+  releaseRule({ key: 'building-permits', match: /building permits/i, name: 'Building Permits', agency: 'Census' }),
+  releaseRule({ key: 'existing-home-sales', match: /existing home sales/i, name: 'Existing Home Sales', agency: 'NAR' }),
+  releaseRule({ key: 'new-home-sales', match: /new home sales/i, name: 'New Home Sales', agency: 'Census' }),
+  releaseRule({ key: 'trade-balance', match: /trade balance/i, name: 'Trade Balance', agency: null }),
+  releaseRule({ key: 'federal-budget', match: /federal budget|government budget/i, name: 'Federal Budget Balance', agency: 'Treasury' }),
+  releaseRule({ key: 'crude-oil-inventories', match: /(?:eia|api).*?(?:crude oil|oil stock)/i, name: null, agency: null }),
+  releaseRule({ key: 'opec-meeting', match: /\bopec\b/i, name: null, agency: 'OPEC' }),
+  releaseRule({ key: 'fomc-minutes', match: /fomc.*minutes|fed.*minutes/i, name: 'FOMC Minutes', agency: 'Federal Reserve' }),
+  releaseRule({ key: 'fed-rate-decision', match: /fed (?:interest )?rate decision|fomc statement|fed press conference|federal reserve.*(?:speech|speaks|testimony)/i, name: null, agency: 'Federal Reserve' }),
 ];
 
 function dateParts(date, timeZone, options = {}) {
@@ -371,7 +348,6 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
   if (sameRange) {
     const week = applyWeekAheadLifecycle(structuredClone(canonicalWeek), null, { now: new Date(timestamp) });
     if (week.source) {
-      delete week.source.timeInterpretation;
       week.source.status = 'cached';
     }
     week.availability = {
@@ -386,12 +362,11 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
     range,
     generatedAt: timestamp,
     source: {
-      provider: FX_MACRO_PROVIDER,
-      endpoint: FX_MACRO_ENDPOINT,
+      provider: TRADINGVIEW_PROVIDER,
+      endpoint: TRADINGVIEW_ENDPOINT,
       status: 'unavailable',
       fetchedAt: timestamp
     },
-    officialSchedule: { events: [], authorities: [] },
     days: targetDates.map((date) => {
       const closureName = MARKET_CLOSURES[Number(date.slice(0, 4))]?.[date] || '';
       return {
@@ -404,9 +379,9 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
     sourceSummary: {
       returnedEvents: 0,
       includedEvents: 0,
-      officialScheduledEvents: 0,
-      officialConflicts: 0,
-      omittedRecognizedEvents: 0
+      highImpactEvents: 0,
+      mediumImpactEvents: 0,
+      omittedLowImpactEvents: 0
     },
     availability: {
       status: 'unavailable',
@@ -417,177 +392,127 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
   return { mode: 'unavailable', week };
 }
 
-function variantsForRule(rule) {
-  return rule.variants
-    ? rule.variants.map((variant) => ({ key: `${rule.key}-${variant.key}`, period: variant.period }))
-    : [{ key: rule.key, period: rule.period }];
-}
-
-function ruleForKey(key) {
-  return EVENT_RULES.find((rule) => rule.key === key) || null;
-}
-
-// These mappings are intentionally explicit: an indicator is used only when
-// FXMacroData labels both its announcement series and forecast series for the
-// exact displayed variant. This prevents row-order guesses for CPI/PPI.
-const FX_MACRO_VALUE_RULES = {
-  'cpi-yoy': { announcementIndicator: 'inflation', predictionIndicator: 'inflation', field: 'val', unit: 'percent' },
-  'cpi-mom': { announcementIndicator: 'inflation', predictionIndicator: 'inflation_mom', field: 'val_mom', unit: 'percent' },
-  'core-cpi-yoy': { announcementIndicator: 'core_inflation', predictionIndicator: 'core_inflation', field: 'val', unit: 'percent' },
-  'core-cpi-mom': { announcementIndicator: 'core_inflation', predictionIndicator: 'core_inflation_mom', field: 'val_mom', unit: 'percent' },
-  'ppi-yoy': { announcementIndicator: 'ppi', predictionIndicator: 'ppi', field: 'val', unit: 'percent' },
-  'ppi-mom': { announcementIndicator: 'ppi', predictionIndicator: 'ppi_mom', field: 'val_mom', unit: 'percent' },
-  'pce': { announcementIndicator: 'pce', predictionIndicator: 'pce', field: 'val', unit: 'percent' },
-  'core-pce': { announcementIndicator: 'core_pce', predictionIndicator: 'core_pce', field: 'val', unit: 'percent' },
-  'nonfarm-payrolls': { announcementIndicator: 'non_farm_payrolls', predictionIndicator: 'non_farm_payrolls', field: 'val', unit: 'thousands' },
-  'unemployment-rate': { announcementIndicator: 'unemployment', predictionIndicator: 'unemployment', field: 'val', unit: 'percent' },
-  'average-hourly-earnings': { announcementIndicator: 'average_hourly_earnings', predictionIndicator: 'average_hourly_earnings', field: 'val', unit: 'percent' },
-  'jobless-claims': { announcementIndicator: 'initial_jobless_claims', predictionIndicator: 'initial_jobless_claims', field: 'val', unit: 'thousands' },
-  jolts: { announcementIndicator: 'job_openings', predictionIndicator: 'job_openings', field: 'val', unit: 'thousandsAsMillions' },
-  'retail-sales': { announcementIndicator: 'retail_sales', predictionIndicator: 'retail_sales', field: 'val', unit: 'percent' },
-  'gdp-level': { announcementIndicator: 'gdp', predictionIndicator: 'gdp', field: 'val', unit: 'usdBillions' },
-  'gdp-growth': { announcementIndicator: 'gdp_growth_qoq_saar', predictionIndicator: 'gdp_growth_qoq_saar', field: 'val', unit: 'percent' },
-  'durable-goods': { announcementIndicator: 'durable_goods_orders', predictionIndicator: 'durable_goods_orders', field: 'val', unit: 'percent' },
-  'housing-starts': { announcementIndicator: 'housing_starts', predictionIndicator: 'housing_starts', field: 'val', unit: 'millions' },
-  'building-permits': { announcementIndicator: 'building_permits', predictionIndicator: 'building_permits', field: 'val', unit: 'millions' },
-  'trade-balance': { announcementIndicator: 'trade_balance', predictionIndicator: 'trade_balance', field: 'val', unit: 'usdMillions' },
-  'fed-rate-decision': { announcementIndicator: 'policy_rate_midpoint', predictionIndicator: 'policy_rate_midpoint', field: 'val', unit: 'percent' }
-};
-
 function numberLabel(value, maximumFractionDigits = 1) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return null;
   return new Intl.NumberFormat('en-US', { maximumFractionDigits }).format(numeric);
 }
 
-function formatFxMacroValue(value, unit) {
+function formatTradingViewValue(value, row) {
   if (value === null || value === undefined || value === '') return null;
-  if (unit === 'percent') {
-    const label = numberLabel(value, 1);
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value).trim() || null;
+  const title = String(row?.title || '');
+  const unit = String(row?.unit || '').trim()
+    || (/\b(?:MoM|YoY|QoQ|WoW)\b|mortgage rate/i.test(title) ? '%' : '');
+  const scale = String(row?.scale || '').trim()
+    || (/(?:crude oil|gasoline|distillate|heating oil) stocks? change/i.test(title) ? 'M' : '');
+  if (unit === '%') {
+    const label = numberLabel(numeric, 3);
     return label === null ? null : `${label}%`;
   }
-  if (unit === 'thousands') {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return null;
-    return `${numberLabel(numeric / 1000, 1)}K`;
-  }
-  if (unit === 'millions') {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return null;
-    const label = numberLabel(Math.abs(numeric) >= 100 ? numeric / 1000 : numeric, 3);
-    return label === null ? null : `${label}M`;
-  }
-  if (unit === 'thousandsAsMillions') {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return null;
-    const label = numberLabel(numeric / 1000, 1);
-    return label === null ? null : `${label}M`;
-  }
-  if (unit === 'usdBillions') {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return null;
+  if (unit === '$') {
     const absolute = Math.abs(numeric);
-    const label = absolute >= 1000 ? numberLabel(absolute / 1000, 2) : numberLabel(absolute, 1);
+    const label = numberLabel(absolute, 3);
     if (label === null) return null;
-    return `${numeric < 0 ? '-' : ''}$${label}${absolute >= 1000 ? 'T' : 'B'}`;
+    return `${numeric < 0 ? '-' : ''}$${label}${scale}`;
   }
-  if (unit === 'usdMillions') {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return null;
-    const absolute = Math.abs(numeric);
-    const label = absolute >= 1000 ? numberLabel(absolute / 1000, 1) : numberLabel(absolute, 0);
-    if (label === null) return null;
-    return `${numeric < 0 ? '-' : ''}$${label}${absolute >= 1000 ? 'B' : 'M'}`;
+  const label = numberLabel(numeric, 3);
+  return label === null ? null : `${label}${scale}`;
+}
+
+function canonicalAgency(row, rule) {
+  if (rule?.agency) return rule.agency;
+  const source = String(row?.source || '').trim();
+  if (/bureau of (?:labou?r )?statistics/i.test(source)) return 'BLS';
+  if (/bureau of economic(?:s)? analysis/i.test(source)) return 'BEA';
+  if (/census bureau/i.test(source)) return 'Census';
+  if (/department of labou?r/i.test(source)) return 'DOL';
+  if (/energy information administration/i.test(source)) return 'EIA';
+  if (/automatic data processing/i.test(source)) return 'ADP';
+  if (/institute for supply management/i.test(source)) return 'ISM';
+  if (/federal reserve bank of dallas/i.test(source)) return 'Dallas Fed';
+  if (/federal reserve bank of richmond/i.test(source)) return 'Richmond Fed';
+  if (/federal reserve/i.test(source)) return 'Federal Reserve';
+  if (source) return source;
+  if (/consumer confidence/i.test(String(row?.title || ''))) return 'Conference Board';
+  return 'Economic calendar';
+}
+
+function eventRule(row) {
+  const haystack = `${row?.title || ''} ${row?.indicator || ''}`;
+  return EVENT_RULES.find((rule) => rule.match?.test(haystack)) || null;
+}
+
+function canonicalTitle(row, rule) {
+  if (rule?.name) return rule.name;
+  return String(row?.title || row?.indicator || 'Economic Event')
+    .replace(/\s+(?:MoM|YoY|QoQ|WoW)(?:\s+(?:Adv|Prel|Final|Flash))?$/i, '')
+    .replace(/\s+(?:Adv|Prel|Final|Flash)$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function eventPeriod(row) {
+  const title = String(row?.title || '');
+  const measure = title.match(/\b(MoM|YoY|QoQ|WoW)\b/i)?.[1];
+  if (measure) return measure[0].toUpperCase() + measure.slice(1);
+  if (/weekly|jobless claims|eia |api crude/i.test(title)) return 'Weekly';
+  if (/press conference|speech|speaks|testimony|minutes|meeting/i.test(title)) return 'Policy';
+  if (/rate decision/i.test(title)) return 'Policy';
+  if (/pmi|index|confidence|sentiment/i.test(title)) return 'Index';
+  if (row?.scale === 'K' || row?.scale === 'M') return 'Level';
+  return 'Release';
+}
+
+function inferLensPath(row, rule) {
+  if (rule?.lensPath) return rule.lensPath;
+  const text = normalizeName(`${row?.title || ''} ${row?.indicator || ''} ${row?.source || ''}`);
+  if (/fed|fomc|interest rate|central bank|powell|testimony|speech/.test(text)) return 'policy';
+  if (/producer price|\bppi\b/.test(text)) return 'producer-inflation';
+  if (/consumer price|\bcpi\b|pce|inflation/.test(text)) return 'consumer-inflation';
+  if (/employment|payroll|jobless|jolts|labor|labour|wage/.test(text)) return 'labor';
+  if (/retail|personal income|personal spending|consumer confidence|consumer sentiment/.test(text)) return 'consumer-demand';
+  if (/manufactur|industrial|factory|durable|regional fed/.test(text)) return 'manufacturing';
+  if (/services pmi|non-manufacturing/.test(text)) return 'services';
+  if (/housing|home sale|mortgage|building permit/.test(text)) return 'housing';
+  if (/eia|api crude|oil stock|gasoline|energy/.test(text)) return 'energy';
+  if (/trade balance|imports|exports/.test(text)) return 'external';
+  if (/budget|treasury auction|bill auction|note auction|bond auction/.test(text)) return 'fiscal';
+  return 'broad-growth';
+}
+
+function valuesApplyToEvent(row) {
+  return !/press conference|speech|speaks|testimony|hearing|minutes|meeting/i.test(String(row?.title || ''));
+}
+
+function tradingViewEvent(row) {
+  if (row?.id === null || row?.id === undefined || String(row.id).trim() === '') {
+    throw new Error('TradingView calendar event is missing its stable identity.');
   }
-  return numberLabel(value, 2);
-}
-
-function releaseDateTime(release) {
-  return `${release.date}T${release.time}`;
-}
-
-function localDateTime(row) {
-  return String(row?.announcement_datetime_local || '').slice(0, 16);
-}
-
-function selectForecast(predictions) {
-  if (!Array.isArray(predictions)) return null;
-  const consensus = predictions.find((item) => item?.prediction_type === 'market_consensus');
-  if (consensus) return { prediction: consensus, type: 'consensus' };
-  const centralBankNowcast = predictions.find((item) => item?.prediction_type === 'central_bank_forecast');
-  if (centralBankNowcast) return { prediction: centralBankNowcast, type: 'nowcast' };
-  const providerModel = predictions.find((item) => item?.prediction_type === 'fxmacrodata');
-  return providerModel ? { prediction: providerModel, type: 'model' } : null;
-}
-
-function fxMacroValueRequests(officialSchedule) {
-  const keys = new Set();
-  for (const release of officialSchedule?.events || []) {
-    for (const ruleKey of release.keys || []) {
-      const rule = ruleForKey(ruleKey);
-      if (!rule) continue;
-      for (const variant of variantsForRule(rule)) keys.add(variant.key);
-    }
-  }
-  const selected = [...keys].map((key) => FX_MACRO_VALUE_RULES[key]).filter(Boolean);
+  const instant = new Date(String(row?.date || ''));
+  if (Number.isNaN(instant.getTime())) throw new Error(`TradingView event ${row?.id || 'unknown'} has an invalid date.`);
+  const local = dateParts(instant, SOURCE_TIME_ZONE, { time: true });
+  const rule = eventRule(row);
+  const actual = formatTradingViewValue(row.actual, row);
+  const forecast = formatTradingViewValue(row.forecast, row);
+  const previous = formatTradingViewValue(row.previous, row);
+  const valuesApplicable = valuesApplyToEvent(row);
   return {
-    announcements: [...new Set(selected.map((item) => item.announcementIndicator))],
-    predictions: [...new Set(selected.map((item) => item.predictionIndicator))]
-  };
-}
-
-function fxMacroValuesForSchedule(officialSchedule, valuePayload) {
-  const announcements = valuePayload?.announcements || {};
-  const predictions = valuePayload?.predictions || {};
-  const values = new Map();
-  for (const release of officialSchedule?.events || []) {
-    for (const ruleKey of release.keys || []) {
-      const rule = ruleForKey(ruleKey);
-      if (!rule) continue;
-      for (const variant of variantsForRule(rule)) {
-        const spec = FX_MACRO_VALUE_RULES[variant.key];
-        if (!spec) continue;
-        const predictionRows = Array.isArray(predictions[spec.predictionIndicator]?.data) ? predictions[spec.predictionIndicator].data : [];
-        const targetPrediction = predictionRows.find((row) => localDateTime(row) === releaseDateTime(release));
-        if (!targetPrediction?.announcement_id) continue;
-        const announcementRows = Array.isArray(announcements[spec.announcementIndicator]?.data) ? announcements[spec.announcementIndicator].data : [];
-        const targetActual = announcementRows.find((row) => row?.announcement_id === targetPrediction.announcement_id) || null;
-        const priorActual = announcementRows
-          .filter((row) => Number(row?.announcement_datetime) < Number(targetPrediction.announcement_datetime))
-          .sort((left, right) => Number(right.announcement_datetime) - Number(left.announcement_datetime))[0] || null;
-        const selectedForecast = selectForecast(targetPrediction.predictions);
-        const value = {
-          actual: formatFxMacroValue(targetActual?.[spec.field], spec.unit),
-          forecast: formatFxMacroValue(selectedForecast?.prediction?.predicted_value, spec.unit),
-          forecastType: selectedForecast?.type || null,
-          forecastSource: selectedForecast?.prediction?.prediction_source_label || null,
-          previous: formatFxMacroValue(priorActual?.[spec.field], spec.unit)
-        };
-        if (value.actual || value.forecast || value.previous) values.set(`${release.date}:${release.time}:${variant.key}`, value);
-      }
-    }
-  }
-  return values;
-}
-
-function officialEvent(release, rule, variant, values) {
-  const actual = values?.actual || null;
-  const forecast = values?.forecast || null;
-  return {
-    id: `${release.date}:${release.time}:${variant.key}`,
-    time: release.time,
-    name: rule.name,
-    agency: rule.agency,
-    period: variant.period,
-    impact: rule.impact,
-    actual,
-    forecast,
-    forecastType: values?.forecastType || null,
-    forecastSource: values?.forecastSource || null,
-    previous: values?.previous || null,
-    scheduleSource: release.authorityName,
-    valueSource: values ? 'FXMacroData' : null,
-    verification: values ? 'official-schedule-fxmacrodata-values' : 'official-schedule-values-unavailable',
+    date: local.isoDate,
+    sortMinutes: local.hour * 60 + local.minute,
+    id: `tradingview:${String(row.id)}`,
+    time: `${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`,
+    name: canonicalTitle(row, rule),
+    agency: canonicalAgency(row, rule),
+    period: eventPeriod(row),
+    impact: row.importance === 1 ? 'high' : 'medium',
+    actual: valuesApplicable ? actual : null,
+    forecast: valuesApplicable ? forecast : null,
+    previous: valuesApplicable ? previous : null,
+    forecastType: valuesApplicable && forecast !== null ? 'consensus' : null,
+    valuesApplicable,
+    lensPath: inferLensPath(row, rule),
     surprise: comparableWeekAheadSurprise(actual, forecast)
   };
 }
@@ -622,12 +547,21 @@ function weekAheadDayFingerprint(day) {
     event.actual,
     event.forecast,
     event.previous,
+    event.status,
     event.forecastType,
-    event.forecastSource,
-    event.scheduleSource,
-    event.valueSource,
-    event.verification
+    event.valuesApplicable,
+    event.lensPath
   ]));
+}
+
+function weekAheadDayHasCompletedEvent(day) {
+  return (Array.isArray(day?.events) ? day.events : [])
+    .some((event) => event?.status === 'released'
+      && (event?.valuesApplicable === false || String(event.actual || '').trim()));
+}
+
+function weekAheadHasCloseReactionRows(day) {
+  return Array.isArray(day?.marketReaction?.rows) && day.marketReaction.rows.length > 0;
 }
 
 function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = {}) {
@@ -640,13 +574,16 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
   const localNowDate = `${nowPart('year')}-${nowPart('month')}-${nowPart('day')}`;
   const days = (Array.isArray(week?.days) ? week.days : []).map((sourceDay) => {
     const day = { ...sourceDay };
-    day.events = (Array.isArray(sourceDay.events) ? sourceDay.events : []).map((sourceEvent) => {
+    const sourceEvents = Array.isArray(sourceDay.events) ? sourceDay.events : [];
+    day.events = sourceEvents.map((sourceEvent) => {
       const event = { ...sourceEvent };
       const releaseInstant = weekAheadReleaseInstant(day.date, event.time, week?.range?.marketTimeZone || SOURCE_TIME_ZONE);
       const hasActual = event.actual !== null && event.actual !== undefined && event.actual !== '';
       if (hasActual && releaseInstant && now < releaseInstant) event.actual = null;
       const hasReleasedActual = event.actual !== null && event.actual !== undefined && event.actual !== '';
-      event.status = hasReleasedActual ? 'released' : releaseInstant && now >= releaseInstant ? 'awaiting_actual' : 'scheduled';
+      event.status = hasReleasedActual || (event.valuesApplicable === false && releaseInstant && now >= releaseInstant)
+        ? 'released'
+        : releaseInstant && now >= releaseInstant ? 'awaiting_actual' : 'scheduled';
       event.surprise = comparableWeekAheadSurprise(event.actual, event.forecast);
       return event;
     });
@@ -655,6 +592,17 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
       delete day.marketReaction;
       delete day.outcome;
       return day;
+    }
+    const newlyReleasedForMarketLens = day.events.some((event, index) => {
+      const priorStatus = sourceEvents[index]?.status;
+      return priorStatus !== 'released'
+        && event.status === 'released'
+        && (event.valuesApplicable === false || String(event.actual || '').trim());
+    });
+    if (newlyReleasedForMarketLens && day.marketLensSource === 'editorial') {
+      day.marketLens = defaultMarketLensForEvents(day.events);
+      day.marketLensSource = 'generated';
+      delete day.marketLensDisposition;
     }
 
     const released = day.events.some((event) => event.status === 'released');
@@ -729,7 +677,8 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
         delete next.marketLensDisposition;
       }
     }
-    if (next?.lifecycle !== 'close_available') return next;
+    if (!weekAheadNeedsOutcomeEditorial(next)) return next;
+    if (next.outcome?.status === 'verified') return next;
     if (next.outcome === undefined) {
       next.outcome = {
         status: 'pending_review'
@@ -751,21 +700,15 @@ function finalizeWeekAheadOutcomes(week, { now = new Date() } = {}) {
   return { ...week, days };
 }
 
-function ruleForEventId(id) {
-  const variantKey = String(id || '').split(':').slice(3).join(':');
-  return EVENT_RULES.find((rule) => variantKey === rule.key || variantKey.startsWith(`${rule.key}-`)) || null;
-}
-
 function defaultMarketLensForEvents(events) {
   if (!Array.isArray(events) || !events.length) return null;
-  const impactWeight = { high: 3, medium: 2, low: 1 };
+  const impactWeight = { high: 2, medium: 1 };
   const groups = new Map();
   for (const event of events) {
-    const rule = ruleForEventId(event.id);
-    if (!rule) continue;
-    const group = groups.get(rule.lensPath) || { path: rule.lensPath, events: [] };
+    if (!DEFAULT_MARKET_LENS_PATHS[event.lensPath]) continue;
+    const group = groups.get(event.lensPath) || { path: event.lensPath, events: [] };
     group.events.push(event);
-    groups.set(rule.lensPath, group);
+    groups.set(event.lensPath, group);
   }
   const selected = [...groups.values()].sort((left, right) => {
     const leftImpact = Math.max(...left.events.map((event) => impactWeight[event.impact] || 0));
@@ -797,53 +740,26 @@ function unavailableMarketLensForEvents(events) {
   };
 }
 
-function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSchedule, now = new Date() } = {}) {
+function normalizeWeekAhead(providerPayload, { range = rangeForDate(), now = new Date() } = {}) {
   const targetDays = displayDatesForRange(range);
   if (targetDays.length !== 5) throw new Error('Week Ahead range must be Monday-Friday or Friday plus next Monday-Thursday.');
-
-  if (!isPlainObject(officialSchedule) || !Array.isArray(officialSchedule.events) || !Array.isArray(officialSchedule.authorities)) {
-    throw new Error('Official Week Ahead schedule is required before values can be normalized.');
-  }
-
   const targetDaySet = new Set(targetDays);
-  const officialEvents = officialSchedule.events
-    .filter((release) => targetDaySet.has(release?.date) && isIsoTime(release?.time) && Array.isArray(release?.keys));
-  const valuesById = fxMacroValuesForSchedule({ ...officialSchedule, events: officialEvents }, valuePayload);
-  const normalized = [];
-  const failures = [
-    ...(Array.isArray(officialSchedule.failures) ? officialSchedule.failures : []).map((failure) => ({
-      source: `official_schedule:${failure.authority || 'unknown'}`,
-      item: failure.authority || 'schedule',
-      message: String(failure.message || 'Official schedule source unavailable.')
-    })),
-    ...(Array.isArray(valuePayload?.failures) ? valuePayload.failures : []).map((failure) => ({
-      source: `fxmacro:${failure.kind || 'values'}`,
-      item: failure.indicator || 'indicator',
-      message: String(failure.message || 'Indicator values unavailable.')
-    }))
-  ];
-  for (const release of officialEvents) {
-    for (const key of release.keys) {
-      const rule = ruleForKey(key);
-      if (!rule) {
-        failures.push({
-          source: `official_schedule:${release.authority || 'unknown'}`,
-          item: `${release.date}:${release.time}:${key}`,
-          message: `Unknown event key ${key} was omitted.`
-        });
-        continue;
-      }
-      for (const variant of variantsForRule(rule)) {
-        const values = valuesById.get(`${release.date}:${release.time}:${variant.key}`) || null;
-        normalized.push({ ...officialEvent(release, rule, variant, values), date: release.date, sortMinutes: Number(release.time.slice(0, 2)) * 60 + Number(release.time.slice(3, 5)) });
-      }
-    }
+  if (!isPlainObject(providerPayload) || providerPayload.status !== 'ok' || !Array.isArray(providerPayload.result)) {
+    throw new Error('TradingView calendar response must contain status "ok" and a result array.');
   }
-
+  const rows = providerPayload.result;
+  const malformedImpactRow = rows.find((row) => row?.country === 'US' && ![-1, 0, 1].includes(row?.importance));
+  if (malformedImpactRow) {
+    throw new Error(`TradingView event ${malformedImpactRow?.id || 'unknown'} has an invalid importance value.`);
+  }
+  const normalized = rows
+    .filter((row) => row?.country === 'US' && [0, 1].includes(row?.importance))
+    .map(tradingViewEvent)
+    .filter((event) => targetDaySet.has(event.date));
   const deduped = [];
   const seenIds = new Set();
   for (const item of normalized.sort((left, right) => left.date.localeCompare(right.date) || left.sortMinutes - right.sortMinutes || left.id.localeCompare(right.id))) {
-    if (seenIds.has(item.id)) continue;
+    if (seenIds.has(item.id)) throw new Error(`TradingView returned duplicate event identity ${item.id}.`);
     seenIds.add(item.id);
     deduped.push(item);
   }
@@ -873,32 +789,19 @@ function normalizeWeekAhead(valuePayload, { range = rangeForDate(), officialSche
     range: { ...range, timeZone: TIME_ZONE, marketTimeZone: SOURCE_TIME_ZONE },
     generatedAt: now.toISOString(),
     source: {
-      provider: FX_MACRO_PROVIDER,
-      endpoint: FX_MACRO_ENDPOINT,
-      status: failures.length ? 'partial' : 'fresh',
+      provider: TRADINGVIEW_PROVIDER,
+      endpoint: TRADINGVIEW_ENDPOINT,
+      status: 'fresh',
       fetchedAt: now.toISOString()
-    },
-    officialSchedule: {
-      events: officialEvents,
-      authorities: officialSchedule.authorities
     },
     days,
     sourceSummary: {
-      returnedEvents: Object.values(valuePayload?.announcements || {}).reduce((count, response) => count + (Array.isArray(response?.data) ? response.data.length : 0), 0),
+      returnedEvents: rows.length,
       includedEvents: deduped.length,
-      officialScheduledEvents: officialEvents.length,
-      officialConflicts: 0,
-      omittedRecognizedEvents: failures.filter((failure) => /Unknown event key/.test(failure.message)).length,
-      unavailableSources: failures.length
-    },
-    ...(failures.length ? {
-      availability: {
-        status: 'partial',
-        reason: 'source_refresh_failed',
-        checkedAt: now.toISOString(),
-        failures
-      }
-    } : {})
+      highImpactEvents: deduped.filter((event) => event.impact === 'high').length,
+      mediumImpactEvents: deduped.filter((event) => event.impact === 'medium').length,
+      omittedLowImpactEvents: rows.filter((row) => row?.country === 'US' && row?.importance === -1).length
+    }
   }, null, { now });
   const errors = validateWeekAheadPayload(result, { now });
   if (errors.length) throw new Error(`Normalized Week Ahead payload is invalid: ${errors.join(' ')}`);
@@ -929,6 +832,7 @@ function validateMarketLens(lens, prefix = 'marketLens') {
 function validateWeekAheadPayload(payload, { now = null, requireOutcomeDisposition = false } = {}) {
   const errors = [];
   if (!isPlainObject(payload)) return ['weekAhead must be an object.'];
+  if (payload.schemaVersion !== SCHEMA_VERSION) errors.push(`weekAhead.schemaVersion must be ${SCHEMA_VERSION}.`);
   const displayDates = displayDatesForRange(payload.range);
   if (!isPlainObject(payload.range) || !isIsoDate(payload.range.from) || !isIsoDate(payload.range.to)) {
     errors.push('weekAhead.range must contain ISO from/to dates.');
@@ -937,23 +841,33 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
   }
   if (payload.range?.timeZone !== TIME_ZONE) errors.push(`weekAhead.range.timeZone must be ${TIME_ZONE}.`);
   if (payload.range?.marketTimeZone !== SOURCE_TIME_ZONE) errors.push(`weekAhead.range.marketTimeZone must be ${SOURCE_TIME_ZONE}.`);
-  if (payload.source !== undefined && (!isPlainObject(payload.source) || !['fresh', 'partial', 'cached', 'unavailable'].includes(payload.source.status))) errors.push('weekAhead.source.status must be fresh, partial, cached, or unavailable.');
+  if (!isPlainObject(payload.source) || !['fresh', 'cached', 'unavailable'].includes(payload.source.status)) {
+    errors.push('weekAhead.source.status must be fresh, cached, or unavailable.');
+  } else {
+    if (payload.source.provider !== TRADINGVIEW_PROVIDER) errors.push(`weekAhead.source.provider must be ${TRADINGVIEW_PROVIDER}.`);
+    if (payload.source.endpoint !== TRADINGVIEW_ENDPOINT) errors.push(`weekAhead.source.endpoint must be ${TRADINGVIEW_ENDPOINT}.`);
+    if (!isIsoDateTime(payload.source.fetchedAt)) errors.push('weekAhead.source.fetchedAt must be an offset-bearing ISO timestamp.');
+  }
+  if (!isPlainObject(payload.sourceSummary)) {
+    errors.push('weekAhead.sourceSummary must be an object.');
+  } else {
+    for (const field of ['returnedEvents', 'includedEvents', 'highImpactEvents', 'mediumImpactEvents', 'omittedLowImpactEvents']) {
+      if (!Number.isInteger(payload.sourceSummary[field]) || payload.sourceSummary[field] < 0) {
+        errors.push(`weekAhead.sourceSummary.${field} must be a non-negative integer.`);
+      }
+    }
+    if (payload.sourceSummary.includedEvents !== payload.sourceSummary.highImpactEvents + payload.sourceSummary.mediumImpactEvents) {
+      errors.push('weekAhead.sourceSummary included count must equal high plus medium counts.');
+    }
+  }
   if (payload.availability !== undefined) {
     if (!isPlainObject(payload.availability)) {
       errors.push('weekAhead.availability must be an object.');
     } else {
-      if (!['carried_forward', 'partial', 'unavailable'].includes(payload.availability.status)) errors.push('weekAhead.availability.status must be carried_forward, partial, or unavailable.');
+      if (!['carried_forward', 'unavailable'].includes(payload.availability.status)) errors.push('weekAhead.availability.status must be carried_forward or unavailable.');
       if (payload.availability.reason !== 'source_refresh_failed') errors.push('weekAhead.availability.reason must be source_refresh_failed.');
       if (!isIsoDateTime(payload.availability.checkedAt)) errors.push('weekAhead.availability.checkedAt must be an offset-bearing ISO timestamp.');
-      if (payload.availability.status === 'partial' && (!Array.isArray(payload.availability.failures) || !payload.availability.failures.length)) errors.push('weekAhead.availability.failures must be a non-empty array when partial.');
-      if (payload.availability.status !== 'partial' && payload.availability.failures !== undefined) errors.push('weekAhead.availability.failures is allowed only when partial.');
-      if (Array.isArray(payload.availability.failures)) {
-        payload.availability.failures.forEach((failure, index) => {
-          for (const field of ['source', 'item', 'message']) {
-            if (typeof failure?.[field] !== 'string' || !failure[field].trim()) errors.push(`weekAhead.availability.failures[${index}].${field} must be populated.`);
-          }
-        });
-      }
+      if (payload.availability.failures !== undefined) errors.push('weekAhead.availability.failures is not supported for the single-source calendar.');
     }
   }
   if (payload.source?.status === 'unavailable' && payload.availability?.status !== 'unavailable') {
@@ -961,12 +875,6 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
   }
   if (payload.source?.status !== 'unavailable' && payload.availability?.status === 'unavailable') {
     errors.push('weekAhead.availability.status unavailable requires weekAhead.source.status unavailable.');
-  }
-  if (payload.source?.status === 'partial' && payload.availability?.status !== 'partial') {
-    errors.push('weekAhead.source.status partial requires weekAhead.availability.status partial.');
-  }
-  if (payload.availability?.status === 'partial' && payload.source?.status !== 'partial') {
-    errors.push('weekAhead.availability.status partial requires weekAhead.source.status partial.');
   }
   if (payload.source?.status === 'cached' && payload.availability?.status !== 'carried_forward') {
     errors.push('weekAhead.source.status cached requires weekAhead.availability.status carried_forward.');
@@ -1041,13 +949,17 @@ function validateWeekAheadPayload(payload, { now = null, requireOutcomeDispositi
       for (const field of ['name', 'agency', 'period']) {
         if (typeof event[field] !== 'string' || !event[field]) errors.push(`${prefix}.${field} is required.`);
       }
-      if (!['high', 'medium', 'low'].includes(event.impact)) errors.push(`${prefix}.impact is invalid.`);
+      if (!['high', 'medium'].includes(event.impact)) errors.push(`${prefix}.impact must be high or medium.`);
       for (const field of ['actual', 'forecast', 'previous']) {
         if (event[field] !== null && typeof event[field] !== 'string') errors.push(`${prefix}.${field} must be string or null.`);
       }
       if (!['scheduled', 'awaiting_actual', 'released'].includes(event.status)) errors.push(`${prefix}.status is invalid.`);
-      if (![null, 'consensus', 'nowcast', 'model'].includes(event.forecastType)) errors.push(`${prefix}.forecastType is invalid.`);
-      if (event.valueSource !== null && typeof event.valueSource !== 'string') errors.push(`${prefix}.valueSource must be string or null.`);
+      if (![null, 'consensus'].includes(event.forecastType)) errors.push(`${prefix}.forecastType must be consensus or null.`);
+      if (typeof event.valuesApplicable !== 'boolean') errors.push(`${prefix}.valuesApplicable must be boolean.`);
+      if (!DEFAULT_MARKET_LENS_PATHS[event.lensPath]) errors.push(`${prefix}.lensPath is invalid.`);
+      if (event.valuesApplicable === false && [event.actual, event.forecast, event.previous].some((value) => value !== null)) {
+        errors.push(`${prefix} non-statistical values must be null.`);
+      }
     });
   });
   void ids;
@@ -1059,44 +971,47 @@ function hasEditorialMarketLens(day) {
     && validateMarketLens(day.marketLens).length === 0;
 }
 
-function preserveMissingWeekAheadValues(incomingEvent, priorEvent) {
-  // Only partial source refreshes use this path, and stable event identity keeps
-  // prior values from leaking into a different release after a schedule change.
-  if (!priorEvent || incomingEvent?.id !== priorEvent.id) return incomingEvent;
-  const next = { ...incomingEvent };
-  const missing = (value) => value === null || value === undefined || value === '';
-  let preserved = false;
-  for (const field of ['actual', 'forecast', 'previous']) {
-    if (missing(next[field]) && !missing(priorEvent[field])) {
-      next[field] = priorEvent[field];
-      preserved = true;
-    }
-  }
-  if (missing(incomingEvent.forecast) && !missing(priorEvent.forecast)) {
-    next.forecastType = priorEvent.forecastType ?? null;
-    next.forecastSource = priorEvent.forecastSource ?? null;
-  }
-  if (preserved) {
-    next.valueSource = next.valueSource || priorEvent.valueSource || FX_MACRO_PROVIDER;
-    next.verification = next.verification === 'official-schedule-values-unavailable'
-      ? priorEvent.verification || 'official-schedule-fxmacrodata-values'
-      : next.verification;
-    next.surprise = comparableWeekAheadSurprise(next.actual, next.forecast);
-    if (!missing(next.actual)) next.status = 'released';
-  }
-  return next;
+function weekAheadHasCurrentMarketLens(day) {
+  return hasEditorialMarketLens(day);
+}
+
+function weekAheadNeedsMarketLensEditorial(day) {
+  return ['released_awaiting_close', 'close_available'].includes(day?.lifecycle)
+    && weekAheadDayHasCompletedEvent(day)
+    && !weekAheadHasCurrentMarketLens(day);
+}
+
+function weekAheadMarketLensDecision(day) {
+  if (weekAheadHasCurrentMarketLens(day)) return { date: day.date, action: 'replace', marketLens: day.marketLens };
+  if (weekAheadNeedsMarketLensEditorial(day)) return { date: day.date, action: 'pending_review' };
+  return { date: day.date, action: 'retain-generated' };
+}
+
+function weekAheadNeedsOutcomeEditorial(day) {
+  return day?.lifecycle === 'close_available'
+    && weekAheadDayHasCompletedEvent(day)
+    && weekAheadHasCloseReactionRows(day);
+}
+
+function prepareWeekAheadForEditorial(weekAhead) {
+  return {
+    ...weekAhead,
+    days: (Array.isArray(weekAhead?.days) ? weekAhead.days : []).map((day) => {
+      if (!weekAheadNeedsOutcomeEditorial(day) || day?.outcome?.status === 'verified') return day;
+      return { ...day, outcome: { status: 'pending_review' } };
+    })
+  };
+}
+
+function shouldPreserveEditorialMarketLens(priorDay, nextDay) {
+  if (!hasEditorialMarketLens(priorDay)) return false;
+  if (!weekAheadDayHasCompletedEvent(nextDay)) return true;
+  return weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(nextDay);
 }
 
 function mergeWeekAheadPayload(existingWeekAhead, payload) {
   const errors = validateWeekAheadPayload(payload);
   if (errors.length) throw new Error(`Generated Week Ahead payload is invalid: ${errors.join(' ')}`);
-  const preservePriorValues = payload.availability?.status === 'partial';
-  const priorEventsById = new Map(
-    (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : [])
-      .flatMap((day) => Array.isArray(day?.events) ? day.events : [])
-      .filter((event) => typeof event?.id === 'string')
-      .map((event) => [event.id, event])
-  );
   const existingEditorialDays = new Map(
     (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : [])
       .filter((day) => typeof day?.date === 'string' && hasEditorialMarketLens(day))
@@ -1105,14 +1020,7 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
   return {
     ...payload,
     days: payload.days.map((day) => {
-      const next = {
-        ...day,
-        events: (Array.isArray(day.events) ? day.events : []).map((event) => (
-          preservePriorValues
-            ? preserveMissingWeekAheadValues(event, priorEventsById.get(event.id))
-            : event
-        ))
-      };
+      const next = { ...day };
       if (next.events.some((event) => event.status === 'released')
         && ['scheduled', 'awaiting_actual'].includes(next.lifecycle)) {
         next.lifecycle = 'released_awaiting_close';
@@ -1120,9 +1028,7 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
       const editorialDay = existingEditorialDays.get(day.date);
       const priorDay = (Array.isArray(existingWeekAhead?.days) ? existingWeekAhead.days : []).find((candidate) => candidate?.date === day.date);
       const deterministicValuesUnchanged = weekAheadDayFingerprint(priorDay) === weekAheadDayFingerprint(next);
-      // An arriving actual advances lifecycle state but does not retire a
-      // still-valid pre-close thesis; the completed close response does that.
-      if (editorialDay && validateMarketLens(editorialDay.marketLens).length === 0) {
+      if (editorialDay && shouldPreserveEditorialMarketLens(editorialDay, next)) {
         next.marketLens = editorialDay.marketLens;
         next.marketLensSource = 'editorial';
       }
@@ -1226,14 +1132,14 @@ function applyMarketLensDecisions(weekAhead, payload, { validateEditorialReferen
 module.exports = {
   DEFAULT_MARKET_LENS_PATHS,
   EVENT_RULES,
-  FX_MACRO_ENDPOINT,
-  FX_MACRO_PROVIDER,
   MARKET_CLOSURES,
   MARKET_LENS_CHANNELS,
   MARKET_LENS_REACTIONS_BY_CHANNEL,
   SCHEMA_VERSION,
   SOURCE_TIME_ZONE,
   TIME_ZONE,
+  TRADINGVIEW_ENDPOINT,
+  TRADINGVIEW_PROVIDER,
   addDays,
   applyWeekAheadLifecycle,
   applyMarketLensDecisions,
@@ -1242,15 +1148,20 @@ module.exports = {
   defaultMarketLensForEvents,
   displayDatesForRange,
   finalizeWeekAheadOutcomes,
-  formatFxMacroValue,
-  fxMacroValueRequests,
+  formatTradingViewValue,
   mondayForDate,
   mergeWeekAheadPayload,
   normalizeMarketLensDecisions,
   normalizeWeekAhead,
+  prepareWeekAheadForEditorial,
   rangeForDate,
   validateMarketLens,
   validateWeekAheadPayload,
+  weekAheadDayHasCompletedEvent,
   weekAheadDayFingerprint,
+  weekAheadHasCurrentMarketLens,
+  weekAheadMarketLensDecision,
+  weekAheadNeedsMarketLensEditorial,
+  weekAheadNeedsOutcomeEditorial,
   weekAheadReleaseInstant
 };

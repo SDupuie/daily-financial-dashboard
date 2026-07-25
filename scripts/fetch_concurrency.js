@@ -1,3 +1,59 @@
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function headerValue(headers = {}, name) {
+  if (!headers || !name) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || headers.get(name.toLowerCase()) || '';
+  return headers[name] || headers[name.toLowerCase()] || '';
+}
+
+function retryAfterDelayMs(headers = {}, fallbackMs = 0) {
+  const raw = String(headerValue(headers, 'Retry-After') || '').trim();
+  if (raw) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const retryDate = Date.parse(raw);
+    if (!Number.isNaN(retryDate)) return Math.max(0, retryDate - Date.now());
+  }
+  return Math.max(0, Number(fallbackMs) || 0);
+}
+
+async function withRetry(operation, options = {}) {
+  if (typeof operation !== 'function') throw new Error('withRetry requires an operation function.');
+  const retries = Number.isFinite(Number(options.retries))
+    ? Math.max(0, Math.floor(Number(options.retries)))
+    : 0;
+  const fallbackDelayMs = Math.max(0, Number(options.delayMs) || 0);
+  const sleepFn = options.sleep || sleep;
+  const shouldRetryError = typeof options.shouldRetryError === 'function'
+    ? options.shouldRetryError
+    : () => false;
+  const shouldRetryResult = typeof options.shouldRetryResult === 'function'
+    ? options.shouldRetryResult
+    : () => false;
+  const headersForResult = typeof options.headersForResult === 'function'
+    ? options.headersForResult
+    : (result) => result?.headers;
+  const headersForError = typeof options.headersForError === 'function'
+    ? options.headersForError
+    : (error) => error?.headers;
+  let attempt = 0;
+
+  while (true) {
+    try {
+      const result = await operation({ attempt });
+      if (attempt >= retries || !shouldRetryResult(result, { attempt })) return result;
+      attempt += 1;
+      await sleepFn(retryAfterDelayMs(headersForResult(result), fallbackDelayMs));
+    } catch (error) {
+      if (attempt >= retries || !shouldRetryError(error, { attempt })) throw error;
+      attempt += 1;
+      await sleepFn(retryAfterDelayMs(headersForError(error), fallbackDelayMs));
+    }
+  }
+}
+
 async function mapConcurrent(items, concurrency, worker, options = {}) {
   // Preserve input order in results while limiting simultaneous provider calls.
   // Callers own retry policy; this helper only coordinates execution.
@@ -28,5 +84,8 @@ async function mapConcurrent(items, concurrency, worker, options = {}) {
 }
 
 module.exports = {
-  mapConcurrent
+  mapConcurrent,
+  retryAfterDelayMs,
+  sleep,
+  withRetry
 };
