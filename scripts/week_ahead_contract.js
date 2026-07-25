@@ -494,8 +494,22 @@ function weekAheadReleaseInstant(date, time, sourceTimeZone = SOURCE_TIME_ZONE) 
   return zonedTimeToUtc({ year, month, day, hour, minute }, sourceTimeZone);
 }
 
+function weekAheadMarketLensEvents(day) {
+  const eventIds = new Set(Array.isArray(day?.marketLens?.eventIds) ? day.marketLens.eventIds : []);
+  return (Array.isArray(day?.events) ? day.events : []).filter((event) => eventIds.has(event?.id));
+}
+
+function weekAheadMarketLensIsComplete(day) {
+  const eventIds = new Set(Array.isArray(day?.marketLens?.eventIds) ? day.marketLens.eventIds : []);
+  const events = weekAheadMarketLensEvents(day);
+  return eventIds.size > 0
+    && events.length === eventIds.size
+    && events.every((event) => event?.status === 'released'
+      && (event?.valuesApplicable === false || String(event.actual || '').trim()));
+}
+
 function weekAheadDayFingerprint(day) {
-  return JSON.stringify((Array.isArray(day?.events) ? day.events : []).map((event) => [
+  return JSON.stringify(weekAheadMarketLensEvents(day).map((event) => [
     event.id,
     event.name,
     event.agency,
@@ -512,7 +526,7 @@ function weekAheadDayFingerprint(day) {
 }
 
 function weekAheadEditorialContextFingerprint(day) {
-  return JSON.stringify((Array.isArray(day?.events) ? day.events : []).map((event) => [
+  return JSON.stringify(weekAheadMarketLensEvents(day).map((event) => [
     event.id,
     event.name,
     event.agency,
@@ -527,12 +541,6 @@ function weekAheadEditorialContextFingerprint(day) {
     event.valuesApplicable,
     event.lensPath
   ]));
-}
-
-function weekAheadDayHasCompletedEvent(day) {
-  return (Array.isArray(day?.events) ? day.events : [])
-    .some((event) => event?.status === 'released'
-      && (event?.valuesApplicable === false || String(event.actual || '').trim()));
 }
 
 function weekAheadHasCloseReactionRows(day) {
@@ -568,24 +576,22 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
       delete day.outcome;
       return day;
     }
-    const newlyReleasedForMarketLens = day.events.some((event, index) => {
-      const priorStatus = sourceEvents[index]?.status;
-      return priorStatus !== 'released'
-        && event.status === 'released'
-        && (event.valuesApplicable === false || String(event.actual || '').trim());
-    });
-    if (newlyReleasedForMarketLens && day.marketLens?.status === 'verified') {
+    const priorEventsById = new Map(sourceEvents.map((event) => [event?.id, event]));
+    const selectedEvents = weekAheadMarketLensEvents(day);
+    const selectedContextComplete = weekAheadMarketLensIsComplete(day);
+    const selectedContextJustCompleted = selectedContextComplete
+      && selectedEvents.some((event) => priorEventsById.get(event.id)?.status !== 'released');
+    if (selectedContextJustCompleted && day.marketLens?.status === 'verified') {
       day.marketLens = defaultMarketLensForEvents(day.events);
     }
 
-    const released = day.events.some((event) => event.status === 'released');
     const reactionSpecs = Array.isArray(day.marketLens?.reactions) ? day.marketLens.reactions : [];
     // A populated event-day bar can arrive before the cash session is final.
     // Gate on the Eastern close itself so an afternoon run cannot publish an
     // incomplete bar as the deterministic closing response.
     const marketCloseInstant = weekAheadReleaseInstant(day.date, '16:00', week?.range?.marketTimeZone || SOURCE_TIME_ZONE);
     const canCalculateClose = day.date < localNowDate || (marketCloseInstant && now >= marketCloseInstant);
-    const reactionRows = canCalculateClose && released ? reactionSpecs.flatMap((reaction) => {
+    const reactionRows = canCalculateClose && selectedContextComplete ? reactionSpecs.flatMap((reaction) => {
       const series = seriesByTicker.get(reaction.ticker);
       const bars = Array.isArray(series?.bars) ? series.bars : [];
       const eventIndex = bars.findIndex((bar) => bar?.time === day.date);
@@ -609,7 +615,7 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
         dir: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat'
       }];
     }) : [];
-    if (reactionSpecs.length && reactionRows.length === reactionSpecs.length) {
+    if (reactionRows.length) {
       const nextMarketReaction = {
         window: 'event-day-close-vs-previous-close',
         asOf: day.date,
@@ -620,9 +626,9 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
       day.lifecycle = 'close_available';
     } else {
       delete day.marketReaction;
-      day.lifecycle = released
+      day.lifecycle = selectedContextComplete
         ? 'released_awaiting_close'
-        : day.events.some((event) => event.status === 'awaiting_actual') ? 'awaiting_actual' : 'scheduled';
+        : selectedEvents.some((event) => event.status === 'awaiting_actual') ? 'awaiting_actual' : 'scheduled';
       delete day.outcome;
     }
     return day;
@@ -635,7 +641,7 @@ function finalizeWeekAheadOutcomes(week) {
     const next = { ...day };
     const hasEvents = Array.isArray(next.events) && next.events.length;
     if (hasEvents) {
-      const completed = weekAheadDayHasCompletedEvent(next);
+      const completed = weekAheadMarketLensIsComplete(next);
       const validLens = !validateMarketLens(next.marketLens).length;
       const currentVerifiedLens = next.marketLens?.status === 'verified' && validLens;
       if (completed && !currentVerifiedLens) {
@@ -966,12 +972,12 @@ function validateWeekAheadPayload(payload, {
       for (const eventId of Array.isArray(day.marketLens?.eventIds) ? day.marketLens.eventIds : []) {
         if (!eventIds.has(eventId)) errors.push(`${lensPrefix}.eventIds contains an ID outside this event day.`);
       }
-      const completed = weekAheadDayHasCompletedEvent(day);
+      const completed = weekAheadMarketLensIsComplete(day);
       if (day.marketLens?.status === 'setup' && completed) {
-        errors.push(`${lensPrefix}.status setup is not current after an event has completed.`);
+        errors.push(`${lensPrefix}.status setup is not current after the selected event context has completed.`);
       }
       if (day.marketLens?.status === 'commentary_unavailable' && !completed) {
-        errors.push(`${lensPrefix}.status commentary_unavailable requires a completed event.`);
+        errors.push(`${lensPrefix}.status commentary_unavailable requires the selected event context to be complete.`);
       }
     }
     if (!hasEvents && hasMarketLens) {
@@ -988,6 +994,10 @@ function validateWeekAheadPayload(payload, {
       if (now instanceof Date && !Number.isNaN(now.getTime()) && marketCloseInstant && now < marketCloseInstant) {
         errors.push(`weekAhead.days[${dayIndex}].lifecycle close_available cannot precede the event-day market close.`);
       }
+    }
+    if (['released_awaiting_close', 'close_available'].includes(day?.lifecycle)
+      && !weekAheadMarketLensIsComplete(day)) {
+      errors.push(`weekAhead.days[${dayIndex}].lifecycle ${day.lifecycle} requires the selected Market Lens event context to be complete.`);
     }
     if (requireOutcomeDisposition && day?.lifecycle === 'close_available' && day?.outcome === undefined) {
       errors.push(`weekAhead.days[${dayIndex}].outcome requires an outcome disposition before publication.`);
@@ -1051,7 +1061,7 @@ function weekAheadNeedsMarketLensEditorial(day) {
 
 function weekAheadNeedsOutcomeEditorial(day) {
   return day?.lifecycle === 'close_available'
-    && weekAheadDayHasCompletedEvent(day)
+    && weekAheadMarketLensIsComplete(day)
     && weekAheadHasCloseReactionRows(day);
 }
 
@@ -1089,7 +1099,7 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
     ...payload,
     days: payload.days.map((day) => {
       const next = { ...day };
-      if (next.events.some((event) => event.status === 'released')
+      if (weekAheadMarketLensIsComplete(next)
         && ['scheduled', 'awaiting_actual'].includes(next.lifecycle)) {
         next.lifecycle = 'released_awaiting_close';
       }
@@ -1099,8 +1109,8 @@ function mergeWeekAheadPayload(existingWeekAhead, payload) {
       if (reconciledMarketLens) {
         next.marketLens = reconciledMarketLens;
       }
-      // Post-close copy is bound to the complete deterministic fingerprint,
-      // including the reaction bars, and must not survive corrected facts.
+      // Post-close copy and reaction bars remain bound to the selected event
+      // facts and must not survive a correction to that context.
       if (deterministicValuesUnchanged && priorDay?.outcome) next.outcome = priorDay.outcome;
       if (deterministicValuesUnchanged && priorDay?.marketReaction) {
         next.marketReaction = priorDay.marketReaction;
@@ -1137,6 +1147,24 @@ function editorialWeekAheadOutcome(outcome) {
   };
 }
 
+function isRenderableWeekAheadReactionRow(row) {
+  if (!isPlainObject(row)
+    || !/^[A-Z0-9]+$/.test(String(row.ticker || ''))
+    || typeof row.role !== 'string'
+    || !row.role.trim()
+    || row.delta === null
+    || row.delta === undefined
+    || row.delta === ''
+    || !Number.isFinite(Number(row.delta))) {
+    return false;
+  }
+  return row.unit === 'percent_yield'
+    || (row.percentChange !== null
+      && row.percentChange !== undefined
+      && row.percentChange !== ''
+      && Number.isFinite(Number(row.percentChange)));
+}
+
 function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { systemFallbacks = null } = {}) {
   const editorialDays = new Map(
     (Array.isArray(editorialWeekAhead?.days) ? editorialWeekAhead.days : [])
@@ -1153,7 +1181,7 @@ function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { syste
     const submittedValidLens = validEditorialMarketLens(editorialLens);
     if (baseLens && submittedValidLens) {
       next.marketLens = overlayEditableMarketLensText(baseLens, editorialLens);
-    } else if (weekAheadDayHasCompletedEvent(next)) {
+    } else if (weekAheadMarketLensIsComplete(next)) {
       next.marketLens = unavailableMarketLensForEvents(next.events);
       addWeekAheadEditorialFallback(systemFallbacks, next, 'commentary_unavailable', 'editorial_commentary_unavailable');
     } else if (baseLens) {
@@ -1167,6 +1195,12 @@ function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { syste
       next.outcome = outcome || { status: 'pending_review' };
     } else {
       delete next.outcome;
+    }
+    if (Array.isArray(next.marketReaction?.rows)) {
+      next.marketReaction = {
+        ...next.marketReaction,
+        rows: next.marketReaction.rows.filter(isRenderableWeekAheadReactionRow)
+      };
     }
     return next;
   });
@@ -1199,7 +1233,6 @@ module.exports = {
   reconcileEditorialMarketLens,
   validateMarketLens,
   validateWeekAheadPayload,
-  weekAheadDayHasCompletedEvent,
   weekAheadDayFingerprint,
   weekAheadHasCurrentMarketLens,
   weekAheadNeedsMarketLensEditorial,

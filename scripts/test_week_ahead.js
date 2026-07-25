@@ -195,6 +195,28 @@ function testTradingViewNormalization() {
   assert.equal(formatTradingViewValue(2.011, { title: 'EIA Crude Oil Stocks Change' }), '2.011M');
 }
 
+function testMarketLensPriorityOrdering() {
+  const event = (id, time, impact, lensPath) => ({ id, time, impact, lensPath });
+  const impactWinner = defaultMarketLensForEvents([
+    event('early-medium', '08:30', 'medium', 'consumer-demand'),
+    event('late-high', '17:00', 'high', 'policy'),
+    event('related-policy', '14:00', 'medium', 'policy')
+  ]);
+  assert.deepEqual(impactWinner.eventIds, ['late-high', 'related-policy']);
+
+  const timeWinner = defaultMarketLensForEvents([
+    event('later-policy', '10:00', 'high', 'policy'),
+    event('earlier-manufacturing', '09:00', 'high', 'manufacturing')
+  ]);
+  assert.deepEqual(timeWinner.eventIds, ['earlier-manufacturing']);
+
+  const pathWinner = defaultMarketLensForEvents([
+    event('policy-tie', '09:00', 'high', 'policy'),
+    event('consumer-tie', '09:00', 'high', 'consumer-demand')
+  ]);
+  assert.deepEqual(pathWinner.eventIds, ['consumer-tie']);
+}
+
 function testReleasedValuesAndLifecycle() {
   const afterRelease = normalizedFixture({ now: new Date('2026-07-28T14:00:00Z') });
   const cpi = findEvent(afterRelease, 'us-cpi-yoy');
@@ -232,6 +254,125 @@ function testReleasedValuesAndLifecycle() {
   const tuesday = afterClose.days.find((day) => day.date === '2026-07-28');
   assert.equal(tuesday.lifecycle, 'close_available');
   assert.equal(tuesday.marketReaction.rows.length, 2);
+
+  const partialAfterClose = applyWeekAheadLifecycle(afterRelease, {
+    series: [chartData.series[0]]
+  }, {
+    now: new Date('2026-07-28T21:00:00Z')
+  });
+  const partialTuesday = partialAfterClose.days.find((day) => day.date === '2026-07-28');
+  assert.equal(partialTuesday.lifecycle, 'close_available');
+  assert.deepEqual(
+    partialTuesday.marketReaction.rows.map((row) => row.ticker),
+    ['UST2Y']
+  );
+  assert.equal(weekAheadNeedsOutcomeEditorial(partialTuesday), true);
+
+  const missingAfterClose = applyWeekAheadLifecycle(afterRelease, { series: [] }, {
+    now: new Date('2026-07-28T21:00:00Z')
+  });
+  const missingTuesday = missingAfterClose.days.find((day) => day.date === '2026-07-28');
+  assert.equal(missingTuesday.lifecycle, 'released_awaiting_close');
+  assert.equal(missingTuesday.marketReaction, undefined);
+}
+
+function testUnrelatedReleaseDoesNotAdvanceSelectedMarketLens() {
+  const week = normalizedFixture();
+  const wednesday = week.days.find((day) => day.date === '2026-07-29');
+  wednesday.events = [
+    {
+      id: 'early-demand',
+      time: '08:30',
+      name: 'Retail Sales',
+      agency: 'Census',
+      period: 'MoM',
+      impact: 'medium',
+      actual: '1%',
+      forecast: '0.5%',
+      previous: '0.2%',
+      status: 'scheduled',
+      forecastType: 'consensus',
+      valuesApplicable: true,
+      lensPath: 'consumer-demand',
+      surprise: null
+    },
+    {
+      id: 'late-policy',
+      time: '17:00',
+      name: 'Fed Chair Speech',
+      agency: 'Federal Reserve',
+      period: 'Policy',
+      impact: 'high',
+      actual: null,
+      forecast: null,
+      previous: null,
+      status: 'scheduled',
+      forecastType: null,
+      valuesApplicable: false,
+      lensPath: 'policy',
+      surprise: null
+    }
+  ];
+  wednesday.lifecycle = 'scheduled';
+  wednesday.marketLens = {
+    ...defaultMarketLensForEvents(wednesday.events),
+    status: 'verified',
+    copy: {
+      question: 'Will the policy signal change the rate path?',
+      title: 'The late policy event owns the lens',
+      body: 'The setup remains forward-looking until the selected policy event occurs.'
+    }
+  };
+  const chartData = {
+    series: wednesday.marketLens.reactions.map((reaction) => ({
+      ticker: reaction.ticker,
+      unit: 'price',
+      bars: [
+        { time: '2026-07-28', close: 100 },
+        { time: '2026-07-29', close: 101 }
+      ]
+    }))
+  };
+
+  const beforeSelectedEvent = finalizeWeekAheadOutcomes(applyWeekAheadLifecycle(week, chartData, {
+    now: new Date('2026-07-29T20:15:00Z')
+  }));
+  const beforeWednesday = beforeSelectedEvent.days.find((day) => day.date === '2026-07-29');
+  assert.equal(beforeWednesday.events.find((event) => event.id === 'early-demand').status, 'released');
+  assert.equal(beforeWednesday.events.find((event) => event.id === 'late-policy').status, 'scheduled');
+  assert.deepEqual(beforeWednesday.marketLens.eventIds, ['late-policy']);
+  assert.equal(beforeWednesday.marketLens.status, 'verified');
+  assert.equal(beforeWednesday.marketLens.copy.title, 'The late policy event owns the lens');
+  assert.equal(beforeWednesday.lifecycle, 'scheduled');
+  assert.equal(beforeWednesday.marketReaction, undefined);
+  assert.equal(beforeWednesday.outcome, undefined);
+  assert.deepEqual(validateWeekAheadPayload(beforeSelectedEvent, {
+    now: new Date('2026-07-29T20:15:00Z'),
+    requireOutcomeDisposition: true
+  }), []);
+
+  const falseClose = structuredClone(beforeSelectedEvent);
+  const falseCloseWednesday = falseClose.days.find((day) => day.date === '2026-07-29');
+  falseCloseWednesday.lifecycle = 'close_available';
+  falseCloseWednesday.marketReaction = { rows: [{ ticker: 'UST2Y' }] };
+  falseCloseWednesday.outcome = { status: 'pending_review' };
+  assert.match(
+    validateWeekAheadPayload(falseClose, { now: new Date('2026-07-29T20:15:00Z') }).join('\n'),
+    /selected Market Lens event context to be complete/
+  );
+
+  const afterSelectedEvent = finalizeWeekAheadOutcomes(applyWeekAheadLifecycle(beforeSelectedEvent, chartData, {
+    now: new Date('2026-07-29T21:15:00Z')
+  }));
+  const afterWednesday = afterSelectedEvent.days.find((day) => day.date === '2026-07-29');
+  assert.equal(afterWednesday.events.find((event) => event.id === 'late-policy').status, 'released');
+  assert.equal(afterWednesday.lifecycle, 'close_available');
+  assert.equal(afterWednesday.marketLens.status, 'commentary_unavailable');
+  assert.deepEqual(afterWednesday.outcome, { status: 'pending_review' });
+  assert.deepEqual(validateWeekAheadPayload(afterSelectedEvent, {
+    now: new Date('2026-07-29T21:15:00Z'),
+    requireOutcomeDisposition: true
+  }), []);
 }
 
 function testMalformedProviderRowsFailClosed() {
@@ -558,7 +699,7 @@ function testMarketLensValidationRejectsMalformedPublishedStates() {
   const released = normalizedFixture({ now: new Date('2026-07-28T14:00:00Z') });
   const releasedTuesday = released.days.find((day) => day.date === '2026-07-28');
   releasedTuesday.marketLens = defaultMarketLensForEvents(releasedTuesday.events);
-  assert.match(validateWeekAheadPayload(released).join('\n'), /status setup is not current after an event has completed/);
+  assert.match(validateWeekAheadPayload(released).join('\n'), /status setup is not current after the selected event context has completed/);
 
   releasedTuesday.marketLens.status = 'verified';
   releasedTuesday.marketLens.copy = { question: '', title: '', body: '' };
@@ -626,6 +767,43 @@ function testWeekAheadOutcomeApplyIsCloseAvailableOnly() {
     applyWeekAheadEditorial(closeCandidate, closeEditorial).days.find((day) => day.date === '2026-07-29').outcome,
     { status: 'pending_review' }
   );
+}
+
+function testWeekAheadApplyDropsMalformedReactionRows() {
+  const released = normalizedFixture({ now: new Date('2026-07-29T18:00:00Z') });
+  const releasedWednesday = released.days.find((day) => day.date === '2026-07-29');
+  const chartData = {
+    series: releasedWednesday.marketLens.reactions.map((reaction, index) => ({
+      ticker: reaction.ticker,
+      unit: index === 0 ? 'percent_yield' : 'price',
+      bars: [
+        { time: '2026-07-28', close: 100 },
+        { time: '2026-07-29', close: 100 }
+      ]
+    }))
+  };
+  const candidate = applyWeekAheadLifecycle(released, chartData, {
+    now: new Date('2026-07-29T21:00:00Z')
+  });
+  const candidateWednesday = candidate.days.find((day) => day.date === '2026-07-29');
+  const validRows = structuredClone(candidateWednesday.marketReaction.rows);
+  candidateWednesday.marketReaction.rows = [
+    null,
+    {},
+    { ticker: 'bad', role: 'Invalid ticker', delta: 1, percentChange: 1 },
+    ...validRows
+  ];
+  const editorial = structuredClone(candidate);
+  editorial.days.find((day) => day.date === '2026-07-29').outcome = {
+    status: 'verified',
+    title: 'Policy reaction settled',
+    body: 'Rates reflected the completed communication.'
+  };
+
+  const applied = applyWeekAheadEditorial(candidate, editorial);
+  const appliedWednesday = applied.days.find((day) => day.date === '2026-07-29');
+  assert.deepEqual(appliedWednesday.marketReaction.rows, validRows);
+  assert.deepEqual(validateWeekAheadPayload(applied, { requireOutcomeDisposition: true }), []);
 }
 
 function testSameRangeFallbackOnly() {
@@ -763,7 +941,9 @@ async function testRunWritesOneCompletePayload() {
 async function main() {
   testRangeSelection();
   testTradingViewNormalization();
+  testMarketLensPriorityOrdering();
   testReleasedValuesAndLifecycle();
+  testUnrelatedReleaseDoesNotAdvanceSelectedMarketLens();
   testMalformedProviderRowsFailClosed();
   testLatestTradingViewValuesOwnRefresh();
   testStatisticalReleaseReopensMarketLensReview();
@@ -776,6 +956,7 @@ async function main() {
   testReleasedMarketLensMissingHandoffBecomesUnavailable();
   testMarketLensValidationRejectsMalformedPublishedStates();
   testWeekAheadOutcomeApplyIsCloseAvailableOnly();
+  testWeekAheadApplyDropsMalformedReactionRows();
   testSameRangeFallbackOnly();
   testFetcherContract();
   await testFetcherRetriesAndHeaders();

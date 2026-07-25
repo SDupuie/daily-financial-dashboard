@@ -2273,7 +2273,7 @@ function testEditorialPreparationCreatesOnePendingHandoff() {
     commentaryTickers: ['SPX']
   });
   scheduledWeekDay = configureWeekDay(0, { lifecycle: 'scheduled', eventStatus: 'scheduled', actual: null });
-  missingActualsWeekDay = configureWeekDay(1, { lifecycle: 'released_awaiting_close', eventStatus: 'awaiting_actual', actual: null });
+  missingActualsWeekDay = configureWeekDay(1, { lifecycle: 'awaiting_actual', eventStatus: 'awaiting_actual', actual: null });
   releasedNeedsLensWeekDay = configureWeekDay(2, { lifecycle: 'released_awaiting_close', eventStatus: 'released', actual: '1.0%' });
   closeCurrentLensWeekDay = configureWeekDay(3, {
     lifecycle: 'close_available',
@@ -4384,7 +4384,7 @@ function testTouchTooltipControls() {
     'esc',
     'weekReactionButtonHtml',
     `${weekOutcomeSource}\nreturn { weekAheadOutcomeHtml };`
-  )((value) => String(value), () => '');
+  )((value) => String(value), (_day, _ticker, _role, label) => `<button>${label}</button>`);
   const unavailableOutcome = weekAheadOutcomeHtml({
     date: '2026-07-15',
     lifecycle: 'close_available',
@@ -4394,7 +4394,7 @@ function testTouchTooltipControls() {
   assert.doesNotMatch(unavailableOutcome, /<strong>(?:Pending|Unavailable)<\/strong>/);
   assert.match(unavailableOutcome, /Outcome commentary was not completed for this update\./);
   assert.match(unavailableOutcome, /data-stale-button/);
-  assert.match(unavailableOutcome, /data-stale-button>i<\/button>[\s\S]*?<span class="week-reactions-label">No selected transmission ticker/);
+  assert.doesNotMatch(unavailableOutcome, /No selected transmission ticker/);
   assert.doesNotMatch(unavailableOutcome, /Post-event commentary unavailable|Released facts/);
   const pendingOutcome = weekAheadOutcomeHtml({
     date: '2026-07-14',
@@ -4406,6 +4406,25 @@ function testTouchTooltipControls() {
   assert.match(pendingOutcome, /Outcome commentary was not completed for this update\./);
   assert.match(pendingOutcome, /data-stale-button/);
   assert.equal(weekAheadOutcomeHtml({ lifecycle: 'close_available', marketReaction: { rows: [] } }), '');
+  const zeroMoveOutcome = weekAheadOutcomeHtml({
+    date: '2026-07-14',
+    label: 'Tue, Jul 14',
+    lifecycle: 'close_available',
+    outcome: {
+      status: 'verified',
+      title: 'The close was unchanged',
+      body: 'The selected transmission tickers finished flat.'
+    },
+    marketReaction: {
+      rows: [
+        { ticker: 'SPX', role: 'Equity reaction', delta: 0, percentChange: 0, unit: 'price' },
+        { ticker: 'UST10Y', role: 'Rate reaction', delta: 0, percentChange: 0, unit: 'percent_yield' }
+      ]
+    }
+  });
+  assert.match(zeroMoveOutcome, /SPX 0\.00%/);
+  assert.match(zeroMoveOutcome, /UST10Y 0 bp/);
+  assert.doesNotMatch(zeroMoveOutcome, /No selected transmission ticker/);
 
   assert.doesNotMatch(html, /week-ledger-status-dot/);
   assert.match(html, /Market Lens commentary was not completed for this update\./);

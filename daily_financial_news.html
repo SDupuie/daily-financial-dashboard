@@ -1749,6 +1749,12 @@
       gap: 7px;
       margin-left: auto;
     }
+    .week-ahead-controls {
+      align-items: center;
+      display: inline-flex;
+      flex: 0 0 auto;
+      gap: 7px;
+    }
     .week-ahead-stale-info .stale-info-tooltip {
       left: auto;
       right: 0;
@@ -2002,12 +2008,16 @@
       grid-template-columns: var(--week-calendar-columns);
     }
     .week-calendar-head > span:first-child { grid-column: 1 / 4; }
-    .week-calendar-head > span:last-child {
+    .week-calendar-head > .week-values-head {
+      display: grid;
+      gap: 7px;
       font-size: 10px;
       grid-column: 4;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       letter-spacing: 0.04em;
       white-space: nowrap;
     }
+    .week-values-head > span { text-align: right; }
     .week-day-row {
       padding: var(--card-padding);
       border-bottom: 1px solid var(--line);
@@ -2137,6 +2147,7 @@
       font-size: 10px;
       font-weight: 900;
       letter-spacing: 0.05em;
+      text-align: right;
       text-transform: uppercase;
     }
     .week-day-values-header { display: none; }
@@ -2480,7 +2491,8 @@
       .catalyst-chip:last-child { border-bottom: none; }
       .section-head { align-items: start; flex-direction: column; }
       .section-tape .section-head,
-      .section-earnings .section-head {
+      .section-earnings .section-head,
+      .section-week-ahead .section-head {
         align-items: end;
         flex-direction: row;
       }
@@ -2510,8 +2522,8 @@
       }
       .section-note { text-align: left; }
       .week-ahead-head-note {
-        align-self: stretch;
-        justify-content: flex-start;
+        align-self: end;
+        justify-content: flex-end;
         margin-left: 0;
       }
       .week-ahead-stale-info .stale-info-tooltip {
@@ -2704,6 +2716,29 @@
       .week-day-values-header { grid-column: 3; justify-self: start; }
       .week-event-variant { grid-template-columns: 1fr; }
       .week-event-variant .week-event-values { grid-column: 1; }
+      .section-week-ahead .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+        gap: var(--gap-md);
+      }
+      .section-week-ahead .section-head > div:first-child {
+        grid-column: 1;
+        grid-row: 1;
+      }
+      .section-week-ahead .week-ahead-head-note {
+        display: contents;
+      }
+      .section-week-ahead .week-ahead-head-note .section-note {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        justify-self: start;
+      }
+      .section-week-ahead .week-ahead-controls {
+        grid-column: 2;
+        grid-row: 1;
+        justify-self: end;
+      }
       .earnings-calendar-strip {
         grid-template-columns: 1fr;
       }
@@ -16824,13 +16859,12 @@
       }
 
       function weekAheadCloseReactionHtml(day, prefixHtml = '') {
-        const rows = (Array.isArray(day.marketReaction?.rows) ? day.marketReaction.rows : [])
-          .filter((row) => Number(row.delta) !== 0)
+        const rows = [...(Array.isArray(day.marketReaction?.rows) ? day.marketReaction.rows : [])]
           .sort((left, right) => {
             const magnitude = (row) => row.unit === 'percent_yield' ? Math.abs(Number(row.delta) * 100) : Math.abs(Number(row.percentChange));
             return magnitude(right) - magnitude(left);
           });
-        if (!rows.length) return `<div class="week-reactions">${prefixHtml}<span class="week-reactions-label">No selected transmission ticker registered a close-to-close move</span></div>`;
+        if (!rows.length) return prefixHtml;
         const buttons = rows.map((row) => {
           const move = row.unit === 'percent_yield'
             ? `${Number(row.delta) > 0 ? '+' : ''}${Math.round(Number(row.delta) * 100)} bp`
@@ -16959,9 +16993,9 @@
         }).join('');
         const note = `${weekAheadRangeLabel(week)} · U.S. events · Times CT`;
         const availabilityInfo = weekAheadAvailabilityInfoHtml(week);
-        const actionHtml = `<div class="week-ahead-head-note"><div class="section-note">${esc(note)}</div>${weekAheadImpactCueHtml()}${availabilityInfo}</div>`;
+        const actionHtml = `<div class="week-ahead-head-note"><div class="section-note">${esc(note)}</div><div class="week-ahead-controls">${weekAheadImpactCueHtml()}${availabilityInfo}</div></div>`;
         const body = `<div class="week surface surface-shadow">
-          <div class="week-ledger-head" aria-hidden="true"><div>Day</div><div class="week-calendar-head"><span>Scheduled economic events</span><span>Previous / Forecast / Actual</span></div><div>Market lens / outcome</div></div>
+          <div class="week-ledger-head" aria-hidden="true"><div>Day</div><div class="week-calendar-head"><span>Scheduled economic events</span><span class="week-values-head"><span>Previous</span><span>Forecast</span><span>Actual</span></span></div><div>Market lens / outcome</div></div>
           ${days}
           ${weekAheadFooterHtml(week)}
         </div>`;
