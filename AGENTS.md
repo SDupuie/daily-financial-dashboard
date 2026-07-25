@@ -58,8 +58,8 @@ Do not directly edit dashboard HTML data as part of a normal refresh. Use the RE
 
 Read only the routed files or README sections needed for the current task:
 
-- Prepare or Apply Handoff: read `README.md` Scheduled and manual execution and the relevant Daily Runbook subsections. Before Apply, also read the final pre-Apply editorial gate in `docs/editorial.md`.
-- AI Editorial Work: read `docs/editorial.md`, including the shared checklist and only the section contracts in scope. For a full dashboard update, all section contracts are in scope.
+- Prepare or Apply Handoff: read `README.md` Scheduled and manual execution and the relevant Daily Runbook subsections. Before Apply, also read `docs/editorial.md` Final Pre-Apply Editorial Gate.
+- AI Editorial Work: read `docs/editorial.md` AI Editorial Work contracts and AI Editorial Work checklist, plus only the section contracts in scope. For a full dashboard update, all section contracts are in scope.
 - Validation, commit, or publish: read only the applicable `README.md` Validation and Publish subsections: Required daily checks, Expanded content and layout checks when the change requires them, and Commit and publish for commit or publication work.
 - Deterministic source, staging, payload-shape, fallback, or data-contract work: read the relevant `docs/reference.md` subsection for the affected domain.
 - Focused repairs or local-refresh work: read only the applicable `docs/reference.md` Focused Repair Commands or Local Refresh Server subsection. For browser-compatibility work, read `docs/agent-implementation.md` and the `docs/reference.md` Browser Support subsection.

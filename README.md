@@ -24,7 +24,7 @@ Do not edit dashboard HTML, CSS, or JavaScript directly during a daily dashboard
 ## Scheduled and manual execution
 
 - `--scheduled` identifies only a scheduler-driven Prepare or Apply run. Manual/on-demand and development runs omit it.
-- Before beginning any manual or scheduled dashboard update, read the current `README.md` Daily Runbook from disk and use it as the workflow authority before running Prepare Handoff. Read `docs/editorial.md` before AI Editorial Work.
+- Before beginning any manual or scheduled dashboard update, read the current `README.md` Daily Runbook from disk and use it as the workflow authority before running Prepare Handoff. Before AI Editorial Work, read the `docs/editorial.md` AI Editorial Work contracts and AI Editorial Work checklist, plus only the section contracts in scope; a full dashboard update requires all section contracts.
 - In `America/Chicago`, the scheduled morning start window is 7:45–9:00 AM and the scheduled afternoon start window is 3:45–5:00 PM on weekdays.
 - Scheduled preparation checks the weekday/time window and completion marker before fetching; scheduled Apply/finalization rechecks only the weekday/completion marker and may finish after the start window.
 - Select the scheduled edition from Chicago time and keep the dashboard date and compile date on the local run date. Do not use the masthead, compiled timestamp, Git history, or a run lock as scheduler state.
@@ -39,8 +39,8 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 
 | Run | 1. Prepare Handoff | 2. AI Editorial Work | 3. Apply Handoff |
 | --- | --- | --- | --- |
-| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following `docs/editorial.md`. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
-| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following `docs/editorial.md`. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
+| Scheduled | Run `node scripts/run_daily_update.js prepare --scheduled --morning` or `node scripts/run_daily_update.js prepare --scheduled --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the applicable `docs/editorial.md` sections routed above. | Run `node scripts/run_daily_update.js apply --scheduled`; then commit on `main` and run `./scripts/publish_main.sh` |
+| Manual/on-demand | Run `node scripts/run_daily_update.js prepare --morning` or `node scripts/run_daily_update.js prepare --afternoon` | Edit the single `generated/editorial/dashboard-data.json` handoff. Complete every required editorial assignment marked by the handoff, following the applicable `docs/editorial.md` sections routed above. | Run `node scripts/run_daily_update.js apply`; commit and publish only when the manual update is intended to go live |
 
 ### Codex command execution
 
