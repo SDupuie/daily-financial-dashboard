@@ -106,6 +106,8 @@ function validEarningsGuidanceDisposition(disposition, text, { requireNotProvide
 }
 
 function earningsNarrativeDispositions(row, narrative, attemptedAt = '') {
+  // Missing copy becomes an auditable unavailable/pending state, never reused
+  // prose. Separate fields can be completed independently.
   const interpretation = String(narrative?.outcome?.interpretation || '').trim();
   const guide = String(narrative?.outcome?.guide || '').trim();
   const reactionNote = String(narrative?.reaction?.note || '').trim();
@@ -915,6 +917,8 @@ function reactionWindow(bars, row) {
   const reportDate = row?.reportDate;
   const reportTiming = row?.reportTiming;
   const basis = earningsReactionBasisForRow(row);
+  // Reaction windows are close-to-close. Unknown timing can resolve from the
+  // actuals observation date, but never from intraday prices.
   if (reportTiming === 'bmo' || reportTiming === 'dmh') {
     return {
       basis,

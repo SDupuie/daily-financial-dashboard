@@ -40,6 +40,8 @@ async function withRetry(operation, options = {}) {
     : (error) => error?.headers;
   let attempt = 0;
 
+  // Retry policy is opt-in at each provider boundary so callers decide which
+  // stale-data or fallback contract applies after a failure.
   while (true) {
     try {
       const result = await operation({ attempt });

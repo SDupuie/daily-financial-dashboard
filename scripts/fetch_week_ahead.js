@@ -142,6 +142,8 @@ async function requestTradingViewCalendar(range, timeoutMs, dependencies = {}) {
 }
 
 function isRetryableTradingViewError(error) {
+  // Malformed provider payloads are retried here because TradingView is the
+  // sole calendar source; a different source cannot repair the contract.
   if (error?.providerPayload === true || error?.transient === true) return true;
   return [408, 425, 429, 500, 502, 503, 504].includes(Number(error?.status));
 }

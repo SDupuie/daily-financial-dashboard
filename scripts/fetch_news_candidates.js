@@ -1003,6 +1003,8 @@ async function collectNewsCandidates({
   articleReview.status = 'reviewing';
   reportProgress();
 
+  // Article review enriches provenance and timestamps; search/provider candidates
+  // remain the inventory even when the review cap leaves some pages unchecked.
   await mapConcurrent(cappedReviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
     eligibleDates: candidate.pool === 'generalCandidates' ? generalAcquisitionDates : eligibleDates,
     fetchArticle,

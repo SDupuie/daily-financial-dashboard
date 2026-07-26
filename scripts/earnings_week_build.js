@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { atomicWriteJson } = require('./staging_writer');
-const { mapConcurrent } = require('./fetch_concurrency');
+const { mapConcurrent, withRetry } = require('./fetch_concurrency');
 const {
   EARNINGS_WEEK_SCHEMA_VERSION,
   attachReactions,
@@ -35,7 +35,8 @@ const {
   isIsoDate,
   isIsoDateTime,
   isoFromDate,
-  isSupportedFiveTradingDayRange
+  isSupportedFiveTradingDayRange,
+  zonedTimeToUtc
 } = require('./calendar_contract');
 
 const REQUEST_TIMEOUT_MS = 20000;
@@ -54,21 +55,8 @@ const DEFAULT_EARNINGSAPI_RESERVE = 20;
 const ZACKS_ENDPOINT = 'https://www.zacks.com/data_handler/earnings_calendar/calendar_handlers.php';
 const ZACKS_REFERER = 'https://www.zacks.com/earnings/earnings-calendar?icid=earnings-earnings-nav_tracking-zcom-main_menu_wrapper-earnings_calendar';
 const ZACKS_BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.55 Safari/537.36';
-const ZACKS_PAGE_READY_TIMEOUT_MS = 12000;
-const ZACKS_MONTHS = new Map([
-  ['JAN', 0],
-  ['FEB', 1],
-  ['MAR', 2],
-  ['APR', 3],
-  ['MAY', 4],
-  ['JUN', 5],
-  ['JUL', 6],
-  ['AUG', 7],
-  ['SEP', 8],
-  ['OCT', 9],
-  ['NOV', 10],
-  ['DEC', 11]
-]);
+const ZACKS_INTERSTITIAL_RETRY_DELAY_MS = 500;
+const ZACKS_INTERSTITIAL_RETRIES = 1;
 const CALENDAR_VERIFICATION_LOOKBACK_DAYS = 7;
 const CALENDAR_VERIFICATION_LOOKAHEAD_DAYS = 14;
 const REACTION_LOOKBACK_DAYS = 5;
@@ -411,7 +399,16 @@ function cleanHtmlText(value) {
 }
 
 function zacksDateTimestamp(isoDate) {
-  return Math.floor(Date.parse(`${isoDate}T00:00:00-04:00`) / 1000);
+  // Zacks expects its date parameter as local dashboard-midnight epoch seconds,
+  // not raw UTC midnight.
+  const [year, month, day] = isoDate.split('-').map(Number);
+  return Math.floor(zonedTimeToUtc({
+    year,
+    month,
+    day,
+    hour: 0,
+    minute: 0
+  }, 'America/Chicago').getTime() / 1000);
 }
 
 function zacksUrl(date, type) {
@@ -516,133 +513,33 @@ function earningsWeekUsedBackupAfterZacksBrowserFailure(payload) {
   return earningsWeekZacksBrowserRuntimeFailureMode(payload) === 'backup';
 }
 
-function zacksMonthDayKey(isoDate) {
-  const date = dateFromIso(isoDate);
-  return `${date.getUTCMonth()}:${date.getUTCDate()}`;
-}
-
-function zacksVisibleDateFromButtonText(text, displayDates) {
-  const match = String(text || '').toUpperCase().match(/\b(?:MON|TUE|WED|THU|FRI|SAT|SUN)\s+([A-Z]{3})\s+(\d{1,2})\b/);
-  if (!match) return '';
-  const month = ZACKS_MONTHS.get(match[1]);
-  const day = Number(match[2]);
-  if (!Number.isInteger(month) || !Number.isInteger(day)) return '';
-  const targetKey = `${month}:${day}`;
-  return displayDates.find((date) => zacksMonthDayKey(date) === targetKey) || '';
-}
-
-async function zacksCalendarButtons(page, displayDates) {
-  const buttons = await page.locator('button.cal_link').evaluateAll((nodes) => nodes.map((button, index) => ({
-    index,
-    text: button.innerText || button.textContent || '',
-    active: button.classList.contains('event_select')
-  })));
-  return buttons
-    .map((button) => ({
-      ...button,
-      visibleDate: zacksVisibleDateFromButtonText(button.text, displayDates)
-    }))
-    .filter((button) => button.visibleDate);
-}
-
-function isZacksEventscalUrl(value, type = 1) {
-  try {
-    const url = new URL(value);
-    return url.hostname === 'www.zacks.com'
-      && url.pathname === '/data_handler/earnings_calendar/calendar_handlers.php'
-      && url.searchParams.get('calltype') === 'eventscal'
-      && url.searchParams.get('type') === String(type);
-  } catch (_error) {
-    return false;
-  }
-}
-
-function zacksEndpointDateFromUrl(value) {
-  try {
-    const date = new URL(value).searchParams.get('date') || '';
-    return /^\d+$/.test(date) ? date : '';
-  } catch (_error) {
-    return '';
-  }
-}
-
-async function zacksClickCalendarButton(page, buttonIndex, args) {
-  const waitMs = Math.max(3000, Math.min(args.timeoutMs, ZACKS_PAGE_READY_TIMEOUT_MS));
-  const responsePromise = page.waitForResponse((response) => isZacksEventscalUrl(response.url(), 1), { timeout: waitMs })
-    .catch(() => null);
-  await page.locator('button.cal_link').nth(buttonIndex).click();
-  return responsePromise;
-}
-
-async function zacksCaptureEndpointDate(page, button, buttons, args) {
-  const active = await page.locator('button.cal_link').nth(button.index).evaluate((node) => node.classList.contains('event_select'))
-    .catch(() => false);
-  if (active && buttons.length > 1) {
-    const alternate = buttons.find((candidate) => candidate.index !== button.index);
-    if (alternate) await zacksClickCalendarButton(page, alternate.index, args);
-  }
-  const response = await zacksClickCalendarButton(page, button.index, args);
-  const endpointDate = response ? zacksEndpointDateFromUrl(response.url()) : '';
-  if (!endpointDate) {
-    throw new Error(`Zacks did not expose an eventscal endpoint request for ${button.visibleDate}.`);
-  }
-  return endpointDate;
-}
-
-async function discoverZacksEndpointDates(page, args) {
-  const buttons = await zacksCalendarButtons(page, args.displayDates);
-  const byDate = new Map(buttons.map((button) => [button.visibleDate, button]));
-  const missingDates = args.displayDates.filter((date) => !byDate.has(date));
-  if (missingDates.length) {
-    throw new Error(`Zacks calendar page is missing visible date button(s): ${missingDates.join(', ')}.`);
-  }
-  const endpointDateByVisibleDate = new Map();
-  for (const visibleDate of args.displayDates) {
-    endpointDateByVisibleDate.set(visibleDate, await zacksCaptureEndpointDate(page, byDate.get(visibleDate), buttons, args));
-  }
-  return endpointDateByVisibleDate;
-}
-
 async function openZacksBrowserSession(args) {
   const playwright = resolvePlaywrightModule(args);
   const browser = await playwright.chromium.launch({ headless: true });
-  let context = null;
-  let page = null;
   try {
-    context = await browser.newContext({
+    const context = await browser.newContext({
       viewport: { width: 1365, height: 900 },
       userAgent: ZACKS_BROWSER_USER_AGENT
     });
-    page = await context.newPage();
+    const page = await context.newPage();
     await page.goto(ZACKS_REFERER, {
       waitUntil: 'domcontentloaded',
       timeout: args.timeoutMs
     });
-    await page.waitForFunction(() => {
-      const text = document.body?.innerText || '';
-      return /Pardon Our Interruption/i.test(document.title)
-        || /Pardon Our Interruption/i.test(text)
-        || Boolean(document.querySelector('#earnings_rel_data_all_table, table.ec-ear-sales-table, button.buttons-csv'));
-    }, null, { timeout: Math.max(3000, Math.min(args.timeoutMs, ZACKS_PAGE_READY_TIMEOUT_MS)) }).catch(() => {});
     const pageState = await page.evaluate(() => {
       const text = document.body?.innerText || '';
       return {
         title: document.title,
         url: location.href,
-        hasInterruption: /Pardon Our Interruption/i.test(document.title) || /Pardon Our Interruption/i.test(text),
-        hasCalendarTable: Boolean(document.querySelector('#earnings_rel_data_all_table, table.ec-ear-sales-table')),
-        hasCsvButton: Boolean(document.querySelector('button.buttons-csv')),
-        tableCount: document.querySelectorAll('table').length
+        hasInterruption: /Pardon Our Interruption/i.test(document.title) || /Pardon Our Interruption/i.test(text)
       };
     });
     if (pageState.hasInterruption) {
       throw new Error('Zacks browser page returned an interstitial challenge.');
     }
-    if (!pageState.hasCalendarTable && !pageState.hasCsvButton) {
-      throw new Error(`Zacks browser page did not expose the earnings calendar table or CSV control. Title: ${pageState.title || 'unknown'}`);
-    }
-    const endpointDateByVisibleDate = await discoverZacksEndpointDates(page, args);
-    return { browser, context, pageState, endpointDateByVisibleDate };
+    // The page visit establishes the browser context for direct eventscal
+    // requests; downstream fetches do not depend on visible calendar controls.
+    return { browser, context };
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
@@ -650,40 +547,45 @@ async function openZacksBrowserSession(args) {
 }
 
 async function fetchZacksEventTable(date, type, args, session) {
-  const endpointDate = session?.endpointDateByVisibleDate?.get(date);
-  const url = endpointDate ? zacksUrlForEndpointDate(endpointDate, type) : zacksUrl(date, type);
+  const url = zacksUrl(date, type);
   const started = Date.now();
-  if (!endpointDate) {
-    return zacksUnavailableResult(date, type, url, `Zacks endpoint date mapping is unavailable for ${date}.`, started);
-  }
   if (!session?.context?.request) {
     return zacksUnavailableResult(date, type, url, 'Zacks browser context is unavailable.', started);
   }
-  let response;
-  try {
-    response = await session.context.request.get(url, {
-      headers: {
-        Accept: 'text/html,application/xhtml+xml,text/plain,*/*',
-        Referer: ZACKS_REFERER,
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      timeout: args.timeoutMs
-    });
-  } catch (error) {
-    return zacksUnavailableResult(date, type, url, error.message, started);
-  }
-  const body = await response.text();
-  return {
-    date,
-    type,
-    provider: 'zacks',
-    url,
-    ok: response.ok(),
-    status: response.status(),
-    responseMs: Date.now() - started,
-    body,
-    error: response.ok() ? '' : body.slice(0, 240) || `HTTP ${response.status()}`
-  };
+  return withRetry(async () => {
+    let response;
+    try {
+      response = await session.context.request.get(url, {
+        headers: {
+          Referer: ZACKS_REFERER,
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        timeout: args.timeoutMs
+      });
+    } catch (error) {
+      return zacksUnavailableResult(date, type, url, error.message, started);
+    }
+    const body = await response.text();
+    const result = {
+      date,
+      type,
+      provider: 'zacks',
+      url,
+      ok: response.ok(),
+      status: response.status(),
+      responseMs: Date.now() - started,
+      body,
+      error: response.ok() ? '' : body.slice(0, 240) || `HTTP ${response.status()}`
+    };
+    return result;
+  }, {
+    retries: ZACKS_INTERSTITIAL_RETRIES,
+    delayMs: ZACKS_INTERSTITIAL_RETRY_DELAY_MS,
+    sleep: args.sleep,
+    // DOM completion can precede the anti-bot session cookie; retry the direct
+    // endpoint instead of waiting on a visible calendar control.
+    shouldRetryResult: (result) => isZacksInterstitialBody(result.body)
+  });
 }
 
 function extractHtmlCells(rowHtml, tag) {
@@ -765,9 +667,13 @@ function normalizeZacksTiming(value) {
   return 'dmh';
 }
 
+function isZacksInterstitialBody(body) {
+  return /Pardon Our Interruption|initializeProtection|reese/i.test(String(body || ''));
+}
+
 function parseZacksTable(result, metric) {
   if (!result.ok) return { ...result, ok: false, rows: [], rowCount: 0, error: result.error || `HTTP ${result.status}` };
-  if (/Pardon Our Interruption|initializeProtection|reese/i.test(result.body)) {
+  if (isZacksInterstitialBody(result.body)) {
     return { ...result, ok: false, rows: [], rowCount: 0, error: 'Zacks returned an interstitial challenge instead of the calendar table.' };
   }
   const tableMatch = String(result.body || '').match(/<table\b[\s\S]*?<\/table>/i);
@@ -2158,6 +2064,8 @@ function filterZacksRowsByFinnhubUsListings(rows, directory) {
     error
   });
   if (!directory?.ok || !Array.isArray(directory.listings) || !directory.listings.length) {
+    // Listing classification is a narrow exclusion pass. If both live and cached
+    // directories are unavailable, keep the Zacks row slate and expose the gap in diagnostics.
     return {
       rows: inputRows,
       summary: unavailableSummary('finnhub_us_symbol_directory_unavailable', directory?.error || ''),
@@ -2615,6 +2523,8 @@ async function runBuild(argv = process.argv.slice(2)) {
   let payload;
 
   if (zacksSchemaGate.ok) {
+    // Zacks is the primary build path; the legacy providers below run only
+    // after this schema gate rejects the complete Zacks slate.
     const token = process.env.FINNHUB_API_KEY;
     const zacksRows = buildZacksRows(zacksDays, { observedAt: generatedAt.toISOString() });
     const finnhubUsSymbols = await fetchZacksListingDirectory(args, token);
@@ -2761,6 +2671,7 @@ module.exports = {
   fetchAlphaVantageCalendar,
   fetchEarningsApiCalendar,
   fetchFinnhubUsSymbols,
+  fetchZacksEventTable,
   fetchZacksCalendar,
   filterZacksRowsByFinnhubUsListings,
   finnhubCalendarFromResponse,
@@ -2779,9 +2690,7 @@ module.exports = {
   runBuild,
   zacksBrowserRuntimeFailureKind,
   zacksGateIndicatesBrowserRuntimeFailure,
-  zacksEndpointDateFromUrl,
   zacksGate,
-  zacksVisibleDateFromButtonText,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
   storeProfileInCache

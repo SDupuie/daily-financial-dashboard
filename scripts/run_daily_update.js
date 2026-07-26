@@ -1098,6 +1098,8 @@ function commitDashboardCandidate(args, nextHtml, {
   const candidate = path.join(directory, `.${path.basename(args.dashboard)}.${process.pid}.${Date.now()}.tmp`);
   try {
     fs.writeFileSync(candidate, nextHtml, { mode: fs.statSync(args.dashboard).mode });
+    // The canonical dashboard is replaced only after the exact candidate passes
+    // publication-mode render validation.
     const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'published', candidate];
     const result = spawnSync(process.execPath, validationArgs, {
       cwd: ROOT,
@@ -1275,6 +1277,8 @@ function isEmptyEarningsRecoveryWeek(week) {
 
 function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previousWeek = data.earnings?.week, checkedAt = scheduledNow(), evidenceRows = false, useSidecarEvidence = false } = {}) {
   const incomingRows = Array.isArray(earningsWeek?.rows) ? earningsWeek.rows.length : 0;
+  // Apply may preserve prior narrative only through the Earnings fingerprint
+  // contract; deterministic rows and display eligibility still come from input.
   const canonicalEarningsWeek = mergeUnchangedEarningsNarrative(data.earnings?.week, earningsWeek);
   delete canonicalEarningsWeek.policy;
   delete canonicalEarningsWeek.outputPath;

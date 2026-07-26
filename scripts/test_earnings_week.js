@@ -36,6 +36,8 @@ const {
   finnhubUsSymbolsFromResponse,
   finnhubCalendarFromResponse,
   fetchYahooBarsForRows,
+  fetchZacksCalendar,
+  fetchZacksEventTable,
   parseZacksTable,
   earningsWeekZacksBrowserRuntimeFailureMode,
   earningsWeekUsedBackupAfterZacksBrowserFailure,
@@ -45,8 +47,6 @@ const {
   zacksGateIndicatesBrowserRuntimeFailure,
   verifyEarningsApiRecoveryRows,
   verifyFinnhubScheduleRows,
-  zacksEndpointDateFromUrl,
-  zacksVisibleDateFromButtonText,
   zacksGate
 } = require('./earnings_week_build');
 const {
@@ -948,16 +948,120 @@ function testUnknownTimingActualObservationDrivesReactionBasis() {
   assert.ok(Math.abs(nextSession.reaction.percent - 10) < 0.0001);
 }
 
-function testZacksVisibleDateMapping() {
-  const displayDates = ['2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24'];
-  assert.equal(
-    zacksVisibleDateFromButtonText('WED JUL 22 Earnings & Sales 154 Reported', displayDates),
-    '2026-07-22'
-  );
-  assert.equal(
-    zacksEndpointDateFromUrl('https://www.zacks.com/data_handler/earnings_calendar/calendar_handlers.php?calltype=eventscal&date=1784782800&type=1&search_trigger=0'),
-    '1784782800'
-  );
+async function testZacksEventFetchUsesDirectDateEndpoint() {
+  const calls = [];
+  const session = {
+    context: {
+      request: {
+        get: async (url, options) => {
+          calls.push({ url, options });
+          return {
+            ok: () => true,
+            status: () => 200,
+            text: async () => '<table></table>'
+          };
+        }
+      }
+    }
+  };
+  const summer = await fetchZacksEventTable('2026-07-30', 1, { timeoutMs: 20000 }, session);
+  const winter = await fetchZacksEventTable('2026-01-06', 9, { timeoutMs: 20000 }, session);
+  assert.equal(summer.ok, true);
+  assert.equal(winter.ok, true);
+  assert.equal(calls.length, 2);
+  const summerUrl = new URL(calls[0].url);
+  const winterUrl = new URL(calls[1].url);
+  assert.equal(summerUrl.searchParams.get('calltype'), 'eventscal');
+  assert.equal(summerUrl.searchParams.get('date'), '1785387600');
+  assert.equal(summerUrl.searchParams.get('type'), '1');
+  assert.equal(winterUrl.searchParams.get('date'), '1767679200');
+  assert.equal(winterUrl.searchParams.get('type'), '9');
+  assert.equal(calls.every((call) => call.options.headers.Referer.includes('/earnings/earnings-calendar')), true);
+  assert.equal(calls.every((call) => !Object.prototype.hasOwnProperty.call(call.options.headers, 'Accept')), true);
+}
+
+async function testZacksEventFetchRetriesTransientSessionChallenge() {
+  let requestCount = 0;
+  const delays = [];
+  const session = {
+    context: {
+      request: {
+        get: async () => {
+          requestCount += 1;
+          const body = requestCount === 1 ? 'Pardon Our Interruption' : '<table></table>';
+          return {
+            ok: () => true,
+            status: () => 200,
+            text: async () => body
+          };
+        }
+      }
+    }
+  };
+  const result = await fetchZacksEventTable('2026-07-30', 1, {
+    timeoutMs: 20000,
+    sleep: async (milliseconds) => delays.push(milliseconds)
+  }, session);
+  assert.equal(result.ok, true);
+  assert.equal(result.body, '<table></table>');
+  assert.equal(requestCount, 2);
+  assert.deepEqual(delays, [500]);
+}
+
+async function testZacksDirectCalendarDoesNotRequirePageControls() {
+  const headers = ['Symbol', 'Company', 'Market Cap', 'Time', 'Expected', 'Reported', 'Surprise'];
+  const body = zacksTable(headers, [[
+    '<a href="/stock/quote/DIRECT">DIRECT Quick Quote</a>',
+    'Direct Endpoint Corp',
+    '$150.00B',
+    'amc',
+    '1.00',
+    '1.25',
+    '25.00%'
+  ]]);
+  const requestUrls = [];
+  let browserClosed = false;
+  const page = {
+    goto: async () => {},
+    evaluate: async () => ({
+      title: 'Zacks Earnings Calendar',
+      url: 'https://www.zacks.com/earnings/earnings-calendar',
+      hasInterruption: false
+    })
+  };
+  const context = {
+    request: {
+      get: async (url) => {
+        requestUrls.push(url);
+        return {
+          ok: () => true,
+          status: () => 200,
+          text: async () => body
+        };
+      }
+    },
+    newPage: async () => page
+  };
+  const playwright = {
+    chromium: {
+      launch: async () => ({
+        newContext: async () => context,
+        close: async () => {
+          browserClosed = true;
+        }
+      })
+    }
+  };
+  const days = await fetchZacksCalendar({
+    playwright,
+    displayDates: ['2026-07-30'],
+    timeoutMs: 20000
+  });
+  assert.equal(days.length, 1);
+  assert.equal(days[0].eps.ok, true);
+  assert.equal(days[0].revenue.ok, true);
+  assert.equal(requestUrls.length, 2);
+  assert.equal(browserClosed, true);
 }
 
 function testZacksBrowserRuntimeDiagnostics() {
@@ -2386,7 +2490,9 @@ async function main() {
   testZacksPrimaryBuildContract();
   testZacksListingFilterUsesFinnhubDirectory();
   testUnknownTimingActualObservationDrivesReactionBasis();
-  testZacksVisibleDateMapping();
+  await testZacksEventFetchUsesDirectDateEndpoint();
+  await testZacksEventFetchRetriesTransientSessionChallenge();
+  await testZacksDirectCalendarDoesNotRequirePageControls();
   testZacksBrowserRuntimeDiagnostics();
   testEarningsGuidanceChoosesSameEventFiling();
   testEarningsGuidanceExhibitSelectionUsesWrapperLabels();

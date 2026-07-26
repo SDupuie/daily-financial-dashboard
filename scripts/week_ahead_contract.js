@@ -303,6 +303,8 @@ function buildWeekAheadPreparationFallback(canonicalWeek, targetRange, { checked
     && Array.isArray(canonicalWeek?.days)
     && canonicalWeek.days.length === 5;
   if (sameRange) {
+    // Same-range carry-forward keeps the event slate but reruns lifecycle so
+    // released/awaiting-close states remain current for the publication time.
     const week = applyWeekAheadLifecycle(structuredClone(canonicalWeek), null, { now: new Date(timestamp) });
     if (week.source) {
       week.source.status = 'cached';
@@ -1180,6 +1182,8 @@ function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { syste
     const editorialLens = editorialDay?.marketLens;
     const submittedValidLens = validEditorialMarketLens(editorialLens);
     if (baseLens && submittedValidLens) {
+      // Editorial owns text only; selected event IDs and reaction tickers are
+      // rebuilt from the deterministic candidate.
       next.marketLens = overlayEditableMarketLensText(baseLens, editorialLens);
     } else if (weekAheadMarketLensIsComplete(next)) {
       next.marketLens = unavailableMarketLensForEvents(next.events);

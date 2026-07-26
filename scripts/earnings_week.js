@@ -254,6 +254,8 @@ function stringValue(value) {
 }
 
 function validateNarrativePayload(source, narrativePayload, options = {}) {
+  // Narrative sidecars are tied to one generated Earnings artifact; Apply does
+  // not accept stale copy for a different range or generation timestamp.
   if (!narrativePayload || typeof narrativePayload !== 'object' || Array.isArray(narrativePayload)) {
     throw new Error('Narrative payload must be an object.');
   }
@@ -294,6 +296,8 @@ function applyEarningsNarrative(source, narrativePayload, options = {}) {
     const key = rowKey(item);
     const target = rowsByKey.get(key);
     if (!target) throw new Error(`${key} narrative does not match a canonical earnings row.`);
+    // Only narrative fields are overlaid; deterministic report facts remain
+    // from the source row that already passed the Earnings contract.
     const row = target.row;
     const next = {
       ...row,

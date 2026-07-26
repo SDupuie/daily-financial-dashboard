@@ -752,6 +752,8 @@ const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((ma
 const allowedLocalRefreshUrls = new Set([
   'https://192.168.2.2:2210/api/market-refresh'
 ]);
+// The published dashboard may call only the optional read-only LAN overlay;
+// deterministic production data still comes from embedded JSON.
 for (const url of runtimeUrls) {
   if (!allowedLocalRefreshUrls.has(url)) {
     errors.push(`Unexpected runtime URL: ${url}`);
