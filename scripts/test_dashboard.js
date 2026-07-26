@@ -31,7 +31,9 @@ const {
 const {
   buildAssetAllocationFallback,
   buildAssetAllocationSummaryFallback,
+  fetchHolding,
   fetchPortfolioRows,
+  parseHolding,
   validateAssetAllocationPortfolioPayload,
   validateAssetAllocationSummaryPayload
 } = require('./fetch_asset_allocation');
@@ -219,6 +221,32 @@ function fixturePortfolioRows() {
     futureMonthDividendsValue: 0,
     futureMonthDividendEvents: []
   }));
+}
+
+function assetYahooPayload(rows, regularMarketPrice = null) {
+  const lastUsableClose = [...rows].reverse().find((row) => Number.isFinite(row.close))?.close;
+  return {
+    chart: {
+      result: [{
+        meta: {
+          regularMarketPrice: Number.isFinite(regularMarketPrice) ? regularMarketPrice : lastUsableClose
+        },
+        timestamp: rows.map((row) => Math.floor(Date.parse(`${row.date}T20:00:00Z`) / 1000)),
+        indicators: {
+          quote: [{
+            close: rows.map((row) => row.close)
+          }],
+          adjclose: [{
+            adjclose: rows.map((row) => row.adjclose)
+          }]
+        },
+        events: {
+          dividends: {}
+        }
+      }],
+      error: null
+    }
+  };
 }
 
 function fixtureEarningsWeek() {
@@ -1518,6 +1546,61 @@ async function testUpdaterModulePatches() {
     currentMonthEnd: '2026-07-31',
     lookaheadEndExclusive: '2026-09-01'
   });
+}
+
+async function testAssetAllocationYahooMalformedLatestRowRetries() {
+  const holding = { symbol: 'VTI', sleeve: 'U.S. total market equity', swatch: 'vti' };
+  const monthStart = new Date('2026-07-01T00:00:00.000Z');
+  const now = new Date('2026-07-24T21:00:00.000Z');
+  const currentMonthEnd = new Date('2026-07-31T00:00:00.000Z');
+  const lookaheadEndExclusive = new Date('2026-09-01T00:00:00.000Z');
+  const malformedLatest = assetYahooPayload([
+    { date: '2026-06-30', close: 99, adjclose: 99 },
+    { date: '2026-07-23', close: 100, adjclose: 100 },
+    { date: '2026-07-24', close: null, adjclose: null }
+  ], 101);
+  const repaired = assetYahooPayload([
+    { date: '2026-06-30', close: 99, adjclose: 99 },
+    { date: '2026-07-23', close: 100, adjclose: 100 },
+    { date: '2026-07-24', close: 101, adjclose: 101 }
+  ], 101);
+
+  assert.throws(
+    () => parseHolding(holding, malformedLatest, monthStart, now, currentMonthEnd, lookaheadEndExclusive),
+    /latest Yahoo price row for 2026-07-24 is missing usable close or adjusted close/
+  );
+
+  let requestCount = 0;
+  const delays = [];
+  const row = await fetchHolding(holding, {
+    timeoutMs: 1000,
+    fetchJson: async () => {
+      requestCount += 1;
+      return requestCount === 1 ? malformedLatest : repaired;
+    },
+    sleep: async (milliseconds) => delays.push(milliseconds)
+  }, 0, 0, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
+
+  assert.equal(requestCount, 2);
+  assert.deepEqual(delays, [500]);
+  assert.equal(row.ticker, 'VTI');
+  assert.equal(row.price, '$101.00');
+  assert.equal(row.dailyTR, '+1.00%');
+  assert.notEqual(row.dailyTR, '-100.00%');
+
+  let failedRequestCount = 0;
+  await assert.rejects(
+    () => fetchHolding(holding, {
+      timeoutMs: 1000,
+      fetchJson: async () => {
+        failedRequestCount += 1;
+        return malformedLatest;
+      },
+      sleep: async () => {}
+    }, 0, 0, monthStart, now, currentMonthEnd, lookaheadEndExclusive),
+    /latest Yahoo price row for 2026-07-24 is missing usable close or adjusted close/
+  );
+  assert.equal(failedRequestCount, 2);
 }
 
 async function testFuturesStagingPayloadContract() {
@@ -4801,6 +4884,7 @@ async function main() {
   const tests = [
     testUpdaterQuoteAndCryptoPatches,
     testUpdaterModulePatches,
+    testAssetAllocationYahooMalformedLatestRowRetries,
     testPartialDeterministicRowsValidate,
     testFuturesStagingPayloadContract,
     testPrepareFallbackAndUnavailableContracts,

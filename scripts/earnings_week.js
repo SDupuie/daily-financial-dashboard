@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { atomicWriteJson } = require('./staging_writer');
-const { mapConcurrent } = require('./fetch_concurrency');
+const { mapConcurrent, sleep, withRetry } = require('./fetch_concurrency');
+const { addDays, dateFromIso, isIsoDate } = require('./calendar_contract');
 const {
   combinedOutcome,
   computeEarningsSourceStatus,
@@ -13,11 +14,13 @@ const {
   earningsNarrativeDispositions,
   earningsRowKey: rowKey,
   applyEarningsLifecycle,
+  earningsCloseAvailable,
   metricResult,
   isDisplayEligibleEarningsRow,
   needsYahooReactionFetch,
   numberOrNull,
   pctChange,
+  reactionWindow,
   reportWindowArrived
 } = require('./earnings_week_contract');
 const {
@@ -35,6 +38,8 @@ const root = path.resolve(__dirname, '..');
 const DEFAULT_EARNINGS_WEEK = path.resolve(root, 'generated', 'earnings_week.json');
 const DEFAULT_NARRATIVE = path.resolve(root, 'generated', 'earnings_narrative.json');
 const SECONDARY_CALENDAR_SLATES = new Set(['alphaVantageCalendar']);
+const YAHOO_REACTION_RETRIES = 3;
+const YAHOO_REACTION_RETRY_DELAY_MS = 1500;
 
 function isSecondaryCalendarSlate(value) {
   return SECONDARY_CALENDAR_SLATES.has(value);
@@ -1092,6 +1097,48 @@ function refreshFailure(provider, code, message) {
   };
 }
 
+function nextWeekday(isoDate) {
+  if (!isIsoDate(isoDate)) return '';
+  let next = isoDate;
+  do {
+    next = addDays(next, 1);
+  } while ([0, 6].includes(dateFromIso(next).getUTCDay()));
+  return next;
+}
+
+function yahooRowDoesNotNeedReactionRetry(row, bars, asOf) {
+  const { basis, fromBar, toBar } = reactionWindow(bars, row);
+  if (fromBar && toBar && earningsCloseAvailable(toBar, asOf)) return true;
+  if (basis === 'same_day_close' || basis === 'during_market_close') {
+    return !earningsCloseAvailable({ date: row?.reportDate }, asOf);
+  }
+  if (basis === 'next_session_close') {
+    if (toBar) return false;
+    const expectedCloseDate = nextWeekday(row?.reportDate);
+    return !expectedCloseDate || !earningsCloseAvailable({ date: expectedCloseDate }, asOf);
+  }
+  return true;
+}
+
+function yahooResultDoesNotNeedReactionRetry(result, rows, asOf) {
+  const canRetryMissingWindow = result?.ok || Number(result?.status) === 200;
+  if (!canRetryMissingWindow) return true;
+  const bars = Array.isArray(result?.bars) ? result.bars : [];
+  return rows.every((row) => yahooRowDoesNotNeedReactionRetry(row, bars, asOf));
+}
+
+async function fetchYahooReactionWithRetry(symbol, rows, source, args, fetchYahoo, fetchJson, sleepFn) {
+  return withRetry(
+    () => fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson),
+    {
+      retries: YAHOO_REACTION_RETRIES,
+      delayMs: YAHOO_REACTION_RETRY_DELAY_MS,
+      sleep: sleepFn,
+      shouldRetryResult: (result) => !yahooResultDoesNotNeedReactionRetry(result, rows, args.asOf)
+    }
+  );
+}
+
 async function collectRefreshData(source, args, dependencies = {}) {
   const targetRows = refreshTargetRows(source, args.asOf);
   const zacksTargets = targetRows.filter((row) => row.sourceAudit?.selectedSources?.slate === 'zacks');
@@ -1214,10 +1261,22 @@ async function collectRefreshData(source, args, dependencies = {}) {
   // Reaction fetches run only after actual EPS or revenue exists; estimates-only
   // rows keep their pending reaction state and avoid unnecessary Yahoo calls.
   const yahooSymbols = [...new Set(yahooTargets.map((row) => row.symbol))];
+  const yahooTargetsBySymbol = new Map(yahooSymbols.map((symbol) => [
+    symbol,
+    yahooTargets.filter((row) => row.symbol === symbol)
+  ]));
   const yahooFetches = await mapConcurrent(yahooSymbols, 4, async (symbol) => {
     const symbolTargets = targetRows.filter((row) => row.symbol === symbol);
     try {
-      const result = await fetchYahoo(symbol, source.range.from, source.range.to, { timeoutMs: args.timeoutMs }, fetchJson);
+      const result = await fetchYahooReactionWithRetry(
+        symbol,
+        yahooTargetsBySymbol.get(symbol) || [],
+        source,
+        args,
+        fetchYahoo,
+        fetchJson,
+        dependencies.sleep || sleep
+      );
       if (result?.ok) return result;
       addFailure(symbolTargets, refreshFailure('yahoo', 'provider_request_failed', result?.error || `Yahoo Finance returned HTTP ${result?.status || 0}.`));
     } catch (error) {

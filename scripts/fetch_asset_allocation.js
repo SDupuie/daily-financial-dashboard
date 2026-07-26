@@ -5,6 +5,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const { withRetry } = require('./fetch_concurrency');
 const { atomicWriteJson } = require('./staging_writer');
 
 const REQUEST_TIMEOUT_MS = 10000;
@@ -14,6 +15,8 @@ const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
 const DEFAULT_REFRESH_URL = 'http://127.0.0.1:2200/api/asset-market-data';
 const DEFAULT_EXPORT_PATH = '/Users/Scott/Projects/Asset Allocation Dashboard/exports/daily-tape-summary.json';
 const DASHBOARD_TIME_ZONE = 'America/Chicago';
+const YAHOO_ASSET_RETRIES = 1;
+const YAHOO_ASSET_RETRY_DELAY_MS = 500;
 
 // Staging helper only: computes instrument-level ETF data and imports one
 // sanitized portfolio summary. It never imports tactical allocation logic.
@@ -267,22 +270,44 @@ function dateText(date) {
   return date.toISOString().slice(0, 10);
 }
 
-function validPriceRows(result) {
+function positiveNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function yahooPriceRow(result, index) {
   const timestamps = result?.timestamp || [];
   const adjCloses = result?.indicators?.adjclose?.[0]?.adjclose || [];
   const closes = result?.indicators?.quote?.[0]?.close || [];
-  return timestamps.map((timestamp, index) => {
-    const price = Number(adjCloses[index]);
-    const close = Number(closes[index]);
-    return Number.isFinite(timestamp) && Number.isFinite(price)
-      ? {
-        date: dayText(timestamp),
-        timestamp,
-        price,
-        close: Number.isFinite(close) ? close : price
-      }
-      : null;
-  }).filter(Boolean);
+  const timestamp = Number(timestamps[index]);
+  if (!Number.isFinite(timestamp)) return null;
+  const price = positiveNumberOrNull(adjCloses[index]);
+  const close = positiveNumberOrNull(closes[index]);
+  return {
+    date: dayText(timestamp),
+    timestamp,
+    price,
+    close,
+    ok: price !== null && close !== null
+  };
+}
+
+function latestYahooPriceRow(result) {
+  const timestamps = result?.timestamp || [];
+  for (let index = timestamps.length - 1; index >= 0; index -= 1) {
+    const row = yahooPriceRow(result, index);
+    if (row) return row;
+  }
+  return null;
+}
+
+function validPriceRows(result) {
+  const timestamps = result?.timestamp || [];
+  return timestamps
+    .map((_timestamp, index) => yahooPriceRow(result, index))
+    .filter((row) => row?.ok)
+    .map(({ ok: _ok, ...row }) => row);
 }
 
 function dividendEventsInRange(result, rangeStart, rangeEndExclusive) {
@@ -338,6 +363,13 @@ function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookah
     throw new Error(`${holding.symbol} response did not include chart data`);
   }
 
+  const latestRaw = latestYahooPriceRow(result);
+  if (!latestRaw) {
+    throw new Error(`${holding.symbol} response did not include price timestamps`);
+  }
+  if (!latestRaw.ok) {
+    throw new Error(`${holding.symbol} latest Yahoo price row for ${latestRaw.date} is missing usable close or adjusted close`);
+  }
   const prices = validPriceRows(result);
   if (prices.length < 2) {
     throw new Error(`${holding.symbol} response did not include enough adjusted-close history`);
@@ -396,8 +428,16 @@ function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookah
 }
 
 async function fetchHolding(holding, args, period1, period2, monthStart, now, currentMonthEnd, lookaheadEndExclusive) {
-  const payload = await fetchJson(chartUrl(holding.symbol, period1, period2), args.timeoutMs);
-  return parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
+  const fetchJsonFn = args.fetchJson || fetchJson;
+  return withRetry(async () => {
+    const payload = await fetchJsonFn(chartUrl(holding.symbol, period1, period2), args.timeoutMs);
+    return parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
+  }, {
+    retries: YAHOO_ASSET_RETRIES,
+    delayMs: YAHOO_ASSET_RETRY_DELAY_MS,
+    sleep: args.sleep,
+    shouldRetryError: () => true
+  });
 }
 
 function readCanonicalPortfolio(input) {
@@ -734,8 +774,10 @@ if (require.main === module) {
 module.exports = {
   buildAssetAllocationFallback,
   buildAssetAllocationSummaryFallback,
+  fetchHolding,
   fetchPortfolioRows,
   normalizedSummary,
+  parseHolding,
   validateAssetAllocationPortfolioPayload,
   validateAssetAllocationSummaryPayload
 };
