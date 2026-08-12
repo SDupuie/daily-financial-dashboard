@@ -45,6 +45,7 @@ Default manual-update scope: when the user asks for a manual dashboard update, r
 ### Codex command execution
 
 - When Codex runs Prepare, use escalated local command execution. Zacks uses Chromium during Earnings preparation, and Chromium may not launch in the default managed sandbox.
+- If command execution returns a session ID, a running state, or no numeric exit code, the underlying command is still active. Poll that session until it returns an exit code, then evaluate the complete accumulated output. `Preparation status: candidate ready` is intermediate until `Editorial workspace prepared ...` appears. Never report or record a terminal result while the session remains active.
 - Zacks uses the Chromium browser installed for this repository. On a new checkout, run `npm install` and then `npm run install:browsers`. This is a one-time setup or repair step, not something required before every dashboard update.
 - At the start of Prepare, if the repo-local Chromium executable is missing, Prepare runs `npm run install:browsers` once and continues regardless of whether that repair succeeds.
 - If Chromium cannot start because the execution environment blocks browser launch, Prepare continues using backup earnings sources or retained prior Zacks facts and prints a warning. Run Prepare with escalated local command execution for that case; reinstalling Chromium does not repair a sandbox or permission failure.
