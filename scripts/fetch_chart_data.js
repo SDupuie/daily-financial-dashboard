@@ -1832,7 +1832,21 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const tickerKey = String(row.ticker || '').toUpperCase();
     try {
       const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
-      seriesByIndex[index] = { ...item, quoteRevision };
+      const refreshedSeries = { ...item, quoteRevision };
+      const validationErrors = validateChartStagingPayload(
+        chartOutput({
+          args,
+          series: [refreshedSeries],
+          failures: [],
+          generatedAt,
+          quoteRevision,
+          startDate,
+          endDate
+        }),
+        [row]
+      );
+      if (validationErrors.length) throw new Error(validationErrors.join(' '));
+      seriesByIndex[index] = refreshedSeries;
       failuresByTicker.delete(tickerKey);
     } catch (error) {
       const prior = canonicalByTicker.get(tickerKey);

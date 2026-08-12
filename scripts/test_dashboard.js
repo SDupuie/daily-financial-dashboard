@@ -3552,6 +3552,78 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   assert.equal(partialValidation.status, 0, partialValidation.stderr);
   assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
 
+  const queuedDashboard = structuredClone(producerDashboard);
+  const queuedChartData = structuredClone(producerChartData);
+  const extraTickers = ['VDC', 'VDE', 'VFH'];
+  for (const [index, ticker] of extraTickers.entries()) {
+    const series = structuredClone(producerChartData.series[0]);
+    series.ticker = ticker;
+    series.name = `Fixture ${ticker}`;
+    series.sourceSymbol = ticker;
+    series.bars = series.bars.map((bar) => [bar[0], ...bar.slice(1).map((value, valueIndex) => (
+      valueIndex < 4 && Number.isFinite(value) ? value + index + 1 : value
+    ))]);
+    queuedChartData.series.push(series);
+    const tapeRow = structuredClone(producerDashboard.tape.rows[0]);
+    tapeRow.ticker = ticker;
+    tapeRow.name = `Fixture ${ticker}`;
+    tapeRow.sourceSymbol = ticker;
+    queuedDashboard.tape.rows.push(tapeRow);
+  }
+  const queuedInput = path.join(dir, 'queued-input.html');
+  const queuedOutput = path.join(dir, 'queued-chart-data.json');
+  fs.writeFileSync(queuedInput, renderDashboardValidationFixture(queuedDashboard, queuedChartData));
+  let releaseInitialWorkers;
+  const initialWorkersBlocked = new Promise((resolve) => { releaseInitialWorkers = resolve; });
+  let invalidSeriesReturned = false;
+  let queuedTickerStartedAfterInvalid = false;
+  const fetchedSeries = (row) => ({
+    ticker: row.ticker,
+    name: row.name,
+    section: row.section,
+    sourceSymbol: row.sourceSymbol,
+    source: 'Yahoo Finance Chart API',
+    dataKind: 'ohlc',
+    priceOnly: false,
+    noVolume: false,
+    bars: [
+      { time: '2026-07-09', open: 6100, high: 6110, low: 6090, close: 6100, volume: 1000 },
+      { time: '2026-07-10', open: 6190, high: 6210, low: 6180, close: 6200, volume: 1100 }
+    ]
+  });
+  await runChart([
+    '--input', queuedInput,
+    '--output', queuedOutput,
+    ...['SPX', 'VCR', 'UST10Y', ...extraTickers].flatMap((ticker) => ['--ticker', ticker]),
+    '--days', '1826',
+    '--delay-ms', '0'
+  ], {
+    now: new Date('2026-07-10T21:07:00.000Z'),
+    fetchSeries: async (row) => {
+      if (row.ticker === 'VCR') {
+        invalidSeriesReturned = true;
+        return { ...fetchedSeries(row), bars: fetchedSeries(row).bars.slice(-1) };
+      }
+      if (row.ticker === 'VDE') {
+        queuedTickerStartedAfterInvalid = invalidSeriesReturned;
+        releaseInitialWorkers();
+        return fetchedSeries(row);
+      }
+      if (['SPX', 'UST10Y', 'VDC'].includes(row.ticker)) await initialWorkersBlocked;
+      return fetchedSeries(row);
+    }
+  });
+  const isolatedFailure = JSON.parse(fs.readFileSync(queuedOutput, 'utf8'));
+  assert.equal(queuedTickerStartedAfterInvalid, true, 'A queued ticker must start after an earlier invalid series is isolated.');
+  assert.equal(isolatedFailure.availability.status, 'partial');
+  assert.equal(isolatedFailure.availability.failures.length, 1);
+  assert.equal(isolatedFailure.availability.failures[0].ticker, 'VCR');
+  assert.match(isolatedFailure.availability.failures[0].message, /must contain at least two bars/);
+  assert.equal(isolatedFailure.series.find((row) => row.ticker === 'VCR').availability.status, 'carried_forward');
+  assert.ok(isolatedFailure.series.filter((row) => row.ticker !== 'VCR')
+    .every((row) => row.quoteRevision === isolatedFailure.generatedAt));
+  assert.deepEqual(validateChartStagingPayload(isolatedFailure, queuedDashboard.tape.rows), []);
+
   await runChart([
     '--input', producerInput,
     '--output', producerOutput,
