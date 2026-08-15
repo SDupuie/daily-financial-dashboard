@@ -415,13 +415,10 @@ function parseHolding(holding, payload, monthStart, now, currentMonthEnd, lookah
     mtdTR: Number.isFinite(mtdTRValue) ? asPercent(mtdTRValue) : 'Unavailable',
     mtdTRValue,
     mtdDir: direction(mtdTRValue),
-    monthDivPerShare: asMoney(monthDivPerShareValue),
     monthDivPerShareValue,
     dividends,
-    upcomingCurrentMonthDividends: asMoney(upcomingCurrentMonthDividendsValue),
     upcomingCurrentMonthDividendsValue,
     upcomingCurrentMonthDividendEvents: dividendBuckets.upcoming,
-    futureMonthDividends: asMoney(futureMonthDividendsValue),
     futureMonthDividendsValue,
     futureMonthDividendEvents: dividendBuckets.future
   };
@@ -450,8 +447,37 @@ function readCanonicalPortfolio(input) {
   }
 }
 
+function timestampInDashboardMonth(timestamp, month) {
+  return isIsoDateTime(timestamp) && dashboardIsoDate(new Date(timestamp))?.startsWith(`${month}-`);
+}
+
+function unavailableHoldingRow(holding, checkedAt) {
+  return {
+    ticker: holding.symbol,
+    sleeve: holding.sleeve,
+    swatch: holding.swatch,
+    price: 'Unavailable',
+    dailyPriceChange: 'Unavailable',
+    dailyTR: 'Unavailable',
+    mtdPriceChange: 'Unavailable',
+    mtdTR: 'Unavailable',
+    monthDivPerShareValue: 0,
+    dividends: [],
+    upcomingCurrentMonthDividendsValue: 0,
+    upcomingCurrentMonthDividendEvents: [],
+    futureMonthDividendsValue: 0,
+    futureMonthDividendEvents: [],
+    availability: {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt
+    }
+  };
+}
+
 async function fetchPortfolioRows(args, dependencies = {}) {
   const now = dependencies.now instanceof Date ? dependencies.now : new Date();
+  const checkedAt = now.toISOString();
   const calendar = dashboardDateParts(now);
   const monthStart = utcDate(calendar.year, calendar.monthIndex, 1);
   const currentMonthEnd = utcDate(calendar.year, calendar.monthIndex + 1, 0);
@@ -479,48 +505,51 @@ async function fetchPortfolioRows(args, dependencies = {}) {
       .map((row) => [row?.ticker, row])
   );
   const failures = [];
-  const rows = settled.map((result, index) => {
-    if (result.status === 'fulfilled') return result.value;
-    const holding = HOLDINGS[index];
-    failures.push({ ticker: holding.symbol, message: result.reason?.message || 'source unavailable' });
+  const failedHoldingRow = (holding, message) => {
+    failures.push({ ticker: holding.symbol, message });
     const prior = priorByTicker.get(holding.symbol);
-    if (prior) {
+    const priorAvailabilityStatus = prior?.availability?.status;
+    const priorErrors = prior ? validateAssetAllocationHoldingRow(prior, {
+      holding,
+      rowLabel: `Asset Allocation prior ${holding.symbol}`,
+      month: currentMonth,
+      observationTimestamp: canonicalLastValidatedAt
+    }) : [];
+    if (prior && priorAvailabilityStatus !== 'unavailable' && !priorErrors.length) {
       const lastValidatedAt = String(prior.availability?.lastValidatedAt || canonicalLastValidatedAt).trim();
-      // Row-level carry-forward is month-scoped; a new month without a fresh
-      // fetch publishes explicit unavailable fields instead of stale MTD math.
-      return {
+      const candidate = {
         ...prior,
         availability: {
           status: 'carried_forward',
           reason: 'source_refresh_failed',
-          checkedAt: now.toISOString(),
-          ...(lastValidatedAt ? { lastValidatedAt } : {})
+          checkedAt,
+          lastValidatedAt
         }
       };
+      const candidateErrors = validateAssetAllocationHoldingRow(candidate, {
+        holding,
+        rowLabel: `Asset Allocation fallback ${holding.symbol}`,
+        month: currentMonth,
+        observationTimestamp: checkedAt
+      });
+      if (!candidateErrors.length) return candidate;
     }
-    return {
-      ticker: holding.symbol,
-      sleeve: holding.sleeve,
-      swatch: holding.swatch,
-      price: 'Unavailable',
-      monthDivPerShare: 'Unavailable',
-      dailyPriceChange: 'Unavailable',
-      dailyTR: 'Unavailable',
-      mtdPriceChange: 'Unavailable',
-      mtdTR: 'Unavailable',
-      dividends: [],
-      upcomingCurrentMonthDividends: 'Unavailable',
-      upcomingCurrentMonthDividendsValue: 0,
-      upcomingCurrentMonthDividendEvents: [],
-      futureMonthDividends: 'Unavailable',
-      futureMonthDividendsValue: 0,
-      futureMonthDividendEvents: [],
-      availability: {
-        status: 'unavailable',
-        reason: 'source_refresh_failed',
-        checkedAt: now.toISOString()
-      }
-    };
+    return unavailableHoldingRow(holding, checkedAt);
+  };
+  const rows = settled.map((result, index) => {
+    const holding = HOLDINGS[index];
+    if (result.status === 'fulfilled') {
+      const rowErrors = validateAssetAllocationHoldingRow(result.value, {
+        holding,
+        rowLabel: `Asset Allocation fresh ${holding.symbol}`,
+        month: currentMonth,
+        observationTimestamp: checkedAt,
+        allowAvailability: false
+      });
+      if (!rowErrors.length) return result.value;
+      return failedHoldingRow(holding, rowErrors.join(' '));
+    }
+    return failedHoldingRow(holding, result.reason?.message || 'source unavailable');
   });
   return {
     compiledAt: now.toISOString(),
@@ -563,11 +592,12 @@ function buildAssetAllocationFallback(canonicalPortfolio, { month, asOf, checked
   const timestamp = new Date(checkedAt).toISOString();
   // MTD values cannot cross a month boundary: retain a complete prior section
   // only within the same month, otherwise publish an explicit empty state.
+  const lastValidatedAt = String(canonicalPortfolio?.availability?.lastValidatedAt || canonicalPortfolio?.compiledAt || '').trim();
   const sameMonth = canonicalPortfolio?.month === month
     && Array.isArray(canonicalPortfolio?.rows)
-    && canonicalPortfolio.rows.length === HOLDINGS.length;
+    && canonicalPortfolio.rows.length === HOLDINGS.length
+    && timestampInDashboardMonth(lastValidatedAt, month);
   if (sameMonth) {
-    const lastValidatedAt = String(canonicalPortfolio?.availability?.lastValidatedAt || canonicalPortfolio?.compiledAt || '').trim();
     return {
       ...structuredClone(canonicalPortfolio),
       portfolioMtdReturnStale: true,
@@ -615,6 +645,116 @@ function buildAssetAllocationSummaryFallback(canonicalPortfolio, { asOf } = {}) 
   };
 }
 
+function dividendBucketBounds(month) {
+  const match = String(month || '').match(/^(\d{4})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (monthIndex < 0 || monthIndex > 11) return null;
+  return {
+    monthStart: `${month}-01`,
+    nextMonthStart: dateText(utcDate(year, monthIndex + 1, 1)),
+    lookaheadEnd: dateText(utcDate(year, monthIndex + 2, 1))
+  };
+}
+
+function validateDividendBucket(errors, row, rowLabel, {
+  eventsField,
+  totalField,
+  bucketLabel,
+  observationDate,
+  bounds
+}) {
+  const events = row[eventsField];
+  if (!Array.isArray(events)) {
+    errors.push(`${rowLabel}.${eventsField} must be an array.`);
+    return;
+  }
+  let eventTotal = 0;
+  events.forEach((event, eventIndex) => {
+    const eventLabel = `${rowLabel}.${eventsField}[${eventIndex}]`;
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      errors.push(`${eventLabel} must be an object.`);
+      return;
+    }
+    const validDate = isIsoDate(event.exDate);
+    if (!validDate) errors.push(`${eventLabel}.exDate must be an ISO date.`);
+    if (!Number.isFinite(event.amount) || event.amount < 0) {
+      errors.push(`${eventLabel}.amount must be a finite non-negative number.`);
+    } else {
+      eventTotal += event.amount;
+    }
+    if (!validDate || !observationDate || !bounds) return;
+    const belongs = bucketLabel === 'current'
+      ? event.exDate >= bounds.monthStart && event.exDate < bounds.nextMonthStart && event.exDate <= observationDate
+      : bucketLabel === 'upcoming'
+        ? event.exDate > observationDate && event.exDate < bounds.nextMonthStart
+        : event.exDate >= bounds.nextMonthStart && event.exDate < bounds.lookaheadEnd;
+    if (!belongs) errors.push(`${eventLabel}.exDate does not belong in the ${bucketLabel} dividend bucket.`);
+  });
+  const total = row[totalField];
+  if (!Number.isFinite(total) || total < 0) {
+    errors.push(`${rowLabel}.${totalField} must be a finite non-negative number.`);
+  } else if (Math.abs(total - eventTotal) > 1e-9) {
+    errors.push(`${rowLabel}.${totalField} must equal the sum of ${eventsField}.`);
+  }
+}
+
+function validateAssetAllocationHoldingRow(row, {
+  holding = null,
+  rowLabel = 'Asset Allocation portfolio staging row',
+  month,
+  observationTimestamp,
+  allowAvailability = true
+} = {}) {
+  const errors = [];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return [`${rowLabel} must be an object.`];
+  if (holding && row.ticker !== holding.symbol) errors.push(`${rowLabel}.ticker must be ${holding.symbol}.`);
+  const requiredFields = ['sleeve', 'price', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR'];
+  for (const field of requiredFields) {
+    if (typeof row[field] !== 'string' || !row[field].trim()) errors.push(`${rowLabel}.${field} must be a populated string.`);
+  }
+
+  const bounds = dividendBucketBounds(month);
+  const availability = row.availability;
+  if (availability !== undefined) {
+    if (!allowAvailability) errors.push(`${rowLabel}.availability is not allowed on a fresh row.`);
+    if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
+      errors.push(`${rowLabel}.availability must be an object.`);
+    } else {
+      if (!['carried_forward', 'unavailable'].includes(availability.status)) errors.push(`${rowLabel}.availability.status must be carried_forward or unavailable.`);
+      if (availability.reason !== 'source_refresh_failed') errors.push(`${rowLabel}.availability.reason must be source_refresh_failed.`);
+      if (!isIsoDateTime(availability.checkedAt)) errors.push(`${rowLabel}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+      if (availability.status === 'carried_forward' && !isIsoDateTime(availability.lastValidatedAt)) {
+        errors.push(`${rowLabel}.availability.lastValidatedAt must be an offset-bearing ISO timestamp when carried_forward.`);
+      } else if (availability.lastValidatedAt !== undefined
+        && (!isIsoDateTime(availability.lastValidatedAt) || !timestampInDashboardMonth(availability.lastValidatedAt, month))) {
+        errors.push(`${rowLabel}.availability.lastValidatedAt must fall within the dashboard month.`);
+      }
+    }
+  }
+
+  const lastValidatedAt = availability?.status === 'carried_forward' && isIsoDateTime(availability.lastValidatedAt)
+    ? availability.lastValidatedAt
+    : observationTimestamp;
+  const observationDate = isIsoDateTime(lastValidatedAt) ? dashboardIsoDate(new Date(lastValidatedAt)) : '';
+  const dividendBuckets = [
+    ['dividends', 'monthDivPerShareValue', 'current'],
+    ['upcomingCurrentMonthDividendEvents', 'upcomingCurrentMonthDividendsValue', 'upcoming'],
+    ['futureMonthDividendEvents', 'futureMonthDividendsValue', 'future']
+  ];
+  for (const [eventsField, totalField, bucketLabel] of dividendBuckets) {
+    validateDividendBucket(errors, row, rowLabel, {
+      eventsField,
+      totalField,
+      bucketLabel,
+      observationDate,
+      bounds
+    });
+  }
+  return errors;
+}
+
 function validateAssetAllocationPortfolioPayload(payload) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Asset Allocation portfolio staging payload must be an object.'];
@@ -625,7 +765,14 @@ function validateAssetAllocationPortfolioPayload(payload) {
   // failed ticker has matching row-level and section-level diagnostics.
   if (!isIsoDateTime(payload.compiledAt)) errors.push('Asset Allocation portfolio staging compiledAt must be an offset-bearing ISO timestamp.');
   if (typeof payload.source !== 'string' || !payload.source.trim()) errors.push('Asset Allocation portfolio staging source must be populated.');
-  if (!/^\d{4}-\d{2}$/.test(String(payload.month || ''))) errors.push('Asset Allocation portfolio staging month must be YYYY-MM.');
+  const bucketBounds = dividendBucketBounds(payload.month);
+  if (!bucketBounds) errors.push('Asset Allocation portfolio staging month must be YYYY-MM.');
+  const payloadObservationDate = isIsoDateTime(payload.compiledAt)
+    ? dashboardIsoDate(new Date(payload.compiledAt))
+    : '';
+  if (bucketBounds && payloadObservationDate && !payloadObservationDate.startsWith(`${payload.month}-`)) {
+    errors.push('Asset Allocation portfolio staging compiledAt must fall within its dashboard month.');
+  }
   if (payload.availability !== undefined) {
     if (!['partial', 'carried_forward', 'unavailable'].includes(payload.availability?.status)) errors.push('Asset Allocation portfolio staging availability.status must be partial, carried_forward, or unavailable.');
     if (payload.availability?.reason !== 'source_refresh_failed') errors.push('Asset Allocation portfolio staging availability.reason must be source_refresh_failed.');
@@ -637,7 +784,6 @@ function validateAssetAllocationPortfolioPayload(payload) {
   if (!unavailable) {
     const expectedTickers = new Set(HOLDINGS.map((holding) => holding.symbol));
     const seenTickers = new Set();
-    const requiredFields = ['sleeve', 'price', 'monthDivPerShare', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR'];
     if (payload.rows.length !== HOLDINGS.length) {
       errors.push(`Asset Allocation portfolio staging must contain exactly ${HOLDINGS.length} rows.`);
     }
@@ -650,16 +796,13 @@ function validateAssetAllocationPortfolioPayload(payload) {
       if (!expectedTickers.has(ticker)) errors.push(`Asset Allocation portfolio staging rows[${index}].ticker is unexpected: ${ticker || '(blank)'}.`);
       else if (seenTickers.has(ticker)) errors.push(`Asset Allocation portfolio staging contains duplicate ticker ${ticker}.`);
       else seenTickers.add(ticker);
-      for (const field of requiredFields) {
-        if (typeof row[field] !== 'string' || !row[field].trim()) {
-          errors.push(`Asset Allocation portfolio staging rows[${index}].${field} must be a populated string.`);
-        }
-      }
-      if (row.availability !== undefined) {
-        if (!['carried_forward', 'unavailable'].includes(row.availability?.status)) errors.push(`Asset Allocation portfolio staging rows[${index}].availability.status must be carried_forward or unavailable.`);
-        if (row.availability?.reason !== 'source_refresh_failed') errors.push(`Asset Allocation portfolio staging rows[${index}].availability.reason must be source_refresh_failed.`);
-        if (!isIsoDateTime(row.availability?.checkedAt)) errors.push(`Asset Allocation portfolio staging rows[${index}].availability.checkedAt must be an offset-bearing ISO timestamp.`);
-      }
+      const holding = HOLDINGS.find((candidate) => candidate.symbol === ticker);
+      errors.push(...validateAssetAllocationHoldingRow(row, {
+        holding,
+        rowLabel: `Asset Allocation portfolio staging rows[${index}]`,
+        month: payload.month,
+        observationTimestamp: payload.compiledAt
+      }));
     });
     for (const holding of HOLDINGS) {
       if (!seenTickers.has(holding.symbol)) errors.push(`Asset Allocation portfolio staging is missing ${holding.symbol}.`);
@@ -722,7 +865,7 @@ function writeJson(file, payload) {
 
 function compactPortfolioText(portfolio) {
   return portfolio.rows
-    .map((row) => `${row.ticker} ${row.price} ${row.monthDivPerShare} ${row.dailyPriceChange} ${row.dailyTR} ${row.mtdPriceChange} ${row.mtdTR}`)
+    .map((row) => `${row.ticker} ${row.price} ${Number.isFinite(row.monthDivPerShareValue) ? asMoney(row.monthDivPerShareValue) : 'Unavailable'} ${row.dailyPriceChange} ${row.dailyTR} ${row.mtdPriceChange} ${row.mtdTR}`)
     .join(' | ');
 }
 

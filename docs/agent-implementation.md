@@ -33,6 +33,17 @@ Work from this order of preference:
 11. Focus tests on failures that could corrupt an update, bypass the sole-writer boundary, or take the dashboard offline; use the README for exact commands and verification requirements.
 12. Mark deliberate simplifications with a code comment only when there is a known ceiling and upgrade path.
 
+### Audit Finding Fixes
+
+When implementing audit findings, use the frozen changed-contract matrix from `docs/agent-review.md` as the implementation scope. Do not narrow the fix to the single failing example if the contract also covers adjacent renderer, validator, fallback, documentation, or test behavior.
+
+- Fix the owning contract path and every transitive consumer needed to keep renderer, validator, generated data, fallback behavior, documentation, and tests in sync.
+- Preserve the repo's fail-open publication policy. Do not add a publication-blocking or canonical-write-blocking condition unless it prevents the overall dashboard from displaying or is explicitly documented as publication-blocking.
+- Verify behavior classes for the changed contract: rejected, fulfilled-malformed, absent, null, wrong type, stale, carried-forward, and unavailable inputs, or document why a class is not applicable.
+- Verify isolation explicitly: one bad ticker, row, card, event, provider, section, or fallback input must not degrade unrelated data unless the documented contract is intentionally atomic.
+- Verify staged and published modes separately when both are affected, and run an actual browser-startup check for malformed published-data shapes that published validation can allow through.
+- Before marking the fix complete, make sure every matrix row and every finding is resolved, intentionally accepted, or outside scope with evidence.
+
 ## Architecture and Ownership
 
 Use a single-writer, staged, contract-driven architecture across every dashboard section. `README.md` owns the normal daily runbook and validation/publish workflow; `docs/reference.md` owns payload fields, detailed data contracts, deterministic-source contracts, focused repair commands, local-refresh operation, and the supported-browser baseline; this section owns the agent behavior boundary.

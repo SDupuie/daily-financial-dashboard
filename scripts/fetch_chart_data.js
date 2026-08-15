@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { atomicWriteJson } = require('./staging_writer');
+const { isIsoDate } = require('./calendar_contract');
 const {
   mapConcurrent,
   retryAfterDelayMs,
@@ -21,6 +22,10 @@ const CHART_ROW_CONCURRENCY = 4;
 const DEFAULT_YAHOO_RATE_LIMIT_RETRIES = 1;
 const DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS = 3000;
 const DEFAULT_FUTURES_DELAY_MS = 750;
+const REQUIRED_YIELD_CURVE_COMPARISONS = [
+  { label: '1M ago', minDays: 20, maxDays: 45 },
+  { label: '6M ago', minDays: 150, maxDays: 215 }
+];
 const TREASURY_FIELDS = new Map([
   ['TREASURY:CURVE', 'BC_10YEAR'],
   ['TREASURY:3M', 'BC_3MONTH'],
@@ -1170,11 +1175,195 @@ function isChartQuoteRevision(value) {
     && !Number.isNaN(Date.parse(value));
 }
 
+function validateChartPayloadMetadata(payload, { label = 'Chart staging' } = {}) {
+  const errors = [];
+  if (payload?.schemaVersion !== 1) errors.push(`${label} schemaVersion must be 1.`);
+  if (!isChartQuoteRevision(payload?.generatedAt)) errors.push(`${label} generatedAt must be an offset-bearing ISO timestamp.`);
+  if (payload?.availability?.status === 'unavailable') return errors;
+  const range = payload?.range;
+  if (!range || typeof range !== 'object' || Array.isArray(range)) {
+    errors.push(`${label} range must be an object.`);
+    return errors;
+  }
+  if (!isIsoDate(range.startDate) || !isIsoDate(range.endDate)) {
+    errors.push(`${label} range.startDate and range.endDate must be ISO dates.`);
+  } else if (range.startDate > range.endDate) {
+    errors.push(`${label} range.startDate must not be after range.endDate.`);
+  }
+  if (!Number.isInteger(range.days) || range.days < DEFAULT_DAYS) {
+    errors.push(`${label} range.days must be an integer of at least ${DEFAULT_DAYS} so the 5Y chart shortcut has enough embedded history.`);
+  }
+  return errors;
+}
+
+function chartDayGap(laterDate, earlierDate) {
+  if (!isIsoDate(laterDate) || !isIsoDate(earlierDate)) return null;
+  const later = Date.parse(`${laterDate}T00:00:00Z`);
+  const earlier = Date.parse(`${earlierDate}T00:00:00Z`);
+  if (!Number.isFinite(later) || !Number.isFinite(earlier)) return null;
+  return Math.round((later - earlier) / 86400000);
+}
+
+function yieldCurvePointsKey(points) {
+  return JSON.stringify(points.map((point) => [
+    String(point?.label || ''),
+    Number(point?.years),
+    Number(point?.value)
+  ]));
+}
+
+function validateYieldCurvePointSet(errors, label, fieldName, points, referencePoints = null) {
+  if (points.length < 2) errors.push(`${label}.${fieldName} must contain a Treasury curve.`);
+  if (referencePoints && points.length !== referencePoints.length) {
+    errors.push(`${label}.${fieldName} must match the current Treasury curve maturity count.`);
+  }
+  for (const [pointIndex, pointRaw] of points.entries()) {
+    const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
+    const referencePoint = referencePoints?.[pointIndex];
+    if (typeof point.label !== 'string' || !point.label.trim()) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must be populated.`);
+    }
+    if (referencePoint && point.label !== referencePoint.label) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].label must match current curve maturity ${referencePoint.label}.`);
+    }
+    if (asFiniteNumber(point.years) === null || Number(point.years) <= 0) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].years must be positive.`);
+    }
+    if (asFiniteNumber(point.value) === null) {
+      errors.push(`${label}.${fieldName}[${pointIndex}].value must be numeric.`);
+    }
+  }
+}
+
+function validateYieldCurveComparisons(errors, label, item, curvePoints) {
+  const comparisonCurves = Array.isArray(item.comparisonCurves) ? item.comparisonCurves : [];
+  if (!Array.isArray(item.comparisonCurves)) {
+    errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
+  }
+  const seenDates = new Map();
+  const seenPointSets = new Map();
+  for (const expected of REQUIRED_YIELD_CURVE_COMPARISONS) {
+    const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expected.label);
+    if (comparisonIndex < 0) {
+      errors.push(`${label}.comparisonCurves must include ${expected.label}.`);
+      continue;
+    }
+    const comparison = comparisonCurves[comparisonIndex];
+    if (!isIsoDate(comparison.date)) {
+      errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
+    } else {
+      if (seenDates.has(comparison.date)) {
+        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be distinct from ${seenDates.get(comparison.date)}.`);
+      }
+      seenDates.set(comparison.date, expected.label);
+      const ageDays = chartDayGap(item.curveDate, comparison.date);
+      if (ageDays === null || ageDays < expected.minDays || ageDays > expected.maxDays) {
+        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be ${expected.label} relative to curveDate.`);
+      }
+    }
+    const points = Array.isArray(comparison.points) ? comparison.points : [];
+    validateYieldCurvePointSet(errors, label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
+    const pointKey = yieldCurvePointsKey(points);
+    if (seenPointSets.has(pointKey)) {
+      errors.push(`${label}.comparisonCurves[${comparisonIndex}].points must be distinct from ${seenPointSets.get(pointKey)}.`);
+    }
+    seenPointSets.set(pointKey, expected.label);
+  }
+}
+
+function isCoherentChartOhlc(bar) {
+  const open = Number(bar.open);
+  const high = Number(bar.high);
+  const low = Number(bar.low);
+  const close = Number(bar.close);
+  if (![open, high, low, close].every(Number.isFinite)) return false;
+  if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
+  return !(close > 0 && [open, high, low].some((value) => value <= 0));
+}
+
+function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}) {
+  const errors = [];
+  const warnings = [];
+  const sourceItem = rawSeries && typeof rawSeries === 'object' && !Array.isArray(rawSeries) ? rawSeries : {};
+  const ticker = String(sourceItem.ticker || '').trim().toUpperCase();
+  const label = options.label || ticker || 'Chart series';
+  const item = {
+    ...sourceItem,
+    bars: Array.isArray(sourceItem.bars) ? sourceItem.bars.map(objectBar) : sourceItem.bars
+  };
+  if (!ticker) errors.push(`${label}.ticker must be populated.`);
+  const expectedSource = String(expectedRow?.sourceSymbol || '');
+  if (expectedSource && item.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
+  const expectedSection = String(expectedRow?.section || '');
+  if (expectedSection && item.section !== expectedSection) errors.push(`${label}.section must be ${expectedSection}.`);
+  if (!isChartQuoteRevision(item.quoteRevision)) errors.push(`${label}.quoteRevision must be an offset-bearing ISO timestamp.`);
+  if (item.availability !== undefined) {
+    if (!item.availability || typeof item.availability !== 'object' || Array.isArray(item.availability)) {
+      errors.push(`${label}.availability must be an object.`);
+    } else {
+      if (item.availability.status !== 'carried_forward') errors.push(`${label}.availability.status must be carried_forward.`);
+      if (item.availability.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+      if (!isChartQuoteRevision(item.availability.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+      if (item.availability.failures !== undefined) errors.push(`${label}.availability.failures is not allowed.`);
+    }
+  }
+  if (!['ohlc', 'close'].includes(item.dataKind)) errors.push(`${label}.dataKind must be ohlc or close.`);
+  if (typeof item.priceOnly !== 'boolean') errors.push(`${label}.priceOnly must be boolean.`);
+  if (typeof item.noVolume !== 'boolean') errors.push(`${label}.noVolume must be boolean.`);
+  if (item.sourceSymbol === 'TREASURY:CURVE') {
+    const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
+    validateYieldCurvePointSet(errors, label, 'curvePoints', curvePoints);
+    validateYieldCurveComparisons(errors, label, item, curvePoints);
+    const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
+    if (curveSpread.label !== '2s10s') errors.push(`${label}.curveSpread.label must be 2s10s.`);
+    if (asFiniteNumber(curveSpread.valueBp) === null) errors.push(`${label}.curveSpread.valueBp must be numeric.`);
+  }
+  if (!Array.isArray(item.bars) || item.bars.length < 2) {
+    errors.push(`${label}.bars must contain at least two daily bars.`);
+    return { errors, warnings, series: item };
+  }
+  let previousTime = '';
+  const enforceRange = item.availability?.status !== 'carried_forward';
+  const rangeStartDate = isIsoDate(options.rangeStartDate) ? options.rangeStartDate : '';
+  const rangeEndDate = isIsoDate(options.rangeEndDate) ? options.rangeEndDate : '';
+  for (const [barIndex, bar] of item.bars.entries()) {
+    const barLabel = `${label}.bars[${barIndex}]`;
+    if (!isIsoDate(bar.time)) errors.push(`${barLabel}.time must be an ISO date.`);
+    else if (enforceRange && rangeStartDate && rangeEndDate && (bar.time < rangeStartDate || bar.time > rangeEndDate)) {
+      errors.push(`${barLabel}.time must fall within payload range ${rangeStartDate} to ${rangeEndDate}.`);
+    }
+    if (previousTime && bar.time <= previousTime) errors.push(`${barLabel}.time must be strictly ascending.`);
+    previousTime = bar.time;
+    for (const key of ['open', 'high', 'low', 'close']) {
+      if (asFiniteNumber(bar[key]) === null) errors.push(`${barLabel}.${key} must be numeric.`);
+    }
+    if (!isCoherentChartOhlc(bar)) errors.push(`${barLabel} has incoherent OHLC values.`);
+    if (bar.volume !== undefined && (asFiniteNumber(bar.volume) === null || Number(bar.volume) < 0)) {
+      errors.push(`${barLabel}.volume must be a non-negative number when present.`);
+    }
+    if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
+      errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
+    }
+    if (item.noVolume && bar.volume !== undefined) {
+      errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
+    }
+    if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
+      const message = `${barLabel} contains a latest quote-only placeholder in an OHLC series; row tooltip discloses unavailable open/high/low data.`;
+      if (options.closeOnlyPlaceholderSeverity === 'warning') warnings.push(message);
+      else errors.push(message);
+    }
+  }
+  const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
+  if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
+    errors.push(`${label}.noVolume must be ${!hasVolume} to match its ${options.volumeDescription || 'chart'} volume bars.`);
+  }
+  return { errors, warnings, series: item };
+}
+
 function validateChartStagingPayload(payload, expectedRows = []) {
   const errors = [];
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return ['Chart staging payload must be an object.'];
-  if (payload.schemaVersion !== 1) errors.push('Chart staging schemaVersion must be 1.');
-  if (!isChartQuoteRevision(payload.generatedAt)) errors.push('Chart staging generatedAt must be an offset-bearing ISO timestamp.');
+  errors.push(...validateChartPayloadMetadata(payload));
   // Quote rows are derived from series during Apply; allowing stored quoteRows
   // here would create a second editable price surface.
   if (payload.quoteRows !== undefined) errors.push('Chart staging quoteRows is no longer stored; derive quote rows from series.');
@@ -1186,28 +1375,28 @@ function validateChartStagingPayload(payload, expectedRows = []) {
     if (payload.series.length) errors.push('Unavailable Chart staging must contain no series.');
     return errors;
   }
+  const rangeStartDate = isIsoDate(payload?.range?.startDate) ? payload.range.startDate : '';
+  const rangeEndDate = isIsoDate(payload?.range?.endDate) ? payload.range.endDate : '';
+  const expectedByTicker = new Map(expectedRows.map((row) => [
+    String(row?.ticker || '').trim().toUpperCase(),
+    row
+  ]).filter(([ticker]) => ticker));
   const byTicker = new Map();
   for (const [index, item] of payload.series.entries()) {
     const ticker = String(item?.ticker || '').trim().toUpperCase();
-    if (!ticker) errors.push(`Chart staging series[${index}].ticker must be populated.`);
-    else if (byTicker.has(ticker)) errors.push(`Chart staging series contains duplicate ticker ${ticker}.`);
-    else byTicker.set(ticker, item);
-    if (!isChartQuoteRevision(item?.quoteRevision)) errors.push(`Chart staging ${ticker || `series[${index}]`}.quoteRevision must be an offset-bearing ISO timestamp.`);
-    if (item?.availability !== undefined) {
-      if (!item.availability || typeof item.availability !== 'object' || Array.isArray(item.availability)) {
-        errors.push(`Chart staging ${ticker || `series[${index}]`}.availability must be an object.`);
-      } else {
-        if (item.availability.status !== 'carried_forward') errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.status must be carried_forward.`);
-        if (item.availability.reason !== 'source_refresh_failed') errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.reason must be source_refresh_failed.`);
-        if (!isChartQuoteRevision(item.availability.checkedAt)) errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
-        if (item.availability.failures !== undefined) errors.push(`Chart staging ${ticker || `series[${index}]`}.availability.failures is not allowed.`);
-      }
-    }
-    if (!Array.isArray(item?.bars) || item.bars.length < 2) {
-      errors.push(`Chart staging ${ticker || `series[${index}]`} must contain at least two bars.`);
-    } else if (!item.priceOnly && item.dataKind === 'ohlc' && isCloseOnlyPlaceholderBar(item.bars.at(-1))) {
-      errors.push(`Chart staging ${ticker || `series[${index}]`}.bars[${item.bars.length - 1}] must contain real OHLC data; do not publish a latest quote-only placeholder in an OHLC series.`);
-    }
+    const label = `Chart staging ${ticker || `series[${index}]`}`;
+    if (ticker && byTicker.has(ticker)) errors.push(`Chart staging series contains duplicate ticker ${ticker}.`);
+    else if (ticker) byTicker.set(ticker, item);
+    const expectedRow = expectedByTicker.get(ticker);
+    if (ticker && expectedByTicker.size && !expectedRow) errors.push(`${label} is not present in the expected chart roster.`);
+    const result = validateChartSeriesContract(item, expectedRow, {
+      label,
+      volumeDescription: 'staging',
+      closeOnlyPlaceholderSeverity: 'error',
+      rangeStartDate,
+      rangeEndDate
+    });
+    errors.push(...result.errors);
   }
   for (const row of expectedRows) {
     const ticker = String(row?.ticker || '').trim().toUpperCase();
@@ -1913,6 +2102,8 @@ module.exports = {
   runFutures: futuresModule.run,
   roundChartPayload,
   runChart: main,
+  validateChartPayloadMetadata,
+  validateChartSeriesContract,
   validateChartStagingPayload,
   readChartableRows,
   readEmbeddedChartPayload,

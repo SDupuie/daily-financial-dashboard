@@ -25,6 +25,7 @@ const {
   roundChartPayload,
   runChart,
   runFutures,
+  validateChartPayloadMetadata,
   validateChartStagingPayload,
   validateFuturesPayload,
 } = require('./fetch_chart_data');
@@ -210,6 +211,8 @@ function fixturePortfolioRows() {
     sleeve: 'Fixture sleeve',
     price: '$100.00',
     monthDivPerShare: '$0.00',
+    monthDivPerShareValue: 0,
+    dividends: [],
     dailyPriceChange: '+0.00%',
     dailyTR: '+0.00%',
     mtdPriceChange: '+0.00%',
@@ -491,7 +494,7 @@ function renderDashboardValidationFixture(dashboard, chartData) {
 <script type="application/json" id="dashboard-data">${JSON.stringify(dashboard)}</script>
 <!-- ============ DATA END ============ -->
 <script type="application/json" id="chart-data">${JSON.stringify(chartData)}</script>
-<div class="page" id="app"><div id="mast-edition"></div><div class="right" id="mast-date"></div><h1 id="hero-headline"></h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>
+<div class="page" id="app"><div id="mast-edition"></div><div class="right" id="mast-date"><span id="mast-date-value"></span></div><h1 id="hero-headline"></h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>
 <script id="dashboard-runtime">const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>`;
 }
 
@@ -1490,6 +1493,144 @@ async function testUpdaterModulePatches() {
   const assetDuplicateFailure = structuredClone(partial);
   assetDuplicateFailure.availability.failures.push(structuredClone(assetDuplicateFailure.availability.failures[0]));
   assert.match(validateAssetAllocationPortfolioPayload(assetDuplicateFailure).join('\n'), /duplicate ticker VTI/);
+
+  for (const [label, malformedRow] of [
+    ['null', null],
+    ['wrong type', 'malformed'],
+    ['invalid dividend', {
+      ...structuredClone(rows[0]),
+      monthDivPerShareValue: 0,
+      dividends: [{ exDate: '2026-07-10', amount: -0.4 }]
+    }]
+  ]) {
+    fs.writeFileSync(input, originalInput);
+    const fulfilledMalformed = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+      now: new Date('2026-07-10T21:05:30.000Z'),
+      fetchHolding: async (holding) => holding.symbol === 'VTI'
+        ? structuredClone(malformedRow)
+        : structuredClone(rows.find((row) => row.ticker === holding.symbol))
+    });
+    assert.equal(fulfilledMalformed.availability.status, 'partial', `${label} fulfilled data must isolate as a partial result.`);
+    assert.deepEqual(fulfilledMalformed.availability.failures.map((failure) => failure.ticker), ['VTI']);
+    assert.equal(fulfilledMalformed.rows.find((row) => row.ticker === 'VTI').availability.status, 'carried_forward');
+    assert.ok(
+      fulfilledMalformed.rows.filter((row) => row.ticker !== 'VTI').every((row) => row.availability === undefined),
+      `${label} fulfilled data must leave unrelated tickers fresh.`
+    );
+    assert.deepEqual(validateAssetAllocationPortfolioPayload(fulfilledMalformed), []);
+  }
+
+  const priorStateCases = [
+    ['carried-forward', (priorDashboard) => {
+      priorDashboard.assetAllocationPortfolio.rows[0].availability = {
+        status: 'carried_forward',
+        reason: 'source_refresh_failed',
+        checkedAt: '2026-07-10T20:55:00.000Z',
+        lastValidatedAt: '2026-07-10T20:50:00.000Z'
+      };
+    }, 'carried_forward'],
+    ['unavailable', (priorDashboard) => {
+      const priorRow = priorDashboard.assetAllocationPortfolio.rows[0];
+      for (const key of ['price', 'dailyPriceChange', 'dailyTR', 'mtdPriceChange', 'mtdTR']) priorRow[key] = 'Unavailable';
+      priorRow.availability = {
+        status: 'unavailable',
+        reason: 'source_refresh_failed',
+        checkedAt: '2026-07-10T20:55:00.000Z'
+      };
+    }, 'unavailable'],
+    ['malformed', (priorDashboard) => {
+      priorDashboard.assetAllocationPortfolio.rows[0].availability = {
+        status: 'partial',
+        reason: 'source_refresh_failed',
+        checkedAt: '2026-07-10T20:55:00.000Z'
+      };
+    }, 'unavailable']
+  ];
+  for (const [priorLabel, mutatePrior, expectedStatus] of priorStateCases) {
+    for (const [freshLabel, failedFreshRow] of [
+      ['rejected', null],
+      ['fulfilled-malformed', 'malformed']
+    ]) {
+      const priorDashboard = structuredClone(dashboard);
+      mutatePrior(priorDashboard);
+      fs.writeFileSync(input, renderDashboardValidationFixture(priorDashboard, chartData));
+      const transition = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+        now: new Date('2026-07-10T21:05:40.000Z'),
+        fetchHolding: async (holding) => {
+          if (holding.symbol !== 'VTI') return structuredClone(rows.find((row) => row.ticker === holding.symbol));
+          if (freshLabel === 'rejected') throw new Error('fixture holding failure');
+          return failedFreshRow;
+        }
+      });
+      assert.equal(
+        transition.rows.find((row) => row.ticker === 'VTI').availability.status,
+        expectedStatus,
+        `${freshLabel} fresh data with a ${priorLabel} prior row must resolve to ${expectedStatus}.`
+      );
+      assert.ok(
+        transition.rows.filter((row) => row.ticker !== 'VTI').every((row) => row.availability === undefined),
+        `${freshLabel} fresh data with a ${priorLabel} prior row must leave unrelated tickers fresh.`
+      );
+      assert.deepEqual(validateAssetAllocationPortfolioPayload(transition), []);
+      if (expectedStatus === 'unavailable') {
+        const embeddedTransition = structuredClone(dashboard);
+        applyAssetAllocationPortfolio(embeddedTransition, transition);
+        for (const validationMode of ['published', 'staged']) {
+          const validation = validateDashboardAndChartFixture(embeddedTransition, chartData, validationMode);
+          assert.equal(validation.status, 0, `${validationMode} ${freshLabel}/${priorLabel}: ${validation.stderr}`);
+        }
+      }
+    }
+  }
+
+  const unavailablePriorDashboard = structuredClone(dashboard);
+  priorStateCases[1][1](unavailablePriorDashboard);
+  fs.writeFileSync(input, renderDashboardValidationFixture(unavailablePriorDashboard, chartData));
+  const freshOverUnavailable = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-07-10T21:05:42.000Z'),
+    fetchHolding: async (holding) => structuredClone(rows.find((row) => row.ticker === holding.symbol))
+  });
+  assert.ok(freshOverUnavailable.rows.every((row) => row.availability === undefined));
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(freshOverUnavailable), []);
+
+  const missingPriorDashboard = structuredClone(dashboard);
+  missingPriorDashboard.assetAllocationPortfolio.rows = missingPriorDashboard.assetAllocationPortfolio.rows
+    .filter((row) => row.ticker !== 'VTI');
+  fs.writeFileSync(input, renderDashboardValidationFixture(missingPriorDashboard, chartData));
+  const missingPriorPartial = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-07-10T21:05:45.000Z'),
+    fetchHolding: async (holding) => {
+      if (holding.symbol === 'VTI') throw new Error('fixture holding failure');
+      return structuredClone(rows.find((row) => row.ticker === holding.symbol));
+    }
+  });
+  assert.equal(missingPriorPartial.rows.find((row) => row.ticker === 'VTI').availability.status, 'unavailable');
+  assert.ok(missingPriorPartial.rows.filter((row) => row.ticker !== 'VTI').every((row) => row.availability === undefined));
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(missingPriorPartial), []);
+
+  const staleCanonicalDashboard = structuredClone(dashboard);
+  staleCanonicalDashboard.assetAllocationPortfolio.month = '2026-07';
+  staleCanonicalDashboard.assetAllocationPortfolio.compiledAt = '2026-07-10T20:55:00.000Z';
+  staleCanonicalDashboard.assetAllocationPortfolio.rows[0].availability = {
+    status: 'carried_forward',
+    reason: 'source_refresh_failed',
+    checkedAt: '2026-07-10T20:55:00.000Z',
+    lastValidatedAt: '2026-08-01T12:00:00.000Z'
+  };
+  fs.writeFileSync(input, renderDashboardValidationFixture(staleCanonicalDashboard, chartData));
+  const stalePriorPartial = await fetchPortfolioRows({ input, timeoutMs: 1000 }, {
+    now: new Date('2026-07-10T21:06:00.000Z'),
+    fetchHolding: async (holding) => {
+      if (holding.symbol === 'VTI') throw new Error('fixture holding failure');
+      return structuredClone(rows.find((row) => row.ticker === holding.symbol));
+    }
+  });
+  assert.equal(stalePriorPartial.availability.status, 'partial');
+  assert.equal(stalePriorPartial.rows.find((row) => row.ticker === 'VTI').availability.status, 'unavailable');
+  assert.equal(stalePriorPartial.rows.find((row) => row.ticker === 'VEA').availability, undefined);
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(stalePriorPartial), []);
+  fs.writeFileSync(input, originalInput);
+
   applyAssetAllocationPortfolio(dashboard, partial);
   assert.equal(validateDashboardAndChartFixture(dashboard, chartData).status, 0);
   assert.equal(fs.readFileSync(input, 'utf8'), originalInput);
@@ -1564,6 +1705,22 @@ async function testAssetAllocationYahooMalformedLatestRowRetries() {
     { date: '2026-07-23', close: 100, adjclose: 100 },
     { date: '2026-07-24', close: 101, adjclose: 101 }
   ], 101);
+  const dividendPayload = structuredClone(repaired);
+  dividendPayload.chart.result[0].events.dividends = {
+    current: { date: Math.floor(Date.parse('2026-07-10T12:00:00Z') / 1000), amount: 0.4 },
+    upcoming: { date: Math.floor(Date.parse('2026-07-30T12:00:00Z') / 1000), amount: 0.5 },
+    future: { date: Math.floor(Date.parse('2026-08-10T12:00:00Z') / 1000), amount: 0.6 }
+  };
+  const dividendRow = parseHolding(holding, dividendPayload, monthStart, now, currentMonthEnd, lookaheadEndExclusive);
+  assert.deepEqual(dividendRow.dividends, [{ exDate: '2026-07-10', amount: 0.4 }]);
+  assert.equal(dividendRow.monthDivPerShareValue, 0.4);
+  assert.deepEqual(dividendRow.upcomingCurrentMonthDividendEvents, [{ exDate: '2026-07-30', amount: 0.5 }]);
+  assert.equal(dividendRow.upcomingCurrentMonthDividendsValue, 0.5);
+  assert.deepEqual(dividendRow.futureMonthDividendEvents, [{ exDate: '2026-08-10', amount: 0.6 }]);
+  assert.equal(dividendRow.futureMonthDividendsValue, 0.6);
+  assert.equal(dividendRow.monthDivPerShare, undefined);
+  assert.equal(dividendRow.upcomingCurrentMonthDividends, undefined);
+  assert.equal(dividendRow.futureMonthDividends, undefined);
 
   assert.throws(
     () => parseHolding(holding, malformedLatest, monthStart, now, currentMonthEnd, lookaheadEndExclusive),
@@ -1601,6 +1758,88 @@ async function testAssetAllocationYahooMalformedLatestRowRetries() {
     /latest Yahoo price row for 2026-07-24 is missing usable close or adjusted close/
   );
   assert.equal(failedRequestCount, 2);
+}
+
+function testAssetAllocationDividendValidation() {
+  const valid = {
+    compiledAt: '2026-07-24T21:00:00.000Z',
+    source: 'Yahoo Finance Chart API',
+    month: '2026-07',
+    rows: fixturePortfolioRows()
+  };
+  Object.assign(valid.rows[0], {
+    monthDivPerShare: '$0.40',
+    monthDivPerShareValue: 0.4,
+    dividends: [{ exDate: '2026-07-10', amount: 0.4 }],
+    upcomingCurrentMonthDividends: '$0.50',
+    upcomingCurrentMonthDividendsValue: 0.5,
+    upcomingCurrentMonthDividendEvents: [{ exDate: '2026-07-30', amount: 0.5 }],
+    futureMonthDividends: '$0.60',
+    futureMonthDividendsValue: 0.6,
+    futureMonthDividendEvents: [{ exDate: '2026-08-10', amount: 0.6 }]
+  });
+  assert.deepEqual(validateAssetAllocationPortfolioPayload(valid), []);
+
+  const carriedForward = structuredClone(valid);
+  carriedForward.compiledAt = '2026-07-28T21:00:00.000Z';
+  carriedForward.availability = {
+    status: 'partial',
+    reason: 'source_refresh_failed',
+    checkedAt: carriedForward.compiledAt,
+    failures: [{ ticker: 'VTI', message: 'fixture holding failure' }]
+  };
+  carriedForward.rows[0].upcomingCurrentMonthDividendEvents = [{ exDate: '2026-07-25', amount: 0.5 }];
+  carriedForward.rows[0].availability = {
+    status: 'carried_forward',
+    reason: 'source_refresh_failed',
+    checkedAt: carriedForward.compiledAt,
+    lastValidatedAt: valid.compiledAt
+  };
+  assert.deepEqual(
+    validateAssetAllocationPortfolioPayload(carriedForward),
+    [],
+    'Carried-forward dividend buckets must use the row lastValidatedAt observation date.'
+  );
+
+  const carriedAcrossMonth = structuredClone(carriedForward);
+  carriedAcrossMonth.rows[0].availability.lastValidatedAt = '2026-08-01T12:00:00.000Z';
+  assert.match(
+    validateAssetAllocationPortfolioPayload(carriedAcrossMonth).join('\n'),
+    /lastValidatedAt must fall within the dashboard month/,
+    'Carried-forward portfolio rows must not validate against a future-month observation date.'
+  );
+
+  const futureInCurrent = structuredClone(valid);
+  futureInCurrent.rows[0].dividends = [{ exDate: '2026-08-10', amount: 0.6 }];
+  futureInCurrent.rows[0].monthDivPerShareValue = 0.6;
+  assert.match(validateAssetAllocationPortfolioPayload(futureInCurrent).join('\n'), /does not belong in the current dividend bucket/);
+
+  const currentInFuture = structuredClone(valid);
+  currentInFuture.rows[0].futureMonthDividendEvents = [{ exDate: '2026-07-10', amount: 0.4 }];
+  currentInFuture.rows[0].futureMonthDividendsValue = 0.4;
+  assert.match(validateAssetAllocationPortfolioPayload(currentInFuture).join('\n'), /does not belong in the future dividend bucket/);
+
+  const invalidDate = structuredClone(valid);
+  invalidDate.rows[0].dividends[0].exDate = '2026-02-30';
+  assert.match(validateAssetAllocationPortfolioPayload(invalidDate).join('\n'), /dividends\[0\]\.exDate must be an ISO date/);
+
+  const negativeAmount = structuredClone(valid);
+  negativeAmount.rows[0].dividends[0].amount = -0.4;
+  negativeAmount.rows[0].monthDivPerShareValue = 0;
+  assert.match(validateAssetAllocationPortfolioPayload(negativeAmount).join('\n'), /amount must be a finite non-negative number/);
+
+  const nonNumericAmount = structuredClone(valid);
+  nonNumericAmount.rows[0].dividends[0].amount = '0.4';
+  nonNumericAmount.rows[0].monthDivPerShareValue = 0;
+  assert.match(validateAssetAllocationPortfolioPayload(nonNumericAmount).join('\n'), /amount must be a finite non-negative number/);
+
+  const inconsistentTotal = structuredClone(valid);
+  inconsistentTotal.rows[0].monthDivPerShareValue = 99;
+  assert.match(validateAssetAllocationPortfolioPayload(inconsistentTotal).join('\n'), /monthDivPerShareValue must equal the sum of dividends/);
+
+  const missingEvents = structuredClone(valid);
+  delete missingEvents.rows[0].upcomingCurrentMonthDividendEvents;
+  assert.match(validateAssetAllocationPortfolioPayload(missingEvents).join('\n'), /upcomingCurrentMonthDividendEvents must be an array/);
 }
 
 async function testFuturesStagingPayloadContract() {
@@ -3540,6 +3779,12 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   assert.deepEqual(validateChartStagingPayload(partial, producerDashboard.tape.rows), []);
   const carriedChart = buildChartDataFallback(producerChartData, FIXTURE_NOW);
   assert.deepEqual(validateChartStagingPayload(carriedChart, producerDashboard.tape.rows), []);
+  carriedChart.series[0].bars[0].time = '2020-01-01';
+  assert.deepEqual(
+    validateChartStagingPayload(carriedChart, producerDashboard.tape.rows),
+    [],
+    'Carried-forward chart history may sit outside the current fetch window without blocking a fallback.'
+  );
   delete carriedChart.series[0].availability;
   assert.match(validateChartStagingPayload(carriedChart, producerDashboard.tape.rows).join('\n'), /requires every series to be marked carried_forward/);
   syncDashboardPricesFromChartData(producerDashboard, partial, {
@@ -3618,11 +3863,180 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   assert.equal(isolatedFailure.availability.status, 'partial');
   assert.equal(isolatedFailure.availability.failures.length, 1);
   assert.equal(isolatedFailure.availability.failures[0].ticker, 'VCR');
-  assert.match(isolatedFailure.availability.failures[0].message, /must contain at least two bars/);
+  assert.match(isolatedFailure.availability.failures[0].message, /bars must contain at least two daily bars/);
   assert.equal(isolatedFailure.series.find((row) => row.ticker === 'VCR').availability.status, 'carried_forward');
   assert.ok(isolatedFailure.series.filter((row) => row.ticker !== 'VCR')
     .every((row) => row.quoteRevision === isolatedFailure.generatedAt));
   assert.deepEqual(validateChartStagingPayload(isolatedFailure, queuedDashboard.tape.rows), []);
+
+  const contractDashboard = structuredClone(queuedDashboard);
+  const contractChartData = structuredClone(queuedChartData);
+  const curveSeries = {
+    ticker: 'USTCURVE',
+    name: 'Fixture Treasury Curve',
+    section: 'tape',
+    sourceSymbol: 'TREASURY:CURVE',
+    quoteRevision: contractChartData.generatedAt,
+    source: 'Treasury.gov Daily Treasury Yield Curve Rate Data',
+    dataKind: 'close',
+    priceOnly: true,
+    noVolume: true,
+    bars: [
+      { time: '2026-07-09', open: 4.1, high: 4.1, low: 4.1, close: 4.1 },
+      { time: '2026-07-10', open: 4.2, high: 4.2, low: 4.2, close: 4.2 }
+    ],
+    curveDate: '2026-07-10',
+    curvePoints: [
+      { label: '2Y', years: 2, value: 3.9 },
+      { label: '10Y', years: 10, value: 4.2 }
+    ],
+    comparisonCurves: [
+      {
+        label: '1M ago',
+        date: '2026-06-10',
+        points: [
+          { label: '2Y', years: 2, value: 3.8 },
+          { label: '10Y', years: 10, value: 4.1 }
+        ]
+      },
+      {
+        label: '6M ago',
+        date: '2026-01-09',
+        points: [
+          { label: '2Y', years: 2, value: 3.7 },
+          { label: '10Y', years: 10, value: 4 }
+        ]
+      }
+    ],
+    curveSpread: { label: '2s10s', valueBp: 30, comparison: '1D' }
+  };
+  contractChartData.series.push(compactChartPayload({ series: [curveSeries] }).series[0]);
+  const curveTapeRow = structuredClone(contractDashboard.tape.rows.find((row) => row.ticker === 'UST10Y'));
+  Object.assign(curveTapeRow, quoteRowFromSeries(curveSeries), {
+    group: 'Rates & Credit',
+    name: curveSeries.name,
+    sourceSymbol: curveSeries.sourceSymbol
+  });
+  contractDashboard.tape.rows.push(curveTapeRow);
+  const contractInput = path.join(dir, 'contract-input.html');
+  fs.writeFileSync(contractInput, renderDashboardValidationFixture(contractDashboard, contractChartData));
+  const contractTickers = contractDashboard.tape.rows.map((row) => row.ticker);
+  const fetchedContractSeries = (row) => {
+    if (row.sourceSymbol !== 'TREASURY:CURVE') return fetchedSeries(row);
+    const { quoteRevision: _quoteRevision, ...freshCurve } = structuredClone(curveSeries);
+    return freshCurve;
+  };
+  const malformedSeriesCases = [
+    {
+      label: 'incoherent older OHLC',
+      ticker: 'VCR',
+      expected: /incoherent OHLC values/,
+      mutate: (series) => { series.bars[0].high = series.bars[0].low - 1; }
+    },
+    {
+      label: 'invalid bar date',
+      ticker: 'VCR',
+      expected: /time must be an ISO date/,
+      mutate: (series) => { series.bars[0].time = 'not-a-date'; }
+    },
+    {
+      label: 'unsorted bar dates',
+      ticker: 'VCR',
+      expected: /time must be strictly ascending/,
+      mutate: (series) => { series.bars[1].time = '2026-07-08'; }
+    },
+    {
+      label: 'bar outside payload range',
+      ticker: 'VCR',
+      expected: /time must fall within payload range/,
+      mutate: (series) => { series.bars[1].time = '2026-07-11'; }
+    },
+    {
+      label: 'negative volume',
+      ticker: 'VCR',
+      expected: /volume must be a non-negative number/,
+      mutate: (series) => { series.bars[0].volume = -1; }
+    },
+    {
+      label: 'noVolume mismatch',
+      ticker: 'VCR',
+      expected: /volume must be omitted when noVolume is true/,
+      mutate: (series) => { series.noVolume = true; }
+    },
+    {
+      label: 'wrong source symbol',
+      ticker: 'VCR',
+      expected: /sourceSymbol must be VCR/,
+      mutate: (series) => { series.sourceSymbol = 'WRONG'; }
+    },
+    {
+      label: 'wrong section',
+      ticker: 'VCR',
+      expected: /section must be tape/,
+      mutate: (series) => { series.section = 'crypto'; }
+    },
+    {
+      label: 'invalid data kind',
+      ticker: 'VCR',
+      expected: /dataKind must be ohlc or close/,
+      mutate: (series) => { series.dataKind = 'candles'; }
+    },
+    {
+      label: 'priceOnly mismatch',
+      ticker: 'VCR',
+      expected: /must synthesize OHLC from close for priceOnly series/,
+      mutate: (series) => { series.priceOnly = true; }
+    },
+    {
+      label: 'malformed Treasury comparisons',
+      ticker: 'USTCURVE',
+      expected: /comparisonCurves must include 1M ago/,
+      mutate: (series) => { series.comparisonCurves = []; }
+    }
+  ];
+  for (const [caseIndex, malformedCase] of malformedSeriesCases.entries()) {
+    const caseOutput = path.join(dir, `contract-isolation-${caseIndex}.json`);
+    await runChart([
+      '--input', contractInput,
+      '--output', caseOutput,
+      ...contractTickers.flatMap((ticker) => ['--ticker', ticker]),
+      '--days', '1826',
+      '--delay-ms', '0'
+    ], {
+      now: new Date(`2026-07-10T13:${String(10 + caseIndex).padStart(2, '0')}:00.000Z`),
+      fetchSeries: async (row) => {
+        const series = fetchedContractSeries(row);
+        if (row.ticker === malformedCase.ticker) malformedCase.mutate(series);
+        return series;
+      }
+    });
+    const casePayload = JSON.parse(fs.readFileSync(caseOutput, 'utf8'));
+    assert.deepEqual(
+      casePayload.availability.failures.map((failure) => failure.ticker),
+      [malformedCase.ticker],
+      `${malformedCase.label} must isolate only its ticker.`
+    );
+    assert.match(casePayload.availability.failures[0].message, malformedCase.expected);
+    assert.deepEqual(
+      casePayload.series.filter((series) => series.availability?.status === 'carried_forward').map((series) => series.ticker),
+      [malformedCase.ticker],
+      `${malformedCase.label} must carry forward only its ticker.`
+    );
+    assert.ok(
+      casePayload.series.filter((series) => series.ticker !== malformedCase.ticker)
+        .every((series) => series.quoteRevision === casePayload.generatedAt),
+      `${malformedCase.label} must leave every other ticker fresh.`
+    );
+    assert.deepEqual(validateChartStagingPayload(casePayload, contractDashboard.tape.rows), []);
+    const caseDashboard = structuredClone(contractDashboard);
+    syncDashboardPricesFromChartData(caseDashboard, casePayload, {
+      resetCommentary: true,
+      commentaryTickers: acceptedFreshChartTickers(casePayload),
+      now: new Date(FIXTURE_NOW)
+    });
+    const caseValidation = validateDashboardAndChartFixture(caseDashboard, compactChartPayload(casePayload), 'staged');
+    assert.equal(caseValidation.status, 0, `${malformedCase.label}: ${caseValidation.stderr}`);
+  }
 
   await runChart([
     '--input', producerInput,
@@ -3675,8 +4089,58 @@ function testChartStagingRejectsLatestCloseOnlyPlaceholder() {
 
   assert.match(
     validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'),
-    new RegExp(`${series.ticker}\\.bars\\[\\d+\\] must contain real OHLC data`)
+    new RegExp(`${series.ticker}\\.bars\\[\\d+\\] contains a latest quote-only placeholder`)
   );
+}
+
+function testChartMetadataAndAvailabilityContracts() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const valid = roundChartPayload(chartData);
+  assert.deepEqual(validateChartPayloadMetadata(valid), []);
+
+  const metadataCases = [
+    ['absent range', (payload) => { delete payload.range; }, /range must be an object/],
+    ['null range', (payload) => { payload.range = null; }, /range must be an object/],
+    ['wrong-type range', (payload) => { payload.range = 'malformed'; }, /range must be an object/],
+    ['invalid date', (payload) => { payload.range.startDate = '2026-02-30'; }, /range\.startDate and range\.endDate must be ISO dates/],
+    ['reversed dates', (payload) => { payload.range.startDate = '2026-07-11'; }, /range\.startDate must not be after range\.endDate/],
+    ['non-integer days', (payload) => { payload.range.days = 1826.5; }, /range\.days must be an integer/],
+    ['short history', (payload) => { payload.range.days = 1825; }, /range\.days must be an integer of at least 1826/],
+    ['missing generatedAt', (payload) => { delete payload.generatedAt; }, /generatedAt must be an offset-bearing ISO timestamp/]
+  ];
+  for (const [label, mutate, expected] of metadataCases) {
+    const payload = structuredClone(valid);
+    mutate(payload);
+    assert.match(validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'), expected, label);
+    const staged = validateDashboardAndChartFixture(dashboard, compactChartPayload(payload), 'staged');
+    assert.equal(staged.status, 1, `${label} must fail staged embedded validation.`);
+    assert.match(staged.stderr, expected);
+    const published = validateDashboardAndChartFixture(dashboard, compactChartPayload(payload), 'published');
+    assert.equal(published.status, 0, `${label} must remain fail-open after publication: ${published.stderr}`);
+  }
+
+  const unavailable = buildUnavailableChartData(FIXTURE_NOW);
+  delete unavailable.range;
+  assert.deepEqual(validateChartPayloadMetadata(unavailable), []);
+  assert.deepEqual(validateChartStagingPayload(unavailable, []), []);
+
+  const availabilityCases = [
+    ['missing reason', (series) => { delete series.availability.reason; }, /availability\.reason must be source_refresh_failed/],
+    ['null checkedAt', (series) => { series.availability.checkedAt = null; }, /availability\.checkedAt must be an offset-bearing ISO timestamp/],
+    ['wrong status', (series) => { series.availability.status = 'stale'; }, /availability\.status must be carried_forward/],
+    ['nested failures', (series) => { series.availability.failures = []; }, /availability\.failures is not allowed/]
+  ];
+  for (const [label, mutate, expected] of availabilityCases) {
+    const payload = buildChartDataFallback(valid, FIXTURE_NOW);
+    mutate(payload.series[0]);
+    assert.match(validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'), expected, label);
+    const compact = compactChartPayload(payload);
+    const staged = validateDashboardAndChartFixture(dashboard, compact, 'staged');
+    assert.equal(staged.status, 1, `${label} must fail staged embedded validation.`);
+    assert.match(staged.stderr, expected);
+    const published = validateDashboardAndChartFixture(dashboard, compact, 'published');
+    assert.equal(published.status, 0, `${label} must remain fail-open after publication: ${published.stderr}`);
+  }
 }
 
 function chartDataWithLatestCloseOnlyPlaceholder(chartData) {
@@ -3800,6 +4264,7 @@ function testChartRepairStagesMixedResultForEditorialReview() {
   const repairPayload = {
     schemaVersion: 1,
     generatedAt: refreshedAt,
+    range: structuredClone(originalChart.range),
     availability: {
       status: 'partial',
       reason: 'source_refresh_failed',
@@ -4059,8 +4524,8 @@ function validateStagedDashboardFixture(data, now = FIXTURE_NOW) {
   return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), now, 'staged');
 }
 
-function validateDashboardAndChartFixture(data, chartData) {
-  return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), FIXTURE_NOW);
+function validateDashboardAndChartFixture(data, chartData, validationMode = 'published') {
+  return dashboardValidationResult(renderDashboardValidationFixture(data, chartData), FIXTURE_NOW, validationMode);
 }
 
 function validationResult(errors, warnings = []) {
@@ -4148,6 +4613,27 @@ function testStagedDashboardValidatorEnforcesMarketLensContract() {
   assert.equal(blankVerifiedResult.status, 1);
   assert.match(blankVerifiedResult.stderr, /copy\.title must be populated when status is verified/);
 
+  const malformedMarketReaction = validationDashboardData();
+  const malformedReactionDay = malformedMarketReaction.weekAhead.days.find((day) => day.events.length);
+  malformedReactionDay.marketReaction = {
+    rows: [null, 'malformed', {},
+      { ticker: 'SPX', role: 'String delta', delta: '1', percentChange: 0.5, unit: 'price' },
+      { ticker: 'SPX', role: 'Boolean delta', delta: true, percentChange: 0.5, unit: 'price' },
+      { ticker: 'SPX', role: 'Missing delta', percentChange: 0.5, unit: 'price' },
+      { ticker: 'SPX', role: 'String percent', delta: 1, percentChange: '0.5', unit: 'price' },
+      { ticker: 'SPX', role: 'Boolean percent', delta: 1, percentChange: false, unit: 'price' },
+      { ticker: 'SPX', role: 'Missing percent', delta: 1, unit: 'price' },
+      { ticker: 'SPX', role: 'Broad growth reaction', delta: 0, percentChange: 0, unit: 'price' },
+      { ticker: 'UST10Y', role: 'Rate reaction', delta: 0, unit: 'percent_yield' }]
+  };
+  const publishedMalformedReaction = validateDashboardFixture(malformedMarketReaction);
+  assert.equal(publishedMalformedReaction.status, 0, publishedMalformedReaction.stderr);
+  const stagedMalformedReaction = validateStagedDashboardFixture(malformedMarketReaction);
+  assert.equal(stagedMalformedReaction.status, 1);
+  for (let rowIndex = 0; rowIndex <= 8; rowIndex += 1) {
+    assert.match(stagedMalformedReaction.stderr, new RegExp(`marketReaction\\.rows\\[${rowIndex}\\] must be a renderable reaction row`));
+  }
+
   const verifiedOutcomeWithoutCopy = validationDashboardData();
   const outcomeDay = verifiedOutcomeWithoutCopy.weekAhead.days.find((day) => day.events.length);
   outcomeDay.events[0].actual = outcomeDay.events[0].forecast || '1.0%';
@@ -4178,6 +4664,21 @@ function testDashboardValidatorKeepsPublishedGateToRenderSurface() {
   const recoverableSectionsResult = validateDashboardFixture(recoverableSections);
   assert.equal(recoverableSectionsResult.status, 0, recoverableSectionsResult.stderr);
 
+  const recoverableWeekAheadMembers = validationDashboardData();
+  recoverableWeekAheadMembers.weekAhead.days[0].events = [
+    recoverableWeekAheadMembers.weekAhead.days[0].events[0],
+    null,
+    'malformed',
+    { impact: 'high' }
+  ];
+  recoverableWeekAheadMembers.weekAhead.days[1] = null;
+  const recoverableWeekAheadResult = validateDashboardFixture(recoverableWeekAheadMembers);
+  assert.equal(recoverableWeekAheadResult.status, 0, recoverableWeekAheadResult.stderr);
+
+  const stagedRecoverableWeekAheadResult = validateStagedDashboardFixture(recoverableWeekAheadMembers);
+  assert.equal(stagedRecoverableWeekAheadResult.status, 1);
+  assert.match(stagedRecoverableWeekAheadResult.stderr, /weekAhead\.days\[(?:0|1)\]/);
+
   const pendingWithCopy = validationDashboardData();
   const reportedRow = fixtureReportedEarningsRow();
   delete reportedRow.sourceAudit;
@@ -4196,6 +4697,84 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const validHtml = renderDashboardValidationFixture(dashboard, chartData);
   assert.equal(dashboardValidationResult(validHtml).status, 0);
+
+  const missingMastDateValueHtml = validHtml.replace('<span id="mast-date-value"></span>', '');
+  const missingMastDateValueResult = dashboardValidationResult(missingMastDateValueHtml);
+  assert.equal(missingMastDateValueResult.status, 1);
+  assert.match(missingMastDateValueResult.stderr, /Missing required dashboard shell marker: <span id="mast-date-value">/);
+
+  const commentedMastDateValueHtml = validHtml.replace('<span id="mast-date-value"></span>', '<!-- <span id="mast-date-value"> -->');
+  const commentedMastDateValueResult = dashboardValidationResult(commentedMastDateValueHtml);
+  assert.equal(commentedMastDateValueResult.status, 1);
+  assert.match(commentedMastDateValueResult.stderr, /Missing required dashboard shell marker: <span id="mast-date-value">/);
+
+  const duplicateMastDateValueHtml = validHtml.replace('<h1 id="hero-headline"></h1>', '<span id="mast-date-value"></span><h1 id="hero-headline"></h1>');
+  const duplicateMastDateValueResult = dashboardValidationResult(duplicateMastDateValueHtml);
+  assert.equal(duplicateMastDateValueResult.status, 1);
+  assert.match(duplicateMastDateValueResult.stderr, /Expected exactly 1 real dashboard shell id #mast-date-value; found 2\./);
+
+  const semanticShellCases = [
+    ['harmless attributes', validHtml.replace(
+      '<span id="mast-date-value"></span>',
+      '<span data-shell-check="allowed" id="mast-date-value"></span>'
+    ), 0, null],
+    ['encoded harmless class', validHtml.replace(
+      '<div class="page" id="app">',
+      '<div id="app" class="p&#97;ge">'
+    ), 0, null],
+    ['different-markup duplicate', validHtml.replace(
+      '<main id="content"></main>',
+      '<main hidden id="content"></main><main id="content"></main>'
+    ), 1, /Expected exactly 1 real dashboard shell id #content; found 2\./],
+    ['encoded duplicate id', validHtml.replace(
+      '<main id="content"></main>',
+      '<main hidden id="cont&#101;nt"></main><main id="content"></main>'
+    ), 1, /Expected exactly 1 real dashboard shell id #content; found 2\./],
+    ['wrong tag', validHtml.replace('<main id="content"></main>', '<div id="content"></div>'), 1, /#content must use <main>; found <div>/],
+    ['hidden required node', validHtml.replace('<main id="content"></main>', '<main hidden id="content"></main>'), 1, /#content must not be hidden/],
+    ['wrong nesting', validHtml.replace(
+      '<div class="right" id="mast-date"><span id="mast-date-value"></span></div>',
+      '<span id="mast-date-value"></span><div class="right" id="mast-date"></div>'
+    ), 1, /#mast-date-value must be directly inside #mast-date/],
+    ['non-void self-closing syntax', validHtml.replace(
+      '<main id="content"></main><footer id="footer"></footer>',
+      '<main id="content"/><footer id="footer"></footer>'
+    ), 1, /#footer must be directly inside #app/]
+  ];
+  for (const [label, shellHtml, expectedStatus, expectedError] of semanticShellCases) {
+    for (const validationMode of ['published', 'staged']) {
+      const result = dashboardValidationResult(shellHtml, FIXTURE_NOW, validationMode);
+      assert.equal(result.status, expectedStatus, `${validationMode} ${label}: ${result.stderr}`);
+      if (expectedError) assert.match(result.stderr, expectedError, `${validationMode} ${label}`);
+    }
+  }
+
+  const outOfOrderShellHtml = validHtml.replace(
+    '<div id="mast-edition"></div><div class="right" id="mast-date"><span id="mast-date-value"></span></div>',
+    '<div class="right" id="mast-date"><span id="mast-date-value"></span></div><div id="mast-edition"></div>'
+  );
+  const outOfOrderShellResult = dashboardValidationResult(outOfOrderShellHtml);
+  assert.equal(outOfOrderShellResult.status, 1);
+  assert.match(outOfOrderShellResult.stderr, /Dashboard shell marker is out of order: <div class="right" id="mast-date">/);
+
+  const shellMarkup = '<div class="page" id="app"><div id="mast-edition"></div><div class="right" id="mast-date"><span id="mast-date-value"></span></div><h1 id="hero-headline"></h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>';
+  const scriptSpoofHtml = validHtml.replace(shellMarkup, `<script id="shell-spoof">const shellSpoof = ${JSON.stringify(shellMarkup)};</script>`);
+  for (const validationMode of ['published', 'staged']) {
+    const scriptSpoofResult = dashboardValidationResult(scriptSpoofHtml, FIXTURE_NOW, validationMode);
+    assert.equal(scriptSpoofResult.status, 1, `${validationMode} validation must reject shell markers embedded in script text.`);
+    assert.match(scriptSpoofResult.stderr, /Missing required dashboard shell marker: <div class="page" id="app">/);
+  }
+
+  const templateSpoofResult = dashboardValidationResult(validHtml.replace(shellMarkup, `<template>${shellMarkup}</template>`));
+  assert.equal(templateSpoofResult.status, 1);
+  assert.match(templateSpoofResult.stderr, /Unexpected <template> container in the dashboard shell/);
+
+  const attributeSpoofHtml = validHtml
+    .replace('<span id="mast-date-value"></span>', '')
+    .replace('<h1 id="hero-headline">', '<h1 data-shell-spoof=\'<span id="mast-date-value">\' id="hero-headline">');
+  const attributeSpoofResult = dashboardValidationResult(attributeSpoofHtml);
+  assert.equal(attributeSpoofResult.status, 1);
+  assert.match(attributeSpoofResult.stderr, /Missing required dashboard shell marker: <span id="mast-date-value">/);
 
   const syntaxErrorHtml = validHtml.replace(
     "const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>",
@@ -4227,12 +4806,40 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   objectBar.series[0].bars[0] = { time: '2026-07-09', close: 100 };
   const objectBarResult = validateDashboardAndChartFixture(dashboard, objectBar);
   assert.equal(objectBarResult.status, 1);
-  assert.match(objectBarResult.stderr, /chart-data\.series\[0\]\.bars\[0\] must be a compact/);
+  assert.match(objectBarResult.stderr, /chart-data\.series\[0\]\.bars\[0\] must be an array/);
 
-  const optionalVolume = structuredClone(chartData);
-  optionalVolume.series[0].bars[0] = optionalVolume.series[0].bars[0].slice(0, 5);
-  const optionalVolumeResult = validateDashboardAndChartFixture(dashboard, optionalVolume);
-  assert.equal(optionalVolumeResult.status, 0, optionalVolumeResult.stderr);
+  const missingVolumeSlot = structuredClone(chartData);
+  missingVolumeSlot.series[0].bars[0] = missingVolumeSlot.series[0].bars[0].slice(0, 5);
+  const publishedMissingVolumeSlotResult = validateDashboardAndChartFixture(dashboard, missingVolumeSlot, 'published');
+  assert.equal(publishedMissingVolumeSlotResult.status, 0, publishedMissingVolumeSlotResult.stderr);
+  const stagedMissingVolumeSlotResult = validateDashboardAndChartFixture(dashboard, missingVolumeSlot, 'staged');
+  assert.equal(stagedMissingVolumeSlotResult.status, 1);
+  assert.match(stagedMissingVolumeSlotResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
+
+  const extraTupleSlot = structuredClone(chartData);
+  extraTupleSlot.series[0].bars[0].push('ignored');
+  const publishedExtraTupleSlotResult = validateDashboardAndChartFixture(dashboard, extraTupleSlot, 'published');
+  assert.equal(publishedExtraTupleSlotResult.status, 0, publishedExtraTupleSlotResult.stderr);
+  const stagedExtraTupleSlotResult = validateDashboardAndChartFixture(dashboard, extraTupleSlot, 'staged');
+  assert.equal(stagedExtraTupleSlotResult.status, 1);
+  assert.match(stagedExtraTupleSlotResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
+
+  const nullVolumeSlot = structuredClone(chartData);
+  nullVolumeSlot.series[0].bars[0][5] = null;
+  const nullVolumeSlotResult = validateDashboardAndChartFixture(dashboard, nullVolumeSlot);
+  assert.equal(nullVolumeSlotResult.status, 0, nullVolumeSlotResult.stderr);
+
+  const carriedChartWithoutDiagnostics = compactChartPayload(buildChartDataFallback(chartData, FIXTURE_NOW));
+  delete carriedChartWithoutDiagnostics.availability;
+  const publishedCarriedWithoutDiagnosticsResult = validateDashboardAndChartFixture(dashboard, carriedChartWithoutDiagnostics);
+  assert.equal(
+    publishedCarriedWithoutDiagnosticsResult.status,
+    0,
+    'Published validation should remain limited to render-surface safety for recoverable Chart diagnostics drift.'
+  );
+  const stagedCarriedWithoutDiagnosticsResult = validateDashboardAndChartFixture(dashboard, carriedChartWithoutDiagnostics, 'staged');
+  assert.equal(stagedCarriedWithoutDiagnosticsResult.status, 1);
+  assert.match(stagedCarriedWithoutDiagnosticsResult.stderr, /carried-forward series SPX requires partial availability diagnostics/);
 }
 
 function testDashboardValidatorTapeNotesAreModeSpecific() {
@@ -4394,19 +5001,26 @@ function testTouchTooltipControls() {
   assert.doesNotMatch(html, /week-forecast-(?:qualifier|pill|tooltip)|data-week-forecast/);
 
   const weekImpactSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-impact-filter');
-  const impactEvents = [{ id: 'high', impact: 'high' }, { id: 'medium', impact: 'medium' }];
+  const impactEvents = [
+    { id: 'high', name: 'High event', impact: 'high' },
+    { id: 'medium', name: 'Medium event', impact: 'medium' }
+  ];
+  const malformedImpactEvents = [null, 'malformed', [], {}, { name: '', impact: 'high' }, { name: 'Bad impact', impact: 'bogus' }, ...impactEvents];
   const highOnlyRuntime = Function(
     'showMediumImpact',
-    `${weekImpactSource}\nreturn { visibleWeekAheadEvents, weekAheadImpactCueHtml };`
+    `${weekImpactSource}\nreturn { renderableWeekAheadItems, renderableWeekAheadEvents, visibleWeekAheadEvents, weekAheadImpactCueHtml };`
   )(false);
-  assert.deepEqual(highOnlyRuntime.visibleWeekAheadEvents(impactEvents), [impactEvents[0]]);
+  const renderableDay = { date: '2026-07-13' };
+  assert.deepEqual(highOnlyRuntime.renderableWeekAheadItems([null, 'malformed', [], renderableDay]), [renderableDay]);
+  assert.deepEqual(highOnlyRuntime.renderableWeekAheadEvents(malformedImpactEvents), impactEvents);
+  assert.deepEqual(highOnlyRuntime.visibleWeekAheadEvents(malformedImpactEvents), [impactEvents[0]]);
   assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /aria-pressed="false"/);
   assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /Show medium impact/);
   const allImpactRuntime = Function(
     'showMediumImpact',
     `${weekImpactSource}\nreturn { visibleWeekAheadEvents, weekAheadImpactCueHtml };`
   )(true);
-  assert.deepEqual(allImpactRuntime.visibleWeekAheadEvents(impactEvents), impactEvents);
+  assert.deepEqual(allImpactRuntime.visibleWeekAheadEvents(malformedImpactEvents), impactEvents);
   assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /aria-pressed="true"/);
   assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /Hide medium impact/);
   assert.match(html, /daily-financial-dashboard:week-medium-impact:v1/);
@@ -4502,6 +5116,20 @@ function testTouchTooltipControls() {
   assert.doesNotMatch(html, /Earnings refresh unavailable; showing the last validated slate|Earnings calendar source unavailable for this week|Earnings week data unavailable/);
   assert.match(html, /week\.availability\?\.status === 'unavailable'[\s\S]*?return earningsUnavailableHtml\(\)/);
 
+  const weekTimeSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-time');
+  const { weekAheadTimeLabel } = Function(
+    `${weekTimeSource}\nreturn { weekAheadTimeLabel };`
+  )();
+  assert.equal(
+    weekAheadTimeLabel(
+      { date: '2026-07-14' },
+      { time: '08:30' }
+    ),
+    '7:30 AM',
+    'Published rendering must use the fixed Eastern source and Central display zones instead of malformed payload zones.'
+  );
+  assert.equal(weekAheadTimeLabel({ date: 'malformed' }, { time: null }), 'TBD');
+
   const weekAvailabilityInfoSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-availability-info');
   const { weekAheadAvailabilityState, weekAheadAvailabilityInfoHtml } = Function(
     'esc',
@@ -4535,11 +5163,33 @@ function testTouchTooltipControls() {
   assert.doesNotMatch(cachedWeekMarkup, /FXMacroData|HTTP|retry/i);
 
   const weekOutcomeSource = extractDashboardRuntimeTestBlock(html, 'week-ahead-outcome');
-  const { weekAheadOutcomeHtml } = Function(
+  const { weekAheadOutcomeHtml, weekAheadReactionsHtml, weekAheadCloseReactionHtml } = Function(
     'esc',
     'weekReactionButtonHtml',
-    `${weekOutcomeSource}\nreturn { weekAheadOutcomeHtml };`
-  )((value) => String(value), (_day, _ticker, _role, label) => `<button>${label}</button>`);
+    `${weekOutcomeSource}\nreturn { weekAheadOutcomeHtml, weekAheadReactionsHtml, weekAheadCloseReactionHtml };`
+  )((value) => String(value), (_day, ticker, _role, label = ticker) => `<button>${label}</button>`);
+  const filteredSetupReactions = weekAheadReactionsHtml(
+    { date: '2026-07-14' },
+    {
+      reactions: [null, 'malformed', [], {}, { ticker: 'BAD-TICKER', role: 'Bad ticker' }, { ticker: 'SPX', role: '' }, { ticker: 'SPX', role: 'Broad growth reaction' }]
+    }
+  );
+  assert.equal((filteredSetupReactions.match(/<button>/g) || []).length, 1);
+  assert.match(filteredSetupReactions, />SPX<\/button>/);
+  const filteredCloseReactions = weekAheadCloseReactionHtml({
+    date: '2026-07-14',
+    marketReaction: {
+      rows: [null, 'malformed', {},
+        { ticker: 'SPX', role: 'Bad delta', delta: '1', percentChange: 0.5, unit: 'price' },
+        { ticker: 'SPX', role: 'Boolean delta', delta: true, percentChange: 0.5, unit: 'price' },
+        { ticker: 'SPX', role: 'Bad percent', delta: 1, percentChange: '0.5', unit: 'price' },
+        { ticker: 'SPX', role: 'Boolean percent', delta: 1, percentChange: false, unit: 'price' },
+        { ticker: 'SPX', role: 'Broad growth reaction', delta: 0, percentChange: 0, unit: 'price' }]
+    }
+  });
+  assert.equal((filteredCloseReactions.match(/<button>/g) || []).length, 1);
+  assert.match(filteredCloseReactions, /SPX 0\.00%/);
+  assert.doesNotMatch(filteredCloseReactions, /NaN/);
   const unavailableOutcome = weekAheadOutcomeHtml({
     date: '2026-07-15',
     lifecycle: 'close_available',
@@ -4679,6 +5329,46 @@ function testTouchTooltipControls() {
   });
   assert.match(retainedFuturesMarkup, /Last valid quote: Jul 15, 8:30 AM CT\./);
   assert.doesNotMatch(retainedFuturesMarkup, /HTTP|provider|retry/i);
+
+  const portfolioDividendSource = extractDashboardRuntimeTestBlock(html, 'portfolio-dividend-info');
+  const { dividendAmountText } = Function(
+    `${portfolioDividendSource}\nreturn { dividendAmountText };`
+  )();
+  assert.equal(
+    dividendAmountText({
+      monthDivPerShare: '$99.0000',
+      monthDivPerShareValue: 0.4
+    }, 'monthDivPerShareValue', [{ exDate: '2026-07-10', amount: 0.4 }]),
+    '$0.4000',
+    'Visible dividend amounts must be formatted from canonical numeric totals, not stored display strings.'
+  );
+  assert.equal(
+    dividendAmountText({
+      upcomingCurrentMonthDividends: '$99.0000'
+    }, 'upcomingCurrentMonthDividendsValue', [{ exDate: '2026-07-30', amount: 0.5 }]),
+    '$0.5000',
+    'Missing numeric totals may fall back to the validated event sum.'
+  );
+  for (const invalidTotal of [null, undefined, '', '0.4', -1, Number.NaN]) {
+    assert.equal(
+      dividendAmountText(
+        { monthDivPerShareValue: invalidTotal },
+        'monthDivPerShareValue',
+        [
+          { exDate: '2026-07-10', amount: '99' },
+          { exDate: '2026-07-11', amount: -1 },
+          { exDate: '2026-07-12', amount: 0.4 }
+        ]
+      ),
+      '$0.4000',
+      `Invalid raw total ${String(invalidTotal)} must fall back only to valid numeric event amounts.`
+    );
+  }
+  assert.equal(
+    dividendAmountText({ monthDivPerShareValue: 0 }, 'monthDivPerShareValue', [{ amount: 0.4 }]),
+    '',
+    'A canonical numeric zero must remain zero instead of being replaced by the event fallback.'
+  );
 
   const portfolioAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'portfolio-availability-info');
   const { portfolioAvailabilityInfo } = Function(
@@ -4957,6 +5647,7 @@ async function main() {
     testUpdaterQuoteAndCryptoPatches,
     testUpdaterModulePatches,
     testAssetAllocationYahooMalformedLatestRowRetries,
+    testAssetAllocationDividendValidation,
     testPartialDeterministicRowsValidate,
     testFuturesStagingPayloadContract,
     testPrepareFallbackAndUnavailableContracts,
@@ -4966,6 +5657,7 @@ async function main() {
     testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking,
     testChartFetcherTickerFilterAndPartialFailure,
     testChartStagingRejectsLatestCloseOnlyPlaceholder,
+    testChartMetadataAndAvailabilityContracts,
     testChartRerunUsesExecutionRevision,
     testMergedChartAvailabilityFollowsFinalSeries,
     testChartRepairStagesMixedResultForEditorialReview,

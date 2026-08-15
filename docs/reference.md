@@ -20,15 +20,17 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 ### Tape and chart data
 
-- Owners: `scripts/fetch_chart_data.js` produces chart/futures data, and `scripts/validate_dashboard.js` provides artifact safety plus staged chart/Tape consistency checks.
+- Owners: `scripts/fetch_chart_data.js` produces chart/futures data and owns the reusable payload-metadata and per-series market-data validators; `scripts/validate_dashboard.js` reuses them for staged artifact checks and adds chart/Tape roster and derived-quote consistency checks. Published validation separately checks only runtime-dereferenced shapes.
 - Boundary rules: `chart-data.series[]` is the canonical market-data store; visible Tape quote fields are derived from it; every displayed Tape ticker must have matching embedded source, chart series, and derived quote data.
-- Each published compact chart bar contains exactly `[time, open, high, low, close]` or, when volume is included, `[time, open, high, low, close, volume]`. Additional values are not supported.
+- Each published compact chart bar contains exactly `[time, open, high, low, close, volume]`; use `null` for `volume` when no volume is available. Missing or additional tuple members are not supported.
 - Tape commentary binds to the accepted quote revision. Refreshed quotes need reviewed commentary; failed quote downloads retain their last validated quote and bound commentary.
 - If neither refreshed nor prior canonical Chart/Tape data validates, Prepare emits an atomic unavailable bundle with empty `chart-data.series[]` and `tape.rows[]`; Apply copies that bundle unchanged.
 
 ### Asset Allocation
 
 - Owner: `scripts/fetch_asset_allocation.js` supplies two independently prepared inputs: instrument-level ETF rows and the sanitized portfolio summary. Prepare validates and resolves each independently, so failure of one does not discard valid data from the other.
+- Row fallback and isolation: each instrument row resolves independently. A rejected or fulfilled-but-malformed fresh row may carry forward only a validated prior row from the same dashboard month; a missing, malformed, or older prior row becomes explicitly unavailable. Other valid fresh rows remain fresh and the section is marked partial rather than discarded.
+- Dividend boundary: each ETF row partitions validated non-negative numeric dividend events into current/past ex-dates, later ex-dates in the displayed month, and the following-month lookahead. Only the current bucket contributes to MTD dividend totals, and every bucket total must equal its event sum. Numeric totals and event arrays are canonical; new staging output does not store duplicate formatted dividend fields, and display text is derived by the consumer.
 
 ### Crypto
 
@@ -47,7 +49,8 @@ Prepare validates fresh deterministic payloads. Where a domain permits prior-can
 
 - `chart-data` and `tape.rows`: failed refreshes retain the complete validated quote/history/commentary bundle; if no valid bundle exists, both publish empty with `availability.status = "unavailable"`.
 - `futuresModule`: individual source failures may produce a validated partial payload from the current preparation run. If no valid current-run payload exists, Futures becomes explicitly unavailable; prior canonical Futures values are not carried forward.
-- `crypto.stats`, `crypto.dominance`, and `assetAllocationPortfolio`: invalid fresh data uses validated same-domain carry-forward where allowed; otherwise Prepare emits explicit unavailable state.
+- `crypto.stats` and `crypto.dominance`: invalid fresh data uses validated same-domain carry-forward where allowed; otherwise Prepare emits explicit unavailable state.
+- `assetAllocationPortfolio`: instrument rows resolve independently through validated same-dashboard-month row carry-forward or per-row unavailable state, while the sanitized portfolio summary resolves independently through its documented section-level fallback. One failed row or input does not discard unrelated fresh rows or the other input.
 - `earnings.week` and `weekAhead`: a failed refresh carries forward only a validated canonical payload for the exact requested calendar range. Without one, Prepare emits that requested range as unavailable.
 
 ### Apply editorial fallback contracts

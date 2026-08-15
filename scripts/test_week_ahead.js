@@ -791,6 +791,12 @@ function testWeekAheadApplyDropsMalformedReactionRows() {
     null,
     {},
     { ticker: 'bad', role: 'Invalid ticker', delta: 1, percentChange: 1 },
+    { ticker: 'SPX', role: 'String delta', delta: '0', percentChange: 0, unit: 'price' },
+    { ticker: 'SPX', role: 'Boolean delta', delta: true, percentChange: 0, unit: 'price' },
+    { ticker: 'SPX', role: 'Missing delta', percentChange: 0, unit: 'price' },
+    { ticker: 'SPX', role: 'String percent', delta: 0, percentChange: '0', unit: 'price' },
+    { ticker: 'SPX', role: 'Boolean percent', delta: 0, percentChange: false, unit: 'price' },
+    { ticker: 'SPX', role: 'Missing percent', delta: 0, unit: 'price' },
     ...validRows
   ];
   const editorial = structuredClone(candidate);

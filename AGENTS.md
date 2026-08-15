@@ -28,6 +28,8 @@ Use each repository artifact only for the scope it owns:
 - Validators are executable enforcement of selected documented contracts.
 - Tests are regression evidence for implementation paths.
 - Neither validators, tests, nor fixtures independently define product or data policy, and fixtures are never production data.
+- Audit finding fixes must follow both `docs/agent-review.md` and `docs/agent-implementation.md`: freeze the changed-contract matrix before editing, implement the full transitive contract surface, and verify the behavior classes required by the review policy.
+- After a closure audit establishes a baseline, later audits default to reporting only regressions from subsequent changes unless the user explicitly asks to reopen or rebaseline the full repository. An unchanged defect that can prevent the overall dashboard from displaying is a baseline breach, not a general reopening.
 
 ## Scope and Worktree Safety
 
@@ -64,7 +66,7 @@ Read only the routed files or README sections needed for the current task:
 - Deterministic source, staging, payload-shape, fallback, or data-contract work: read the relevant `docs/reference.md` subsection for the affected domain.
 - Focused repairs or local-refresh work: read only the applicable `docs/reference.md` Focused Repair Commands or Local Refresh Server subsection. For browser-compatibility work, read `docs/agent-implementation.md` and the `docs/reference.md` Browser Support subsection.
 - Source-code, architecture, refactor, tests, or visible UI changes: read `docs/agent-implementation.md`, plus any relevant `docs/reference.md` section for touched dashboard domains.
-- Reviews, audits, regression audits, changed-contract checks, or commenting passes: read `docs/agent-review.md`, plus `docs/agent-implementation.md` when the review scope includes implementation, architecture, or visible UI policy, plus only the relevant `docs/reference.md` subsection when domain contracts are in scope.
+- Reviews, audits, regression audits, closure audits, changed-contract checks, or commenting passes: read `docs/agent-review.md`, plus `docs/agent-implementation.md` when the review scope includes implementation, architecture, visible UI policy, or audit finding fixes, plus only the relevant `docs/reference.md` subsection when domain contracts are in scope.
 - Questions about policy, documentation structure, or possible changes: read only the current files needed to answer the question. Do not edit, run workflows, commit, or publish unless explicitly authorized.
 
 ## Financial and Source Boundaries

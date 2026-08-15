@@ -6,20 +6,17 @@ const { spawnSync } = require('child_process');
 const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
-const { deriveQuoteRowsFromSeries, roundChartPayload } = require('./fetch_chart_data');
+const {
+  deriveQuoteRowsFromSeries,
+  roundChartPayload,
+  validateChartPayloadMetadata,
+  validateChartSeriesContract
+} = require('./fetch_chart_data');
 const { validateWeekAheadPayload } = require('./week_ahead_contract');
 
 const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
 const defaultChartData = path.resolve(root, 'generated', 'chart_data.json');
-// Chart staging data and the compact embedded payload share this contract.
-// It lives here because validate_dashboard owns both full-dashboard and chart-data validation.
-const MIN_CHART_HISTORY_DAYS = 1826;
-// Treasury skips weekends and holidays, so validate broad comparison windows rather than exact offsets.
-const REQUIRED_YIELD_CURVE_COMPARISONS = [
-  { label: '1M ago', minDays: 20, maxDays: 45 },
-  { label: '6M ago', minDays: 150, maxDays: 215 }
-];
 const DASHBOARD_VALIDATION_MODES = new Set(['staged', 'published']);
 
 function normalizedDashboardValidationMode(value) {
@@ -130,8 +127,8 @@ function validateDashboardRenderSurface(errors, data, chartData) {
     const label = `chart-data.series[${seriesIndex}]`;
     if (!renderObject(errors, series, label) || !renderArray(errors, series.bars, `${label}.bars`)) continue;
     for (const [barIndex, bar] of series.bars.entries()) {
-      if (!Array.isArray(bar) || ![5, 6].includes(bar.length)) {
-        errors.push(`${label}.bars[${barIndex}] must be a compact [time, open, high, low, close, volume?] tuple for dashboard rendering.`);
+      if (!Array.isArray(bar)) {
+        errors.push(`${label}.bars[${barIndex}] must be an array for dashboard rendering.`);
       }
     }
   }
@@ -140,113 +137,6 @@ function validateDashboardRenderSurface(errors, data, chartData) {
 function isFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return false;
   return Number.isFinite(Number(value));
-}
-
-function isoDayGap(laterDate, earlierDate) {
-  if (!isIsoDate(laterDate) || !isIsoDate(earlierDate)) return null;
-  const later = Date.parse(`${laterDate}T00:00:00Z`);
-  const earlier = Date.parse(`${earlierDate}T00:00:00Z`);
-  if (!Number.isFinite(later) || !Number.isFinite(earlier)) return null;
-  return Math.round((later - earlier) / 86400000);
-}
-
-function yieldCurvePointsKey(points) {
-  // Duplicate comparison curves can render as one line even when their labels differ.
-  return JSON.stringify(points.map((point) => [
-    String(point?.label || ''),
-    Number(point?.years),
-    Number(point?.value)
-  ]));
-}
-
-function validateYieldCurvePointSet(errors, label, fieldName, points, referencePoints = null) {
-  if (points.length < 2) {
-    errors.push(`${label}.${fieldName} must contain a Treasury curve.`);
-  }
-  if (referencePoints && points.length !== referencePoints.length) {
-    errors.push(`${label}.${fieldName} must match the current Treasury curve maturity count.`);
-  }
-  for (const [pointIndex, pointRaw] of points.entries()) {
-    const point = pointRaw && typeof pointRaw === 'object' ? pointRaw : {};
-    const referencePoint = referencePoints?.[pointIndex];
-    if (typeof point.label !== 'string' || point.label.trim() === '') {
-      errors.push(`${label}.${fieldName}[${pointIndex}].label must be populated.`);
-    }
-    if (referencePoint && point.label !== referencePoint.label) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].label must match current curve maturity ${referencePoint.label}.`);
-    }
-    if (!isFiniteNumber(point.years) || Number(point.years) <= 0) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].years must be positive.`);
-    }
-    if (!isFiniteNumber(point.value)) {
-      errors.push(`${label}.${fieldName}[${pointIndex}].value must be numeric.`);
-    }
-  }
-}
-
-function validateYieldCurveComparisons(errors, label, item, curvePoints) {
-  const comparisonCurves = Array.isArray(item.comparisonCurves) ? item.comparisonCurves : [];
-  if (!Array.isArray(item.comparisonCurves)) {
-    errors.push(`${label}.comparisonCurves must include 1M ago and 6M ago Treasury curves.`);
-  }
-  // The renderer assumes these labels exist and that each comparison shares the current curve maturity order.
-  const seenDates = new Map();
-  const seenPointSets = new Map();
-  for (const expected of REQUIRED_YIELD_CURVE_COMPARISONS) {
-    const comparisonIndex = comparisonCurves.findIndex((comparison) => comparison?.label === expected.label);
-    if (comparisonIndex < 0) {
-      errors.push(`${label}.comparisonCurves must include ${expected.label}.`);
-      continue;
-    }
-    const comparison = comparisonCurves[comparisonIndex];
-    if (!isIsoDate(comparison.date)) {
-      errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be an ISO date.`);
-    } else {
-      if (seenDates.has(comparison.date)) {
-        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be distinct from ${seenDates.get(comparison.date)}.`);
-      }
-      seenDates.set(comparison.date, expected.label);
-      const ageDays = isoDayGap(item.curveDate, comparison.date);
-      if (ageDays === null || ageDays < expected.minDays || ageDays > expected.maxDays) {
-        errors.push(`${label}.comparisonCurves[${comparisonIndex}].date must be ${expected.label} relative to curveDate.`);
-      }
-    }
-    const points = Array.isArray(comparison.points) ? comparison.points : [];
-    validateYieldCurvePointSet(errors, label, `comparisonCurves[${comparisonIndex}].points`, points, curvePoints);
-    const pointKey = yieldCurvePointsKey(points);
-    if (seenPointSets.has(pointKey)) {
-      errors.push(`${label}.comparisonCurves[${comparisonIndex}].points must be distinct from ${seenPointSets.get(pointKey)}.`);
-    }
-    seenPointSets.set(pointKey, expected.label);
-  }
-}
-
-function isCoherentOhlc(bar) {
-  const open = Number(bar.open);
-  const high = Number(bar.high);
-  const low = Number(bar.low);
-  const close = Number(bar.close);
-  if (![open, high, low, close].every(Number.isFinite)) return false;
-  if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
-  return !(close > 0 && [open, high, low].some((value) => value <= 0));
-}
-
-function isCloseOnlyPlaceholderBar(bar) {
-  return bar?.volume === undefined
-    && isFiniteNumber(bar?.open)
-    && Number(bar.open) === Number(bar.high)
-    && Number(bar.high) === Number(bar.low)
-    && Number(bar.low) === Number(bar.close);
-}
-
-function validateChartPayloadMetadata(errors, payload, { label = '' } = {}) {
-  const prefix = label ? `${label}.` : '';
-  if (!isIsoDate(payload?.range?.startDate) || !isIsoDate(payload?.range?.endDate)) {
-    errors.push(`${prefix}range.startDate and ${prefix}range.endDate must be ISO dates.`);
-  }
-  if (!Number.isFinite(Number(payload?.range?.days)) || Number(payload.range.days) < MIN_CHART_HISTORY_DAYS) {
-    errors.push(`${prefix}range.days must be at least ${MIN_CHART_HISTORY_DAYS} so the 5Y chart shortcut has enough embedded history.`);
-  }
 }
 
 // These adapters only bridge storage representation. All market-data semantics live below.
@@ -278,42 +168,6 @@ function decodeTupleSeries(errors, sourceItem, label) {
   return { ...sourceItem, bars };
 }
 
-function validateBars(errors, warnings, label, item, volumeDescription, { closeOnlyPlaceholderSeverity = 'error' } = {}) {
-  if (!Array.isArray(item.bars) || item.bars.length < 2) {
-    errors.push(`${label}.bars must contain at least two daily bars.`);
-    return;
-  }
-  let previousTime = '';
-  for (const [barIndex, bar] of item.bars.entries()) {
-    const barLabel = `${label}.bars[${barIndex}]`;
-    if (!isIsoDate(bar.time)) errors.push(`${barLabel}.time must be an ISO date.`);
-    if (previousTime && bar.time <= previousTime) errors.push(`${barLabel}.time must be strictly ascending.`);
-    previousTime = bar.time;
-    for (const key of ['open', 'high', 'low', 'close']) {
-      if (!isFiniteNumber(bar[key])) errors.push(`${barLabel}.${key} must be numeric.`);
-    }
-    if (!isCoherentOhlc(bar)) errors.push(`${barLabel} has incoherent OHLC values.`);
-    if (bar.volume !== undefined && (!isFiniteNumber(bar.volume) || Number(bar.volume) < 0)) {
-      errors.push(`${barLabel}.volume must be a non-negative number when present.`);
-    }
-    if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
-      errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);
-    }
-    if (item.noVolume && bar.volume !== undefined) {
-      errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
-    }
-    if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
-      const message = `${barLabel} contains a latest quote-only placeholder in an OHLC series; row tooltip discloses unavailable open/high/low data.`;
-      if (closeOnlyPlaceholderSeverity === 'warning') warnings.push(message);
-      else errors.push(message);
-    }
-  }
-  const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
-  if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
-    errors.push(`${label}.noVolume must be ${!hasVolume} to match its ${volumeDescription} volume bars.`);
-  }
-}
-
 function validateSeries(errors, series, {
   warnings = errors,
   expectedByTicker,
@@ -324,7 +178,9 @@ function validateSeries(errors, series, {
   duplicateMessage,
   missingMessage,
   volumeDescription,
-  closeOnlyPlaceholderSeverity = 'error'
+  closeOnlyPlaceholderSeverity = 'error',
+  rangeStartDate = '',
+  rangeEndDate = ''
 }) {
   const seriesByTicker = new Map();
   const decodedSeries = [];
@@ -334,34 +190,23 @@ function validateSeries(errors, series, {
     const label = ticker || `${prefix}series[${index}]`;
     const item = decodeSeries(errors, sourceItem, label);
     decodedSeries.push(item);
-    if (!ticker) errors.push(`${prefix}series[${index}].ticker must be populated.`);
     if (seriesByTicker.has(ticker)) errors.push(`${duplicateMessage} ${ticker}.`);
     seriesByTicker.set(ticker, item);
     const expectedSource = expectedByTicker.get(ticker);
     if (!expectedSource) errors.push(`${label} ${absentMessage}`);
-    else if (item.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
     const expectedSection = expectedSectionByTicker.get(ticker);
-    if (expectedSection && item.section !== expectedSection) errors.push(`${label}.section must be ${expectedSection}.`);
-    if (!isIsoDateTime(item.quoteRevision)) errors.push(`${label}.quoteRevision must be an offset-bearing ISO timestamp.`);
-    if (item.availability !== undefined) {
-      if (!item.availability || typeof item.availability !== 'object' || Array.isArray(item.availability)) {
-        errors.push(`${label}.availability must be an object.`);
-      } else {
-        if (item.availability.status !== 'carried_forward') errors.push(`${label}.availability.status must be carried_forward.`);
-      }
-    }
-    if (!['ohlc', 'close'].includes(item.dataKind)) errors.push(`${label}.dataKind must be ohlc or close.`);
-    if (typeof item.priceOnly !== 'boolean') errors.push(`${label}.priceOnly must be boolean.`);
-    if (typeof item.noVolume !== 'boolean') errors.push(`${label}.noVolume must be boolean.`);
-    if (item.sourceSymbol === 'TREASURY:CURVE') {
-      const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
-      validateYieldCurvePointSet(errors, label, 'curvePoints', curvePoints);
-      validateYieldCurveComparisons(errors, label, item, curvePoints);
-      const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
-      if (curveSpread.label !== '2s10s') errors.push(`${label}.curveSpread.label must be 2s10s.`);
-      if (!isFiniteNumber(curveSpread.valueBp)) errors.push(`${label}.curveSpread.valueBp must be numeric.`);
-    }
-    validateBars(errors, warnings, label, item, volumeDescription, { closeOnlyPlaceholderSeverity });
+    const contract = validateChartSeriesContract(item, expectedSource ? {
+      sourceSymbol: expectedSource,
+      section: expectedSection
+    } : null, {
+      label,
+      volumeDescription,
+      closeOnlyPlaceholderSeverity,
+      rangeStartDate,
+      rangeEndDate
+    });
+    errors.push(...contract.errors);
+    warnings.push(...contract.warnings);
   }
   for (const ticker of expectedByTicker.keys()) {
     if (!seriesByTicker.has(ticker)) errors.push(`${missingMessage} ${ticker}.`);
@@ -377,7 +222,7 @@ function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker
       .map(([ticker]) => ticker)
   );
   if (availability === undefined) {
-    void carriedTickers;
+    for (const ticker of carriedTickers) errors.push(`${prefix}carried-forward series ${ticker} requires partial availability diagnostics.`);
     return;
   }
   if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {
@@ -385,8 +230,30 @@ function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker
     return;
   }
   if (!['partial', 'carried_forward'].includes(availability.status)) errors.push(`${prefix}availability.status must be partial or carried_forward.`);
-  void seriesByTicker;
-  void carriedTickers;
+  if (availability.reason !== 'source_refresh_failed') errors.push(`${prefix}availability.reason must be source_refresh_failed.`);
+  if (!isIsoDateTime(availability.checkedAt)) errors.push(`${prefix}availability.checkedAt must be an offset-bearing ISO timestamp.`);
+  if (availability.status === 'partial') {
+    if (!Array.isArray(availability.failures) || !availability.failures.length) {
+      errors.push(`${prefix}partial availability.failures must be a non-empty array.`);
+      return;
+    }
+    const failureTickers = new Set();
+    availability.failures.forEach((failure, index) => {
+      const ticker = String(failure?.ticker || '').trim().toUpperCase();
+      if (!ticker) errors.push(`${prefix}availability.failures[${index}].ticker must be populated.`);
+      else if (failureTickers.has(ticker)) errors.push(`${prefix}availability.failures contains duplicate ticker ${ticker}.`);
+      else failureTickers.add(ticker);
+      if (typeof failure?.message !== 'string' || !failure.message.trim()) errors.push(`${prefix}availability.failures[${index}].message must be populated.`);
+      if (ticker && !seriesByTicker.has(ticker)) errors.push(`${prefix}availability failure names unknown ticker ${ticker}.`);
+      else if (ticker && !carriedTickers.has(ticker)) errors.push(`${prefix}availability failure ${ticker} must identify a carried_forward series.`);
+    });
+    for (const ticker of carriedTickers) {
+      if (!failureTickers.has(ticker)) errors.push(`${prefix}carried_forward series ${ticker} must have a matching availability failure.`);
+    }
+  } else {
+    if (availability.failures !== undefined) errors.push(`${prefix}carried_forward availability.failures is not allowed.`);
+    if (carriedTickers.size !== seriesByTicker.size) errors.push(`${prefix}carried_forward availability requires every series to be marked carried_forward.`);
+  }
 }
 
 function quoteRowsByTicker(derivedRows) {
@@ -448,8 +315,8 @@ function validateDashboardTapeCommentary(errors, data) {
   }
 }
 
-// Staged fetch output and the compact published payload share this complete contract;
-// callers provide only their storage decoder and dashboard roster boundary.
+// Add payload, storage, roster, and derived-quote checks around the shared
+// per-series market-data contract owned by fetch_chart_data.
 function validateChartPayload(errors, payload, {
   warnings = errors,
   expectedByTicker,
@@ -464,18 +331,18 @@ function validateChartPayload(errors, payload, {
   closeOnlyPlaceholderSeverity = 'error'
 }) {
   const prefix = label ? `${label}.` : '';
-  if (payload.schemaVersion !== 1) errors.push(`${prefix}schemaVersion must be 1.`);
+  errors.push(...validateChartPayloadMetadata(payload, { label: label || 'Chart payload' }));
   if (!Array.isArray(payload.series)) errors.push(`${prefix}series must be an array.`);
   if (payload.quoteRows !== undefined) errors.push(`${prefix}quoteRows is no longer published; derive quote rows from ${prefix}series.`);
   if (payload.availability?.status === 'unavailable') {
-    if (!isIsoDateTime(payload.generatedAt)) errors.push(`${prefix}generatedAt must be an offset-bearing ISO timestamp when unavailable.`);
     if (payload.availability.reason !== 'source_refresh_failed') errors.push(`${prefix}availability.reason must be source_refresh_failed when unavailable.`);
     if (!isIsoDateTime(payload.availability.checkedAt)) errors.push(`${prefix}availability.checkedAt must be an offset-bearing ISO timestamp when unavailable.`);
     if (Array.isArray(payload.series) && payload.series.length) errors.push(`${prefix}series must be empty when chart data is unavailable.`);
     if (expectedByTicker.size) errors.push(`${prefix}unavailable chart data requires an empty dashboard Tape roster.`);
     return { decodedSeries: [], seriesByTicker: new Map() };
   }
-  validateChartPayloadMetadata(errors, payload, { label });
+  const rangeStartDate = isIsoDate(payload?.range?.startDate) ? payload.range.startDate : '';
+  const rangeEndDate = isIsoDate(payload?.range?.endDate) ? payload.range.endDate : '';
   const series = Array.isArray(payload.series) ? payload.series : [];
   const result = validateSeries(errors, series, {
     warnings,
@@ -487,7 +354,9 @@ function validateChartPayload(errors, payload, {
     duplicateMessage,
     missingMessage,
     volumeDescription,
-    closeOnlyPlaceholderSeverity
+    closeOnlyPlaceholderSeverity,
+    rangeStartDate,
+    rangeEndDate
   });
   validateChartAvailabilityCorrespondence(errors, payload, result.seriesByTicker, prefix);
   const roundedSeries = roundChartPayload({ series: result.decodedSeries }).series;
@@ -716,20 +585,128 @@ function countMatches(pattern) {
   return [...html.matchAll(pattern)].length;
 }
 
-function requireOrderedMarkerSequence(markers, bounds = {}) {
-  const { minIndex = -1, maxIndex = Number.POSITIVE_INFINITY } = bounds;
-  let previousIndex = minIndex;
-  for (const marker of markers) {
-    const index = html.indexOf(marker);
-    if (index < 0) {
-      errors.push(`Missing required dashboard shell marker: ${marker}`);
+function dashboardShellElements(shell) {
+  const elements = [];
+  const stack = [];
+  const voidTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+  const decodeAttributeValue = (value) => String(value)
+    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (_match, hex, decimal) => {
+      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : '\ufffd';
+    })
+    .replace(/&(amp|quot|apos|lt|gt);/gi, (_match, name) => ({
+      amp: '&', quot: '"', apos: "'", lt: '<', gt: '>'
+    })[name.toLowerCase()]);
+  let cursor = 0;
+  while (cursor < shell.length) {
+    const openIndex = shell.indexOf('<', cursor);
+    if (openIndex < 0) break;
+    if (shell.startsWith('<!--', openIndex)) {
+      const commentEnd = shell.indexOf('-->', openIndex + 4);
+      cursor = commentEnd < 0 ? shell.length : commentEnd + 3;
       continue;
     }
-    if (index <= previousIndex) {
-      errors.push(`Dashboard shell marker is out of order: ${marker}`);
+    const closing = shell[openIndex + 1] === '/';
+    const nameOffset = openIndex + (closing ? 2 : 1);
+    const nameMatch = shell.slice(nameOffset).match(/^([A-Za-z][A-Za-z0-9:-]*)/);
+    if (!nameMatch) {
+      cursor = openIndex + 1;
+      continue;
     }
-    if (index >= maxIndex) {
-      errors.push(`Dashboard shell marker appears in the runtime script region: ${marker}`);
+    let quote = '';
+    let closeIndex = -1;
+    for (let index = openIndex + 1; index < shell.length; index += 1) {
+      const character = shell[index];
+      if (quote) {
+        if (character === quote) quote = '';
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === '>') {
+        closeIndex = index;
+        break;
+      }
+    }
+    if (closeIndex < 0) break;
+    const name = nameMatch[1].toLowerCase();
+    if (closing) {
+      const matchingIndex = stack.map((elementIndex) => elements[elementIndex].name).lastIndexOf(name);
+      if (matchingIndex >= 0) stack.length = matchingIndex;
+      cursor = closeIndex + 1;
+      continue;
+    }
+    const source = shell.slice(openIndex, closeIndex + 1);
+    const attributes = {};
+    const attributeSource = shell.slice(nameOffset + nameMatch[1].length, closeIndex);
+    const attributePattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+    for (const match of attributeSource.matchAll(attributePattern)) {
+      const attributeName = match[1].toLowerCase();
+      if (!(attributeName in attributes)) {
+        attributes[attributeName] = decodeAttributeValue(match[2] ?? match[3] ?? match[4] ?? '');
+      }
+    }
+    const element = {
+      name,
+      source,
+      attributes,
+      parentIndex: stack.length ? stack[stack.length - 1] : -1
+    };
+    elements.push(element);
+    // HTML ignores self-closing slashes on non-void elements, so the shell
+    // stack must do the same to match browser DOM ancestry.
+    if (!voidTags.has(name)) stack.push(elements.length - 1);
+    cursor = closeIndex + 1;
+  }
+  return elements;
+}
+
+function requireOrderedMarkerSequence(markers, shell) {
+  const elements = dashboardShellElements(shell);
+  const inertContainer = elements.find((element) => [
+    'iframe', 'noembed', 'noscript', 'plaintext', 'script', 'style', 'template', 'textarea', 'title', 'xmp'
+  ].includes(element.name));
+  if (inertContainer) {
+    errors.push(`Unexpected <${inertContainer.name}> container in the dashboard shell.`);
+  }
+  const hasAncestorId = (element, ancestorId) => {
+    let parentIndex = element.parentIndex;
+    while (parentIndex >= 0) {
+      const parent = elements[parentIndex];
+      if (parent.attributes.id === ancestorId) return true;
+      parentIndex = parent.parentIndex;
+    }
+    return false;
+  };
+  let previousIndex = -1;
+  for (const marker of markers) {
+    const indexes = elements
+      .map((element, index) => element.attributes.id === marker.id ? index : -1)
+      .filter((index) => index >= 0);
+    if (!indexes.length) {
+      errors.push(`Missing required dashboard shell marker: ${marker.label}`);
+      continue;
+    }
+    if (indexes.length > 1) {
+      errors.push(`Expected exactly 1 real dashboard shell id #${marker.id}; found ${indexes.length}.`);
+    }
+    const index = indexes[0];
+    const element = elements[index];
+    if (element.name !== marker.tag) {
+      errors.push(`Dashboard shell #${marker.id} must use <${marker.tag}>; found <${element.name}>.`);
+    }
+    for (const className of marker.classes || []) {
+      const classes = String(element.attributes.class || '').split(/[\t\n\f\r ]+/).filter(Boolean);
+      if (!classes.includes(className)) errors.push(`Dashboard shell #${marker.id} must include class ${className}.`);
+    }
+    if ('hidden' in element.attributes) errors.push(`Dashboard shell #${marker.id} must not be hidden.`);
+    if (marker.parentId && elements[element.parentIndex]?.attributes.id !== marker.parentId) {
+      errors.push(`Dashboard shell #${marker.id} must be directly inside #${marker.parentId}.`);
+    } else if (marker.ancestorId && !hasAncestorId(element, marker.ancestorId)) {
+      errors.push(`Dashboard shell #${marker.id} must be inside #${marker.ancestorId}.`);
+    }
+    if (index <= previousIndex) {
+      errors.push(`Dashboard shell marker is out of order: ${marker.label}`);
     }
     previousIndex = index;
   }
@@ -777,6 +754,13 @@ const dataStartIndex = html.indexOf('<!-- ============ DATA START');
 const dataEndIndex = html.indexOf('<!-- ============ DATA END ============ -->');
 const chartDataIndex = html.indexOf('<script type="application/json" id="chart-data">');
 const runtimeScriptIndex = html.indexOf('<script id="dashboard-runtime">');
+const chartDataEndIndex = chartDataMatch ? chartDataMatch.index + chartDataMatch[0].length : -1;
+const firstScriptAfterChartOffset = chartDataEndIndex >= 0
+  ? html.slice(chartDataEndIndex).search(/<script\b/i)
+  : -1;
+const firstScriptAfterChartIndex = firstScriptAfterChartOffset >= 0
+  ? chartDataEndIndex + firstScriptAfterChartOffset
+  : -1;
 
 if (dataStartIndex < 0) {
   errors.push('Could not find the DATA START marker.');
@@ -801,17 +785,17 @@ if (chartDataIndex >= 0 && runtimeScriptIndex >= 0 && chartDataIndex >= runtimeS
 }
 
 requireOrderedMarkerSequence([
-  '<div class="page" id="app">',
-  '<div id="mast-edition">',
-  '<div class="right" id="mast-date">',
-  '<h1 id="hero-headline">',
-  '<div id="hero-copy"></div>',
-  '<main id="content"></main>',
-  '<footer id="footer"></footer>'
-], {
-  minIndex: chartDataIndex,
-  maxIndex: runtimeScriptIndex >= 0 ? runtimeScriptIndex : Number.POSITIVE_INFINITY
-});
+  { id: 'app', tag: 'div', classes: ['page'], label: '<div class="page" id="app">' },
+  { id: 'mast-edition', tag: 'div', ancestorId: 'app', label: '<div id="mast-edition">' },
+  { id: 'mast-date', tag: 'div', classes: ['right'], ancestorId: 'app', label: '<div class="right" id="mast-date">' },
+  { id: 'mast-date-value', tag: 'span', parentId: 'mast-date', label: '<span id="mast-date-value">' },
+  { id: 'hero-headline', tag: 'h1', ancestorId: 'app', label: '<h1 id="hero-headline">' },
+  { id: 'hero-copy', tag: 'div', ancestorId: 'app', label: '<div id="hero-copy">' },
+  { id: 'content', tag: 'main', parentId: 'app', label: '<main id="content">' },
+  { id: 'footer', tag: 'footer', parentId: 'app', label: '<footer id="footer">' }
+], chartDataEndIndex >= 0 && firstScriptAfterChartIndex >= chartDataEndIndex
+  ? html.slice(chartDataEndIndex, firstScriptAfterChartIndex)
+  : '');
 
 if (!dashboardMatch) {
   errors.push('Could not find dashboard-data JSON block.');
@@ -934,8 +918,6 @@ function main(argv = process.argv.slice(2)) {
 if (require.main === module) main();
 
 module.exports = {
-  MIN_CHART_HISTORY_DAYS,
-  REQUIRED_YIELD_CURVE_COMPARISONS,
   changedPaths,
   chartableRowsFromDashboardData,
   chartableRowsFromDashboardHtml,
@@ -949,7 +931,5 @@ module.exports = {
   validateChartPayload,
   validateChartPayloadMetadata,
   validateDashboardHtml,
-  normalizedDashboardValidationMode,
-  validateYieldCurveComparisons,
-  validateYieldCurvePointSet
+  normalizedDashboardValidationMode
 };

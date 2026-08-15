@@ -991,6 +991,18 @@ function validateWeekAheadPayload(payload, {
     if (!hasEvents && (day?.lifecycle !== undefined || day?.marketReaction !== undefined || day?.outcome !== undefined)) {
       errors.push(`weekAhead.days[${dayIndex}] without events must omit lifecycle, marketReaction, and outcome.`);
     }
+    if (day?.marketReaction !== undefined) {
+      const reactionPrefix = `weekAhead.days[${dayIndex}].marketReaction`;
+      if (!isPlainObject(day.marketReaction) || !Array.isArray(day.marketReaction.rows)) {
+        errors.push(`${reactionPrefix} must be an object with a rows array.`);
+      } else {
+        day.marketReaction.rows.forEach((row, rowIndex) => {
+          if (!isRenderableWeekAheadReactionRow(row)) {
+            errors.push(`${reactionPrefix}.rows[${rowIndex}] must be a renderable reaction row.`);
+          }
+        });
+      }
+    }
     if (day?.lifecycle === 'close_available') {
       const marketCloseInstant = weekAheadReleaseInstant(day.date, '16:00', payload.range?.marketTimeZone || SOURCE_TIME_ZONE);
       if (now instanceof Date && !Number.isNaN(now.getTime()) && marketCloseInstant && now < marketCloseInstant) {
@@ -1154,17 +1166,13 @@ function isRenderableWeekAheadReactionRow(row) {
     || !/^[A-Z0-9]+$/.test(String(row.ticker || ''))
     || typeof row.role !== 'string'
     || !row.role.trim()
-    || row.delta === null
-    || row.delta === undefined
-    || row.delta === ''
-    || !Number.isFinite(Number(row.delta))) {
+    || typeof row.delta !== 'number'
+    || !Number.isFinite(row.delta)) {
     return false;
   }
   return row.unit === 'percent_yield'
-    || (row.percentChange !== null
-      && row.percentChange !== undefined
-      && row.percentChange !== ''
-      && Number.isFinite(Number(row.percentChange)));
+    || (typeof row.percentChange === 'number'
+      && Number.isFinite(row.percentChange));
 }
 
 function applyWeekAheadEditorial(candidateWeekAhead, editorialWeekAhead, { systemFallbacks = null } = {}) {

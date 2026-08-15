@@ -523,10 +523,6 @@ function writeJson(file, data) {
   atomicWriteJson(file, data);
 }
 
-function isObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
 function metricPayload(current, incoming, metric, options = {}) {
   const estimate = numberOrNull(incoming?.estimate);
   const actual = numberOrNull(incoming?.actual);
