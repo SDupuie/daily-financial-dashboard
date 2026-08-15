@@ -3954,8 +3954,26 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
     {
       label: 'negative volume',
       ticker: 'VCR',
-      expected: /volume must be a non-negative number/,
+      expected: /volume must be a non-negative finite JSON number/,
       mutate: (series) => { series.bars[0].volume = -1; }
+    },
+    {
+      label: 'boolean OHLC',
+      ticker: 'VCR',
+      expected: /open must be a finite JSON number/,
+      mutate: (series) => { series.bars[0].open = true; }
+    },
+    {
+      label: 'numeric-string OHLC',
+      ticker: 'VCR',
+      expected: /open must be a finite JSON number/,
+      mutate: (series) => { series.bars[0].open = String(series.bars[0].open); }
+    },
+    {
+      label: 'boolean volume',
+      ticker: 'VCR',
+      expected: /volume must be a non-negative finite JSON number/,
+      mutate: (series) => { series.bars[0].volume = false; }
     },
     {
       label: 'noVolume mismatch',
@@ -4349,6 +4367,63 @@ function testDashboardEmbeddedRuntimeParses() {
   assert.doesNotThrow(() => new Function(runtime), 'The complete dashboard runtime must parse as JavaScript.');
   assert.match(runtime, /data\?\.tape\?\.availability\?\.status === 'unavailable'[\s\S]*?Market data unavailable for this update\./,
     'The runtime must render the explicit unavailable Chart/Tape state without initializing a chart.');
+}
+
+function testEmbeddedChartDecoderSkipsMalformedCompactBars() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'chart-payload-load');
+  const payload = {
+    series: [{
+      ticker: 'SPX',
+      bars: [[], ['2026-07-10', 1, 2, 0.5, 'not-a-number', null]]
+    }, {
+      ticker: 'NDX',
+      bars: [['2026-07-09', 1, 2, 0.5, 1, null], ['not-a-date', 1, 2, 0.5, 1, null]]
+    }, {
+      ticker: 'DJI',
+      bars: [['2026-07-10', 1, 2, 0.5, 1, null], ['2026-07-09', 1, 2, 0.5, 1, null]]
+    }, {
+      ticker: 'RUT',
+      bars: [['2026-07-09', 1, 2, 0.5, 1, null], ['2026-07-10', true, true, true, true, false]]
+    }, {
+      ticker: 'VOX',
+      bars: [['2026-07-09', 1, 2, 0.5, 1, null], ['2026-07-10', 100, 50, 90, 95, null]]
+    }, {
+      ticker: 'VDC',
+      bars: [['2026-07-09', 1, 2, 0.5, 1, null], ['2026-07-10', 1, 2, 0.5, 1, -1]]
+    }, {
+      ticker: 'VIX',
+      bars: [
+        ['2026-07-09', 20, 21, 19, 20.5, null],
+        ['2026-07-10', 21, 22, 20, 21.5, null]
+      ]
+    }, {
+      ticker: 'BTC',
+      bars: [['2026-07-10', 100, 101, 99, 100.5, null]]
+    }]
+  };
+  const loadFixtureChartData = new Function('payload', `
+    let chartSeriesByTicker = new Map();
+    let chartAvailability = null;
+    let chartDataReferenceDate = '';
+    const document = {
+      getElementById(id) {
+        return id === 'chart-data' ? { textContent: JSON.stringify(payload) } : null;
+      }
+    };
+    function chartPayloadReferenceDate() { return '2026-07-10'; }
+    ${source}
+    loadChartData();
+    return {
+      tickers: [...chartSeriesByTicker.keys()],
+      vixBars: chartSeriesByTicker.get('VIX').bars,
+      chartDataReferenceDate
+    };
+  `);
+  const result = loadFixtureChartData(payload);
+  assert.deepEqual(result.tickers, ['VIX'], 'Malformed or too-short compact series must not enter the browser chart map.');
+  assert.deepEqual(result.vixBars[0], { time: '2026-07-09', open: 20, high: 21, low: 19, close: 20.5 });
+  assert.equal(result.chartDataReferenceDate, '2026-07-10');
 }
 
 function testOpeningRenderingOmitsIncompleteBlocks() {
@@ -4793,25 +4868,56 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   const nullSeries = structuredClone(chartData);
   nullSeries.series[0] = null;
   const nullSeriesResult = validateDashboardAndChartFixture(dashboard, nullSeries);
-  assert.equal(nullSeriesResult.status, 1);
-  assert.match(nullSeriesResult.stderr, /chart-data\.series\[0\] must be an object/);
+  assert.equal(nullSeriesResult.status, 0, nullSeriesResult.stderr);
+  assert.match(nullSeriesResult.stdout, /chart-data\.series\[0\] is not a renderable object and will be skipped/);
+  const stagedNullSeriesResult = validateDashboardAndChartFixture(dashboard, nullSeries, 'staged');
+  assert.equal(stagedNullSeriesResult.status, 1);
+  assert.match(stagedNullSeriesResult.stderr, /chart-data\.series\[0\]\.ticker must be populated/);
 
   const malformedBars = structuredClone(chartData);
   malformedBars.series[0].bars = 'malformed';
   const malformedBarsResult = validateDashboardAndChartFixture(dashboard, malformedBars);
-  assert.equal(malformedBarsResult.status, 1);
-  assert.match(malformedBarsResult.stderr, /chart-data\.series\[0\]\.bars must be an array/);
+  assert.equal(malformedBarsResult.status, 0, malformedBarsResult.stderr);
+  assert.match(malformedBarsResult.stdout, /chart-data\.series\[0\]\.bars is not an array and will be skipped/);
+  const stagedMalformedBarsResult = validateDashboardAndChartFixture(dashboard, malformedBars, 'staged');
+  assert.equal(stagedMalformedBarsResult.status, 1);
+  assert.match(stagedMalformedBarsResult.stderr, /SPX\.bars must contain at least two daily bars/);
 
   const objectBar = structuredClone(chartData);
   objectBar.series[0].bars[0] = { time: '2026-07-09', close: 100 };
   const objectBarResult = validateDashboardAndChartFixture(dashboard, objectBar);
-  assert.equal(objectBarResult.status, 1);
-  assert.match(objectBarResult.stderr, /chart-data\.series\[0\]\.bars\[0\] must be an array/);
+  assert.equal(objectBarResult.status, 0, objectBarResult.stderr);
+  assert.match(objectBarResult.stdout, /chart-data\.series\[0\]\.bars\[0\] is not a compact bar array and will be skipped/);
+  const stagedObjectBarResult = validateDashboardAndChartFixture(dashboard, objectBar, 'staged');
+  assert.equal(stagedObjectBarResult.status, 1);
+  assert.match(stagedObjectBarResult.stderr, /SPX\.bars\[0\] must be a \[time, open, high, low, close, volume\] tuple/);
+
+  const invalidDateSlot = structuredClone(chartData);
+  invalidDateSlot.series[0].bars[1][0] = 'not-a-date';
+  const publishedInvalidDateSlotResult = validateDashboardAndChartFixture(dashboard, invalidDateSlot, 'published');
+  assert.equal(publishedInvalidDateSlotResult.status, 0, publishedInvalidDateSlotResult.stderr);
+  assert.match(publishedInvalidDateSlotResult.stdout, /chart-data\.series\[0\]\.bars\[1\]\.time is not a valid ISO date and will be skipped/);
+  const stagedInvalidDateSlotResult = validateDashboardAndChartFixture(dashboard, invalidDateSlot, 'staged');
+  assert.equal(stagedInvalidDateSlotResult.status, 1);
+  assert.match(stagedInvalidDateSlotResult.stderr, /SPX\.bars\[1\]\.time must be an ISO date/);
+
+  const descendingDateSlot = structuredClone(chartData);
+  descendingDateSlot.series[0].bars = [
+    ['2026-07-10', 1, 2, 0.5, 1, null],
+    ['2026-07-09', 1, 2, 0.5, 1, null]
+  ];
+  const publishedDescendingDateSlotResult = validateDashboardAndChartFixture(dashboard, descendingDateSlot, 'published');
+  assert.equal(publishedDescendingDateSlotResult.status, 0, publishedDescendingDateSlotResult.stderr);
+  assert.match(publishedDescendingDateSlotResult.stdout, /chart-data\.series\[0\]\.bars are not strictly ascending/);
+  const stagedDescendingDateSlotResult = validateDashboardAndChartFixture(dashboard, descendingDateSlot, 'staged');
+  assert.equal(stagedDescendingDateSlotResult.status, 1);
+  assert.match(stagedDescendingDateSlotResult.stderr, /SPX\.bars\[1\]\.time must be strictly ascending/);
 
   const missingVolumeSlot = structuredClone(chartData);
   missingVolumeSlot.series[0].bars[0] = missingVolumeSlot.series[0].bars[0].slice(0, 5);
   const publishedMissingVolumeSlotResult = validateDashboardAndChartFixture(dashboard, missingVolumeSlot, 'published');
   assert.equal(publishedMissingVolumeSlotResult.status, 0, publishedMissingVolumeSlotResult.stderr);
+  assert.match(publishedMissingVolumeSlotResult.stdout, /is not a complete \[time, open, high, low, close, volume\] tuple and will be skipped/);
   const stagedMissingVolumeSlotResult = validateDashboardAndChartFixture(dashboard, missingVolumeSlot, 'staged');
   assert.equal(stagedMissingVolumeSlotResult.status, 1);
   assert.match(stagedMissingVolumeSlotResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
@@ -4820,14 +4926,83 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   extraTupleSlot.series[0].bars[0].push('ignored');
   const publishedExtraTupleSlotResult = validateDashboardAndChartFixture(dashboard, extraTupleSlot, 'published');
   assert.equal(publishedExtraTupleSlotResult.status, 0, publishedExtraTupleSlotResult.stderr);
+  assert.match(publishedExtraTupleSlotResult.stdout, /is not a complete \[time, open, high, low, close, volume\] tuple and will be skipped/);
   const stagedExtraTupleSlotResult = validateDashboardAndChartFixture(dashboard, extraTupleSlot, 'staged');
   assert.equal(stagedExtraTupleSlotResult.status, 1);
   assert.match(stagedExtraTupleSlotResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
+
+  const emptyTupleSlot = structuredClone(chartData);
+  emptyTupleSlot.series[0].bars = [[], []];
+  const publishedEmptyTupleSlotResult = validateDashboardAndChartFixture(dashboard, emptyTupleSlot, 'published');
+  assert.equal(publishedEmptyTupleSlotResult.status, 0, publishedEmptyTupleSlotResult.stderr);
+  assert.match(publishedEmptyTupleSlotResult.stdout, /chart-data\.series\[0\]\.bars\[0\] is not a complete/);
+  const stagedEmptyTupleSlotResult = validateDashboardAndChartFixture(dashboard, emptyTupleSlot, 'staged');
+  assert.equal(stagedEmptyTupleSlotResult.status, 1);
+  assert.match(stagedEmptyTupleSlotResult.stderr, /must be a \[time, open, high, low, close, volume\] tuple/);
 
   const nullVolumeSlot = structuredClone(chartData);
   nullVolumeSlot.series[0].bars[0][5] = null;
   const nullVolumeSlotResult = validateDashboardAndChartFixture(dashboard, nullVolumeSlot);
   assert.equal(nullVolumeSlotResult.status, 0, nullVolumeSlotResult.stderr);
+
+  const semanticBarCases = [
+    {
+      label: 'boolean OHLC',
+      published: /open is not a finite JSON number/,
+      staged: /SPX\.bars\[0\]\.open must be a finite JSON number/,
+      mutate: (bar) => { bar[1] = true; }
+    },
+    {
+      label: 'numeric-string OHLC',
+      published: /open is not a finite JSON number/,
+      staged: /SPX\.bars\[0\]\.open must be a finite JSON number/,
+      mutate: (bar) => { bar[1] = String(bar[1]); }
+    },
+    {
+      label: 'incoherent OHLC',
+      published: /has incoherent OHLC values and will be skipped/,
+      staged: /SPX\.bars\[0\] has incoherent OHLC values/,
+      mutate: (bar) => { bar[2] = bar[3] - 1; }
+    },
+    {
+      label: 'negative volume',
+      published: /volume is not a non-negative finite JSON number or null/,
+      staged: /SPX\.bars\[0\]\.volume must be a non-negative finite JSON number/,
+      mutate: (bar) => { bar[5] = -1; }
+    },
+    {
+      label: 'boolean volume',
+      published: /volume is not a non-negative finite JSON number or null/,
+      staged: /SPX\.bars\[0\]\.volume must be a non-negative finite JSON number/,
+      mutate: (bar) => { bar[5] = false; }
+    }
+  ];
+  for (const { label, published, staged, mutate } of semanticBarCases) {
+    const malformed = structuredClone(chartData);
+    mutate(malformed.series[0].bars[0]);
+    const publishedResult = validateDashboardAndChartFixture(dashboard, malformed, 'published');
+    assert.equal(publishedResult.status, 0, `${label} must remain fail-open in published validation: ${publishedResult.stderr}`);
+    assert.match(publishedResult.stdout, published, label);
+    const stagedResult = validateDashboardAndChartFixture(dashboard, malformed, 'staged');
+    assert.equal(stagedResult.status, 1, `${label} must fail staged validation.`);
+    assert.match(stagedResult.stderr, staged, label);
+  }
+  const roundedBooleanBar = roundChartPayload({
+    series: [{
+      ticker: 'SPX',
+      bars: [{ time: '2026-07-09', open: true, high: true, low: true, close: true, volume: false }]
+    }]
+  }).series[0].bars[0];
+  assert.deepEqual(
+    roundedBooleanBar,
+    { time: '2026-07-09', open: null, high: null, low: null, close: null },
+    'Rounding must not coerce boolean stored chart values into plausible market data.'
+  );
+  assert.deepEqual(
+    compactChartPayload({ series: [{ ticker: 'SPX', bars: [roundedBooleanBar] }] }).series[0].bars[0],
+    ['2026-07-09', null, null, null, null, null],
+    'Compaction must preserve malformed numeric fields as unrenderable nulls instead of 1/0.'
+  );
 
   const carriedChartWithoutDiagnostics = compactChartPayload(buildChartDataFallback(chartData, FIXTURE_NOW));
   delete carriedChartWithoutDiagnostics.availability;
@@ -5662,6 +5837,7 @@ async function main() {
     testMergedChartAvailabilityFollowsFinalSeries,
     testChartRepairStagesMixedResultForEditorialReview,
     testDashboardEmbeddedRuntimeParses,
+    testEmbeddedChartDecoderSkipsMalformedCompactBars,
     testOpeningRenderingOmitsIncompleteBlocks,
     testEarningsOutcomeLifecycleRendering,
     testMarketLensReactionOpensChartBelowDay,

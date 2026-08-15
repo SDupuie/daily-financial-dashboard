@@ -2,8 +2,10 @@
 
 const assert = require('assert/strict');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const {
   NEWS_COVERAGE_POLICIES,
   NEWS_COVERAGE_REASON,
@@ -23,6 +25,7 @@ const {
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
+  fetchResponse,
   msnReutersReaderUrl,
   normalizeProviderCandidate,
   parseApNewsSitemap,
@@ -44,6 +47,29 @@ function makeTemporaryDirectory(parent, prefix) {
 process.on('exit', () => {
   for (const dir of temporaryDirectories) fs.rmSync(dir, { recursive: true, force: true });
 });
+
+function startHttpServer(handler) {
+  const server = http.createServer(handler);
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      const { port } = server.address();
+      resolve({ server, baseUrl: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
+function closeHttpServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function sendFixtureJson(res, payload, status = 200) {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
 
 function story(title, url, extra = {}) {
   return { title, url, ...extra };
@@ -548,16 +574,154 @@ async function testYahooOriginalPromotionValidation() {
   assert.ok(originalFetches.some((url) => url.endsWith('/unapproved-redirect')), 'An approved original URL must be fetched before its unapproved redirect is rejected.');
 }
 
+async function testYahooStructuredProviderReutersValidation() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const cases = [
+    ['valid', 'Structured provider Reuters fixture'],
+    ['valid-main-entity', 'Structured main entity Reuters fixture'],
+    ['provider-url-mismatch', 'Provider URL mismatch fixture'],
+    ['provider-url-insecure', 'Provider URL insecure fixture'],
+    ['stale-date', 'Structured stale date fixture'],
+    ['title-mismatch', 'Structured title mismatch fixture'],
+    ['page-title-mismatch', 'Page title mismatch fixture'],
+    ['overlap-unlinked', 'Markets rally on Fed rate decision'],
+    ['missing-structured-url', 'Missing structured URL fixture'],
+    ['ambiguous-structured-url', 'Ambiguous structured URL fixture'],
+    ['unrelated-provider', 'Unrelated provider fixture'],
+    ['missing-structured', 'Missing structured fixture'],
+    ['null-structured', 'Null structured fixture'],
+    ['wrong-structured-type', 'Wrong structured type fixture'],
+    ['malformed-member', 'Malformed structured member fixture'],
+    ['external-canonical-only', 'External canonical only fixture'],
+    ['external-final-url-links-back', 'External final URL links back fixture']
+  ];
+  const artifact = await collectNewsCandidates({
+    asOf,
+    acquisitionPaths: [{ id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({
+      items: cases.map(([slug, title]) => ({
+        title,
+        url: `https://finance.yahoo.com/news/${slug}.html`,
+        publishedAt: '2026-07-10T19:00:00.000Z',
+        providerSourceName: 'Yahoo Finance'
+      }))
+    }),
+    fetchArticle: async (candidate) => {
+      const parsedUrl = new URL(candidate.url);
+      if (parsedUrl.hostname === 'www.reuters.com') throw new Error('Simulated unavailable original Reuters page.');
+      const slug = parsedUrl.pathname.split('/').at(-1).replace(/\.html$/, '');
+      const externalReutersUrl = 'https://www.reuters.com/markets/us/external-canonical-only-2026-07-10/';
+      const externalFinalReutersUrl = 'https://www.reuters.com/markets/us/external-final-url-links-back-2026-07-10/';
+      const article = {
+        title: slug === 'title-mismatch' ? 'Completely unrelated structured headline' : candidate.title,
+        publishedAt: slug === 'stale-date' ? new Date('2026-07-01T19:00:00.000Z') : new Date('2026-07-10T19:00:00.000Z'),
+        providerName: 'Reuters',
+        url: slug === 'external-canonical-only' ? externalReutersUrl : candidate.url,
+        providerUrl: slug === 'provider-url-mismatch'
+          ? 'https://www.cnbc.com/'
+          : slug === 'provider-url-insecure'
+            ? 'http://www.reuters.com/'
+            : slug === 'malformed-member'
+              ? ''
+              : 'https://www.reuters.com/'
+      };
+      let structuredNewsArticles = [article];
+      if (slug === 'valid-main-entity') {
+        structuredNewsArticles = [{ ...article, url: '', mainEntityOfPage: { '@id': candidate.url } }];
+      } else if (slug === 'overlap-unlinked') {
+        structuredNewsArticles = [{ ...article, title: 'Fed rate decision', url: '' }];
+      } else if (slug === 'missing-structured-url') {
+        structuredNewsArticles = [{ ...article, url: '' }];
+      } else if (slug === 'ambiguous-structured-url') {
+        structuredNewsArticles = [article, { ...article, publishedAt: new Date('2026-07-10T20:00:00.000Z') }];
+      } else if (slug === 'unrelated-provider') {
+        structuredNewsArticles = [
+          { ...article, providerName: 'Yahoo Finance', providerUrl: 'https://finance.yahoo.com/' },
+          { ...article, title: 'Unrelated Reuters article', url: 'https://finance.yahoo.com/news/other.html' }
+        ];
+      } else if (slug === 'missing-structured') {
+        structuredNewsArticles = undefined;
+      } else if (slug === 'null-structured') {
+        structuredNewsArticles = null;
+      } else if (slug === 'wrong-structured-type') {
+        structuredNewsArticles = { article };
+      }
+      return {
+        finalUrl: slug === 'external-final-url-links-back' ? externalFinalReutersUrl : candidate.url,
+        canonicalUrl: slug === 'external-canonical-only' ? externalReutersUrl : '',
+        ogUrl: slug === 'external-canonical-only' ? externalReutersUrl : '',
+        pageTitle: slug === 'page-title-mismatch' ? 'Completely unrelated page headline' : candidate.title,
+        publishedAt: new Date('2026-07-10T19:00:00.000Z'),
+        publisherName: 'Yahoo Finance',
+        structuredNewsArticles,
+        explicitPublisherUrls: []
+      };
+    }
+  });
+
+  const valid = artifact.generalCandidates.find((candidate) => candidate.url.includes('/valid.html'));
+  assert.equal(valid.sourceId, 'reuters');
+  assert.equal(valid.sourceLabel, 'Reuters');
+  assert.equal(valid.url, 'https://finance.yahoo.com/news/valid.html');
+  assert.equal(valid.syndication.status, 'structured_provider_validated');
+  assert.equal(valid.syndication.providerName, 'Reuters');
+  assert.equal(valid.syndication.providerUrl, 'https://www.reuters.com/');
+  const validMainEntity = artifact.generalCandidates.find((candidate) => candidate.url.includes('/valid-main-entity.html'));
+  assert.equal(validMainEntity.sourceId, 'reuters');
+  assert.equal(validMainEntity.sourceLabel, 'Reuters');
+  assert.equal(validMainEntity.syndication.status, 'structured_provider_validated');
+  for (const [slug] of cases.filter(([slug]) => !['valid', 'valid-main-entity'].includes(slug))) {
+    const rejected = artifact.generalCandidates.find((candidate) => candidate.url.includes(`/${slug}.html`));
+    assert.equal(rejected.sourceId, 'yahoo-finance');
+    assert.equal(rejected.sourceLabel, 'Yahoo Finance');
+    assert.equal(rejected.syndication.status, 'yahoo_hosted');
+  }
+}
+
 function testArticleMetadataExtraction() {
+  const longParagraph = `This fixture paragraph contains enough article text to be retained by the mechanical page extractor ${'and extended context '.repeat(330)}.`;
   const metadata = extractArticleMetadata(`<!doctype html>
     <meta property="og:title" content="Fixture &amp; Markets">
     <meta name="description" content="A useful fixture description.">
-    <script type="application/ld+json">{"datePublished":"2026-07-10T12:30:00-04:00"}</script>
-    <p>This fixture paragraph contains enough article text to be retained by the mechanical page extractor.</p>`);
+    <script type="application/ld+json">{
+      "@type":"NewsArticle",
+      "headline":"Fixture & Markets",
+      "url":"https://finance.yahoo.com/news/fixture.html",
+      "datePublished":"2026-07-10T12:30:00-04:00",
+      "provider":{"@type":"Organization","name":"Reuters","url":"https://www.reuters.com/"}
+    }</script>
+    <p>${longParagraph}</p>`);
   assert.equal(metadata.pageTitle, 'Fixture & Markets');
   assert.equal(metadata.description, 'A useful fixture description.');
   assert.equal(metadata.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
   assert.match(metadata.excerpt, /mechanical page extractor/);
+  assert.equal(metadata.excerpt.length, 5000);
+  assert.equal(Object.hasOwn(metadata, 'text'), false);
+  assert.equal(Object.hasOwn(metadata, 'providerName'), false);
+  assert.equal(Object.hasOwn(metadata, 'providerUrl'), false);
+  assert.equal(metadata.structuredNewsArticles.length, 1);
+  assert.equal(metadata.structuredNewsArticles[0].title, 'Fixture & Markets');
+  assert.equal(metadata.structuredNewsArticles[0].publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
+  assert.equal(metadata.structuredNewsArticles[0].providerName, 'Reuters');
+  assert.equal(metadata.structuredNewsArticles[0].providerUrl, 'https://www.reuters.com/');
+  assert.deepEqual(metadata.structuredNewsArticles[0].linkedUrls, ['https://finance.yahoo.com/news/fixture.html']);
+
+  const unrelatedMetadata = extractArticleMetadata(`<!doctype html>
+    <script type="application/ld+json">{"@graph":[
+      {"@type":"Organization","provider":{"name":"Reuters","url":"https://www.reuters.com/"}},
+      {"@type":"NewsArticle","headline":"Actual Yahoo fixture","datePublished":"2026-07-10T12:30:00Z","provider":{"name":"Yahoo Finance","url":"https://finance.yahoo.com/"}}
+    ]}</script>`);
+  assert.deepEqual(
+    unrelatedMetadata.structuredNewsArticles.map(({ title, providerName, providerUrl }) => ({ title, providerName, providerUrl })),
+    [{ title: 'Actual Yahoo fixture', providerName: 'Yahoo Finance', providerUrl: 'https://finance.yahoo.com/' }],
+    'Provider metadata outside a NewsArticle must not become article provenance.'
+  );
+  assert.deepEqual(
+    extractArticleMetadata('<script type="application/ld+json">{malformed</script>').structuredNewsArticles,
+    [],
+    'Malformed JSON-LD must fail open without manufacturing provenance.'
+  );
 
   const decryptMetadata = extractArticleMetadata(`<!doctype html>
     <meta property="article:published_time" content="2026-07-23T10:24:09">
@@ -689,12 +853,221 @@ function testApNewsSitemapParsing() {
   }]);
 }
 
+async function testNewsFetchResponseTransport() {
+  const targetRequests = [];
+  const target = await startHttpServer((req, res) => {
+    targetRequests.push({ url: req.url, authorization: req.headers.authorization });
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('redirect ok');
+  });
+  const server = await startHttpServer((req, res) => {
+    const url = new URL(req.url, 'http://fixture.local');
+    if (url.pathname === '/large-header') {
+      res.writeHead(200, { 'content-type': 'text/plain', 'x-large-fixture': 'a'.repeat(40000) });
+      res.end('large header ok');
+      return;
+    }
+    if (url.pathname === '/redirect') {
+      res.writeHead(302, { location: '/large-header' });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/bad-redirect') {
+      res.writeHead(302, { location: 'http://[invalid' });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/deadline-redirect') {
+      setTimeout(() => {
+        res.writeHead(302, { location: '/deadline-final' });
+        res.end();
+      }, 40);
+      return;
+    }
+    if (url.pathname === '/deadline-final') {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('too late');
+      }, 40);
+      return;
+    }
+    if (url.pathname === '/cross-origin') {
+      res.writeHead(302, { location: `${target.baseUrl}/target` });
+      res.end();
+      return;
+    }
+    if (url.pathname === '/gzip') {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip' });
+      res.end(zlib.gzipSync('compressed fixture'));
+      return;
+    }
+    if (url.pathname === '/identity-over-limit') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('x'.repeat(17));
+      return;
+    }
+    if (url.pathname === '/gzip-over-limit') {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'gzip' });
+      res.end(zlib.gzipSync('x'.repeat(17)));
+      return;
+    }
+    if (url.pathname === '/deflate-over-limit') {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'deflate' });
+      res.end(zlib.deflateSync('x'.repeat(17)));
+      return;
+    }
+    if (url.pathname === '/br-over-limit' && typeof zlib.brotliCompressSync === 'function') {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-encoding': 'br' });
+      res.end(zlib.brotliCompressSync('x'.repeat(17)));
+      return;
+    }
+    if (url.pathname === '/forbidden') {
+      res.writeHead(403, { 'content-type': 'text/plain' });
+      res.end('blocked');
+      return;
+    }
+    if (url.pathname === '/slow') {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end('late');
+      }, 100);
+      return;
+    }
+    if (url.pathname === '/trickle') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      let sent = 0;
+      const interval = setInterval(() => {
+        res.write('x');
+        sent += 1;
+        if (sent === 10) {
+          clearInterval(interval);
+          res.end();
+        }
+      }, 10);
+      res.on('close', () => clearInterval(interval));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  try {
+    const large = await fetchResponse(`${server.baseUrl}/large-header`, { timeoutMs: 1000, headers: { Accept: 'text/plain' } });
+    assert.equal(await large.text(), 'large header ok');
+    assert.equal(large.headers.get('x-large-fixture').length, 40000);
+
+    const redirected = await fetchResponse(`${server.baseUrl}/redirect`, { timeoutMs: 1000, headers: { Accept: 'text/plain' } });
+    assert.equal(redirected.url, `${server.baseUrl}/large-header`);
+    assert.equal(await redirected.text(), 'large header ok');
+
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/bad-redirect`, { timeoutMs: 1000, headers: { Accept: 'text/plain' } }),
+      /Invalid URL/
+    );
+
+    const compressed = await fetchResponse(`${server.baseUrl}/gzip`, { timeoutMs: 1000, headers: { Accept: 'text/plain' } });
+    assert.equal(await compressed.text(), 'compressed fixture');
+
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/identity-over-limit`, { timeoutMs: 1000, maxBodyBytes: 16, headers: { Accept: 'text/plain' } }),
+      /exceeded 16 compressed bytes/
+    );
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/identity-over-limit`, { timeoutMs: 1000, maxDecodedBytes: 16, headers: { Accept: 'text/plain' } }),
+      /exceeded 16 decoded bytes/
+    );
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/gzip-over-limit`, { timeoutMs: 1000, maxDecodedBytes: 16, headers: { Accept: 'text/plain' } }),
+      /unexpected end of file|Cannot create a Buffer larger than 16 bytes|exceeded 16 decoded bytes/
+    );
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/deflate-over-limit`, { timeoutMs: 1000, maxDecodedBytes: 16, headers: { Accept: 'text/plain' } }),
+      /Cannot create a Buffer larger than 16 bytes|exceeded 16 decoded bytes/
+    );
+    if (typeof zlib.brotliCompressSync === 'function') {
+      await assert.rejects(
+        () => fetchResponse(`${server.baseUrl}/br-over-limit`, { timeoutMs: 1000, maxDecodedBytes: 16, headers: { Accept: 'text/plain' } }),
+        /Cannot create a Buffer larger than 16 bytes|exceeded 16 decoded bytes/
+      );
+    }
+
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/forbidden`, { timeoutMs: 1000, headers: { Accept: 'text/plain' } }),
+      /HTTP 403/
+    );
+
+    await fetchResponse(`${server.baseUrl}/cross-origin`, {
+      timeoutMs: 1000,
+      headers: { Accept: 'text/plain', Authorization: 'Bearer fixture-secret' }
+    });
+    assert.equal(targetRequests[0].authorization, undefined, 'Authorization must not follow a cross-origin redirect.');
+
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/slow`, { timeoutMs: 20, headers: { Accept: 'text/plain' } }),
+      /Request timed out/
+    );
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/trickle`, { timeoutMs: 30, headers: { Accept: 'text/plain' } }),
+      /Request timed out/
+    );
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/deadline-redirect`, { timeoutMs: 60, headers: { Accept: 'text/plain' } }),
+      /Request timed out/
+    );
+  } finally {
+    await closeHttpServer(server.server);
+    await closeHttpServer(target.server);
+  }
+}
+
+async function testNewsTransportFailureIsolation() {
+  const server = await startHttpServer((req, res) => {
+    if (req.url === '/bad') {
+      res.writeHead(302, { location: 'http://[invalid' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/xml' });
+    res.end(`<?xml version="1.0"?>
+      <urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+        <url>
+          <loc>https://apnews.com/article/isolation-fixture-123</loc>
+          <news:news>
+            <news:publication><news:name>Associated Press</news:name><news:language>eng</news:language></news:publication>
+            <news:publication_date>2026-07-10T14:30:00-04:00</news:publication_date>
+            <news:title>Isolation fixture</news:title>
+          </news:news>
+        </url>
+      </urlset>`);
+  });
+  try {
+    const asOf = new Date('2026-07-10T21:00:00.000Z');
+    const artifact = await collectNewsCandidates({
+      asOf,
+      acquisitionPaths: [
+        { id: 'bad-ap', provider: 'ap-public', pool: 'generalCandidates', feedUrl: `${server.baseUrl}/bad` },
+        { id: 'good-ap', provider: 'ap-public', pool: 'generalCandidates', feedUrl: `${server.baseUrl}/good` }
+      ],
+      searchTimeoutMs: 1000,
+      clock: () => asOf,
+      fetchArticle: async () => {
+        throw new Error('Provider-verified AP candidates must bypass article review.');
+      }
+    });
+    assert.equal(artifact.generalCandidates.length, 1);
+    assert.equal(artifact.generalCandidates[0].title, 'Isolation fixture');
+    assert.match(artifact.attempts.find((attempt) => attempt.id === 'bad-ap').error, /Invalid URL/);
+    assert.equal(artifact.attempts.find((attempt) => attempt.id === 'good-ap').error, null);
+  } finally {
+    await closeHttpServer(server.server);
+  }
+}
+
 async function testApPublicAcquisitionUsesOneSitemapFetch() {
-  const originalFetch = global.fetch;
   const calls = [];
-  global.fetch = async (url) => {
-    calls.push(String(url));
-    return new Response(`<?xml version="1.0"?>
+  const server = await startHttpServer((req, res) => {
+    calls.push(req.url);
+    res.writeHead(200, { 'content-type': 'text/xml' });
+    res.end(`<?xml version="1.0"?>
       <urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
         <url>
           <loc>https://apnews.com/article/markets-fixture-123</loc>
@@ -704,17 +1077,14 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
             <news:title>Markets fixture</news:title>
           </news:news>
         </url>
-      </urlset>`, {
-      status: 200,
-      headers: { 'content-type': 'text/xml' }
-    });
-  };
+      </urlset>`);
+  });
   try {
     const result = await fetchAcquisitionPath({
       id: 'ap-public',
       provider: 'ap-public',
       pool: 'generalCandidates',
-      feedUrl: 'https://apnews.com/news-sitemap-content.xml'
+      feedUrl: `${server.baseUrl}/news-sitemap-content.xml`
     }, { timeoutMs: 1000 });
     assert.equal(calls.length, 1, 'AP public acquisition should fetch only the sitemap.');
     assert.deepEqual(result.items, [{
@@ -725,19 +1095,11 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
       publishedAtVerified: true
     }]);
   } finally {
-    global.fetch = originalFetch;
+    await closeHttpServer(server.server);
   }
 }
 
 async function testMsnReutersProviderVerifiedAcquisition() {
-  const pathConfig = {
-    id: 'msn-reuters',
-    provider: 'msn-reuters',
-    pool: 'generalCandidates',
-    feedUrl: 'https://api.msn.com/news/providers/AAf3a78/items',
-    providerId: 'AAf3a78',
-    limit: 100
-  };
   const provider = { id: 'AAf3a78', name: 'Reuters' };
   const cards = [
     {
@@ -791,22 +1153,27 @@ async function testMsnReutersProviderVerifiedAcquisition() {
     ['AAwrongtime', detail(cards[2], { publishedDateTime: '2026-07-10T18:15:00Z', sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGTIME' })],
     ['AAwronglegal', detail(cards[3], { provider: { ...provider, companyLegalName: 'Not Reuters' }, sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGLEGAL' })]
   ]);
-  const originalFetch = global.fetch;
   const calls = [];
-  global.fetch = async (value) => {
-    const url = new URL(String(value));
+  const server = await startHttpServer((req, res) => {
+    const url = new URL(req.url, 'http://fixture.local');
     calls.push(url);
-    if (url.hostname === 'api.msn.com') {
-      return new Response(JSON.stringify({ value: [{ subCards: cards }] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' }
-      });
+    if (url.pathname === '/providers/AAf3a78/items') {
+      sendFixtureJson(res, { value: [{ subCards: cards }] });
+      return;
     }
-    const item = details.get(decodeURIComponent(url.pathname.split('/').pop()));
-    return new Response(JSON.stringify(item || {}), {
-      status: item ? 200 : 404,
-      headers: { 'content-type': 'application/json' }
-    });
+    const item = url.pathname.startsWith('/detail/')
+      ? details.get(decodeURIComponent(url.pathname.split('/').pop()))
+      : null;
+    sendFixtureJson(res, item || {}, item ? 200 : 404);
+  });
+  const pathConfig = {
+    id: 'msn-reuters',
+    provider: 'msn-reuters',
+    pool: 'generalCandidates',
+    feedUrl: `${server.baseUrl}/providers/AAf3a78/items`,
+    detailUrl: `${server.baseUrl}/detail/`,
+    providerId: 'AAf3a78',
+    limit: 100
   };
   let result;
   let staleResult;
@@ -816,19 +1183,20 @@ async function testMsnReutersProviderVerifiedAcquisition() {
     staleResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(['2026-07-09']), timeoutMs: 1000 });
     emptyResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(), timeoutMs: 1000 });
   } finally {
-    global.fetch = originalFetch;
+    await closeHttpServer(server.server);
   }
 
-  const feedCall = calls.find((url) => url.hostname === 'api.msn.com');
+  const feedCall = calls.find((url) => url.pathname === '/providers/AAf3a78/items');
   assert.equal(feedCall.searchParams.get('contentType'), 'article');
   assert.equal(feedCall.searchParams.get('$top'), '100');
-  assert.equal(calls.filter((url) => url.hostname === 'assets.msn.com').length, 4, 'Sports and spoofed-provider cards must be rejected before detail retrieval.');
+  assert.equal(calls.filter((url) => url.pathname.startsWith('/detail/')).length, 4, 'Sports and spoofed-provider cards must be rejected before detail retrieval.');
   assert.deepEqual(staleResult, { items: [] }, 'Out-of-window cards must be discarded before detail retrieval.');
   assert.deepEqual(emptyResult, { items: [] }, 'An empty eligible date set must not become a provider failure.');
   assert.equal(result.items.length, 2, 'Timestamp-mismatched detail records must be rejected without discarding the valid Reuters batch.');
   assert.ok(result.items.every((item) => item.publishedAtVerified === true));
   assert.ok(result.items.every((item) => item.publisherStoryId === 'tag:reuters.com,2026:newsml_KBNFIXTURE1'));
-  assert.ok(result.items.every((item) => item.article.text.length > 200));
+  assert.ok(result.items.every((item) => item.article.excerpt.length > 200));
+  assert.ok(result.items.every((item) => !Object.hasOwn(item.article, 'text')));
   assert.equal(
     msnReutersReaderUrl(cards[0].url, cards[0].id),
     'https://www.msn.com/en-us/money/markets/markets-rally-on-fixture-catalyst/ar-AAfixture1'
@@ -853,7 +1221,8 @@ async function testMsnReutersProviderVerifiedAcquisition() {
   assert.equal(candidate.sourceLabel, 'Reuters');
   assert.equal(candidate.publishedAtVerified, true);
   assert.equal(candidate.publishedAt, '2026-07-10T18:00:00.000Z');
-  assert.equal(candidate.article.text.length > 200, true);
+  assert.equal(candidate.article.excerpt.length > 200, true);
+  assert.equal(Object.hasOwn(candidate.article, 'text'), false);
   assert.equal(artifact.articleReview.reviewCandidateCount, 0);
 
   const prior = priorNewsCandidates({
@@ -1085,6 +1454,8 @@ async function main() {
   testNewsTimestampParsing();
   testRssParsing();
   testApNewsSitemapParsing();
+  await testNewsFetchResponseTransport();
+  await testNewsTransportFailureIsolation();
   await testApPublicAcquisitionUsesOneSitemapFetch();
   await testMsnReutersProviderVerifiedAcquisition();
   await testVerifiedPublishedAtCandidatesBypassReviewCap();
@@ -1094,6 +1465,7 @@ async function main() {
   await testNewsCandidateReviewCapAndProgress();
   await testNewsCandidateCapAfterEligibilityAndDedupe();
   await testYahooOriginalPromotionValidation();
+  await testYahooStructuredProviderReutersValidation();
   testBaselineSanitization();
   testManualBaselineTransition();
   testScheduledBaselineTransition();

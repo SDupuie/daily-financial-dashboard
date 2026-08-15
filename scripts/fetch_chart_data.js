@@ -1047,8 +1047,12 @@ function asFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function asStoredChartNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 function fourDecimalNumber(value) {
-  const numeric = asFiniteNumber(value);
+  const numeric = asStoredChartNumber(value);
   if (numeric === null) return null;
   const scale = 10 ** 4;
   const epsilon = Math.sign(numeric || 1) * Number.EPSILON * Math.max(1, Math.abs(numeric));
@@ -1072,13 +1076,14 @@ function objectBar(bar) {
 
 function compactChartBar(rawBar) {
   const bar = objectBar(rawBar);
+  const volume = asStoredChartNumber(bar.volume);
   return [
     String(bar.time || ''),
     fourDecimalNumber(bar.open),
     fourDecimalNumber(bar.high),
     fourDecimalNumber(bar.low),
     fourDecimalNumber(bar.close),
-    Number.isFinite(Number(bar.volume)) ? Math.round(Number(bar.volume)) : null
+    volume === null ? null : Math.round(volume)
   ];
 }
 
@@ -1098,7 +1103,7 @@ function roundChartPayload(payload) {
             high: fourDecimalNumber(bar.high),
             low: fourDecimalNumber(bar.low),
             close: fourDecimalNumber(bar.close),
-            ...(Number.isFinite(Number(bar.volume)) ? { volume: Math.round(Number(bar.volume)) } : {})
+            ...(asStoredChartNumber(bar.volume) === null ? {} : { volume: Math.round(bar.volume) })
           };
         })
       };
@@ -1272,11 +1277,11 @@ function validateYieldCurveComparisons(errors, label, item, curvePoints) {
 }
 
 function isCoherentChartOhlc(bar) {
-  const open = Number(bar.open);
-  const high = Number(bar.high);
-  const low = Number(bar.low);
-  const close = Number(bar.close);
-  if (![open, high, low, close].every(Number.isFinite)) return false;
+  const open = asStoredChartNumber(bar.open);
+  const high = asStoredChartNumber(bar.high);
+  const low = asStoredChartNumber(bar.low);
+  const close = asStoredChartNumber(bar.close);
+  if ([open, high, low, close].some((value) => value === null)) return false;
   if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
 }
@@ -1335,11 +1340,11 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
     if (previousTime && bar.time <= previousTime) errors.push(`${barLabel}.time must be strictly ascending.`);
     previousTime = bar.time;
     for (const key of ['open', 'high', 'low', 'close']) {
-      if (asFiniteNumber(bar[key]) === null) errors.push(`${barLabel}.${key} must be numeric.`);
+      if (asStoredChartNumber(bar[key]) === null) errors.push(`${barLabel}.${key} must be a finite JSON number.`);
     }
     if (!isCoherentChartOhlc(bar)) errors.push(`${barLabel} has incoherent OHLC values.`);
-    if (bar.volume !== undefined && (asFiniteNumber(bar.volume) === null || Number(bar.volume) < 0)) {
-      errors.push(`${barLabel}.volume must be a non-negative number when present.`);
+    if (bar.volume !== undefined && (asStoredChartNumber(bar.volume) === null || bar.volume < 0)) {
+      errors.push(`${barLabel}.volume must be a non-negative finite JSON number when present.`);
     }
     if (item.priceOnly && !(bar.open === bar.high && bar.high === bar.low && bar.low === bar.close)) {
       errors.push(`${barLabel} must synthesize OHLC from close for priceOnly series.`);

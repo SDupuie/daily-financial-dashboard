@@ -8,6 +8,13 @@ This file is the canonical human-readable contract for dashboard data. Data cont
 
 The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA END` comments in `daily_financial_news.html`. The embedded `chart-data` JSON block is a separate production payload. Generated files are staging only and must not become published runtime dependencies.
 
+### News candidates
+
+- Owner: `scripts/fetch_news_candidates.js` retrieves and normalizes the read-only News inventory; `scripts/news_sources.js` owns approved source identities, display names, domains, and acquisition paths.
+- Retrieval contract: every News feed, API, provider-detail, and article-page GET uses the shared News HTTP client with a 64 KiB response-header ceiling, compressed- and decoded-body ceilings, compressed-body decoding, at most five redirects, and one wall-clock deadline across the complete redirect and body operation. A failed acquisition path is recorded and does not discard candidates from other paths; an unavailable article page does not discard an otherwise eligible provider candidate.
+- Context shape: downloaded candidates may contain `candidate.article`; its sole article-body context field is `excerpt`, bounded to 5,000 characters. `candidate.article.text` is not supported. Article context is staging-only source material for AI Editorial Work and is never copied into a published News card.
+- Provenance contract: downloaded URLs map to the approved source catalog. MSN-hosted Reuters candidates qualify only through the validated Reuters provider-detail path and retain the reader-facing MSN URL. A Yahoo-hosted candidate may be labeled Reuters without an original Reuters article URL only when the fetched article page's final URL remains Yahoo-hosted and exactly one structured `NewsArticle` record links to the hosted Yahoo article through `url`, `mainEntityOfPage`, or `@id`, supplies an exactly matching normalized headline, an eligible `datePublished`, `provider.name` equal to Reuters, and an HTTPS Reuters provider URL that maps to the approved source catalog; the reader-facing Yahoo URL remains unchanged. Other Yahoo-hosted candidates remain labeled Yahoo Finance unless an approved original article URL is fetched and its final URL, title, and date validate.
+
 ### Week Ahead
 
 - Owners: `scripts/fetch_week_ahead.js` makes one direct TradingView Economic Calendar request for the complete authorized range, and `scripts/week_ahead_contract.js` owns Eastern-time normalization, canonical event identity, the visible slate, Market Lens templates and lifecycle, and the Outcome contract.
@@ -22,7 +29,7 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 - Owners: `scripts/fetch_chart_data.js` produces chart/futures data and owns the reusable payload-metadata and per-series market-data validators; `scripts/validate_dashboard.js` reuses them for staged artifact checks and adds chart/Tape roster and derived-quote consistency checks. Published validation separately checks only runtime-dereferenced shapes.
 - Boundary rules: `chart-data.series[]` is the canonical market-data store; visible Tape quote fields are derived from it; every displayed Tape ticker must have matching embedded source, chart series, and derived quote data.
-- Each published compact chart bar contains exactly `[time, open, high, low, close, volume]`; use `null` for `volume` when no volume is available. Missing or additional tuple members are not supported.
+- Each published compact chart bar contains exactly `[time, open, high, low, close, volume]`; `time` is a valid `YYYY-MM-DD` calendar date, OHLC fields are finite JSON numbers with coherent high/low bounds, bars are strictly ascending by `time`, and `volume` is either a non-negative finite JSON number or `null` when no volume is available. Missing or additional tuple members are not supported. Published startup skips malformed compact bars or series instead of deriving visible quote values from them; staged validation remains the strict contract gate.
 - Tape commentary binds to the accepted quote revision. Refreshed quotes need reviewed commentary; failed quote downloads retain their last validated quote and bound commentary.
 - If neither refreshed nor prior canonical Chart/Tape data validates, Prepare emits an atomic unavailable bundle with empty `chart-data.series[]` and `tape.rows[]`; Apply copies that bundle unchanged.
 

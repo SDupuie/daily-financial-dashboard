@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const path = require('path');
+const zlib = require('zlib');
 const {
   isIsoDateTime,
   sameDateTimeParts,
@@ -29,9 +32,14 @@ const MSN_CONTENT_DETAIL_URL = 'https://assets.msn.com/content/view/v2/Detail/en
 const MSN_REUTERS_LEGAL_NAME = 'Reuters News & Media Inc.';
 const MSN_REUTERS_CATEGORIES = new Set(['money', 'news']);
 const ARTICLE_BYTE_LIMIT = 1_000_000;
+const ARTICLE_EXCERPT_LIMIT = 5000;
 const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const ALPHA_VANTAGE_PACING_MS = 1250;
+const NEWS_HTTP_MAX_HEADER_SIZE = 65536;
+const NEWS_HTTP_MAX_REDIRECTS = 5;
+const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
+const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
 const PROVENANCE_PRIORITY = Object.freeze({ 'msn-reuters': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 const FIXED_ZONE_OFFSETS = Object.freeze({
   UT: 0,
@@ -139,16 +147,199 @@ function alphaTimeFrom(eligibleDates) {
   return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}`;
 }
 
-async function fetchResponse(url, { timeoutMs, headers = {} }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { redirect: 'follow', headers, signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response;
-  } finally {
-    clearTimeout(timer);
+function newsHttpError(error) {
+  if (!error) return new Error('HTTP request failed');
+  if (error.message && error.code) return new Error(`${error.code}: ${error.message}`);
+  if (error.message) return error;
+  return new Error(String(error));
+}
+
+function responseHeaders(headers) {
+  const byName = new Map(Object.entries(headers || {}).map(([key, value]) => [
+    key.toLowerCase(),
+    Array.isArray(value) ? value.join(', ') : String(value)
+  ]));
+  return {
+    get(name) {
+      return byName.get(String(name || '').toLowerCase()) || null;
+    }
+  };
+}
+
+function decodeResponseBody(buffer, encoding, maxDecodedBytes) {
+  const normalized = String(encoding || '').toLowerCase().split(',')[0].trim();
+  if (!normalized || normalized === 'identity') {
+    if (buffer.length > maxDecodedBytes) {
+      return Promise.reject(new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`));
+    }
+    return Promise.resolve(buffer);
   }
+  const options = { maxOutputLength: maxDecodedBytes };
+  if (normalized === 'gzip' || normalized === 'x-gzip') {
+    return new Promise((resolve, reject) => zlib.gunzip(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
+  }
+  if (normalized === 'deflate') {
+    return new Promise((resolve, reject) => zlib.inflate(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
+  }
+  if (normalized === 'br' && typeof zlib.brotliDecompress === 'function') {
+    return new Promise((resolve, reject) => zlib.brotliDecompress(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
+  }
+  if (buffer.length > maxDecodedBytes) {
+    return Promise.reject(new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`));
+  }
+  return Promise.resolve(buffer);
+}
+
+function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, maxDecodedBytes }, redirectCount) {
+  const currentUrl = new URL(String(url));
+  const client = currentUrl.protocol === 'https:' ? https : currentUrl.protocol === 'http:' ? http : null;
+  if (!client) throw new Error(`Unsupported protocol ${currentUrl.protocol}`);
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new Error(`Request timed out after ${timeoutMs}ms`);
+  const requestHeaders = { ...headers };
+  if (!Object.keys(requestHeaders).some((key) => key.toLowerCase() === 'accept-encoding')) {
+    requestHeaders['Accept-Encoding'] = 'gzip, deflate, br';
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let req = null;
+    let timer = null;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(newsHttpError(error));
+    };
+    const succeed = (response) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(response);
+    };
+    const follow = (nextUrl, nextHeaders) => {
+      if (settled) return;
+      let nextRequest;
+      try {
+        nextRequest = requestNewsResponse(nextUrl, {
+          timeoutMs,
+          headers: nextHeaders,
+          deadline,
+          maxBodyBytes,
+          maxDecodedBytes
+        }, redirectCount + 1);
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(nextRequest);
+    };
+
+    timer = setTimeout(() => {
+      const error = new Error(`Request timed out after ${timeoutMs}ms`);
+      if (req) req.destroy(error);
+      fail(error);
+    }, remainingMs);
+
+    try {
+      req = client.request(currentUrl, {
+        method: 'GET',
+        headers: requestHeaders,
+        maxHeaderSize: NEWS_HTTP_MAX_HEADER_SIZE
+      }, (res) => {
+        const status = Number(res.statusCode || 0);
+        const location = res.headers.location;
+        if ([301, 302, 303, 307, 308].includes(status) && location) {
+          res.on('error', fail);
+          res.on('aborted', () => fail(new Error('Redirect response ended before completion')));
+          res.resume();
+          res.on('end', () => {
+            try {
+              if (redirectCount >= NEWS_HTTP_MAX_REDIRECTS) {
+                fail(new Error(`Too many redirects after ${NEWS_HTTP_MAX_REDIRECTS}`));
+                return;
+              }
+              const nextUrl = new URL(location, currentUrl);
+              const nextHeaders = { ...requestHeaders };
+              if (nextUrl.origin !== currentUrl.origin) {
+                for (const key of Object.keys(nextHeaders)) {
+                  if (key.toLowerCase() === 'authorization') delete nextHeaders[key];
+                }
+              }
+              follow(nextUrl, nextHeaders);
+            } catch (error) {
+              fail(error);
+            }
+          });
+          return;
+        }
+
+        const chunks = [];
+        let receivedBytes = 0;
+        res.on('data', (chunk) => {
+          receivedBytes += chunk.length;
+          if (receivedBytes > maxBodyBytes) {
+            const error = new Error(`HTTP response body exceeded ${maxBodyBytes} compressed bytes`);
+            fail(error);
+            res.destroy(error);
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('error', fail);
+        res.on('aborted', () => fail(new Error('Response ended before completion')));
+        res.on('end', async () => {
+          try {
+            const compressed = Buffer.concat(chunks);
+            const decoded = await decodeResponseBody(compressed, res.headers['content-encoding'], maxDecodedBytes);
+            const response = {
+              ok: status >= 200 && status < 300,
+              status,
+              url: currentUrl.toString(),
+              headers: responseHeaders(res.headers),
+              async text() {
+                return decoded.toString('utf8');
+              },
+              async json() {
+                return JSON.parse(decoded.toString('utf8'));
+              }
+            };
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            succeed(response);
+          } catch (error) {
+            fail(error);
+          }
+        });
+      });
+      req.on('error', fail);
+      req.end();
+    } catch (error) {
+      fail(error);
+    }
+  });
+}
+
+async function fetchResponse(url, {
+  timeoutMs,
+  headers = {},
+  maxBodyBytes = NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES,
+  maxDecodedBytes = NEWS_HTTP_MAX_DECODED_BODY_BYTES
+}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Request timeout must be a positive number');
+  }
+  if (!Number.isFinite(maxBodyBytes) || maxBodyBytes <= 0 || !Number.isFinite(maxDecodedBytes) || maxDecodedBytes <= 0) {
+    throw new Error('HTTP body limits must be positive numbers');
+  }
+  return requestNewsResponse(url, {
+    timeoutMs,
+    headers,
+    deadline: Date.now() + timeoutMs,
+    maxBodyBytes,
+    maxDecodedBytes
+  }, 0);
 }
 
 async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, env = process.env }) {
@@ -276,8 +467,7 @@ function normalizeMsnReutersItem(card, detail, acquisitionPath) {
       finalUrl: url,
       pageTitle: title,
       description: plainText(detail.abstract),
-      excerpt: articleText.slice(0, 1800),
-      text: articleText
+      excerpt: articleText.slice(0, ARTICLE_EXCERPT_LIMIT)
     }
   };
 }
@@ -310,9 +500,10 @@ async function fetchMsnReuters(acquisitionPath, { eligibleDates, timeoutMs }) {
     : providerCards;
   if (providerCards.length && !eligibleCards.length) return { items: [] };
   const items = Array(eligibleCards.length).fill(null);
+  const detailUrlBase = acquisitionPath.detailUrl || MSN_CONTENT_DETAIL_URL;
   await mapConcurrent(eligibleCards.map((card, index) => ({ card, index })), ARTICLE_CONCURRENCY, async ({ card, index }) => {
     try {
-      const detailResponse = await fetchResponse(`${MSN_CONTENT_DETAIL_URL}${encodeURIComponent(card.id)}`, {
+      const detailResponse = await fetchResponse(`${detailUrlBase}${encodeURIComponent(card.id)}`, {
         timeoutMs,
         headers: {
           Accept: 'application/json',
@@ -632,6 +823,76 @@ function explicitPublisherUrls(html) {
   return [...new Set(urls.map(canonicalStoryUrl).filter(Boolean))];
 }
 
+function jsonLdScripts(html) {
+  return [...String(html).matchAll(/<script\b[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+}
+
+function walkJson(value, visit) {
+  if (!value || typeof value !== 'object') return;
+  visit(value);
+  if (Array.isArray(value)) {
+    for (const item of value) walkJson(item, visit);
+    return;
+  }
+  for (const item of Object.values(value)) walkJson(item, visit);
+}
+
+function structuredNewsArticles(html) {
+  const articles = [];
+  for (const script of jsonLdScripts(html)) {
+    try {
+      const parsed = JSON.parse(script);
+      walkJson(parsed, (node) => {
+        const types = Array.isArray(node['@type']) ? node['@type'] : [node['@type']];
+        if (!types.includes('NewsArticle')) return;
+        const linkedUrls = structuredArticleLinkedUrls(node);
+        const providers = Array.isArray(node.provider) ? node.provider : [node.provider];
+        for (const provider of providers) {
+          if (!provider || typeof provider !== 'object' || Array.isArray(provider)) continue;
+          articles.push({
+            title: plainText(node.headline || node.name),
+            publishedAt: firstValidDate([node.datePublished]),
+            providerName: plainText(provider.name),
+            providerUrl: canonicalStoryUrl(provider.url),
+            linkedUrls
+          });
+        }
+      });
+    } catch (_error) {
+      // Ignore malformed page metadata; normal meta tags still provide fallback context.
+    }
+  }
+  return articles;
+}
+
+function structuredArticleLinkedUrls(node) {
+  const urls = [];
+  const addUrl = (value) => {
+    const url = canonicalStoryUrl(value);
+    if (url) urls.push(url);
+  };
+  const addUrlValue = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) addUrlValue(item);
+      return;
+    }
+    if (typeof value === 'string') {
+      addUrl(value);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      addUrl(value.url);
+      addUrl(value['@id']);
+    }
+  };
+  addUrlValue(node.url);
+  addUrlValue(node.mainEntityOfPage);
+  addUrlValue(node['@id']);
+  return [...new Set(urls)];
+}
+
 function extractArticleMetadata(html) {
   const jsonDates = [...String(html).matchAll(/["']datePublished["']\s*:\s*["']([^"']+)["']/gi)].map((match) => match[1]);
   const timeDates = [...String(html).matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)].map((match) => match[1]);
@@ -645,21 +906,24 @@ function extractArticleMetadata(html) {
     .map((match) => plainText(match[1]))
     .filter((value) => value.length >= 40);
   const publisherName = plainText(String(html).match(/["']publisher["']\s*:\s*\{[\s\S]{0,500}?["']name["']\s*:\s*["']([^"']+)["']/i)?.[1]);
+  const excerpt = paragraphs.join(' ').slice(0, ARTICLE_EXCERPT_LIMIT);
   return {
     pageTitle: metaContent(html, 'og:title') || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),
     description: metaContent(html, 'description') || metaContent(html, 'og:description'),
-    excerpt: paragraphs.slice(0, 3).join(' ').slice(0, 1800),
+    excerpt,
     publishedAt,
     canonicalUrl: canonicalStoryUrl(canonicalLink(html)),
     ogUrl: canonicalStoryUrl(metaContent(html, 'og:url')),
     explicitPublisherUrls: explicitPublisherUrls(html),
-    publisherName
+    publisherName,
+    structuredNewsArticles: structuredNewsArticles(html)
   };
 }
 
 async function fetchArticlePage(candidate, { timeoutMs }) {
   const response = await fetchResponse(candidate.url, {
     timeoutMs,
+    maxDecodedBytes: ARTICLE_BYTE_LIMIT,
     headers: {
       Accept: 'text/html,application/xhtml+xml',
       'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
@@ -785,6 +1049,11 @@ function titleEquivalent(left, right) {
   return shared / Math.min(leftWords.size, rightWords.size) >= 0.6;
 }
 
+function titleExactlyMatches(left, right) {
+  const leftTitle = normalizeStoryTitle(left);
+  return Boolean(leftTitle && leftTitle === normalizeStoryTitle(right));
+}
+
 function articleRecord(page) {
   return {
     accessible: true,
@@ -793,6 +1062,46 @@ function articleRecord(page) {
     description: page.description || '',
     excerpt: page.excerpt || ''
   };
+}
+
+function yahooStructuredReutersSource(hostedPage, candidate, eligibleDates) {
+  const pageTitle = plainText(hostedPage?.pageTitle);
+  if (!pageTitle || !titleExactlyMatches(candidate.title, pageTitle)) return null;
+  const finalUrl = canonicalStoryUrl(hostedPage?.finalUrl);
+  if (!finalUrl || sourceForUrl(finalUrl)?.id !== 'yahoo-finance') return null;
+  const hostedUrls = new Set([
+    candidate.url,
+    finalUrl,
+    hostedPage?.canonicalUrl,
+    hostedPage?.ogUrl
+  ].map(canonicalStoryUrl).filter((url) => url && sourceForUrl(url)?.id === 'yahoo-finance'));
+  const articles = Array.isArray(hostedPage?.structuredNewsArticles) ? hostedPage.structuredNewsArticles : [];
+  const matches = [];
+  for (const article of articles) {
+    const providerName = plainText(article?.providerName);
+    const providerUrl = canonicalStoryUrl(article?.providerUrl);
+    let providerProtocol = '';
+    try {
+      providerProtocol = new URL(providerUrl).protocol;
+    } catch (_error) {
+      continue;
+    }
+    const providerSource = sourceForUrl(providerUrl);
+    if (normalizeStoryTitle(providerName) !== 'reuters'
+      || providerProtocol !== 'https:'
+      || providerSource?.id !== 'reuters'
+      || !titleExactlyMatches(candidate.title, plainText(article?.title))) continue;
+    const linkedUrls = (Array.isArray(article?.linkedUrls)
+      ? article.linkedUrls
+      : structuredArticleLinkedUrls(article)).map(canonicalStoryUrl).filter(Boolean);
+    if (!linkedUrls.some((url) => hostedUrls.has(url))) continue;
+    const publishedAt = firstValidDate([article?.publishedAt]);
+    if (!publishedAt) continue;
+    const publishedOn = chicagoIsoDate(publishedAt);
+    if (!eligibleDates.has(publishedOn)) continue;
+    matches.push({ source: providerSource, providerName, providerUrl, publishedAt, publishedOn });
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTimeoutMs, clock }) {
@@ -864,6 +1173,23 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       // Keep the truthful Yahoo-hosted URL when the explicit publisher URL cannot be validated.
     }
   }
+  const structuredReuters = yahooStructuredReutersSource(hostedPage, candidate, eligibleDates);
+  if (!structuredReuters) return;
+  candidate.sourceId = structuredReuters.source.id;
+  candidate.sourceLabel = structuredReuters.source.displayName;
+  candidate.sourceDomain = new URL(candidate.url).hostname.toLowerCase();
+  candidate.article = articleRecord(hostedPage);
+  candidate.pagePublishedAt = structuredReuters.publishedAt.toISOString();
+  candidate.pagePublishedOn = structuredReuters.publishedOn;
+  candidate.pageDateFresh = true;
+  candidate.publishedAt = candidate.pagePublishedAt;
+  candidate.publishedOn = structuredReuters.publishedOn;
+  candidate.dateSource = 'article_page';
+  candidate.publishedAtVerified = true;
+  candidate.syndication.status = 'structured_provider_validated';
+  candidate.syndication.providerName = structuredReuters.providerName;
+  candidate.syndication.providerUrl = structuredReuters.providerUrl;
+  candidate.syndication.validatedAt = clock().toISOString();
 }
 
 async function collectNewsCandidates({
@@ -1055,6 +1381,7 @@ module.exports = {
   extractArticleMetadata,
   fetchAcquisitionPath,
   fetchArticlePage,
+  fetchResponse,
   fetchMsnReuters,
   msnReutersReaderUrl,
   normalizeMsnReutersItem,

@@ -117,7 +117,31 @@ function renderArray(errors, value, label) {
   return true;
 }
 
-function validateDashboardRenderSurface(errors, data, chartData) {
+function publishedChartBarWarning(bar, label) {
+  if (!Array.isArray(bar)) return `${label} is not a compact bar array and will be skipped by the dashboard runtime.`;
+  if (bar.length !== 6) return `${label} is not a complete [time, open, high, low, close, volume] tuple and will be skipped by the dashboard runtime.`;
+  const [time, open, high, low, close, volume] = bar;
+  if (!isIsoDate(time)) return `${label}.time is not a valid ISO date and will be skipped by the dashboard runtime.`;
+  for (const [field, value] of [['open', open], ['high', high], ['low', low], ['close', close]]) {
+    if (!isFiniteNumber(value)) return `${label}.${field} is not a finite JSON number and will be skipped by the dashboard runtime.`;
+  }
+  if (!coherentChartBar({ open, high, low, close })) return `${label} has incoherent OHLC values and will be skipped by the dashboard runtime.`;
+  if (volume !== null && (!isFiniteNumber(volume) || volume < 0)) {
+    return `${label}.volume is not a non-negative finite JSON number or null and will be skipped by the dashboard runtime.`;
+  }
+  return '';
+}
+
+function strictlyAscendingTimes(times) {
+  let previousTime = '';
+  for (const time of times) {
+    if (previousTime && time <= previousTime) return false;
+    previousTime = time;
+  }
+  return true;
+}
+
+function validateDashboardRenderSurface(errors, warnings, data, chartData) {
   // The final publication gate checks only shapes the runtime dereferences at
   // startup. Financial completeness, provenance, and freshness stay in staged
   // contract checks so recoverable content issues do not take the page offline.
@@ -125,18 +149,36 @@ function validateDashboardRenderSurface(errors, data, chartData) {
   if (chartData === null || !renderObject(errors, chartData, 'chart-data') || !renderArray(errors, chartData.series, 'chart-data.series')) return;
   for (const [seriesIndex, series] of chartData.series.entries()) {
     const label = `chart-data.series[${seriesIndex}]`;
-    if (!renderObject(errors, series, label) || !renderArray(errors, series.bars, `${label}.bars`)) continue;
+    if (!series || typeof series !== 'object' || Array.isArray(series)) {
+      warnings.push(`${label} is not a renderable object and will be skipped by the dashboard runtime.`);
+      continue;
+    }
+    if (!Array.isArray(series.bars)) {
+      warnings.push(`${label}.bars is not an array and will be skipped by the dashboard runtime.`);
+      continue;
+    }
+    const renderableTimes = [];
     for (const [barIndex, bar] of series.bars.entries()) {
-      if (!Array.isArray(bar)) {
-        errors.push(`${label}.bars[${barIndex}] must be an array for dashboard rendering.`);
-      }
+      const warning = publishedChartBarWarning(bar, `${label}.bars[${barIndex}]`);
+      if (warning) warnings.push(warning);
+      else renderableTimes.push(bar[0]);
+    }
+    if (renderableTimes.length < 2) {
+      warnings.push(`${label} has fewer than two renderable bars and will be skipped by the dashboard runtime.`);
+    } else if (!strictlyAscendingTimes(renderableTimes)) {
+      warnings.push(`${label}.bars are not strictly ascending after malformed bars are skipped; the series will be skipped by the dashboard runtime.`);
     }
   }
 }
 
 function isFiniteNumber(value) {
-  if (value === null || value === undefined || value === '') return false;
-  return Number.isFinite(Number(value));
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function coherentChartBar({ open, high, low, close }) {
+  if (![open, high, low, close].every(isFiniteNumber)) return false;
+  if (high < Math.max(open, low, close) || low > Math.min(open, high, close)) return false;
+  return !(close > 0 && [open, high, low].some((value) => value <= 0));
 }
 
 // These adapters only bridge storage representation. All market-data semantics live below.
@@ -820,7 +862,7 @@ if (!dashboardMatch) {
       }
     }
 
-    validateDashboardRenderSurface(errors, data, chartData);
+    validateDashboardRenderSurface(errors, warnings, data, chartData);
 
     if (validationMode === 'staged') {
       const chartableRows = chartableRowsFromDashboardData(data);
