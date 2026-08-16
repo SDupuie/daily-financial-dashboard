@@ -5887,41 +5887,130 @@ function testTouchTooltipControls() {
     reviewedAt: FIXTURE_NOW
   };
   const refreshedRevision = '2026-07-18T03:00:01.000Z';
+  const baseTapeRow = {
+    ticker: 'SPX',
+    last: '100',
+    delta: '+1',
+    pct: '+1.00%',
+    dir: 'up',
+    asOf: '2026-07-09',
+    note: 'Existing equity commentary.',
+    noteDisposition: reviewedDisposition
+  };
+  const baseCryptoRow = {
+    ticker: 'BTC',
+    last: '$60,000',
+    delta: '+$1,000',
+    pct: '+2.00%',
+    dir: 'up',
+    asOf: '2026-07-09',
+    note: 'Existing crypto commentary.',
+    noteDisposition: reviewedDisposition
+  };
   const localQuoteDashboard = {
     tape: {
       rows: [
         null,
         'malformed',
-        { ticker: 'SPX', last: '100', pct: '+1.00%', asOf: '2026-07-09', note: 'Existing equity commentary.', noteDisposition: reviewedDisposition },
-        { ticker: 'BTC', last: '$60,000', pct: '+2.00%', asOf: '2026-07-09', note: 'Existing crypto commentary.', noteDisposition: reviewedDisposition }
+        baseTapeRow,
+        { ticker: 'VCR', last: '200', delta: '0.00', pct: '0.00%', dir: 'flat', asOf: '2026-07-09', note: 'Untouched commentary.', noteDisposition: reviewedDisposition },
+        baseCryptoRow
       ]
     }
   };
   assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(localQuoteDashboard, [{
-    ticker: 'SPX', last: '101', delta: '+1', pct: '+1.01%', dir: 'up', asOf: '2026-07-10', quoteRevision: FIXTURE_NOW
+    ticker: 'SPX', last: '100', delta: '+1', pct: '+1.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
   }]), true);
   assert.equal(localQuoteDashboard.tape.rows[2].note, 'Existing equity commentary.');
-  assert.deepEqual(localQuoteDashboard.tape.rows[2].noteDisposition, reviewedDisposition);
-  assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(localQuoteDashboard, [{
-    ticker: 'BTC', price: '$61,000', delta: '+$1,000', chg: '+1.67%', dir: 'up', asOf: '2026-07-10', quoteRevision: refreshedRevision
-  }]), true);
-  assert.equal(localQuoteDashboard.tape.rows[3].note, '');
-  assert.deepEqual(localQuoteDashboard.tape.rows[3].noteDisposition, {
-    status: 'commentary_unavailable',
-    quoteRevision: refreshedRevision
-  });
-  assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(localQuoteDashboard, [{
-    ticker: 'SPX', last: '102', delta: '+2', pct: '+2.00%', dir: 'up', asOf: '2026-07-11', quoteRevision: refreshedRevision
-  }]), true);
-  assert.equal(localQuoteDashboard.tape.rows[2].note, '');
   assert.deepEqual(localQuoteDashboard.tape.rows[2].noteDisposition, {
+    ...reviewedDisposition,
+    quoteRevision: refreshedRevision
+  });
+  assert.deepEqual(localQuoteDashboard.tape.rows[3].noteDisposition, reviewedDisposition);
+  assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(localQuoteDashboard, [{
+    ticker: 'BTC', price: '$60,000', delta: '+$1,000', chg: '+2.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
+  }]), true);
+  assert.equal(localQuoteDashboard.tape.rows[4].note, 'Existing crypto commentary.');
+  assert.deepEqual(localQuoteDashboard.tape.rows[4].noteDisposition, {
+    ...reviewedDisposition,
+    quoteRevision: refreshedRevision
+  });
+  [
+    ['last', { last: '101' }],
+    ['delta', { delta: '+2' }],
+    ['pct', { pct: '+2.00%' }],
+    ['dir', { dir: 'down' }],
+    ['asOf', { asOf: '2026-07-10' }]
+  ].forEach(([field, override]) => {
+    const changedQuoteDashboard = { tape: { rows: [structuredClone(baseTapeRow)] } };
+    assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(changedQuoteDashboard, [{
+      ticker: 'SPX',
+      last: '100',
+      delta: '+1',
+      pct: '+1.00%',
+      dir: 'up',
+      asOf: '2026-07-09',
+      quoteRevision: FIXTURE_NOW,
+      ...override
+    }]), true, `A changed ${field} field must invalidate existing commentary.`);
+    assert.equal(changedQuoteDashboard.tape.rows[0].note, '');
+    assert.deepEqual(changedQuoteDashboard.tape.rows[0].noteDisposition, {
+      status: 'commentary_unavailable',
+      quoteRevision: FIXTURE_NOW
+    });
+  });
+  [
+    ['absent disposition', undefined],
+    ['null disposition', null],
+    ['primitive disposition', 'reviewed'],
+    ['array disposition', []],
+    ['missing reviewedAt', { status: 'reviewed', quoteRevision: FIXTURE_NOW }],
+    ['unavailable row with stale note', { status: 'commentary_unavailable', quoteRevision: FIXTURE_NOW, note: 'Stale note.' }]
+  ].forEach(([label, disposition]) => {
+    const malformedRow = structuredClone(baseTapeRow);
+    if (label === 'absent disposition') {
+      delete malformedRow.noteDisposition;
+    } else if (label === 'unavailable row with stale note') {
+      malformedRow.noteDisposition = disposition;
+      malformedRow.note = disposition.note;
+    } else {
+      malformedRow.noteDisposition = disposition;
+    }
+    const malformedDashboard = { tape: { rows: [malformedRow] } };
+    assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(malformedDashboard, [{
+      ticker: 'SPX', last: '100', delta: '+1', pct: '+1.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
+    }]), true, `Malformed ${label} must not preserve commentary.`);
+    assert.equal(malformedDashboard.tape.rows[0].note, '');
+    assert.deepEqual(malformedDashboard.tape.rows[0].noteDisposition, {
+      status: 'commentary_unavailable',
+      quoteRevision: refreshedRevision
+    });
+  });
+  const unavailableDashboard = {
+    tape: {
+      rows: [{
+        ...baseTapeRow,
+        note: '',
+        noteDisposition: { status: 'commentary_unavailable', quoteRevision: FIXTURE_NOW }
+      }]
+    }
+  };
+  assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(unavailableDashboard, [{
+    ticker: 'SPX', last: '100', delta: '+1', pct: '+1.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
+  }]), true);
+  assert.deepEqual(unavailableDashboard.tape.rows[0].noteDisposition, {
     status: 'commentary_unavailable',
     quoteRevision: refreshedRevision
   });
+  const staleQuoteDashboard = { tape: { rows: [structuredClone(baseTapeRow)] } };
+  assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(staleQuoteDashboard, [{
+    ticker: 'SPX', last: '99', delta: '-1', pct: '-1.00%', dir: 'down', asOf: '2026-07-08', quoteRevision: refreshedRevision
+  }]), false, 'A stale local quote must be ignored.');
+  assert.deepEqual(staleQuoteDashboard.tape.rows[0], baseTapeRow);
   assert.equal(localQuoteRowsRuntime.applyTapeQuoteRows(localQuoteDashboard, [{
     ticker: 'SPX', last: '999', delta: '+999', pct: '+999.00%', dir: 'up', asOf: '2026-07-12'
   }]), false, 'A local quote without a valid revision must be ignored.');
-  assert.equal(localQuoteDashboard.tape.rows[2].last, '102');
+  assert.equal(localQuoteDashboard.tape.rows[2].last, '100');
   assert.deepEqual(localQuoteRowsRuntime.deriveTapeQuoteRowFromSeries({
     ticker: 'MOVE',
     sourceSymbol: '^MOVE',
