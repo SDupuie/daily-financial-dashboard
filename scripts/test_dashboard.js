@@ -5771,6 +5771,19 @@ function testTouchTooltipControls() {
   assert.match(staleCommentaryMarkup, /commentary-stale-info/);
   assert.match(staleCommentaryMarkup, /Commentary predates the latest local market refresh/);
   assert.match(staleCommentaryMarkup, /Commentary reviewed Jul 10, 8:30 AM CT; local quote refreshed Jul 10, 9:00 AM CT\./);
+  const tapeSignalCss = html.match(/\.tape-signal \{([\s\S]*?)\n    \}/)?.[1] || '';
+  const tapeSignalCopyCss = html.match(/\.tape-signal-copy \{([\s\S]*?)\n    \}/)?.[1] || '';
+  assert.match(tapeSignalCss, /display:\s*flex;/);
+  assert.match(tapeSignalCss, /overflow:\s*visible;/, 'The commentary tooltip container must not clip its tooltip.');
+  assert.doesNotMatch(tapeSignalCss, /-webkit-line-clamp|overflow:\s*hidden/);
+  assert.match(tapeSignalCopyCss, /display:\s*-webkit-box;/);
+  assert.match(tapeSignalCopyCss, /overflow:\s*hidden;/);
+  assert.match(tapeSignalCopyCss, /-webkit-line-clamp:\s*2;/);
+  assert.match(
+    html,
+    /<span class="tape-signal">\$\{tapeCommentaryInfo\(row\)\}<span class="tape-signal-copy">\$\{esc\(row\.note\)\}<\/span><\/span>/,
+    'Only the commentary text wrapper may own two-line clipping; the tooltip must remain its unclipped sibling.'
+  );
   assert.doesNotMatch(html, /Data is stale: latest chart bar is/);
 
   const futuresAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'futures-availability-info');

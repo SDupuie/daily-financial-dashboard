@@ -668,13 +668,20 @@
       box-shadow: none;
     }
     .tape-signal {
+      align-items: flex-start;
       color: var(--ink);
+      display: flex;
+      min-width: 0;
+      overflow: visible;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .tape-signal-copy {
       display: -webkit-box;
+      min-width: 0;
       overflow: hidden;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
-      font-size: 14px;
-      line-height: 1.35;
     }
     .tape-chart-shell {
       display: grid;
@@ -8933,7 +8940,7 @@
           <div class="quote-row tape-row ${rowTone}${hasChart ? '' : ' is-disabled'}" aria-selected="${selected}">
             <button class="tape-row-hitbox" type="button" data-tape-group="${esc(groupKey)}" data-tape-chart-row="${esc(ticker)}" data-tape-chart-button aria-label="${esc(`${row.name} chart and quote`)}" aria-pressed="${selected}"${hasChart ? '' : ' disabled'}></button>
             <span class="instrument"><strong class="entity-name entity-name-lg">${esc(row.name)}</strong><span class="tape-ticker-line"><span class="entity-sub entity-sub-mono">${esc(row.ticker)}</span>${tapeStaleInfo(series, row)}</span></span>
-            <span class="tape-signal">${tapeCommentaryInfo(row)}${esc(row.note)}</span>
+            <span class="tape-signal">${tapeCommentaryInfo(row)}<span class="tape-signal-copy">${esc(row.note)}</span></span>
             <span class="quote-cluster quote-readout" aria-label="${esc(row.name)} quote">
               <span class="quote-last metric-primary">${esc(row.last)}</span>
               <span class="metric-pair">
