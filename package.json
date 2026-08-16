@@ -5,6 +5,7 @@
     "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium"
   },
   "dependencies": {
+    "acorn": "8.18.0",
     "playwright": "1.61.0"
   }
 }

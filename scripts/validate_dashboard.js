@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const acorn = require('acorn');
 const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
@@ -18,6 +19,150 @@ const root = path.resolve(__dirname, '..');
 const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
 const defaultChartData = path.resolve(root, 'generated', 'chart_data.json');
 const DASHBOARD_VALIDATION_MODES = new Set(['staged', 'published']);
+const LOCAL_MARKET_REFRESH_URL = 'https://192.168.2.2:2210/api/market-refresh';
+
+function walkJavaScriptAst(node, ancestors, visitor) {
+  if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
+  visitor(node, ancestors);
+  const nextAncestors = [...ancestors, node];
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'start' || key === 'end' || key === 'loc') continue;
+    if (Array.isArray(value)) {
+      for (const child of value) walkJavaScriptAst(child, nextAncestors, visitor);
+    } else {
+      walkJavaScriptAst(value, nextAncestors, visitor);
+    }
+  }
+}
+
+function staticStringValue(node) {
+  if (node?.type === 'Literal' && typeof node.value === 'string') return node.value;
+  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) return node.quasis[0]?.value?.cooked ?? '';
+  if (node?.type === 'BinaryExpression' && node.operator === '+') {
+    const left = staticStringValue(node.left);
+    const right = staticStringValue(node.right);
+    return typeof left === 'string' && typeof right === 'string' ? left + right : null;
+  }
+  return null;
+}
+
+function memberPropertyName(node) {
+  if (node?.type !== 'MemberExpression') return '';
+  if (!node.computed && node.property?.type === 'Identifier') return node.property.name;
+  if (node.computed) return staticStringValue(node.property) ?? '';
+  return '';
+}
+
+function containsJavaScriptBinding(node, name) {
+  let found = false;
+  walkJavaScriptAst(node, [], (candidate) => {
+    if (candidate.type === 'VariableDeclarator' && candidate.id?.type === 'Identifier' && candidate.id.name === name) found = true;
+    if (candidate.type === 'CatchClause' && candidate.param?.type === 'Identifier' && candidate.param.name === name) found = true;
+    if ((candidate.type === 'FunctionDeclaration' || candidate.type === 'FunctionExpression' || candidate.type === 'ArrowFunctionExpression')
+      && candidate.params.some((parameter) => parameter?.type === 'Identifier' && parameter.name === name)) found = true;
+  });
+  return found;
+}
+
+function canonicalRuntimeFetchCall(node, ancestors) {
+  if (node?.type !== 'CallExpression' || node.callee?.type !== 'Identifier' || node.callee.name !== 'fetch') return false;
+  if (node.arguments[0]?.type !== 'Identifier' || node.arguments[0].name !== 'url') return false;
+  if (ancestors.at(-1)?.type !== 'AwaitExpression') return false;
+  for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+    const ancestor = ancestors[index];
+    if (ancestor.type !== 'ForOfStatement') continue;
+    const declaration = ancestor.left?.type === 'VariableDeclaration' && ancestor.left.kind === 'const'
+      ? ancestor.left.declarations[0]
+      : null;
+    return ancestor.left.declarations?.length === 1
+      && declaration?.id?.type === 'Identifier'
+      && declaration.id.name === 'url'
+      && ancestor.right?.type === 'Identifier'
+      && ancestor.right.name === 'LOCAL_MARKET_REFRESH_URLS'
+      && !containsJavaScriptBinding(ancestor.body, 'url');
+  }
+  return false;
+}
+
+function validateDashboardRuntimeNetworkContract(errors, program) {
+  const contractErrors = new Set();
+  const endpointDeclarations = [];
+  const endpointReferences = [];
+  const runtimeUrls = [];
+  const fetchCalls = [];
+  const forbiddenConstructors = new Set(['XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker', 'SharedWorker', 'Function']);
+  const forbiddenCalls = new Set(['importScripts', 'eval', 'Function']);
+
+  walkJavaScriptAst(program, [], (node, ancestors) => {
+    const parent = ancestors.at(-1);
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.id.name === 'LOCAL_MARKET_REFRESH_URLS') {
+      endpointDeclarations.push({ node, parent });
+    }
+    if (node.type === 'Identifier' && node.name === 'LOCAL_MARKET_REFRESH_URLS') {
+      endpointReferences.push({ node, parent });
+    }
+    if (node.type === 'Literal' && typeof node.value === 'string' && /^https?:\/\//.test(node.value)) {
+      runtimeUrls.push(node.value);
+    }
+    if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+      const value = node.quasis[0]?.value?.cooked;
+      if (typeof value === 'string' && /^https?:\/\//.test(value)) runtimeUrls.push(value);
+    }
+    if (node.type === 'MemberExpression') {
+      const propertyName = memberPropertyName(node);
+      if (propertyName === 'fetch') contractErrors.add('The dashboard runtime may not access fetch through a member expression.');
+    }
+    if (node.type === 'Identifier' && node.name === 'fetch') {
+      const allowedTypeCheck = parent?.type === 'UnaryExpression' && parent.operator === 'typeof' && parent.argument === node;
+      const allowedCall = parent?.type === 'CallExpression' && parent.callee === node;
+      if (!allowedTypeCheck && !allowedCall) {
+        contractErrors.add('The dashboard runtime may reference fetch only in its availability check and canonical request call.');
+      }
+    }
+    if (node.type === 'CallExpression') {
+      const calleeName = node.callee?.type === 'Identifier' ? node.callee.name : memberPropertyName(node.callee);
+      if (calleeName === 'fetch') fetchCalls.push({ node, ancestors });
+      if (calleeName === 'sendBeacon' || forbiddenCalls.has(calleeName)) {
+        contractErrors.add(`Unexpected dashboard runtime network or dynamic-code API: ${calleeName}.`);
+      }
+    }
+    if (node.type === 'NewExpression') {
+      const constructorName = node.callee?.type === 'Identifier' ? node.callee.name : memberPropertyName(node.callee);
+      if (forbiddenConstructors.has(constructorName)) {
+        contractErrors.add(`Unexpected dashboard runtime network or dynamic-code API: ${constructorName}.`);
+      }
+    }
+    if (node.type === 'ImportExpression') {
+      contractErrors.add('Unexpected dashboard runtime dynamic import.');
+    }
+  });
+
+  const endpoint = endpointDeclarations[0];
+  const endpointIsCanonical = endpointDeclarations.length === 1
+    && endpoint.parent?.type === 'VariableDeclaration'
+    && endpoint.parent.kind === 'const'
+    && endpoint.node.init?.type === 'ArrayExpression'
+    && endpoint.node.init.elements.length === 1
+    && endpoint.node.init.elements[0]?.type === 'Literal'
+    && endpoint.node.init.elements[0].value === LOCAL_MARKET_REFRESH_URL;
+  if (!endpointIsCanonical) {
+    contractErrors.add('The dashboard runtime must declare exactly one canonical const LOCAL_MARKET_REFRESH_URLS endpoint array.');
+  }
+  const endpointReferencesAreCanonical = endpointReferences.length === 2
+    && endpointReferences.some(({ node, parent }) => parent?.type === 'VariableDeclarator' && parent.id === node)
+    && endpointReferences.some(({ node, parent }) => parent?.type === 'ForOfStatement' && parent.right === node);
+  if (!endpointReferencesAreCanonical) {
+    contractErrors.add('The dashboard runtime may use LOCAL_MARKET_REFRESH_URLS only in its declaration and canonical request loop.');
+  }
+  if (runtimeUrls.length !== 1 || runtimeUrls[0] !== LOCAL_MARKET_REFRESH_URL) {
+    contractErrors.add('The dashboard runtime must contain only the canonical HTTPS LAN market-refresh URL.');
+  }
+  if (fetchCalls.length !== 1 || !canonicalRuntimeFetchCall(fetchCalls[0]?.node, fetchCalls[0]?.ancestors || [])) {
+    contractErrors.add('The dashboard runtime must make exactly one canonical await fetch(url, ...) call inside the LOCAL_MARKET_REFRESH_URLS loop.');
+  }
+
+  errors.push(...contractErrors);
+}
 
 function normalizedDashboardValidationMode(value) {
   return DASHBOARD_VALIDATION_MODES.has(value) ? value : 'published';
@@ -760,27 +905,15 @@ if (runtimeScriptMatches.length !== 1) {
 }
 const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
 if (runtimeScript) {
+  let runtimeProgram = null;
   try {
     // Compile only: executing the dashboard runtime would touch DOM/browser APIs.
     new Function(runtimeScript);
+    runtimeProgram = acorn.parse(runtimeScript, { ecmaVersion: 'latest', sourceType: 'script' });
   } catch (error) {
     errors.push(`dashboard-runtime JavaScript is invalid: ${error.message}`);
   }
-}
-const runtimeUrls = [...runtimeScript.matchAll(/https?:\/\/[^'"`\s]+/g)].map((match) => match[0]);
-const allowedLocalRefreshUrls = new Set([
-  'https://192.168.2.2:2210/api/market-refresh'
-]);
-// The published dashboard may call only the optional read-only LAN overlay;
-// deterministic production data still comes from embedded JSON.
-for (const url of runtimeUrls) {
-  if (!allowedLocalRefreshUrls.has(url)) {
-    errors.push(`Unexpected runtime URL: ${url}`);
-  }
-}
-const expectedRuntimeUrls = [...allowedLocalRefreshUrls];
-if (runtimeUrls.length !== expectedRuntimeUrls.length || runtimeUrls.some((url, index) => url !== expectedRuntimeUrls[index])) {
-  errors.push('The dashboard runtime must expose only the canonical HTTPS LAN market-refresh URL.');
+  if (runtimeProgram) validateDashboardRuntimeNetworkContract(errors, runtimeProgram);
 }
 
 const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);

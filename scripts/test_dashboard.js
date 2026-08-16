@@ -500,7 +500,15 @@ function renderDashboardValidationFixture(dashboard, chartData) {
 <!-- ============ DATA END ============ -->
 <script type="application/json" id="chart-data">${JSON.stringify(chartData)}</script>
 <div class="page" id="app"><div id="mast-edition"></div><div class="right" id="mast-date"><span id="mast-date-value"></span></div><h1 id="hero-headline"></h1><div id="hero-copy"></div><main id="content"></main><footer id="footer"></footer></div>
-<script id="dashboard-runtime">const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>`;
+<script id="dashboard-runtime">const LOCAL_MARKET_REFRESH_URLS = ['https://192.168.2.2:2210/api/market-refresh'];
+async function refreshLocalMarketData() {
+  if (typeof fetch !== 'function') return;
+  for (const url of LOCAL_MARKET_REFRESH_URLS) await fetch(url, { cache: 'no-store' });
+}</script>`;
+}
+
+function replaceDashboardRuntime(html, runtime) {
+  return html.replace(/<script id="dashboard-runtime">[\s\S]*?<\/script>/, `<script id="dashboard-runtime">${runtime}</script>`);
 }
 
 // Some fixture paths outlive the helper that creates them, so main() owns one failure-safe cleanup pass for the whole suite.
@@ -5117,10 +5125,7 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   assert.equal(attributeSpoofResult.status, 1);
   assert.match(attributeSpoofResult.stderr, /Missing required dashboard shell marker: <span id="mast-date-value">/);
 
-  const syntaxErrorHtml = validHtml.replace(
-    "const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh'];</script>",
-    "const localRefreshUrls = ['https://192.168.2.2:2210/api/market-refresh']; const invalidRuntime = ;</script>"
-  );
+  const syntaxErrorHtml = replaceDashboardRuntime(validHtml, 'const invalidRuntime = ;');
   const syntaxErrorResult = dashboardValidationResult(syntaxErrorHtml);
   assert.equal(syntaxErrorResult.status, 1);
   assert.match(syntaxErrorResult.stderr, /dashboard-runtime JavaScript is invalid/);
@@ -5281,6 +5286,37 @@ function testDashboardValidatorBlocksStartupCrashSurfaces() {
   const stagedCarriedWithoutDiagnosticsResult = validateDashboardAndChartFixture(dashboard, carriedChartWithoutDiagnostics, 'staged');
   assert.equal(stagedCarriedWithoutDiagnosticsResult.status, 1);
   assert.match(stagedCarriedWithoutDiagnosticsResult.stderr, /carried-forward series SPX requires partial availability diagnostics/);
+}
+
+function testDashboardValidatorEnforcesRuntimeNetworkBoundary() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const validHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const canonicalRuntime = validHtml.match(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/)[1];
+  for (const validationMode of ['published', 'staged']) {
+    const canonicalResult = dashboardValidationResult(validHtml, FIXTURE_NOW, validationMode);
+    assert.equal(canonicalResult.status, 0, `${validationMode} canonical runtime: ${canonicalResult.stderr}`);
+  }
+
+  const cases = [
+    ['direct unexpected URL', `${canonicalRuntime}\nfetch('https://example.com/collect');`, /only the canonical HTTPS LAN market-refresh URL|exactly one canonical await fetch/],
+    ['computed unexpected URL', `${canonicalRuntime}\nfetch('https:' + '//example.com/collect');`, /exactly one canonical await fetch/],
+    ['fetch alias', `${canonicalRuntime}\nconst externalRequest = fetch; externalRequest('https:' + '//example.com/collect');`, /may reference fetch only/],
+    ['computed global fetch', `${canonicalRuntime}\nglobalThis['fe' + 'tch']('https:' + '//example.com/collect');`, /may not access fetch through a member expression/],
+    ['mutated endpoint array', canonicalRuntime.replace('for (const url of LOCAL_MARKET_REFRESH_URLS)', "LOCAL_MARKET_REFRESH_URLS[0] = 'https:' + '//example.com/collect';\n  for (const url of LOCAL_MARKET_REFRESH_URLS)"), /may use LOCAL_MARKET_REFRESH_URLS only/],
+    ['shadowed loop URL', canonicalRuntime.replace("await fetch(url, { cache: 'no-store' });", "{ const url = 'https:' + '//example.com/collect'; await fetch(url, { cache: 'no-store' }); }"), /exactly one canonical await fetch/],
+    ['WebSocket', `${canonicalRuntime}\nnew WebSocket('wss:' + '//example.com/socket');`, /Unexpected dashboard runtime network or dynamic-code API: WebSocket/],
+    ['sendBeacon', `${canonicalRuntime}\nnavigator.sendBeacon('/collect', 'data');`, /Unexpected dashboard runtime network or dynamic-code API: sendBeacon/],
+    ['dynamic import', `${canonicalRuntime}\nimport('/external-module.js');`, /Unexpected dashboard runtime dynamic import/],
+    ['missing endpoint', canonicalRuntime.replace("const LOCAL_MARKET_REFRESH_URLS = ['https://192.168.2.2:2210/api/market-refresh'];", 'const LOCAL_MARKET_REFRESH_URLS = [];'), /must declare exactly one canonical const LOCAL_MARKET_REFRESH_URLS/],
+    ['duplicate endpoint', canonicalRuntime.replace("['https://192.168.2.2:2210/api/market-refresh']", "['https://192.168.2.2:2210/api/market-refresh', 'https://192.168.2.2:2210/api/market-refresh']"), /must declare exactly one canonical const LOCAL_MARKET_REFRESH_URLS/]
+  ];
+  for (const [label, runtime, expectedError] of cases) {
+    for (const validationMode of ['published', 'staged']) {
+      const result = dashboardValidationResult(replaceDashboardRuntime(validHtml, runtime), FIXTURE_NOW, validationMode);
+      assert.equal(result.status, 1, `${validationMode} ${label} must fail validation.`);
+      assert.match(result.stderr, expectedError, `${validationMode} ${label}`);
+    }
+  }
 }
 
 function testDashboardValidatorTapeNotesAreModeSpecific() {
@@ -6669,6 +6705,7 @@ async function main() {
     testStagedDashboardValidatorEnforcesMarketLensContract,
     testDashboardValidatorKeepsPublishedGateToRenderSurface,
     testDashboardValidatorBlocksStartupCrashSurfaces,
+    testDashboardValidatorEnforcesRuntimeNetworkBoundary,
     testDashboardValidatorTapeNotesAreModeSpecific,
     testDashboardValidatorCloseOnlyPlaceholderIsStagedOnly,
     testPrepareNormalizesStaleTapeCommentary,

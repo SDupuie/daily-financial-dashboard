@@ -5,7 +5,7 @@ This folder contains the tracked backup template for the optional local market r
 - `com.scott.daily-financial-dashboard.plist` runs `scripts/local_market_server.js` with Node over HTTPS on port `2210`.
 - The server binds to the Mac Mini's reserved primary-LAN address `192.168.2.2`, loads its dedicated certificate and private key from `~/.daily-financial-dashboard/tls/`, and exposes `GET /health` plus `GET /api/market-refresh`.
 - Browser requests are accepted only from `https://sdupuie.github.io` and local HTTP(S) development origins; other browser origins receive `403`.
-- `GET /api/market-refresh` returns quote rows, chart series, and crypto stat-card data.
+- `GET /api/market-refresh` returns normalized chart series and crypto stat-card data; the browser derives visible quote rows from accepted series.
 - Logs are written to `~/Library/Logs/DailyFinancialDashboard/`.
 
 The helper requires a dedicated leaf certificate signed by a private CA trusted on each client. The tracked `local-market-ca.cnf` and `local-market-server.cnf` templates enforce the intended constraints: the root is `CA:TRUE`; the leaf is `CA:FALSE`, is restricted to TLS server authentication, and covers `192.168.2.2`, `localhost`, `127.0.0.1`, and `::1`. No certificate or private key belongs in Git.
