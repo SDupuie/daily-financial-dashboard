@@ -6,7 +6,10 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const chartDataModule = require('./fetch_chart_data');
+const cryptoStatsModule = require('./fetch_crypto_stats');
 const {
+  buildMarketRefresh,
   isAllowedBrowserOrigin,
   parseArgs: parseLocalMarketServerArgs
 } = require('./local_market_server');
@@ -30,7 +33,7 @@ const {
   validateChartPayloadMetadata,
   validateChartStagingPayload,
   validateFuturesPayload,
-} = require('./fetch_chart_data');
+} = chartDataModule;
 const {
   buildAssetAllocationFallback,
   buildAssetAllocationSummaryFallback,
@@ -40,7 +43,7 @@ const {
   validateAssetAllocationPortfolioPayload,
   validateAssetAllocationSummaryPayload
 } = require('./fetch_asset_allocation');
-const { buildCryptoStatsFallback, fetchCryptoStatsPartial, validateCryptoStatsPayload } = require('./fetch_crypto_stats');
+const { buildCryptoStatsFallback, fetchCryptoStatsPartial, validateCryptoStatsPayload } = cryptoStatsModule;
 const {
   validateDashboardHtml
 } = require('./validate_dashboard');
@@ -5722,7 +5725,7 @@ function testTouchTooltipControls() {
     const chartDateLabel = (value) => value;
     ${moveDailyChangeSource}
     ${tapeStaleSource}
-    return { chartBusinessDayGap, tapeSeriesIsStale, tapeSeriesHasLatestCloseOnlyPlaceholder, tapeStaleInfo, tapeCommentaryUnavailableInfo };
+    return { chartBusinessDayGap, tapeSeriesIsStale, tapeSeriesHasLatestCloseOnlyPlaceholder, tapeStaleInfo, tapeCommentaryInfo };
   `)((value) => String(value));
   const moveSeries = { ticker: 'MOVE', bars: [{ time: '2026-07-10' }] };
   const moveQuoteOnlySeries = {
@@ -5748,11 +5751,26 @@ function testTouchTooltipControls() {
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /MOVE data is stale/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /Last valid quote: 2026-07-10\./);
   assert.doesNotMatch(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /not updated/);
-  assert.match(tapeStaleRuntime.tapeCommentaryUnavailableInfo({
+  assert.match(tapeStaleRuntime.tapeCommentaryInfo({
     ticker: 'SPX',
     note: '',
     noteDisposition: { status: 'commentary_unavailable', quoteRevision: FIXTURE_NOW }
   }), /Commentary unavailable for this refreshed quote/);
+  assert.equal(tapeStaleRuntime.tapeCommentaryInfo({
+    ticker: 'BTC',
+    note: 'Reviewed crypto commentary.',
+    displayQuoteRevision: FIXTURE_NOW,
+    noteDisposition: { status: 'reviewed', quoteRevision: FIXTURE_NOW, reviewedAt: FIXTURE_NOW }
+  }), '');
+  const staleCommentaryMarkup = tapeStaleRuntime.tapeCommentaryInfo({
+    ticker: 'BTC',
+    note: 'Reviewed crypto commentary.',
+    displayQuoteRevision: '2026-07-10T14:00:00Z',
+    noteDisposition: { status: 'reviewed', quoteRevision: FIXTURE_NOW, reviewedAt: FIXTURE_NOW }
+  });
+  assert.match(staleCommentaryMarkup, /commentary-stale-info/);
+  assert.match(staleCommentaryMarkup, /Commentary predates the latest local market refresh/);
+  assert.match(staleCommentaryMarkup, /Commentary reviewed Jul 10, 8:30 AM CT; local quote refreshed Jul 10, 9:00 AM CT\./);
   assert.doesNotMatch(html, /Data is stale: latest chart bar is/);
 
   const futuresAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'futures-availability-info');
@@ -5922,6 +5940,7 @@ function testTouchTooltipControls() {
     ticker: 'SPX', last: '100', delta: '+1', pct: '+1.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
   }]), true);
   assert.equal(localQuoteDashboard.tape.rows[2].note, 'Existing equity commentary.');
+  assert.equal(localQuoteDashboard.tape.rows[2].displayQuoteRevision, refreshedRevision);
   assert.deepEqual(localQuoteDashboard.tape.rows[2].noteDisposition, {
     ...reviewedDisposition,
     quoteRevision: refreshedRevision
@@ -5931,6 +5950,7 @@ function testTouchTooltipControls() {
     ticker: 'BTC', price: '$60,000', delta: '+$1,000', chg: '+2.00%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
   }]), true);
   assert.equal(localQuoteDashboard.tape.rows[4].note, 'Existing crypto commentary.');
+  assert.equal(localQuoteDashboard.tape.rows[4].displayQuoteRevision, refreshedRevision);
   assert.deepEqual(localQuoteDashboard.tape.rows[4].noteDisposition, {
     ...reviewedDisposition,
     quoteRevision: refreshedRevision
@@ -5950,15 +5970,24 @@ function testTouchTooltipControls() {
       pct: '+1.00%',
       dir: 'up',
       asOf: '2026-07-09',
-      quoteRevision: FIXTURE_NOW,
+      quoteRevision: refreshedRevision,
       ...override
-    }]), true, `A changed ${field} field must invalidate existing commentary.`);
-    assert.equal(changedQuoteDashboard.tape.rows[0].note, '');
-    assert.deepEqual(changedQuoteDashboard.tape.rows[0].noteDisposition, {
-      status: 'commentary_unavailable',
-      quoteRevision: FIXTURE_NOW
-    });
+    }]), true, `A changed ${field} field must preserve reviewed commentary as stale.`);
+    assert.equal(changedQuoteDashboard.tape.rows[0].note, 'Existing equity commentary.');
+    assert.equal(changedQuoteDashboard.tape.rows[0].displayQuoteRevision, refreshedRevision);
+    assert.deepEqual(changedQuoteDashboard.tape.rows[0].noteDisposition, reviewedDisposition);
   });
+  const repeatedlyRefreshedDashboard = { tape: { rows: [structuredClone(baseCryptoRow)] } };
+  assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(repeatedlyRefreshedDashboard, [{
+    ticker: 'BTC', price: '$60,100', delta: '+$1,100', chg: '+2.10%', dir: 'up', asOf: '2026-07-09', quoteRevision: refreshedRevision
+  }]), true);
+  const secondRefreshedRevision = '2026-07-18T03:30:01.000Z';
+  assert.equal(localQuoteRowsRuntime.applyCryptoQuoteRows(repeatedlyRefreshedDashboard, [{
+    ticker: 'BTC', price: '$60,100', delta: '+$1,100', chg: '+2.10%', dir: 'up', asOf: '2026-07-09', quoteRevision: secondRefreshedRevision
+  }]), true);
+  assert.equal(repeatedlyRefreshedDashboard.tape.rows[0].note, 'Existing crypto commentary.');
+  assert.equal(repeatedlyRefreshedDashboard.tape.rows[0].displayQuoteRevision, secondRefreshedRevision);
+  assert.deepEqual(repeatedlyRefreshedDashboard.tape.rows[0].noteDisposition, reviewedDisposition);
   [
     ['absent disposition', undefined],
     ['null disposition', null],
@@ -6334,6 +6363,97 @@ function testExpandedChartScrollsFullyIntoViewport() {
   assert.deepEqual(correctiveScrolls, [], 'A fully visible chart must not move the page after expansion.');
 }
 
+async function testLocalMarketServerNormalizesAllChartSeries() {
+  const originalFetchSeries = chartDataModule.fetchSeries;
+  const originalFetchCryptoStats = cryptoStatsModule.fetchCryptoStats;
+  try {
+    chartDataModule.fetchSeries = async (row) => ({
+      ...row,
+      source: 'Fixture Provider',
+      sourceKey: 'fixture_provider',
+      dataKind: 'ohlc',
+      priceOnly: false,
+      noVolume: false,
+      bars: row.ticker === 'XAG' ? [
+        {
+          time: '2026-08-13',
+          open: 64.87300109863281,
+          high: 64.87300109863281,
+          low: 64.77999877929688,
+          close: 64.87300109863281,
+          volume: 3
+        },
+        {
+          time: '2026-08-14',
+          open: 64.62999725341797,
+          high: 65.875,
+          low: 63.64500045776367,
+          close: 65.10800170898438,
+          volume: 31855
+        }
+      ] : [
+        {
+          time: '2026-08-13',
+          open: 100.123456,
+          high: 101.111119,
+          low: 99.999994,
+          close: 100.123456,
+          volume: 1234.6
+        },
+        {
+          time: '2026-08-14',
+          open: 100.200006,
+          high: 101.222229,
+          low: 100.111114,
+          close: 100.358456,
+          volume: 1235.4
+        }
+      ]
+    });
+    cryptoStatsModule.fetchCryptoStats = async () => ({ stats: [], dominance: {} });
+
+    const payload = await buildMarketRefresh(parseLocalMarketServerArgs([
+      '--days', '5',
+      '--input', path.join(root, 'daily_financial_news.html')
+    ]));
+    assert.deepEqual(payload.errors, []);
+    assert.ok(payload.series.length > 1);
+    for (const series of payload.series) {
+      for (const bar of series.bars) {
+        for (const field of ['open', 'high', 'low', 'close']) {
+          assert.equal(bar[field], Number(bar[field].toFixed(4)), `${series.ticker}.${field} must use canonical precision.`);
+        }
+        assert.ok(Number.isInteger(bar.volume), `${series.ticker}.volume must use canonical whole-number precision.`);
+      }
+    }
+
+    const silver = payload.series.find((series) => series.ticker === 'XAG');
+    assert.deepEqual(silver.bars.map((bar) => bar.close), [64.873, 65.108]);
+    const refreshedSilverQuote = quoteRowFromSeries(silver);
+    assert.equal(refreshedSilverQuote.delta, '+0.23');
+    const embeddedDashboard = readJsonBlock(
+      fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8'),
+      'dashboard-data'
+    );
+    const embeddedSilverQuote = embeddedDashboard.tape.rows.find((row) => row.ticker === 'XAG');
+    for (const field of ['last', 'delta', 'pct', 'dir', 'asOf']) {
+      assert.equal(refreshedSilverQuote[field], embeddedSilverQuote[field], `XAG.${field} must not create a false local change.`);
+    }
+    const spx = payload.series.find((series) => series.ticker === 'SPX');
+    assert.deepEqual(spx.bars[0], {
+      time: '2026-08-13',
+      open: 100.1235,
+      high: 101.1111,
+      low: 100,
+      close: 100.1235,
+      volume: 1235
+    });
+  } finally {
+    chartDataModule.fetchSeries = originalFetchSeries;
+    cryptoStatsModule.fetchCryptoStats = originalFetchCryptoStats;
+  }
+}
+
 function testLocalMarketServerOriginPolicyAndTlsOptions() {
   assert.equal(isAllowedBrowserOrigin(''), true);
   assert.equal(isAllowedBrowserOrigin('https://sdupuie.github.io'), true);
@@ -6401,6 +6521,7 @@ const architectureContractTests = Object.freeze([
 
 const localRefreshIntegrationTests = Object.freeze([
   testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,
+  testLocalMarketServerNormalizesAllChartSeries,
   testLocalMarketServerOriginPolicyAndTlsOptions
 ]);
 

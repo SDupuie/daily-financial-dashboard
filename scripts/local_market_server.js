@@ -279,7 +279,8 @@ async function fetchChartPayload(args, startDate, endDate) {
       return null;
     }
   });
-  const series = results.filter(Boolean);
+  // Match the scheduled chart-data precision contract before the browser derives displayed quotes.
+  const series = chartData.roundChartPayload({ series: results.filter(Boolean) }).series;
   return { series, errors };
 }
 
