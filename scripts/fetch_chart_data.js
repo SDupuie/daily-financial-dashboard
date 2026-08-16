@@ -1051,6 +1051,33 @@ function asStoredChartNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function moveDailyChangeReferenceErrors(item, { label = String(item?.ticker || 'Chart series'), latestTime = '' } = {}) {
+  const errors = [];
+  const ticker = String(item?.ticker || '').trim().toUpperCase();
+  const reference = item?.dailyChangeReference;
+  if (ticker !== 'MOVE' || item?.sourceSymbol !== '^MOVE') {
+    errors.push(`${label}.dailyChangeReference is supported only for MOVE from ^MOVE.`);
+  }
+  if (item?.source !== 'Yahoo Finance Chart API' || item?.sourceKey !== 'yahoo_chart') {
+    errors.push(`${label}.dailyChangeReference requires Yahoo Finance Chart API provenance.`);
+  }
+  if (!reference || typeof reference !== 'object' || Array.isArray(reference)) {
+    errors.push(`${label}.dailyChangeReference must be an object.`);
+  } else {
+    if (!isIsoDate(reference.asOf) || reference.asOf !== latestTime) {
+      errors.push(`${label}.dailyChangeReference.asOf must match the latest bar date.`);
+    }
+    if (asStoredChartNumber(reference.previousClose) === null || reference.previousClose <= 0) {
+      errors.push(`${label}.dailyChangeReference.previousClose must be a positive finite JSON number.`);
+    }
+  }
+  return errors;
+}
+
+function isValidMoveDailyChangeReference(item, latestTime = String(objectBar(item?.bars?.at(-1)).time || '')) {
+  return moveDailyChangeReferenceErrors(item, { latestTime }).length === 0;
+}
+
 function fourDecimalNumber(value) {
   const numeric = asStoredChartNumber(value);
   if (numeric === null) return null;
@@ -1093,8 +1120,15 @@ function roundChartPayload(payload) {
     ...rest,
     series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => {
       const { note: _note, ...seriesFields } = series || {};
+      const dailyChangeReference = series?.dailyChangeReference;
       return {
         ...seriesFields,
+        ...(dailyChangeReference && typeof dailyChangeReference === 'object' && !Array.isArray(dailyChangeReference) ? {
+          dailyChangeReference: {
+            ...dailyChangeReference,
+            previousClose: fourDecimalNumber(dailyChangeReference.previousClose)
+          }
+        } : {}),
         bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
           const bar = objectBar(rawBar);
           return {
@@ -1352,7 +1386,13 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
     if (item.noVolume && bar.volume !== undefined) {
       errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
     }
-    if (!item.priceOnly && item.dataKind === 'ohlc' && barIndex === item.bars.length - 1 && isCloseOnlyPlaceholderBar(bar)) {
+    if (
+      !item.priceOnly
+      && item.dataKind === 'ohlc'
+      && barIndex === item.bars.length - 1
+      && isCloseOnlyPlaceholderBar(bar)
+      && !isValidMoveDailyChangeReference(item, bar.time)
+    ) {
       const message = `${barLabel} contains a latest quote-only placeholder in an OHLC series; row tooltip discloses unavailable open/high/low data.`;
       if (options.closeOnlyPlaceholderSeverity === 'warning') warnings.push(message);
       else errors.push(message);
@@ -1361,6 +1401,9 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
   const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
   if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
     errors.push(`${label}.noVolume must be ${!hasVolume} to match its ${options.volumeDescription || 'chart'} volume bars.`);
+  }
+  if (item.dailyChangeReference !== undefined) {
+    errors.push(...moveDailyChangeReferenceErrors(item, { label, latestTime: item.bars.at(-1).time }));
   }
   return { errors, warnings, series: item };
 }
@@ -1462,6 +1505,50 @@ function uniqueBars(bars) {
     byDate.set(bar.time, bar);
   }
   return sortBars([...byDate.values()]);
+}
+
+function mergeSparseMoveHistory(item, prior, row, startDate, endDate) {
+  if (String(item?.ticker || '').toUpperCase() !== 'MOVE'
+    || item?.sourceSymbol !== '^MOVE'
+    || !Array.isArray(item?.bars)
+  ) return item;
+
+  const rangeStartDate = isoDateFromDate(startDate);
+  const rangeEndDate = isoDateFromDate(endDate);
+  const sourceFreshBars = uniqueBars(item.bars.map(objectBar))
+    .filter((bar) => bar.time >= rangeStartDate && bar.time <= rangeEndDate);
+  // A close-only MOVE window cannot replace validated historical candles; only
+  // its latest quote is eligible for the temporary flat-candle merge.
+  const freshBars = item.priceOnly ? sourceFreshBars.slice(-1) : sourceFreshBars;
+  const firstFreshDate = freshBars[0]?.time || '';
+  const startGapDays = chartDayGap(firstFreshDate, rangeStartDate);
+  const sparseRefresh = item.priceOnly || freshBars.length < 2 || (startGapDays !== null && startGapDays > 7);
+  if (!sparseRefresh) return item;
+  if (!isValidMoveDailyChangeReference({ ...item, bars: freshBars })) {
+    throw new Error('MOVE sparse Yahoo refresh did not include a valid dailyChangeReference.');
+  }
+  if (!prior) {
+    throw new Error('MOVE sparse Yahoo refresh requires prior validated history.');
+  }
+  const priorValidation = validateChartSeriesContract(prior, row, { label: 'Prior canonical MOVE' });
+  if (priorValidation.errors.length) {
+    throw new Error(`MOVE prior canonical history is invalid: ${priorValidation.errors.join(' ')}`);
+  }
+  const bars = uniqueBars([...priorValidation.series.bars, ...freshBars].map(objectBar))
+    .filter((bar) => bar.time >= rangeStartDate && bar.time <= rangeEndDate);
+  const preservesHistoricalOhlc = item.priceOnly
+    && item.dataKind === 'close'
+    && !priorValidation.series.priceOnly
+    && priorValidation.series.dataKind === 'ohlc';
+  return {
+    ...item,
+    ...(preservesHistoricalOhlc ? {
+      dataKind: 'ohlc',
+      priceOnly: false,
+      noVolume: !bars.some((bar) => bar.volume !== undefined)
+    } : {}),
+    bars
+  };
 }
 
 function closeOnlyBar(time, close) {
@@ -1650,12 +1737,20 @@ function quoteRowFromSeries(item) {
   const bars = item.bars || [];
   const latest = bars[bars.length - 1];
   const previous = bars[bars.length - 2];
-  if (!latest || !previous) {
+  if (!latest || (!previous && item.dailyChangeReference === undefined)) {
     throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
   }
 
-  const delta = latest.close - previous.close;
-  const pct = previous.close ? (delta / previous.close) * 100 : 0;
+  let previousClose = previous?.close;
+  if (item.dailyChangeReference !== undefined) {
+    if (!isValidMoveDailyChangeReference(item, latest.time)) {
+      throw new Error(`${item.ticker} daily change reference is invalid`);
+    }
+    previousClose = item.dailyChangeReference.previousClose;
+  }
+
+  const delta = latest.close - previousClose;
+  const pct = previousClose ? (delta / previousClose) * 100 : 0;
   const isYield = item.unit === 'percent_yield';
   if (item.sourceSymbol === 'TREASURY:CURVE' && item.curveSpread?.label && Number.isFinite(item.curveSpread.valueBp)) {
     const deltaBp = item.curveSpread.deltaBp;
@@ -1799,6 +1894,19 @@ function parseYahooSeries(row, payload, host) {
     throw new Error(`${row.sourceSymbol} response did not include usable daily bars`);
   }
 
+  const latestBar = bars.at(-1);
+  const regularMarketPrice = asFiniteNumber(result.meta?.regularMarketPrice);
+  const previousClose = asFiniteNumber(result.meta?.chartPreviousClose);
+  const dailyChangeReference = String(row.ticker || '').toUpperCase() === 'MOVE'
+    && row.sourceSymbol === '^MOVE'
+    && regularMarketPrice !== null
+    && regularMarketPrice > 0
+    && previousClose !== null
+    && previousClose > 0
+    && fourDecimalNumber(regularMarketPrice) === fourDecimalNumber(latestBar.close)
+    ? { asOf: latestBar.time, previousClose }
+    : null;
+
   return {
     ...seriesBase(row),
     source: 'Yahoo Finance Chart API',
@@ -1809,6 +1917,7 @@ function parseYahooSeries(row, payload, host) {
     noVolume: !hasRealVolume,
     currency: result.meta?.currency || null,
     exchangeTimezoneName: result.meta?.exchangeTimezoneName || null,
+    ...(dailyChangeReference ? { dailyChangeReference } : {}),
     bars: uniqueBars(bars)
   };
 }
@@ -2000,9 +2109,28 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
   const treasuryMonthCache = new Map();
   const canonicalPayload = readEmbeddedChartPayload(args.input);
-  const canonicalByTicker = new Map(
+  const rawCanonicalByTicker = new Map(
     (canonicalPayload?.series || []).map((item) => [String(item?.ticker || '').toUpperCase(), item])
   );
+  const canonicalByTicker = new Map();
+  const moveHistoryByTicker = new Map();
+  for (const row of inputRows) {
+    const tickerKey = String(row.ticker || '').toUpperCase();
+    const prior = rawCanonicalByTicker.get(tickerKey);
+    if (!prior) continue;
+    const priorValidation = validateChartSeriesContract(prior, row, { label: `Prior canonical ${tickerKey}` });
+    if (!priorValidation.errors.length) {
+      canonicalByTicker.set(tickerKey, priorValidation.series);
+      if (tickerKey === 'MOVE') moveHistoryByTicker.set(tickerKey, priorValidation.series);
+      continue;
+    }
+    if (tickerKey === 'MOVE' && prior.dailyChangeReference !== undefined) {
+      const historyCandidate = { ...prior };
+      delete historyCandidate.dailyChangeReference;
+      const historyValidation = validateChartSeriesContract(historyCandidate, row, { label: `Prior canonical ${tickerKey} history` });
+      if (!historyValidation.errors.length) moveHistoryByTicker.set(tickerKey, historyValidation.series);
+    }
+  }
   const seriesByIndex = inputRows.map((row) => {
     const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
     return prior ? carriedForwardChartSeries(prior, quoteRevision) : null;
@@ -2026,7 +2154,11 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const tickerKey = String(row.ticker || '').toUpperCase();
     try {
       const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
-      const refreshedSeries = { ...item, quoteRevision };
+      const prior = tickerKey === 'MOVE' ? moveHistoryByTicker.get(tickerKey) : canonicalByTicker.get(tickerKey);
+      const refreshedSeries = {
+        ...mergeSparseMoveHistory(item, prior, row, startDate, endDate),
+        quoteRevision
+      };
       const validationErrors = validateChartStagingPayload(
         chartOutput({
           args,
@@ -2097,10 +2229,12 @@ module.exports = {
   fetchSeries,
   fetchYahooJsonWithRetry,
   finnhubQuoteBarFromPayload,
+  isValidMoveDailyChangeReference,
   isoDateFromDate,
   mergeFinnhubQuoteBar,
   quoteRowFromSeries,
   parseArgs,
+  parseYahooSeries,
     parseFuture: futuresModule.parseFuture,
     premarketCutoff: futuresModule.premarketCutoff,
     scheduledNow: futuresModule.scheduledNow,
