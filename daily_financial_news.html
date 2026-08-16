@@ -632,6 +632,9 @@
       z-index: 2;
       pointer-events: auto;
     }
+    .tape-row .stale-info:hover,
+    .tape-row .stale-info:focus-within,
+    .tape-row .stale-info.is-open { z-index: 3; }
     .tape-row .stale-info-tooltip { left: 0; transform: translate(0, 3px); }
     .tape-row .stale-info:hover .stale-info-tooltip,
     .tape-row .stale-info:focus-within .stale-info-tooltip,
@@ -7958,10 +7961,8 @@
           || displayRevision <= commentaryRevision) return '';
         const reviewedLabel = tapeCommentaryTimestamp(row.noteDisposition.reviewedAt);
         const refreshedLabel = tapeCommentaryTimestamp(row.displayQuoteRevision);
-        const timing = reviewedLabel && refreshedLabel
-          ? ` Commentary reviewed ${reviewedLabel}; local quote refreshed ${refreshedLabel}.`
-          : '';
-        const message = `Commentary predates the latest local market refresh and may not reflect the subsequent price move.${timing}`;
+        if (!reviewedLabel || !refreshedLabel) return '';
+        const message = `Commentary reviewed ${reviewedLabel}; local quote refreshed ${refreshedLabel}.`;
         return `<span class="stale-info commentary-stale-info" data-stale-info><button class="stale-info-button" type="button" aria-label="${esc(message)}" aria-describedby="${esc(tooltipId)}" aria-expanded="false" data-stale-button>i</button><span class="stale-info-tooltip" id="${esc(tooltipId)}" role="tooltip">${esc(message)}</span></span>`;
       }
       /* TEST BLOCK END: tape-stale-info */

@@ -5769,8 +5769,14 @@ function testTouchTooltipControls() {
     noteDisposition: { status: 'reviewed', quoteRevision: FIXTURE_NOW, reviewedAt: FIXTURE_NOW }
   });
   assert.match(staleCommentaryMarkup, /commentary-stale-info/);
-  assert.match(staleCommentaryMarkup, /Commentary predates the latest local market refresh/);
   assert.match(staleCommentaryMarkup, /Commentary reviewed Jul 10, 8:30 AM CT; local quote refreshed Jul 10, 9:00 AM CT\./);
+  assert.doesNotMatch(staleCommentaryMarkup, /predates|subsequent price move/);
+  assert.equal(tapeStaleRuntime.tapeCommentaryInfo({
+    ticker: 'BTC',
+    note: 'Malformed reviewed commentary.',
+    displayQuoteRevision: '2026-07-10T14:00:00Z',
+    noteDisposition: { status: 'reviewed', quoteRevision: FIXTURE_NOW }
+  }), '', 'Reviewed commentary without a valid review timestamp must not render an incomplete tooltip.');
   const tapeSignalCss = html.match(/\.tape-signal \{([\s\S]*?)\n    \}/)?.[1] || '';
   const tapeSignalCopyCss = html.match(/\.tape-signal-copy \{([\s\S]*?)\n    \}/)?.[1] || '';
   assert.match(tapeSignalCss, /display:\s*flex;/);
@@ -5779,6 +5785,11 @@ function testTouchTooltipControls() {
   assert.match(tapeSignalCopyCss, /display:\s*-webkit-box;/);
   assert.match(tapeSignalCopyCss, /overflow:\s*hidden;/);
   assert.match(tapeSignalCopyCss, /-webkit-line-clamp:\s*2;/);
+  assert.match(
+    html,
+    /\.tape-row \.stale-info:hover,\s*\.tape-row \.stale-info:focus-within,\s*\.tape-row \.stale-info\.is-open\s*\{\s*z-index:\s*3;/,
+    'The active Tape information control must stack above neighboring information controls.'
+  );
   assert.match(
     html,
     /<span class="tape-signal">\$\{tapeCommentaryInfo\(row\)\}<span class="tape-signal-copy">\$\{esc\(row\.note\)\}<\/span><\/span>/,
@@ -6120,6 +6131,92 @@ function testTouchTooltipControls() {
   );
   assert.deepEqual(tapeGroupsRuntime.tapeGroupsForData(localQuoteDashboard).map((group) => group.rows.map((row) => row.ticker)), [['SPX']]);
   assert.doesNotMatch(html, /Market-driver commentary is temporarily unavailable/);
+}
+
+async function testTapeTooltipStacksAboveNeighboringInfoControlsInBrowser() {
+  const previousBrowserPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+  const { chromium } = require('playwright');
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((match) => match[1]).join('\n');
+  let browser;
+  try {
+    browser = await chromium.launch({ executablePath: chromium.executablePath(), headless: true });
+    const page = await browser.newPage();
+    await page.setContent(`<!doctype html><html><head><style>${styles}</style></head><body>
+      <div style="position:fixed;left:24px;top:80px;width:300px;z-index:9999">
+        <div class="quote-row tape-row" style="display:block;height:48px;padding:0;border:0">
+          <span class="stale-info" id="active-info" style="position:absolute;left:16px;top:20px">
+            <button class="stale-info-button" id="active-info-button" type="button">i</button>
+            <span class="stale-info-tooltip" id="active-tooltip" role="tooltip">Commentary reviewed Jul 10, 8:30 AM CT; local quote refreshed Jul 10, 9:00 AM CT.</span>
+          </span>
+        </div>
+        <div class="quote-row tape-row" style="display:block;height:48px;padding:0;border:0">
+          <span class="stale-info" style="position:absolute;left:16px;top:20px">
+            <button class="stale-info-button" id="neighbor-info-button" type="button">i</button>
+          </span>
+        </div>
+      </div>
+    </body></html>`);
+
+    const assertTooltipOnTop = async (label) => {
+      await page.waitForTimeout(180);
+      const result = await page.evaluate(() => {
+        const tooltip = document.getElementById('active-tooltip');
+        const neighbor = document.getElementById('neighbor-info-button');
+        const tooltipRect = tooltip.getBoundingClientRect();
+        const neighborRect = neighbor.getBoundingClientRect();
+        const left = Math.max(tooltipRect.left, neighborRect.left);
+        const right = Math.min(tooltipRect.right, neighborRect.right);
+        const top = Math.max(tooltipRect.top, neighborRect.top);
+        const bottom = Math.min(tooltipRect.bottom, neighborRect.bottom);
+        const x = (left + right) / 2;
+        const y = (top + bottom) / 2;
+        const topmost = right > left && bottom > top ? document.elementFromPoint(x, y) : null;
+        return {
+          overlaps: right > left && bottom > top,
+          tooltipOnTop: Boolean(topmost && (topmost === tooltip || tooltip.contains(topmost))),
+          visible: getComputedStyle(tooltip).visibility === 'visible' && getComputedStyle(tooltip).opacity === '1',
+          insideViewport: tooltipRect.left >= 0
+            && tooltipRect.top >= 0
+            && tooltipRect.right <= window.innerWidth
+            && tooltipRect.bottom <= window.innerHeight
+        };
+      });
+      assert.equal(result.overlaps, true, `${label}: fixture must overlap the neighboring information control.`);
+      assert.equal(result.visible, true, `${label}: tooltip must be visible.`);
+      assert.equal(result.insideViewport, true, `${label}: tooltip must remain inside the viewport.`);
+      assert.equal(result.tooltipOnTop, true, `${label}: tooltip must paint above the neighboring information control.`);
+    };
+
+    for (const viewport of [
+      { width: 390, height: 844, label: 'mobile' },
+      { width: 768, height: 1024, label: 'tablet' },
+      { width: 1440, height: 900, label: 'desktop' }
+    ]) {
+      await page.setViewportSize(viewport);
+      const activeInfo = page.locator('#active-info');
+      const activeButton = page.locator('#active-info-button');
+
+      await activeButton.hover();
+      await assertTooltipOnTop(`${viewport.label} hover`);
+
+      await page.mouse.move(viewport.width - 1, viewport.height - 1);
+      await activeButton.focus();
+      await assertTooltipOnTop(`${viewport.label} keyboard focus`);
+
+      await page.evaluate(() => {
+        document.activeElement?.blur();
+        document.getElementById('active-info').classList.add('is-open');
+      });
+      await assertTooltipOnTop(`${viewport.label} open state`);
+      await activeInfo.evaluate((element) => element.classList.remove('is-open'));
+    }
+  } finally {
+    if (browser) await browser.close();
+    if (previousBrowserPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath;
+  }
 }
 
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
@@ -6541,7 +6638,7 @@ const localRefreshIntegrationTests = Object.freeze([
 async function main() {
   const testArguments = new Set(process.argv.slice(2));
   for (const argument of testArguments) {
-    if (argument !== '--local-refresh') throw new Error(`Unknown test_dashboard.js option: ${argument}`);
+    if (!['--local-refresh', '--browser'].includes(argument)) throw new Error(`Unknown test_dashboard.js option: ${argument}`);
   }
   const tests = [
     testUpdaterQuoteAndCryptoPatches,
@@ -6578,6 +6675,7 @@ async function main() {
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,
     testExpandedChartScrollsFullyIntoViewport,
+    ...(testArguments.has('--browser') ? [testTapeTooltipStacksAboveNeighboringInfoControlsInBrowser] : []),
     ...(testArguments.has('--local-refresh') ? localRefreshIntegrationTests : [])
   ];
 
@@ -6590,6 +6688,7 @@ async function main() {
       await runDashboardTest(test);
     }
     console.log('Dashboard fixture tests passed.');
+    if (testArguments.has('--browser')) console.log('Browser-visible dashboard tests passed.');
     if (testArguments.has('--local-refresh')) console.log('Local refresh integration tests passed.');
   } finally {
     cleanupTemporaryDirectories();
