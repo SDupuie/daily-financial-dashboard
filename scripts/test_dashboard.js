@@ -4819,29 +4819,32 @@ function testNewsMoreDisclosureRendering() {
   const { renderStoryCollection } = Function(`${source}\nreturn { renderStoryCollection };`)();
   const cards = Array.from({ length: 18 }, (_, index) => `<article data-story="${index + 1}">Story ${index + 1}</article>`);
 
-  const exactGeneral = renderStoryCollection(cards.slice(0, 9), 'story-grid', 9);
-  assert.doesNotMatch(exactGeneral, /data-news-more/, 'The disclosure must be absent when General News has no extras.');
-  assert.equal((exactGeneral.match(/data-story=/g) || []).length, 9);
+  const exactGeneral = renderStoryCollection(cards.slice(0, 9), 'story-grid', 9, 'general');
+  assert.equal(exactGeneral.actionHtml, '', 'The header button must be absent when General News has no extras.');
+  assert.doesNotMatch(exactGeneral.body, /data-news-more/, 'The controlled panel must be absent when General News has no extras.');
+  assert.equal((exactGeneral.body.match(/data-story=/g) || []).length, 9);
 
-  const expandedGeneral = renderStoryCollection(cards, 'story-grid', 9);
-  assert.match(expandedGeneral, /<details class="news-more" data-news-more>/);
-  assert.match(expandedGeneral, /More stories <span class="news-more-count">9<\/span>/);
-  assert.match(expandedGeneral, /<span class="news-more-expanded">Show fewer<\/span>/);
-  assert.match(expandedGeneral, /class="story-grid news-more-grid"/);
+  const expandedGeneral = renderStoryCollection(cards, 'story-grid', 9, 'general');
+  assert.match(expandedGeneral.actionHtml, /<button class="news-more-toggle"[^>]+data-news-more-toggle/);
+  assert.match(expandedGeneral.actionHtml, /aria-expanded="false" aria-controls="news-more-general"/);
+  assert.match(expandedGeneral.actionHtml, /More stories <span class="news-more-count">9<\/span>/);
+  assert.match(expandedGeneral.actionHtml, /<span class="news-more-expanded">Show fewer<\/span>/);
+  assert.match(expandedGeneral.body, /class="story-grid news-more-grid" id="news-more-general" data-news-more-panel hidden/);
   assert.ok(
-    expandedGeneral.indexOf('data-story="9"') < expandedGeneral.indexOf('data-news-more')
-      && expandedGeneral.indexOf('data-story="10"') > expandedGeneral.indexOf('data-news-more'),
-    'The first nine General cards must remain in the primary grid and the remainder must follow the disclosure.'
+    expandedGeneral.body.indexOf('data-story="9"') < expandedGeneral.body.indexOf('data-news-more-panel')
+      && expandedGeneral.body.indexOf('data-story="10"') > expandedGeneral.body.indexOf('data-news-more-panel'),
+    'The first nine General cards must remain in the primary grid and the remainder must follow in the controlled panel.'
   );
 
   const cryptoCards = cards.slice(0, 12).map((card) => card.replace('data-story', 'data-crypto-story'));
-  const expandedCrypto = renderStoryCollection(cryptoCards, 'crypto-notes', 6);
-  assert.match(expandedCrypto, /More stories <span class="news-more-count">6<\/span>/);
-  assert.match(expandedCrypto, /class="crypto-notes news-more-grid"/);
+  const expandedCrypto = renderStoryCollection(cryptoCards, 'crypto-notes', 6, 'crypto');
+  assert.match(expandedCrypto.actionHtml, /More stories <span class="news-more-count">6<\/span>/);
+  assert.match(expandedCrypto.actionHtml, /aria-controls="news-more-crypto"/);
+  assert.match(expandedCrypto.body, /class="crypto-notes news-more-grid" id="news-more-crypto"/);
   assert.ok(
-    expandedCrypto.indexOf('data-crypto-story="6"') < expandedCrypto.indexOf('data-news-more')
-      && expandedCrypto.indexOf('data-crypto-story="7"') > expandedCrypto.indexOf('data-news-more'),
-    'The first six Crypto cards must remain in the primary grid and the remainder must follow the disclosure.'
+    expandedCrypto.body.indexOf('data-crypto-story="6"') < expandedCrypto.body.indexOf('data-news-more-panel')
+      && expandedCrypto.body.indexOf('data-crypto-story="7"') > expandedCrypto.body.indexOf('data-news-more-panel'),
+    'The first six Crypto cards must remain in the primary grid and the remainder must follow in the controlled panel.'
   );
 }
 
@@ -5694,14 +5697,17 @@ function testTouchTooltipControls() {
   assert.deepEqual(highOnlyRuntime.renderableWeekAheadEvents(malformedImpactEvents), impactEvents);
   assert.deepEqual(highOnlyRuntime.visibleWeekAheadEvents(malformedImpactEvents), [impactEvents[0]]);
   assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /aria-pressed="false"/);
-  assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /Show medium impact/);
+  assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /class="week-impact-check"/);
+  assert.match(highOnlyRuntime.weekAheadImpactCueHtml(), /<span data-week-impact-cue-text>Medium impact<\/span>/);
+  assert.doesNotMatch(highOnlyRuntime.weekAheadImpactCueHtml(), /Show medium impact|Hide medium impact/);
   const allImpactRuntime = Function(
     'showMediumImpact',
     `${weekImpactSource}\nreturn { visibleWeekAheadEvents, weekAheadImpactCueHtml };`
   )(true);
   assert.deepEqual(allImpactRuntime.visibleWeekAheadEvents(malformedImpactEvents), impactEvents);
   assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /aria-pressed="true"/);
-  assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /Hide medium impact/);
+  assert.match(allImpactRuntime.weekAheadImpactCueHtml(), /<span data-week-impact-cue-text>Medium impact<\/span>/);
+  assert.match(html, /\.week-impact-cue\[aria-pressed="true"\] \.week-impact-check \{ display: block; \}/);
   assert.match(html, /daily-financial-dashboard:week-medium-impact:v1/);
   assert.match(html, /data-week-impact-toggle/);
 
@@ -6472,19 +6478,37 @@ async function testNewsMoreDisclosureInBrowser() {
     `<article class="crypto-note editorial-card surface card" data-crypto-story="${index + 1}">Crypto ${index + 1}</article>`
   ));
   const exactCards = storyCards.slice(0, 9).map((card) => card.replace('data-general-story', 'data-exact-story'));
+  const generalCollection = renderStoryCollection(storyCards, 'story-grid', 9, 'general-fixture');
+  const cryptoCollection = renderStoryCollection(cryptoCards, 'crypto-notes', 6, 'crypto-fixture');
+  const exactCollection = renderStoryCollection(exactCards, 'story-grid', 9, 'exact-fixture');
   let browser;
   try {
     browser = await chromium.launch({ executablePath: chromium.executablePath(), headless: true });
     const page = await browser.newPage();
     await page.setContent(`<!doctype html><html><head><style>${styles}</style></head><body>
       <main style="max-width:1180px;margin:32px auto;padding:0 20px">
-        <section id="general-fixture">${renderStoryCollection(storyCards, 'story-grid', 9)}</section>
-        <section id="crypto-fixture" style="margin-top:32px">${renderStoryCollection(cryptoCards, 'crypto-notes', 6)}</section>
-        <section id="exact-fixture" style="margin-top:32px">${renderStoryCollection(exactCards, 'story-grid', 9)}</section>
+        <section id="general-fixture" class="section section-news">
+          <div class="section-head"><div><div class="section-label">News Flow</div><h2 class="section-title">What’s Moving Today</h2></div>${generalCollection.actionHtml}</div>
+          ${generalCollection.body}
+        </section>
+        <section id="crypto-fixture" class="section section-crypto">
+          <div class="section-head"><div><div class="section-label">Digital Assets</div><h2 class="section-title">Crypto</h2></div>${cryptoCollection.actionHtml}</div>
+          <div class="crypto-grid">${cryptoCollection.body}</div>
+        </section>
+        <section id="exact-fixture" class="section section-news">
+          <div class="section-head"><div><div class="section-label">Exact</div><h2 class="section-title">No Extras</h2></div>${exactCollection.actionHtml}</div>
+          ${exactCollection.body}
+        </section>
       </main>
+      <script>${source}
+        document.addEventListener('click', (event) => {
+          const button = event.target.closest('[data-news-more-toggle]');
+          if (button) toggleNewsMore(button);
+        });
+      <\/script>
     </body></html>`);
 
-    assert.equal(await page.locator('#exact-fixture [data-news-more]').count(), 0, 'A section without extras must not expose a disclosure.');
+    assert.equal(await page.locator('#exact-fixture [data-news-more-toggle]').count(), 0, 'A section without extras must not expose a header button.');
 
     for (const viewport of [
       { width: 390, height: 844, columns: 1, label: 'mobile' },
@@ -6492,36 +6516,59 @@ async function testNewsMoreDisclosureInBrowser() {
       { width: 1440, height: 900, columns: 3, label: 'desktop' }
     ]) {
       await page.setViewportSize(viewport);
-      const generalDetails = page.locator('#general-fixture [data-news-more]');
-      const generalSummary = generalDetails.locator('summary');
-      const cryptoDetails = page.locator('#crypto-fixture [data-news-more]');
-      const cryptoSummary = cryptoDetails.locator('summary');
+      const generalButton = page.locator('#general-fixture [data-news-more-toggle]');
+      const generalPanel = page.locator('#general-fixture [data-news-more-panel]');
+      const cryptoButton = page.locator('#crypto-fixture [data-news-more-toggle]');
+      const cryptoPanel = page.locator('#crypto-fixture [data-news-more-panel]');
 
-      assert.equal(await generalDetails.evaluate((element) => element.open), false, `${viewport.label}: General extras must start collapsed.`);
+      assert.equal(await generalButton.getAttribute('aria-expanded'), 'false', `${viewport.label}: General extras must start collapsed.`);
+      assert.equal(await generalPanel.getAttribute('hidden'), '', `${viewport.label}: the collapsed General panel must be hidden.`);
       assert.equal(await page.locator('#general-fixture [data-general-story]:visible').count(), 9, `${viewport.label}: nine General cards must be initially visible.`);
       assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 6, `${viewport.label}: six Crypto cards must be initially visible.`);
       assert.equal(await page.locator('#general-fixture .story-grid').first().evaluate((element) => (
         getComputedStyle(element).gridTemplateColumns.split(' ').length
       )), viewport.columns, `${viewport.label}: the primary General grid must retain its responsive column count.`);
-      const alignment = await page.locator('#general-fixture').evaluate((section) => {
-        const gridRect = section.querySelector('.story-grid').getBoundingClientRect();
-        const summaryRect = section.querySelector('summary').getBoundingClientRect();
-        return Math.abs(gridRect.right - summaryRect.right);
+      const headerLayout = await page.locator('#general-fixture').evaluate((section) => {
+        const headRect = section.querySelector('.section-head').getBoundingClientRect();
+        const titleRect = section.querySelector('.section-head > div:first-child').getBoundingClientRect();
+        const buttonRect = section.querySelector('[data-news-more-toggle]').getBoundingClientRect();
+        return {
+          rightOffset: Math.abs(headRect.right - buttonRect.right),
+          bottomOffset: Math.abs(titleRect.bottom - buttonRect.bottom),
+          overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
+        };
       });
-      assert.ok(alignment <= 1, `${viewport.label}: the More stories disclosure must align to the right edge.`);
+      assert.ok(headerLayout.rightOffset <= 1, `${viewport.label}: the More stories button must align to the header's right edge.`);
+      assert.ok(headerLayout.bottomOffset <= 1, `${viewport.label}: the More stories button must remain on the title row.`);
+      assert.ok(headerLayout.overflow <= 0, `${viewport.label}: the header button must not cause horizontal overflow.`);
 
-      await generalSummary.click();
-      assert.equal(await generalDetails.evaluate((element) => element.open), true, `${viewport.label}: pointer activation must expand General extras.`);
+      await generalButton.click();
+      assert.equal(await generalButton.getAttribute('aria-expanded'), 'true', `${viewport.label}: pointer activation must expand General extras.`);
+      assert.equal(await generalPanel.getAttribute('hidden'), null, `${viewport.label}: the expanded General panel must be exposed.`);
       assert.equal(await page.locator('#general-fixture [data-general-story]:visible').count(), 18, `${viewport.label}: all eighteen General cards must be visible after expansion.`);
-      assert.equal(await generalSummary.getByText('Show fewer').isVisible(), true, `${viewport.label}: the expanded label must be visible.`);
-      await generalSummary.press('Enter');
-      assert.equal(await generalDetails.evaluate((element) => element.open), false, `${viewport.label}: keyboard activation must collapse General extras.`);
+      assert.equal(await generalButton.getByText('Show fewer').isVisible(), true, `${viewport.label}: the expanded label must be visible.`);
+      const generalGap = await page.locator('#general-fixture').evaluate((section) => {
+        const primaryRect = section.querySelector('.story-grid').getBoundingClientRect();
+        const extrasRect = section.querySelector('.news-more-grid').getBoundingClientRect();
+        return extrasRect.top - primaryRect.bottom;
+      });
+      await generalButton.press('Enter');
+      assert.equal(await generalButton.getAttribute('aria-expanded'), 'false', `${viewport.label}: keyboard activation must collapse General extras.`);
 
-      await cryptoSummary.click();
-      assert.equal(await cryptoDetails.evaluate((element) => element.open), true, `${viewport.label}: Crypto extras must expand independently.`);
+      await cryptoButton.click();
+      assert.equal(await cryptoButton.getAttribute('aria-expanded'), 'true', `${viewport.label}: Crypto extras must expand independently.`);
       assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 12, `${viewport.label}: all twelve Crypto cards must be visible after expansion.`);
-      await cryptoSummary.press('Enter');
-      assert.equal(await cryptoDetails.evaluate((element) => element.open), false, `${viewport.label}: Crypto extras must collapse with the keyboard.`);
+      const cryptoGap = await page.locator('#crypto-fixture').evaluate((section) => {
+        const primaryRect = section.querySelector('.crypto-notes').getBoundingClientRect();
+        const extrasRect = section.querySelector('.news-more-grid').getBoundingClientRect();
+        return extrasRect.top - primaryRect.bottom;
+      });
+      assert.ok(
+        Math.abs(generalGap - cryptoGap) <= 1,
+        `${viewport.label}: General and Crypto secondary-card spacing must match.`
+      );
+      await cryptoButton.press('Enter');
+      assert.equal(await cryptoButton.getAttribute('aria-expanded'), 'false', `${viewport.label}: Crypto extras must collapse with the keyboard.`);
     }
   } finally {
     if (browser) await browser.close();
