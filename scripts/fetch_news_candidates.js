@@ -28,19 +28,23 @@ const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'news_candidates.json');
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
-const MSN_CONTENT_DETAIL_URL = 'https://assets.msn.com/content/view/v2/Detail/en-us/';
-const MSN_REUTERS_LEGAL_NAME = 'Reuters News & Media Inc.';
-const MSN_REUTERS_CATEGORIES = new Set(['money', 'news']);
+const REUTERS_NEWS_SITEMAP_INDEX_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml';
+const REUTERS_NEWS_SITEMAP_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_EXCERPT_LIMIT = 5000;
 const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
+const EDITORIAL_CANDIDATE_LIMIT = ARTICLE_REVIEW_CANDIDATE_LIMIT;
+const REUTERS_SITEMAP_CONCURRENCY = 8;
+const REUTERS_SITEMAP_MAX_SLICES = 100;
+const REUTERS_SITEMAP_BODY_LIMIT = 2_000_000;
 const ALPHA_VANTAGE_PACING_MS = 1250;
 const NEWS_HTTP_MAX_HEADER_SIZE = 65536;
 const NEWS_HTTP_MAX_REDIRECTS = 5;
 const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
 const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
-const PROVENANCE_PRIORITY = Object.freeze({ 'msn-reuters': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const REUTERS_UNSUPPORTED_PATHS = new Set(['ar', 'de', 'default', 'es', 'fr', 'it', 'ja', 'pt', 'ru', 'zh']);
 const FIXED_ZONE_OFFSETS = Object.freeze({
   UT: 0,
   UTC: 0,
@@ -166,6 +170,10 @@ function responseHeaders(headers) {
   };
 }
 
+function sameOriginRedirect(nextUrl, currentUrl) {
+  return nextUrl.origin === currentUrl.origin;
+}
+
 function decodeResponseBody(buffer, encoding, maxDecodedBytes) {
   const normalized = String(encoding || '').toLowerCase().split(',')[0].trim();
   if (!normalized || normalized === 'identity') {
@@ -190,7 +198,7 @@ function decodeResponseBody(buffer, encoding, maxDecodedBytes) {
   return Promise.resolve(buffer);
 }
 
-function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, maxDecodedBytes }, redirectCount) {
+function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, maxDecodedBytes, allowRedirect }, redirectCount) {
   const currentUrl = new URL(String(url));
   const client = currentUrl.protocol === 'https:' ? https : currentUrl.protocol === 'http:' ? http : null;
   if (!client) throw new Error(`Unsupported protocol ${currentUrl.protocol}`);
@@ -226,7 +234,8 @@ function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, 
           headers: nextHeaders,
           deadline,
           maxBodyBytes,
-          maxDecodedBytes
+          maxDecodedBytes,
+          allowRedirect
         }, redirectCount + 1);
       } catch (error) {
         fail(error);
@@ -262,6 +271,10 @@ function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, 
                 return;
               }
               const nextUrl = new URL(location, currentUrl);
+              if (nextUrl.username || nextUrl.password || !allowRedirect(nextUrl, currentUrl)) {
+                fail(new Error('Redirect target is outside the request policy.'));
+                return;
+              }
               const nextHeaders = { ...requestHeaders };
               if (nextUrl.origin !== currentUrl.origin) {
                 for (const key of Object.keys(nextHeaders)) {
@@ -325,7 +338,8 @@ async function fetchResponse(url, {
   timeoutMs,
   headers = {},
   maxBodyBytes = NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES,
-  maxDecodedBytes = NEWS_HTTP_MAX_DECODED_BODY_BYTES
+  maxDecodedBytes = NEWS_HTTP_MAX_DECODED_BODY_BYTES,
+  allowRedirect = sameOriginRedirect
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error('Request timeout must be a positive number');
@@ -333,16 +347,20 @@ async function fetchResponse(url, {
   if (!Number.isFinite(maxBodyBytes) || maxBodyBytes <= 0 || !Number.isFinite(maxDecodedBytes) || maxDecodedBytes <= 0) {
     throw new Error('HTTP body limits must be positive numbers');
   }
+  if (typeof allowRedirect !== 'function') {
+    throw new Error('HTTP redirect policy must be a function');
+  }
   return requestNewsResponse(url, {
     timeoutMs,
     headers,
     deadline: Date.now() + timeoutMs,
     maxBodyBytes,
-    maxDecodedBytes
+    maxDecodedBytes,
+    allowRedirect
   }, 0);
 }
 
-async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, env = process.env }) {
+async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, env = process.env, fetchPage = fetchResponse }) {
   const apiKey = String(env.ALPHA_VANTAGE_API_KEY || '').trim();
   if (!apiKey) throw new Error('ALPHA_VANTAGE_API_KEY is not configured.');
   const url = new URL(ALPHA_VANTAGE_URL);
@@ -352,10 +370,11 @@ async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, en
   url.searchParams.set('sort', 'LATEST');
   url.searchParams.set('limit', '1000');
   url.searchParams.set('apikey', apiKey);
-  const response = await fetchResponse(url, { timeoutMs, headers: { Accept: 'application/json' } });
+  const response = await fetchPage(url, { timeoutMs, headers: { Accept: 'application/json' } });
   const payload = await response.json();
   if (payload?.Information || payload?.Note || payload?.['Error Message']) {
-    throw new Error(payload.Information || payload.Note || payload['Error Message']);
+    const message = String(payload.Information || payload.Note || payload['Error Message']);
+    throw new Error(message.replaceAll(apiKey, '[redacted]'));
   }
   if (!Array.isArray(payload?.feed)) throw new Error('Alpha Vantage response must contain feed[].');
   return { items: payload.feed.map((item) => ({
@@ -417,116 +436,12 @@ async function fetchApPublic(acquisitionPath, { timeoutMs }) {
   return { items };
 }
 
-function msnReutersProvider(provider, providerId) {
-  return provider?.id === providerId
-    && provider?.name === 'Reuters';
-}
-
-function msnReutersReaderUrl(value, contentId = '') {
-  try {
-    const url = new URL(value);
-    const expectedSuffix = contentId ? `/ar-${contentId}` : '';
-    if (url.protocol !== 'https:'
-      || !['msn.com', 'www.msn.com'].includes(url.hostname.toLowerCase())
-      || !/\/ar-AA[A-Za-z0-9]+$/.test(url.pathname)
-      || (expectedSuffix && !url.pathname.endsWith(expectedSuffix))) return '';
-    url.searchParams.delete('ocid');
-    return canonicalStoryUrl(url.toString());
-  } catch (_error) {
-    return '';
-  }
-}
-
-function normalizeMsnReutersItem(card, detail, acquisitionPath) {
-  if (card?.type !== 'article'
-    || !MSN_REUTERS_CATEGORIES.has(card?.category)
-    || !msnReutersProvider(card?.provider, acquisitionPath.providerId)
-    || detail?.id !== card.id
-    || detail?.type !== 'article'
-    || !msnReutersProvider(detail?.provider, acquisitionPath.providerId)
-    || detail?.provider?.companyLegalName !== MSN_REUTERS_LEGAL_NAME
-    || !isIsoDateTime(card?.publishedDateTime)
-    || card.publishedDateTime !== detail?.publishedDateTime
-    || !/^tag:reuters\.com,\d{4}:newsml_[A-Z0-9]+(?::\d+)?$/.test(String(detail?.sourceId || ''))) return null;
-  const url = msnReutersReaderUrl(card.url, card.id);
-  const title = plainText(detail.title || card.title);
-  const cardTitle = plainText(card.title);
-  const articleText = plainText(detail.body);
-  if (!url || !title || !cardTitle || !titleEquivalent(title, cardTitle) || articleText.length < 200) return null;
-  return {
-    title,
-    url,
-    publishedAt: detail.publishedDateTime,
-    publishedAtVerified: true,
-    summary: detail.abstract,
-    providerSourceName: 'Reuters',
-    providerVerified: true,
-    publisherStoryId: detail.sourceId,
-    article: {
-      accessible: true,
-      finalUrl: url,
-      pageTitle: title,
-      description: plainText(detail.abstract),
-      excerpt: articleText.slice(0, ARTICLE_EXCERPT_LIMIT)
-    }
-  };
-}
-
-async function fetchMsnReuters(acquisitionPath, { eligibleDates, timeoutMs }) {
-  const url = new URL(acquisitionPath.feedUrl);
-  url.searchParams.set('$top', String(acquisitionPath.limit || 100));
-  url.searchParams.set('responseSchema', 'CardView');
-  url.searchParams.set('market', 'en-us');
-  url.searchParams.set('contentType', 'article');
-  const response = await fetchResponse(url, {
-    timeoutMs,
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
-    }
-  });
-  const payload = await response.json();
-  const cards = payload?.value?.[0]?.subCards;
-  if (!Array.isArray(cards)) throw new Error('MSN Reuters response must contain value[0].subCards[].');
-  if (eligibleDates instanceof Set && !eligibleDates.size) return { items: [] };
-  // Reject stale feed cards before the per-article detail requests; otherwise a
-  // stale batch can consume one network timeout for every provider card.
-  const providerCards = cards.filter((card) => card?.type === 'article'
-    && MSN_REUTERS_CATEGORIES.has(card?.category)
-    && msnReutersProvider(card?.provider, acquisitionPath.providerId)
-    && isIsoDateTime(card?.publishedDateTime));
-  const eligibleCards = eligibleDates instanceof Set
-    ? providerCards.filter((card) => eligibleDates.has(chicagoIsoDate(new Date(card.publishedDateTime))))
-    : providerCards;
-  if (providerCards.length && !eligibleCards.length) return { items: [] };
-  const items = Array(eligibleCards.length).fill(null);
-  const detailUrlBase = acquisitionPath.detailUrl || MSN_CONTENT_DETAIL_URL;
-  await mapConcurrent(eligibleCards.map((card, index) => ({ card, index })), ARTICLE_CONCURRENCY, async ({ card, index }) => {
-    try {
-      const detailResponse = await fetchResponse(`${detailUrlBase}${encodeURIComponent(card.id)}`, {
-        timeoutMs,
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
-        }
-      });
-      const item = normalizeMsnReutersItem(card, await detailResponse.json(), acquisitionPath);
-      if (item) items[index] = item;
-    } catch (_error) {
-      // One malformed or unavailable syndication record must not discard the rest of the Reuters batch.
-    }
-  });
-  const validatedItems = items.filter(Boolean);
-  if (!validatedItems.length) throw new Error('MSN Reuters response contains no validated Reuters article items.');
-  return { items: validatedItems };
-}
-
 async function fetchAcquisitionPath(acquisitionPath, options) {
   if (acquisitionPath.provider === 'alpha-vantage') return fetchAlphaVantage(acquisitionPath, options);
   if (acquisitionPath.provider === 'stockfit') return fetchStockfit(acquisitionPath, options);
   if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
   if (acquisitionPath.provider === 'ap-public') return fetchApPublic(acquisitionPath, options);
-  if (acquisitionPath.provider === 'msn-reuters') return fetchMsnReuters(acquisitionPath, options);
+  if (acquisitionPath.provider === 'reuters-public') return fetchReutersPublic(acquisitionPath, options);
   throw new Error(`Unsupported News provider ${acquisitionPath.provider}.`);
 }
 
@@ -734,6 +649,137 @@ function parseApNewsSitemap(xml) {
     && item.publishedAt);
 }
 
+function reutersSitemapPageUrl(value) {
+  try {
+    const sourceUrl = new URL(decodeHtml(value));
+    if (sourceUrl.protocol !== 'https:'
+      || sourceUrl.hostname !== 'www.reuters.com'
+      || sourceUrl.pathname !== '/arc/outboundfeeds/news-sitemap/'
+      || sourceUrl.searchParams.get('outputType') !== 'xml') return '';
+    const rawOffset = sourceUrl.searchParams.get('from');
+    const offset = rawOffset === null ? 0 : Number(rawOffset);
+    if (!Number.isInteger(offset)
+      || offset < 0
+      || offset > (REUTERS_SITEMAP_MAX_SLICES - 1) * 100
+      || offset % 100 !== 0) return '';
+    const target = new URL(REUTERS_NEWS_SITEMAP_URL);
+    target.searchParams.set('size', '100');
+    if (offset) target.searchParams.set('from', String(offset));
+    return target.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function parseReutersNewsSitemapIndex(xml) {
+  if (typeof xml !== 'string'
+    || !/^\s*(?:<\?xml\b[^?]*\?>\s*)?<sitemapindex\b[\s\S]*<\/sitemapindex>\s*$/i.test(xml)) {
+    throw new Error('Reuters News sitemap index is not a sitemapindex document.');
+  }
+  const openingCount = [...xml.matchAll(/<sitemap\b[^>]*>/gi)].length;
+  const closingCount = [...xml.matchAll(/<\/sitemap\s*>/gi)].length;
+  const blocks = [...xml.matchAll(/<sitemap\b[^>]*>([\s\S]*?)<\/sitemap\s*>/gi)].map((match) => match[1]);
+  if (!blocks.length || blocks.length !== openingCount || blocks.length !== closingCount) {
+    throw new Error('Reuters News sitemapindex contains malformed sitemap entries.');
+  }
+  if (blocks.length > REUTERS_SITEMAP_MAX_SLICES) {
+    throw new Error(`Reuters News sitemap index exceeds ${REUTERS_SITEMAP_MAX_SLICES} slices.`);
+  }
+  const urls = blocks.map((block) => reutersSitemapPageUrl(xmlValue(block, 'loc')));
+  if (!urls.length || urls.some((url) => !url)) {
+    throw new Error('Reuters News sitemap index contains an invalid page URL.');
+  }
+  const uniqueUrls = [...new Set(urls)];
+  const offsets = uniqueUrls.map((url) => Number(new URL(url).searchParams.get('from') || 0)).sort((left, right) => left - right);
+  if (uniqueUrls.length !== urls.length
+    || offsets.some((offset, index) => offset !== index * 100)) {
+    throw new Error('Reuters News sitemap index contains duplicate or non-contiguous page offsets.');
+  }
+  return [...uniqueUrls].sort((left, right) => Number(new URL(left).searchParams.get('from') || 0)
+    - Number(new URL(right).searchParams.get('from') || 0));
+}
+
+function englishReutersArticleUrl(value) {
+  const url = canonicalStoryUrl(value);
+  if (!url || sourceForUrl(url)?.id !== 'reuters' || !articlePathUrl(url)) return '';
+  const firstPath = new URL(url).pathname.split('/').filter(Boolean)[0]?.toLowerCase() || '';
+  return REUTERS_UNSUPPORTED_PATHS.has(firstPath) ? '' : url;
+}
+
+function parseReutersNewsSitemap(xml) {
+  if (typeof xml !== 'string'
+    || !/^\s*(?:<\?xml\b[^?]*\?>\s*)?<urlset\b[\s\S]*<\/urlset>\s*$/i.test(xml)) {
+    throw new Error('Reuters News sitemap page is not a urlset document.');
+  }
+  const openingCount = [...xml.matchAll(/<url\b[^>]*>/gi)].length;
+  const closingCount = [...xml.matchAll(/<\/url\s*>/gi)].length;
+  const blocks = [...xml.matchAll(/<url\b[^>]*>([\s\S]*?)<\/url\s*>/gi)].map((match) => match[1]);
+  if (!blocks.length || blocks.length !== openingCount || blocks.length !== closingCount) {
+    throw new Error('Reuters News sitemap urlset contains malformed or no URL entries.');
+  }
+  const entries = blocks.map((block) => {
+    const url = englishReutersArticleUrl(xmlValue(block, 'loc'));
+    const title = xmlValue(block, 'news:title');
+    const publicationName = xmlValue(block, 'news:name');
+    const language = xmlValue(block, 'news:language');
+    const publishedAt = xmlValue(block, 'news:publication_date');
+    return { title, url, publishedAt, language, publicationName, providerSourceName: 'Reuters', publishedAtVerified: true };
+  }).filter((entry) => entry.url
+    && entry.title
+    && entry.publicationName === 'Reuters'
+    && entry.language === 'en'
+    && isIsoDateTime(entry.publishedAt));
+  if (!entries.length) {
+    throw new Error('Reuters News sitemap urlset contains no valid English article entries.');
+  }
+  return entries;
+}
+
+async function fetchReutersPublic(acquisitionPath, { timeoutMs, fetchPage = fetchResponse } = {}) {
+  if (acquisitionPath?.feedUrl !== REUTERS_NEWS_SITEMAP_INDEX_URL) {
+    throw new Error('Reuters News sitemap acquisition requires its fixed public index URL.');
+  }
+  const headers = {
+    Accept: 'application/xml,text/xml;q=0.9,*/*;q=0.5',
+    'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+  };
+  const indexResponse = await fetchPage(acquisitionPath.feedUrl, {
+    timeoutMs,
+    headers,
+    maxBodyBytes: REUTERS_SITEMAP_BODY_LIMIT,
+    maxDecodedBytes: REUTERS_SITEMAP_BODY_LIMIT,
+    allowRedirect: (nextUrl) => nextUrl.toString() === REUTERS_NEWS_SITEMAP_INDEX_URL
+  });
+  if (indexResponse.url && new URL(indexResponse.url).toString() !== REUTERS_NEWS_SITEMAP_INDEX_URL) {
+    throw new Error('Reuters News sitemap index redirected outside its fixed endpoint.');
+  }
+  const pageUrls = parseReutersNewsSitemapIndex(await indexResponse.text());
+  const pages = await mapConcurrent(pageUrls, REUTERS_SITEMAP_CONCURRENCY, async (url) => {
+    try {
+      const response = await fetchPage(url, {
+        timeoutMs,
+        headers,
+        maxBodyBytes: REUTERS_SITEMAP_BODY_LIMIT,
+        maxDecodedBytes: REUTERS_SITEMAP_BODY_LIMIT,
+        allowRedirect: (nextUrl) => nextUrl.toString() === url
+      });
+      if (response.url && new URL(response.url).toString() !== url) {
+        throw new Error('Reuters News sitemap page redirected outside its indexed endpoint.');
+      }
+      return { entries: parseReutersNewsSitemap(await response.text()), error: null };
+    } catch (error) {
+      return { entries: [], error: String(error?.message || error) };
+    }
+  });
+  const pageErrors = pages.map((page, index) => page.error ? { url: pageUrls[index], error: page.error } : null).filter(Boolean);
+  return {
+    items: pages.flatMap((page) => page.entries),
+    pageCount: pageUrls.length,
+    failedPageCount: pageErrors.length,
+    ...(pageErrors.length ? { error: `Reuters News sitemap partial: ${pageErrors.length} of ${pageUrls.length} slices failed.` } : {})
+  };
+}
+
 function sourceForUrl(value) {
   let hostname;
   try {
@@ -746,11 +792,16 @@ function sourceForUrl(value) {
   )) || null;
 }
 
+function articleRedirectAllowed(candidateUrl, nextUrl) {
+  const source = sourceForUrl(candidateUrl);
+  return Boolean(source
+    && nextUrl.protocol === 'https:'
+    && sourceForUrl(nextUrl.toString())?.id === source.id);
+}
+
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
-  const source = acquisitionPath.provider === 'msn-reuters' && item?.providerVerified === true
-    ? APPROVED_NEWS_SOURCES.find((entry) => entry.id === 'reuters')
-    : sourceForUrl(url);
+  const source = sourceForUrl(url);
   // Normalize before the Chicago-date freshness check; malformed structured
   // provider timestamps must be rejected instead of rolling into an eligible day.
   const publishedAt = parseNewsTimestamp(item?.publishedAt);
@@ -764,15 +815,14 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     url,
     publishedOn,
     publishedAt: publishedAt.toISOString(),
-    dateSource: 'provider_published',
-    ...(item.publishedAtVerified === true ? { publishedAtVerified: true } : {}),
+    dateSource: source.id === 'yahoo-finance' ? 'hosted_syndication' : 'provider_published',
+    ...(item.publishedAtVerified === true && source.id !== 'yahoo-finance' ? { publishedAtVerified: true } : {}),
     sourceId: source.id,
     sourceLabel: source.displayName,
     sourceDomain: new URL(url).hostname.toLowerCase(),
     provider: acquisitionPath.provider,
     ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
     ...(plainText(item.providerSourceName) ? { providerSourceName: plainText(item.providerSourceName) } : {}),
-    ...(item.publisherStoryId ? { publisherStoryId: item.publisherStoryId } : {}),
     ...(item.article ? { article: item.article } : {}),
     origin: 'downloaded',
     pool: acquisitionPath.pool,
@@ -807,92 +857,6 @@ function firstValidDate(values) {
   return null;
 }
 
-function canonicalLink(html) {
-  const links = [...String(html).matchAll(/<link\b[^>]*>/gi)].map((match) => match[0]);
-  const canonical = links.find((tag) => /\brel=["'][^"']*canonical[^"']*["']/i.test(tag));
-  return decodeHtml(canonical?.match(/\bhref=["']([^"']+)["']/i)?.[1] || '');
-}
-
-function explicitPublisherUrls(html) {
-  const urls = [];
-  for (const match of String(html).matchAll(/["'](?:isBasedOn(?:Url)?|originalUrl|sourceUrl)["']\s*:\s*["'](https:\/\/[^"']+)["']/gi)) {
-    urls.push(decodeHtml(match[1].replaceAll('\\/', '/')));
-  }
-  const sourceMeta = metaContent(html, 'source');
-  if (/^https:\/\//i.test(sourceMeta)) urls.push(sourceMeta);
-  return [...new Set(urls.map(canonicalStoryUrl).filter(Boolean))];
-}
-
-function jsonLdScripts(html) {
-  return [...String(html).matchAll(/<script\b[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
-    .map((match) => match[1].trim())
-    .filter(Boolean);
-}
-
-function walkJson(value, visit) {
-  if (!value || typeof value !== 'object') return;
-  visit(value);
-  if (Array.isArray(value)) {
-    for (const item of value) walkJson(item, visit);
-    return;
-  }
-  for (const item of Object.values(value)) walkJson(item, visit);
-}
-
-function structuredNewsArticles(html) {
-  const articles = [];
-  for (const script of jsonLdScripts(html)) {
-    try {
-      const parsed = JSON.parse(script);
-      walkJson(parsed, (node) => {
-        const types = Array.isArray(node['@type']) ? node['@type'] : [node['@type']];
-        if (!types.includes('NewsArticle')) return;
-        const linkedUrls = structuredArticleLinkedUrls(node);
-        const providers = Array.isArray(node.provider) ? node.provider : [node.provider];
-        for (const provider of providers) {
-          if (!provider || typeof provider !== 'object' || Array.isArray(provider)) continue;
-          articles.push({
-            title: plainText(node.headline || node.name),
-            publishedAt: firstValidDate([node.datePublished]),
-            providerName: plainText(provider.name),
-            providerUrl: canonicalStoryUrl(provider.url),
-            linkedUrls
-          });
-        }
-      });
-    } catch (_error) {
-      // Ignore malformed page metadata; normal meta tags still provide fallback context.
-    }
-  }
-  return articles;
-}
-
-function structuredArticleLinkedUrls(node) {
-  const urls = [];
-  const addUrl = (value) => {
-    const url = canonicalStoryUrl(value);
-    if (url) urls.push(url);
-  };
-  const addUrlValue = (value) => {
-    if (Array.isArray(value)) {
-      for (const item of value) addUrlValue(item);
-      return;
-    }
-    if (typeof value === 'string') {
-      addUrl(value);
-      return;
-    }
-    if (value && typeof value === 'object') {
-      addUrl(value.url);
-      addUrl(value['@id']);
-    }
-  };
-  addUrlValue(node.url);
-  addUrlValue(node.mainEntityOfPage);
-  addUrlValue(node['@id']);
-  return [...new Set(urls)];
-}
-
 function extractArticleMetadata(html) {
   const jsonDates = [...String(html).matchAll(/["']datePublished["']\s*:\s*["']([^"']+)["']/gi)].map((match) => match[1]);
   const timeDates = [...String(html).matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)].map((match) => match[1]);
@@ -905,18 +869,12 @@ function extractArticleMetadata(html) {
   const paragraphs = [...String(html).matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
     .map((match) => plainText(match[1]))
     .filter((value) => value.length >= 40);
-  const publisherName = plainText(String(html).match(/["']publisher["']\s*:\s*\{[\s\S]{0,500}?["']name["']\s*:\s*["']([^"']+)["']/i)?.[1]);
   const excerpt = paragraphs.join(' ').slice(0, ARTICLE_EXCERPT_LIMIT);
   return {
     pageTitle: metaContent(html, 'og:title') || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),
     description: metaContent(html, 'description') || metaContent(html, 'og:description'),
     excerpt,
-    publishedAt,
-    canonicalUrl: canonicalStoryUrl(canonicalLink(html)),
-    ogUrl: canonicalStoryUrl(metaContent(html, 'og:url')),
-    explicitPublisherUrls: explicitPublisherUrls(html),
-    publisherName,
-    structuredNewsArticles: structuredNewsArticles(html)
+    publishedAt
   };
 }
 
@@ -924,6 +882,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
   const response = await fetchResponse(candidate.url, {
     timeoutMs,
     maxDecodedBytes: ARTICLE_BYTE_LIMIT,
+    allowRedirect: (nextUrl) => articleRedirectAllowed(candidate.url, nextUrl),
     headers: {
       Accept: 'text/html,application/xhtml+xml',
       'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
@@ -950,12 +909,7 @@ function priorCandidate(item, pool, eligibleDates) {
   const title = String(item?.title || '').trim();
   const publishedOn = String(item?.publishedOn || '');
   const sourceLabel = String(item?.sourceLabel || '').trim();
-  // MSN is a validated syndication host, not an approved publisher domain. A
-  // previously published Reuters card may re-enter only through its exact MSN
-  // article route and preserved updater-owned Reuters label.
-  const approvedPriorSource = sourceForUrl(url)
-    || (sourceLabel === 'Reuters' && msnReutersReaderUrl(url));
-  if (!url || !approvedPriorSource || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
+  if (!url || !sourceForUrl(url) || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   try {
     if (new URL(url).protocol !== 'https:') return null;
   } catch (_error) {
@@ -966,9 +920,8 @@ function priorCandidate(item, pool, eligibleDates) {
     url,
     publishedOn,
     sourceLabel,
-    ...(item.publishedAt ? { publishedAt: item.publishedAt } : {}),
+    ...(isIsoDateTime(item?.publishedAt) ? { publishedAt: item.publishedAt } : {}),
     dateSource: 'prior_validated_card',
-    publishedAtVerified: true,
     origin: 'prior_card',
     priorCard: true,
     priorCollection: pool,
@@ -1012,7 +965,6 @@ function deduplicateCandidates(candidates) {
   for (const candidate of candidates) {
     const titleKey = normalizeStoryTitle(candidate.title);
     const index = selected.findIndex((item) => item.url === candidate.url
-      || (candidate.publisherStoryId && candidate.publisherStoryId === item.publisherStoryId)
       || (titleKey && normalizeStoryTitle(item.title) === titleKey));
     if (index < 0) {
       selected.push(candidate);
@@ -1040,20 +992,6 @@ function articlePathUrl(value) {
   }
 }
 
-function titleEquivalent(left, right) {
-  const leftWords = new Set(normalizeStoryTitle(left).split(' ').filter((word) => word.length > 2));
-  const rightWords = new Set(normalizeStoryTitle(right).split(' ').filter((word) => word.length > 2));
-  if (!leftWords.size || !rightWords.size) return false;
-  let shared = 0;
-  for (const word of leftWords) if (rightWords.has(word)) shared += 1;
-  return shared / Math.min(leftWords.size, rightWords.size) >= 0.6;
-}
-
-function titleExactlyMatches(left, right) {
-  const leftTitle = normalizeStoryTitle(left);
-  return Boolean(leftTitle && leftTitle === normalizeStoryTitle(right));
-}
-
 function articleRecord(page) {
   return {
     accessible: true,
@@ -1064,47 +1002,7 @@ function articleRecord(page) {
   };
 }
 
-function yahooStructuredReutersSource(hostedPage, candidate, eligibleDates) {
-  const pageTitle = plainText(hostedPage?.pageTitle);
-  if (!pageTitle || !titleExactlyMatches(candidate.title, pageTitle)) return null;
-  const finalUrl = canonicalStoryUrl(hostedPage?.finalUrl);
-  if (!finalUrl || sourceForUrl(finalUrl)?.id !== 'yahoo-finance') return null;
-  const hostedUrls = new Set([
-    candidate.url,
-    finalUrl,
-    hostedPage?.canonicalUrl,
-    hostedPage?.ogUrl
-  ].map(canonicalStoryUrl).filter((url) => url && sourceForUrl(url)?.id === 'yahoo-finance'));
-  const articles = Array.isArray(hostedPage?.structuredNewsArticles) ? hostedPage.structuredNewsArticles : [];
-  const matches = [];
-  for (const article of articles) {
-    const providerName = plainText(article?.providerName);
-    const providerUrl = canonicalStoryUrl(article?.providerUrl);
-    let providerProtocol = '';
-    try {
-      providerProtocol = new URL(providerUrl).protocol;
-    } catch (_error) {
-      continue;
-    }
-    const providerSource = sourceForUrl(providerUrl);
-    if (normalizeStoryTitle(providerName) !== 'reuters'
-      || providerProtocol !== 'https:'
-      || providerSource?.id !== 'reuters'
-      || !titleExactlyMatches(candidate.title, plainText(article?.title))) continue;
-    const linkedUrls = (Array.isArray(article?.linkedUrls)
-      ? article.linkedUrls
-      : structuredArticleLinkedUrls(article)).map(canonicalStoryUrl).filter(Boolean);
-    if (!linkedUrls.some((url) => hostedUrls.has(url))) continue;
-    const publishedAt = firstValidDate([article?.publishedAt]);
-    if (!publishedAt) continue;
-    const publishedOn = chicagoIsoDate(publishedAt);
-    if (!eligibleDates.has(publishedOn)) continue;
-    matches.push({ source: providerSource, providerName, providerUrl, publishedAt, publishedOn });
-  }
-  return matches.length === 1 ? matches[0] : null;
-}
-
-async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTimeoutMs, clock }) {
+async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTimeoutMs }) {
   let hostedPage;
   try {
     hostedPage = await fetchArticle(candidate, { timeoutMs: articleTimeoutMs });
@@ -1117,79 +1015,18 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       if (candidate.pageDateFresh) {
         candidate.publishedAt = candidate.pagePublishedAt;
         candidate.publishedOn = publishedOn;
-        candidate.dateSource = 'article_page';
-        candidate.publishedAtVerified = true;
+        if (candidate.sourceId === 'yahoo-finance') {
+          candidate.dateSource = 'hosted_syndication';
+          delete candidate.publishedAtVerified;
+        } else {
+          candidate.dateSource = 'article_page';
+          candidate.publishedAtVerified = true;
+        }
       }
     }
   } catch (error) {
     candidate.article = { accessible: false, error: String(error?.message || error) };
   }
-  if (candidate.sourceId !== 'yahoo-finance') return;
-
-  const publisherName = plainText(hostedPage?.publisherName);
-  const syndicatedPublisherName = ['yahoo', 'yahoo finance'].includes(normalizeStoryTitle(publisherName))
-    ? ''
-    : publisherName;
-  candidate.syndication = {
-    status: 'yahoo_hosted',
-    hostedUrl: candidate.url,
-    ...(syndicatedPublisherName ? { publisherName: syndicatedPublisherName } : {})
-  };
-  if (!hostedPage) return;
-  const urls = [hostedPage.finalUrl, hostedPage.canonicalUrl, hostedPage.ogUrl, ...(hostedPage.explicitPublisherUrls || [])]
-    .map(canonicalStoryUrl)
-    .filter((url) => url && sourceForUrl(url)?.id !== 'yahoo-finance' && articlePathUrl(url));
-  for (const originalUrl of [...new Set(urls)]) {
-    const source = sourceForUrl(originalUrl);
-    if (!source) continue;
-    try {
-      const originalPage = await fetchArticle({ ...candidate, url: originalUrl }, { timeoutMs: articleTimeoutMs });
-      const originalTitle = plainText(originalPage.pageTitle);
-      if (!originalTitle || !titleEquivalent(candidate.title, originalTitle)) continue;
-      const originalPublishedAt = firstValidDate([originalPage.publishedAt]);
-      if (!originalPublishedAt) continue;
-      const originalPublishedOn = chicagoIsoDate(originalPublishedAt);
-      if (!eligibleDates.has(originalPublishedOn)) continue;
-      const validatedUrl = canonicalStoryUrl(originalPage.finalUrl || originalUrl) || originalUrl;
-      const validatedSource = sourceForUrl(validatedUrl);
-      if (!validatedSource || validatedSource.id === 'yahoo-finance' || !articlePathUrl(validatedUrl)) continue;
-      candidate.url = validatedUrl;
-      candidate.sourceId = validatedSource.id;
-      candidate.sourceLabel = validatedSource.displayName;
-      candidate.sourceDomain = new URL(candidate.url).hostname.toLowerCase();
-      candidate.article = articleRecord(originalPage);
-      candidate.pagePublishedAt = originalPublishedAt.toISOString();
-      candidate.pagePublishedOn = originalPublishedOn;
-      candidate.pageDateFresh = true;
-      candidate.publishedAt = candidate.pagePublishedAt;
-      candidate.publishedOn = originalPublishedOn;
-      candidate.dateSource = 'article_page';
-      candidate.publishedAtVerified = true;
-      candidate.syndication.status = 'original_validated';
-      candidate.syndication.originalUrl = candidate.url;
-      candidate.syndication.validatedAt = clock().toISOString();
-      return;
-    } catch (_error) {
-      // Keep the truthful Yahoo-hosted URL when the explicit publisher URL cannot be validated.
-    }
-  }
-  const structuredReuters = yahooStructuredReutersSource(hostedPage, candidate, eligibleDates);
-  if (!structuredReuters) return;
-  candidate.sourceId = structuredReuters.source.id;
-  candidate.sourceLabel = structuredReuters.source.displayName;
-  candidate.sourceDomain = new URL(candidate.url).hostname.toLowerCase();
-  candidate.article = articleRecord(hostedPage);
-  candidate.pagePublishedAt = structuredReuters.publishedAt.toISOString();
-  candidate.pagePublishedOn = structuredReuters.publishedOn;
-  candidate.pageDateFresh = true;
-  candidate.publishedAt = candidate.pagePublishedAt;
-  candidate.publishedOn = structuredReuters.publishedOn;
-  candidate.dateSource = 'article_page';
-  candidate.publishedAtVerified = true;
-  candidate.syndication.status = 'structured_provider_validated';
-  candidate.syndication.providerName = structuredReuters.providerName;
-  candidate.syndication.providerUrl = structuredReuters.providerUrl;
-  candidate.syndication.validatedAt = clock().toISOString();
 }
 
 async function collectNewsCandidates({
@@ -1223,7 +1060,7 @@ async function collectNewsCandidates({
     : eligibleDates;
   const attemptsByIndex = Array(acquisitionPaths.length).fill(null);
   const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
-  const verifiedDownloaded = [];
+  const reviewBypassDownloaded = [];
   const reviewedDownloaded = [];
   const articleReview = {
     candidateLimit: ARTICLE_REVIEW_CANDIDATE_LIMIT,
@@ -1241,7 +1078,7 @@ async function collectNewsCandidates({
     // Prior Futures cards compete only inside the Futures pool; they should not
     // stretch the broad-market freshness window after the displayed session rolls.
     const candidates = deduplicateCandidates([
-      ...verifiedDownloaded,
+      ...reviewBypassDownloaded,
       ...reviewedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
       ...prior.generalCandidates,
       ...prior.cryptoCandidates,
@@ -1257,13 +1094,18 @@ async function collectNewsCandidates({
       articleReview: { ...articleReview, status },
       generalCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates' && eligibleDates.has(candidate.publishedOn))
-        .sort(candidateOrder),
+        .sort(candidateOrder)
+        .slice(0, EDITORIAL_CANDIDATE_LIMIT),
       futuresCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates'
           && futuresDates.has(candidate.publishedOn)
           && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow)))
-        .sort(candidateOrder),
-      cryptoCandidates: candidates.filter((candidate) => candidate.pool === 'cryptoCandidates').sort(candidateOrder)
+        .sort(candidateOrder)
+        .slice(0, EDITORIAL_CANDIDATE_LIMIT),
+      cryptoCandidates: candidates
+        .filter((candidate) => candidate.pool === 'cryptoCandidates')
+        .sort(candidateOrder)
+        .slice(0, EDITORIAL_CANDIDATE_LIMIT)
     };
   };
   const reportProgress = (status = articleReview.status) => {
@@ -1288,6 +1130,7 @@ async function collectNewsCandidates({
       if (offline) throw new Error('Network disabled for offline test.');
       const result = await fetchPath(acquisitionPath, { eligibleDates: pathEligibleDates, timeoutMs: searchTimeoutMs, env });
       if (!Array.isArray(result?.items)) throw new Error(`${acquisitionPath.provider} result must contain items[].`);
+      if (result.error) attempt.error = String(result.error);
       attempt.resultCount = result.items.length;
       for (const item of result.items) {
         const candidate = normalizeProviderCandidate(item, acquisitionPath, pathEligibleDates);
@@ -1319,9 +1162,9 @@ async function collectNewsCandidates({
   }));
 
   const reviewCandidates = deduplicateCandidates(downloadedCandidates()).sort(candidateOrder);
-  const verifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified === true);
+  const reviewBypassCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified === true);
   const unverifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified !== true);
-  verifiedDownloaded.push(...verifiedReviewCandidates);
+  reviewBypassDownloaded.push(...reviewBypassCandidates);
   const cappedReviewCandidates = unverifiedReviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   articleReview.eligibleDownloadedCount = reviewCandidates.length;
   articleReview.reviewCandidateCount = cappedReviewCandidates.length;
@@ -1334,8 +1177,7 @@ async function collectNewsCandidates({
   await mapConcurrent(cappedReviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
     eligibleDates: candidate.pool === 'generalCandidates' ? generalAcquisitionDates : eligibleDates,
     fetchArticle,
-    articleTimeoutMs,
-    clock
+    articleTimeoutMs
   }), {
     onSuccess: (candidate) => {
       reviewedDownloaded.push(candidate);
@@ -1346,6 +1188,7 @@ async function collectNewsCandidates({
       }
     }
   });
+
   articleReview.status = 'complete';
   return buildArtifact('complete');
 }
@@ -1376,21 +1219,22 @@ if (require.main === module) {
 
 module.exports = {
   ARTICLE_REVIEW_CANDIDATE_LIMIT,
+  EDITORIAL_CANDIDATE_LIMIT,
   alphaTimeFrom,
+  articleRedirectAllowed,
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
   fetchArticlePage,
+  fetchReutersPublic,
   fetchResponse,
-  fetchMsnReuters,
-  msnReutersReaderUrl,
-  normalizeMsnReutersItem,
   normalizeProviderCandidate,
   parseApNewsSitemap,
   parseArgs,
   parseNewsFeed,
   parseNewsTimestamp,
+  parseReutersNewsSitemap,
+  parseReutersNewsSitemapIndex,
   priorNewsCandidates,
-  sourceForUrl,
-  titleEquivalent
+  sourceForUrl
 };

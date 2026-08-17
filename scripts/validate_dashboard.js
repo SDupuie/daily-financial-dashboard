@@ -231,7 +231,7 @@ function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options 
     if (!isIsoDate(card.publishedOn)) {
       errors.push(`${itemLabel}.publishedOn must be an ISO date.`);
     }
-    if (options.requirePublishedAt && !isIsoDateTime(card.publishedAt)) {
+    if ((options.requirePublishedAt || card.publishedAt !== undefined) && !isIsoDateTime(card.publishedAt)) {
       errors.push(`${itemLabel}.publishedAt must be an offset-bearing ISO timestamp.`);
     }
     if (typeof card.sourceLabel !== 'string' || !card.sourceLabel.trim()) {

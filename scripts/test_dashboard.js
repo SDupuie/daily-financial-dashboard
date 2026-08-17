@@ -90,6 +90,7 @@ const {
 const { buildEarningsPreparationFallback } = require('./earnings_week_contract');
 const { validateEarningsWeekPayload } = require('./earnings_week');
 const { atomicWriteFile } = require('./staging_writer');
+const { EDITORIAL_CANDIDATE_LIMIT } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
 const {
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
@@ -2111,6 +2112,30 @@ function testPrepareFallbackAndUnavailableContracts() {
   });
   assert.deepEqual(result.errors, []);
 
+  const datelineOnlyGeneralNews = createDashboardValidationFixture().dashboard;
+  delete datelineOnlyGeneralNews.stories[0].publishedAt;
+  for (const validationMode of ['staged', 'published']) {
+    const datelineOnlyResult = validateDashboardHtml(renderDashboardValidationFixture(datelineOnlyGeneralNews, chartData), {
+      now: new Date(FIXTURE_NOW),
+      validationMode
+    });
+    assert.deepEqual(datelineOnlyResult.errors, [], `General News may publish a verified dateline date without fabricating an original timestamp in ${validationMode} mode.`);
+  }
+
+  for (const malformedPublishedAt of [null, 42, [], {}, '', 'not-a-time', '2026-07-10', '2026-07-10T13:30:00']) {
+    const malformedGeneralNews = createDashboardValidationFixture().dashboard;
+    malformedGeneralNews.stories[0].publishedAt = malformedPublishedAt;
+    const malformedPublishedAtResult = validateDashboardHtml(renderDashboardValidationFixture(malformedGeneralNews, chartData), {
+      now: new Date(FIXTURE_NOW),
+      validationMode: 'staged'
+    });
+    assert.match(
+      malformedPublishedAtResult.errors.join('\n'),
+      /stories\[0\]\.publishedAt must be an offset-bearing ISO timestamp/,
+      'Malformed optional precision must not pass staged validation.'
+    );
+  }
+
   const missingSourceLabelDashboard = createDashboardValidationFixture().dashboard;
   delete missingSourceLabelDashboard.stories[0].sourceLabel;
   const missingSourceResult = validateDashboardHtml(renderDashboardValidationFixture(missingSourceLabelDashboard, chartData), {
@@ -3288,6 +3313,12 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   const mixedNewsPayload = structuredClone(editorialPayload);
+  mixedNewsPayload.editorialReview.newsSearch.generalCandidates.push({
+    title: 'Outside inventory story',
+    url: 'https://outside.test/story',
+    publishedOn: '2026-07-10',
+    sourceLabel: 'Reuters'
+  });
   mixedNewsPayload.editorialReview.newsSelection.stories[0] = {
     tag: 'Markets',
     title: 'Outside inventory story',
@@ -3319,21 +3350,78 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const missingCandidateSourceResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(missingCandidateSourceResult.status, 0, missingCandidateSourceResult.stderr);
   const missingCandidateSourceFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
-  assert.equal(missingCandidateSourceFinalized.stories.length, 8, 'Apply must not infer sourceLabel when the prepared candidate omits it.');
-  assert.ok(!missingCandidateSourceFinalized.stories.some((story) => story.url === dashboard.stories[0].url));
-  assert.ok(missingCandidateSourceFinalized.editorialReview.systemFallbacks.some((item) => item.reason === 'invalid_editorial_item'));
-  writeFixtureNewsCandidates(dashboard);
+  assert.equal(missingCandidateSourceFinalized.stories.length, 9, 'Editing the handoff inventory must not change sidecar-owned candidate metadata.');
+  assert.equal(missingCandidateSourceFinalized.stories[0].sourceLabel, 'Fixture News');
+
+  const newsCandidatesPath = path.join(root, 'generated', 'news_candidates.json');
+  const malformedOptionalTimestamp = fixtureNewsSearchArtifact(dashboard);
+  const malformedCandidate = malformedOptionalTimestamp.generalCandidates.find(
+    (candidate) => candidate.url === editorialPayload.editorialReview.newsSelection.stories[0].url
+  );
+  malformedCandidate.publishedAt = 'not-a-time';
+  malformedCandidate.publishedAtVerified = true;
+  fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(malformedOptionalTimestamp, null, 2)}\n`);
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
+  const malformedOptionalTimestampResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(malformedOptionalTimestampResult.status, 0, malformedOptionalTimestampResult.stderr);
+  const malformedOptionalTimestampFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.equal(malformedOptionalTimestampFinalized.stories.length, 9);
+  assert.equal(Object.hasOwn(malformedOptionalTimestampFinalized.stories[0], 'publishedAt'), false, 'Malformed optional precision must be omitted from the affected general-News card.');
+  assert.equal(malformedOptionalTimestampFinalized.futuresModule.stories.length, 3, 'One malformed general timestamp must not degrade verified Futures stories.');
+  assert.equal(malformedOptionalTimestampFinalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
 
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
-  const newsCandidatesPath = path.join(root, 'generated', 'news_candidates.json');
-  const corruptedExternalCandidates = JSON.parse(fs.readFileSync(newsCandidatesPath, 'utf8'));
-  corruptedExternalCandidates.generatedAt = '1999-01-01T00:00:00.000Z';
-  corruptedExternalCandidates.generalCandidates = [];
-  corruptedExternalCandidates.futuresCandidates = [];
-  corruptedExternalCandidates.cryptoCandidates = [];
-  fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(corruptedExternalCandidates, null, 2)}\n`);
+  for (const corruptSidecar of [
+    () => fs.unlinkSync(newsCandidatesPath),
+    () => fs.writeFileSync(newsCandidatesPath, '{'),
+    () => {
+      const stale = fixtureNewsSearchArtifact(dashboard, '1999-01-01T00:00:00.000Z');
+      fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(stale, null, 2)}\n`);
+    },
+    () => {
+      const differentlySpelledTimestamp = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
+      differentlySpelledTimestamp.generatedAt = differentlySpelledTimestamp.generatedAt.replace(/Z$/, '+00:00');
+      fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(differentlySpelledTimestamp, null, 2)}\n`);
+    },
+    () => {
+      const overLimit = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
+      while (overLimit.generalCandidates.length <= EDITORIAL_CANDIDATE_LIMIT) {
+        const index = overLimit.generalCandidates.length;
+        overLimit.generalCandidates.push({
+          title: `Over-limit candidate ${index}`,
+          url: `https://candidate.test/over-limit-${index}`,
+          publishedOn: '2026-07-10',
+          sourceLabel: 'Fixture News'
+        });
+      }
+      fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(overLimit, null, 2)}\n`);
+    }
+  ]) {
+    writeFixtureNewsCandidates(dashboard);
+    corruptSidecar();
+    fs.writeFileSync(dashboardFile, originalHtml);
+    fs.writeFileSync(candidateFile, originalHtml);
+    const unavailableResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+    assert.equal(unavailableResult.status, 0, unavailableResult.stderr);
+    const unavailable = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+    assert.equal(unavailable.stories.length, 0);
+    assert.equal(unavailable.futuresModule.stories.length, 0);
+    assert.equal(unavailable.crypto.notes.length, 0);
+    assert.equal(unavailable.storiesCoverage.status, 'partial');
+    assert.equal(unavailable.futuresModule.storiesCoverage.status, 'partial');
+    assert.equal(unavailable.crypto.notesCoverage.status, 'partial');
+    const newsFallbacks = unavailable.editorialReview.systemFallbacks.filter((item) => ['futures-news', 'stories', 'crypto'].includes(item.section));
+    assert.equal(newsFallbacks.length, 18);
+    assert.ok(newsFallbacks.every((item) => item.reason === 'not_in_candidate_inventory'));
+  }
+
+  writeFixtureNewsCandidates(dashboard);
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
   const validResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
   assert.equal(validResult.status, 0, validResult.stderr);
   const finalizedHtml = fs.readFileSync(dashboardFile, 'utf8');

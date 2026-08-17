@@ -55,7 +55,7 @@ const STOCKFIT_NEWS_PATHS = Object.freeze([
 
 const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates', feedUrl: 'https://apnews.com/news-sitemap-content.xml' },
-  { id: 'msn-reuters', provider: 'msn-reuters', pool: 'generalCandidates', feedUrl: 'https://api.msn.com/news/providers/AAf3a78/items', providerId: 'AAf3a78', limit: 100 },
+  { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates', feedUrl: 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml' },
   { id: 'investing-market', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_25.rss' },
   { id: 'investing-economy', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_14.rss' },
   { id: 'investing-indicators', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_95.rss' },

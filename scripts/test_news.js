@@ -12,6 +12,7 @@ const {
   allowedNewsDates,
   applyNewsCoverageState,
   applyScheduledNewsBaseline,
+  candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,
   normalizeStoryTitle,
@@ -22,16 +23,19 @@ const {
 } = require('./news_contract');
 const {
   ARTICLE_REVIEW_CANDIDATE_LIMIT,
+  EDITORIAL_CANDIDATE_LIMIT,
+  articleRedirectAllowed,
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
+  fetchReutersPublic,
   fetchResponse,
-  msnReutersReaderUrl,
   normalizeProviderCandidate,
   parseApNewsSitemap,
   parseNewsFeed,
   parseNewsTimestamp,
-  priorNewsCandidates
+  parseReutersNewsSitemap,
+  parseReutersNewsSitemapIndex
 } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
 const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
@@ -64,11 +68,6 @@ function closeHttpServer(server) {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
-}
-
-function sendFixtureJson(res, payload, status = 200) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(payload));
 }
 
 function story(title, url, extra = {}) {
@@ -146,12 +145,94 @@ function testNewsCoverageState() {
   assert.deepEqual(validateNewsCoverageState(undefined, 10, NEWS_COVERAGE_POLICIES.stories), []);
 }
 
+function testFuturesPublicationTimestampValidation() {
+  const futuresWindow = {
+    start: new Date('2026-07-10T18:30:00.000Z'),
+    end: new Date('2026-07-10T19:00:00.000Z')
+  };
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T18:45:00.000Z',
+    publishedAtVerified: true
+  }, futuresWindow), true);
+  for (const publishedAt of [undefined, null, 42, [], {}, '', 'not-a-time', '2026-07-10', '2026-07-10T18:45:00']) {
+    assert.equal(candidateInFuturesPublicationWindow({ publishedAt, publishedAtVerified: true }, futuresWindow), false);
+  }
+}
+
 function testMondayMorningFreshnessWindow() {
   const saturday = '2026-07-11';
   assert.equal(allowedNewsDates(new Date('2026-07-13T12:44:00.000Z')).has(saturday), false);
   assert.equal(allowedNewsDates(new Date('2026-07-13T12:45:00.000Z')).has(saturday), true);
   assert.equal(allowedNewsDates(new Date('2026-07-13T14:00:00.000Z')).has(saturday), true);
   assert.equal(allowedNewsDates(new Date('2026-07-13T14:01:00.000Z')).has(saturday), false);
+}
+
+async function testAlphaVantageProviderErrorRedaction() {
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const apiKey = 'fixture-alpha-key-123';
+  const alphaPath = {
+    id: 'alpha-financial-markets',
+    provider: 'alpha-vantage',
+    pool: 'generalCandidates',
+    topic: 'financial_markets'
+  };
+  const providerMessage = `Alpha Vantage detected ${apiKey}; repeated value ${apiKey}.`;
+  const fetchPage = async () => ({ json: async () => ({ Information: providerMessage }) });
+  const artifact = await collectNewsCandidates({
+    asOf,
+    acquisitionPaths: [
+      alphaPath,
+      { id: 'independent-ap', provider: 'ap-public', pool: 'generalCandidates' }
+    ],
+    env: { ALPHA_VANTAGE_API_KEY: apiKey },
+    clock: () => asOf,
+    fetchPath: async (acquisitionPath, options) => {
+      if (acquisitionPath.id === alphaPath.id) {
+        return fetchAcquisitionPath(acquisitionPath, { ...options, fetchPage });
+      }
+      return { items: [{
+        title: 'Independent AP fixture',
+        url: 'https://apnews.com/article/alpha-error-isolation-fixture',
+        publishedAt: '2026-07-10T18:30:00.000Z',
+        publishedAtVerified: true
+      }] };
+    },
+    fetchArticle: async () => {
+      throw new Error('Provider-verified AP candidates must bypass article review.');
+    }
+  });
+  const alphaError = artifact.attempts.find((attempt) => attempt.id === alphaPath.id).error;
+  assert.equal(alphaError, 'Alpha Vantage detected [redacted]; repeated value [redacted].');
+  assert.equal(alphaError.includes(apiKey), false, 'Persisted Alpha Vantage diagnostics must not contain the configured API key.');
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.sourceId === 'ap'), true, 'An Alpha Vantage error must not discard unrelated provider candidates.');
+
+  await assert.rejects(
+    () => fetchAcquisitionPath(alphaPath, {
+      eligibleDates: new Set(['2026-07-10']),
+      timeoutMs: 1000,
+      env: { ALPHA_VANTAGE_API_KEY: apiKey },
+      fetchPage: async () => ({ json: async () => ({ Note: 'Provider warning without a credential.' }) })
+    }),
+    /Provider warning without a credential\./
+  );
+  await assert.rejects(
+    () => fetchAcquisitionPath(alphaPath, {
+      eligibleDates: new Set(['2026-07-10']),
+      timeoutMs: 1000,
+      env: { ALPHA_VANTAGE_API_KEY: apiKey },
+      fetchPage: async () => ({ json: async () => ({ 'Error Message': `Rejected key ${apiKey}.` }) })
+    }),
+    (error) => {
+      assert.equal(error.message, 'Rejected key [redacted].');
+      return true;
+    }
+  );
+  assert.deepEqual(await fetchAcquisitionPath(alphaPath, {
+    eligibleDates: new Set(['2026-07-10']),
+    timeoutMs: 1000,
+    env: { ALPHA_VANTAGE_API_KEY: apiKey },
+    fetchPage: async () => ({ json: async () => ({ feed: [] }) })
+  }), { items: [] });
 }
 
 async function testDeterministicNewsCandidateAcquisition() {
@@ -214,12 +295,13 @@ async function testDeterministicNewsCandidateAcquisition() {
         url: 'https://www.marketwatch.com/story/direct-fixture?mod=stockfit'
       }, {
         publishedAt: '2026-07-10T19:30:00.000Z',
-        title: 'Yahoo validated syndication fixture',
+        publishedAtVerified: true,
+        title: 'Yahoo hosted fixture one',
         url: 'https://finance.yahoo.com/news/validated-fixture.html?.tsrc=stockfit',
         providerSourceName: 'Yahoo Finance'
       }, {
         publishedAt: '2026-07-10T19:15:00.000Z',
-        title: 'Yahoo unresolved syndication fixture',
+        title: 'Yahoo hosted fixture two',
         url: 'https://finance.yahoo.com/news/unresolved-fixture.html',
         providerSourceName: 'Yahoo Finance'
       }] };
@@ -233,24 +315,22 @@ async function testDeterministicNewsCandidateAcquisition() {
         title: 'Crypto direct duplicate fixture',
         url: 'https://www.coindesk.com/markets/2026/07/10/crypto-fixture'
       }] };
+      if (acquisitionPath.id === 'reuters-public') return { items: [{
+        publishedAt: '2026-07-10T18:45:00.000Z',
+        publishedAtVerified: true,
+        title: 'Reuters direct sitemap fixture',
+        url: 'https://www.reuters.com/markets/us/reuters-direct-sitemap-fixture-2026-07-10',
+        providerSourceName: 'Reuters'
+      }] };
       return { items: [] };
     },
-    fetchArticle: async (candidate) => {
-      const isOriginalPublisher = candidate.url.startsWith('https://www.reuters.com/');
-      return {
-        finalUrl: candidate.url,
-        pageTitle: candidate.title,
-        description: 'Fixture description.',
-        excerpt: 'Fixture article content.',
-        publishedAt: isOriginalPublisher
-          ? new Date('2026-07-10T18:45:00.000Z')
-          : new Date(candidate.publishedAt),
-        publisherName: candidate.url.includes('validated-fixture.html') ? 'Reuters' : 'Yahoo Finance',
-        explicitPublisherUrls: candidate.url.includes('validated-fixture')
-          ? ['https://www.reuters.com/markets/validated-fixture']
-          : []
-      };
-    }
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      description: 'Fixture description.',
+      excerpt: 'Fixture article content.',
+      publishedAt: new Date(candidate.publishedAt)
+    })
   });
 
   assert.deepEqual([...calls].sort(), acquisitionPaths.map((entry) => entry.id).sort(), 'Every configured API and direct-feed path must be attempted.');
@@ -260,7 +340,7 @@ async function testDeterministicNewsCandidateAcquisition() {
     'Distinct non-Alpha endpoints should not wait for the second paced Alpha call.'
   );
   assert.deepEqual(pauses, [1250], 'The two Alpha Vantage calls must be paced.');
-  assert.equal(artifact.generalCandidates.length, 4, 'The CNBC duplicate, two Yahoo stories, and the prior card must remain available once each.');
+  assert.equal(artifact.generalCandidates.length, 5, 'Direct Reuters, the CNBC duplicate, two Yahoo stories, and the prior card must remain available once each.');
   assert.equal(artifact.cryptoCandidates.length, 2, 'The direct Crypto duplicate and prior Crypto card must both reach editorial review.');
   const cnbc = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc');
   assert.equal(cnbc.provider, 'rss', 'A direct feed must win deterministic provenance deduplication over an aggregator copy.');
@@ -268,17 +348,22 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(cnbc.publishedAtVerified, true, 'Article-page review must mark provider timestamps verified after confirmation.');
   assert.deepEqual(cnbc.searchPathIds, ['cnbc', 'alpha-financial-markets']);
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Removed MarketWatch fixture'), false);
-  const resolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'original_validated');
-  assert.equal(resolvedYahoo.url, 'https://www.reuters.com/markets/validated-fixture');
-  assert.equal(resolvedYahoo.sourceLabel, 'Reuters');
-  assert.equal(resolvedYahoo.syndication.hostedUrl, 'https://finance.yahoo.com/news/validated-fixture.html');
-  assert.equal(resolvedYahoo.syndication.publisherName, 'Reuters');
-  assert.equal(resolvedYahoo.publishedAt, '2026-07-10T18:45:00.000Z', 'A promoted story must use the original page publication time.');
+  const reuters = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'reuters');
+  assert.equal(reuters.provider, 'reuters-public');
+  assert.equal(reuters.sourceLabel, 'Reuters');
+  assert.equal(reuters.url, 'https://www.reuters.com/markets/us/reuters-direct-sitemap-fixture-2026-07-10');
+  assert.equal(reuters.publishedAtVerified, true);
+  assert.equal(candidateInFuturesPublicationWindow(reuters, {
+    start: new Date('2026-07-10T18:30:00.000Z'),
+    end: new Date('2026-07-10T19:00:00.000Z')
+  }), true, 'A Reuters sitemap timestamp must use the shared exact Futures predicate.');
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale provider fixture'), false);
-  const unresolvedYahoo = artifact.generalCandidates.find((candidate) => candidate.syndication?.status === 'yahoo_hosted');
-  assert.equal(unresolvedYahoo.url, 'https://finance.yahoo.com/news/unresolved-fixture.html');
-  assert.equal(unresolvedYahoo.sourceLabel, 'Yahoo Finance');
-  assert.equal(unresolvedYahoo.syndication.publisherName, undefined, 'StockFit Yahoo Finance attribution is the host, not a syndicated publisher.');
+  const yahooCandidates = artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'yahoo-finance');
+  assert.equal(yahooCandidates.length, 2);
+  assert.ok(yahooCandidates.every((candidate) => candidate.sourceLabel === 'Yahoo Finance'));
+  assert.ok(yahooCandidates.every((candidate) => candidate.url.startsWith('https://finance.yahoo.com/news/')));
+  assert.ok(yahooCandidates.every((candidate) => candidate.dateSource === 'hosted_syndication'));
+  assert.ok(yahooCandidates.every((candidate) => candidate.publishedAtVerified !== true), 'Yahoo-hosted timestamps must remain provisional even when an upstream item claims verification.');
   const priorMarket = artifact.generalCandidates.find((candidate) => candidate.priorCard);
   assert.equal(priorMarket.sourceLabel, 'Fixture News');
   assert.equal(priorMarket.priorCopy.tag, 'Prior');
@@ -339,7 +424,23 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
   const premarketArtifact = await collectNewsCandidates({
     asOf: premarketAsOf,
     dashboardData: {
-      stories: [],
+      stories: [{
+        title: 'Prior Yahoo hosted fixture',
+        url: 'https://finance.yahoo.com/news/prior-hosted-fixture.html',
+        publishedOn: '2026-07-13',
+        publishedAt: '2026-07-13T12:45:00.000Z',
+        sourceLabel: 'Yahoo Finance',
+        tag: 'Markets',
+        body: 'Previously reviewed Yahoo-hosted fixture.'
+      }, {
+        title: 'Prior malformed timestamp fixture',
+        url: 'https://www.cnbc.com/2026/07/13/prior-malformed-time.html',
+        publishedOn: '2026-07-13',
+        publishedAt: 'not-a-time',
+        sourceLabel: 'CNBC',
+        tag: 'Markets',
+        body: 'Previously reviewed malformed-time fixture.'
+      }],
       futuresModule: {
         sectionTitle: 'Pre-Market Futures',
         futures: ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'].map((symbol) => ({ symbol, raw: { referenceDate: '2026-07-10' } })),
@@ -366,6 +467,10 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
       title: 'Monday unverified premarket fixture',
       url: 'https://www.cnbc.com/2026/07/13/monday-unverified.html'
     }, {
+      publishedAt: '2026-07-13T12:45:00.000Z',
+      title: 'Monday Yahoo hosted fixture',
+      url: 'https://finance.yahoo.com/news/monday-hosted-fixture.html'
+    }, {
       publishedAt: '2026-07-13T13:05:00.000Z',
       title: 'Monday after run fixture',
       url: 'https://www.cnbc.com/2026/07/13/monday-after-run.html'
@@ -382,6 +487,15 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
     }
   });
   assert.ok(premarketArtifact.generalCandidates.some((candidate) => candidate.title === 'Monday unverified premarket fixture'));
+  const yahooGeneral = premarketArtifact.generalCandidates.filter((candidate) => candidate.url.startsWith('https://finance.yahoo.com/news/'));
+  assert.equal(yahooGeneral.length, 2, 'Current and prior Yahoo-hosted stories must remain available to general News while fresh.');
+  assert.ok(yahooGeneral.every((candidate) => candidate.publishedAtVerified !== true));
+  assert.ok(yahooGeneral.some((candidate) => candidate.dateSource === 'hosted_syndication'));
+  assert.ok(yahooGeneral.some((candidate) => candidate.dateSource === 'prior_validated_card'));
+  const malformedPrior = premarketArtifact.generalCandidates.find((candidate) => candidate.title === 'Prior malformed timestamp fixture');
+  assert.ok(malformedPrior, 'A malformed optional timestamp must not discard an otherwise valid general-News card.');
+  assert.equal(Object.hasOwn(malformedPrior, 'publishedAt'), false);
+  assert.equal(Object.hasOwn(malformedPrior, 'publishedAtVerified'), false);
   assert.deepEqual(
     premarketArtifact.futuresCandidates.map((candidate) => candidate.title).sort(),
     ['Monday premarket fixture', 'Sunday after futures open fixture']
@@ -506,179 +620,6 @@ async function testNewsCandidateCapAfterEligibilityAndDedupe() {
   assert.equal(artifact.generalCandidates.some((candidate) => /unapproved|non-HTTPS|missing|stale/.test(candidate.title)), false);
 }
 
-async function testYahooOriginalPromotionValidation() {
-  const asOf = new Date('2026-07-10T21:00:00.000Z');
-  const cases = [
-    ['missing-title', 'Missing title promotion fixture'],
-    ['missing-date', 'Missing date promotion fixture'],
-    ['stale-date', 'Stale date promotion fixture'],
-    ['title-mismatch', 'Title mismatch promotion fixture'],
-    ['inaccessible', 'Inaccessible promotion fixture'],
-    ['unapproved-domain', 'Unapproved domain promotion fixture'],
-    ['unapproved-redirect', 'Unapproved redirect promotion fixture']
-  ];
-  const originalFetches = [];
-  const artifact = await collectNewsCandidates({
-    asOf,
-    acquisitionPaths: [{ id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates' }],
-    clock: () => asOf,
-    fetchPath: async () => ({
-      items: cases.map(([slug, title]) => ({
-        title,
-        url: `https://finance.yahoo.com/news/${slug}.html`,
-        publishedAt: '2026-07-10T19:00:00.000Z',
-        providerSourceName: 'Yahoo Finance'
-      }))
-    }),
-    fetchArticle: async (candidate) => {
-      const url = new URL(candidate.url);
-      const slug = url.pathname.split('/').at(-1).replace(/\.html$/, '');
-      if (url.hostname === 'finance.yahoo.com') {
-        return {
-          finalUrl: candidate.url,
-          pageTitle: candidate.title,
-          publishedAt: new Date('2026-07-10T19:00:00.000Z'),
-          publisherName: 'Yahoo Finance',
-          explicitPublisherUrls: [slug === 'unapproved-domain'
-            ? `https://unapproved.example/${slug}`
-            : `https://www.reuters.com/markets/${slug}`]
-        };
-      }
-      originalFetches.push(candidate.url);
-      if (slug === 'inaccessible') throw new Error('fixture article unavailable');
-      return {
-        finalUrl: slug === 'unapproved-redirect'
-          ? `https://unapproved.example/${slug}`
-          : candidate.url,
-        pageTitle: slug === 'missing-title' ? '' : slug === 'title-mismatch' ? 'Completely unrelated fixture headline' : candidate.title,
-        publishedAt: slug === 'missing-date'
-          ? null
-          : slug === 'stale-date'
-            ? new Date('2026-07-01T19:00:00.000Z')
-            : new Date('2026-07-10T19:00:00.000Z')
-      };
-    }
-  });
-
-  assert.equal(artifact.generalCandidates.length, cases.length);
-  assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceId === 'yahoo-finance'));
-  assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceLabel === 'Yahoo Finance'));
-  assert.ok(artifact.generalCandidates.every((candidate) => candidate.syndication?.status === 'yahoo_hosted'));
-  assert.ok(artifact.generalCandidates.every((candidate) => candidate.url.startsWith('https://finance.yahoo.com/news/')));
-  assert.equal(
-    artifact.generalCandidates.find((candidate) => candidate.url.includes('/stale-date.html')).publishedAt,
-    '2026-07-10T19:00:00.000Z',
-    'A rejected stale original must not replace the Yahoo-hosted timestamp.'
-  );
-  assert.ok(!originalFetches.some((url) => url.includes('unapproved.example')), 'Unapproved original domains must not be fetched or promoted.');
-  assert.ok(originalFetches.some((url) => url.endsWith('/unapproved-redirect')), 'An approved original URL must be fetched before its unapproved redirect is rejected.');
-}
-
-async function testYahooStructuredProviderReutersValidation() {
-  const asOf = new Date('2026-07-10T21:00:00.000Z');
-  const cases = [
-    ['valid', 'Structured provider Reuters fixture'],
-    ['valid-main-entity', 'Structured main entity Reuters fixture'],
-    ['provider-url-mismatch', 'Provider URL mismatch fixture'],
-    ['provider-url-insecure', 'Provider URL insecure fixture'],
-    ['stale-date', 'Structured stale date fixture'],
-    ['title-mismatch', 'Structured title mismatch fixture'],
-    ['page-title-mismatch', 'Page title mismatch fixture'],
-    ['overlap-unlinked', 'Markets rally on Fed rate decision'],
-    ['missing-structured-url', 'Missing structured URL fixture'],
-    ['ambiguous-structured-url', 'Ambiguous structured URL fixture'],
-    ['unrelated-provider', 'Unrelated provider fixture'],
-    ['missing-structured', 'Missing structured fixture'],
-    ['null-structured', 'Null structured fixture'],
-    ['wrong-structured-type', 'Wrong structured type fixture'],
-    ['malformed-member', 'Malformed structured member fixture'],
-    ['external-canonical-only', 'External canonical only fixture'],
-    ['external-final-url-links-back', 'External final URL links back fixture']
-  ];
-  const artifact = await collectNewsCandidates({
-    asOf,
-    acquisitionPaths: [{ id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates' }],
-    clock: () => asOf,
-    fetchPath: async () => ({
-      items: cases.map(([slug, title]) => ({
-        title,
-        url: `https://finance.yahoo.com/news/${slug}.html`,
-        publishedAt: '2026-07-10T19:00:00.000Z',
-        providerSourceName: 'Yahoo Finance'
-      }))
-    }),
-    fetchArticle: async (candidate) => {
-      const parsedUrl = new URL(candidate.url);
-      if (parsedUrl.hostname === 'www.reuters.com') throw new Error('Simulated unavailable original Reuters page.');
-      const slug = parsedUrl.pathname.split('/').at(-1).replace(/\.html$/, '');
-      const externalReutersUrl = 'https://www.reuters.com/markets/us/external-canonical-only-2026-07-10/';
-      const externalFinalReutersUrl = 'https://www.reuters.com/markets/us/external-final-url-links-back-2026-07-10/';
-      const article = {
-        title: slug === 'title-mismatch' ? 'Completely unrelated structured headline' : candidate.title,
-        publishedAt: slug === 'stale-date' ? new Date('2026-07-01T19:00:00.000Z') : new Date('2026-07-10T19:00:00.000Z'),
-        providerName: 'Reuters',
-        url: slug === 'external-canonical-only' ? externalReutersUrl : candidate.url,
-        providerUrl: slug === 'provider-url-mismatch'
-          ? 'https://www.cnbc.com/'
-          : slug === 'provider-url-insecure'
-            ? 'http://www.reuters.com/'
-            : slug === 'malformed-member'
-              ? ''
-              : 'https://www.reuters.com/'
-      };
-      let structuredNewsArticles = [article];
-      if (slug === 'valid-main-entity') {
-        structuredNewsArticles = [{ ...article, url: '', mainEntityOfPage: { '@id': candidate.url } }];
-      } else if (slug === 'overlap-unlinked') {
-        structuredNewsArticles = [{ ...article, title: 'Fed rate decision', url: '' }];
-      } else if (slug === 'missing-structured-url') {
-        structuredNewsArticles = [{ ...article, url: '' }];
-      } else if (slug === 'ambiguous-structured-url') {
-        structuredNewsArticles = [article, { ...article, publishedAt: new Date('2026-07-10T20:00:00.000Z') }];
-      } else if (slug === 'unrelated-provider') {
-        structuredNewsArticles = [
-          { ...article, providerName: 'Yahoo Finance', providerUrl: 'https://finance.yahoo.com/' },
-          { ...article, title: 'Unrelated Reuters article', url: 'https://finance.yahoo.com/news/other.html' }
-        ];
-      } else if (slug === 'missing-structured') {
-        structuredNewsArticles = undefined;
-      } else if (slug === 'null-structured') {
-        structuredNewsArticles = null;
-      } else if (slug === 'wrong-structured-type') {
-        structuredNewsArticles = { article };
-      }
-      return {
-        finalUrl: slug === 'external-final-url-links-back' ? externalFinalReutersUrl : candidate.url,
-        canonicalUrl: slug === 'external-canonical-only' ? externalReutersUrl : '',
-        ogUrl: slug === 'external-canonical-only' ? externalReutersUrl : '',
-        pageTitle: slug === 'page-title-mismatch' ? 'Completely unrelated page headline' : candidate.title,
-        publishedAt: new Date('2026-07-10T19:00:00.000Z'),
-        publisherName: 'Yahoo Finance',
-        structuredNewsArticles,
-        explicitPublisherUrls: []
-      };
-    }
-  });
-
-  const valid = artifact.generalCandidates.find((candidate) => candidate.url.includes('/valid.html'));
-  assert.equal(valid.sourceId, 'reuters');
-  assert.equal(valid.sourceLabel, 'Reuters');
-  assert.equal(valid.url, 'https://finance.yahoo.com/news/valid.html');
-  assert.equal(valid.syndication.status, 'structured_provider_validated');
-  assert.equal(valid.syndication.providerName, 'Reuters');
-  assert.equal(valid.syndication.providerUrl, 'https://www.reuters.com/');
-  const validMainEntity = artifact.generalCandidates.find((candidate) => candidate.url.includes('/valid-main-entity.html'));
-  assert.equal(validMainEntity.sourceId, 'reuters');
-  assert.equal(validMainEntity.sourceLabel, 'Reuters');
-  assert.equal(validMainEntity.syndication.status, 'structured_provider_validated');
-  for (const [slug] of cases.filter(([slug]) => !['valid', 'valid-main-entity'].includes(slug))) {
-    const rejected = artifact.generalCandidates.find((candidate) => candidate.url.includes(`/${slug}.html`));
-    assert.equal(rejected.sourceId, 'yahoo-finance');
-    assert.equal(rejected.sourceLabel, 'Yahoo Finance');
-    assert.equal(rejected.syndication.status, 'yahoo_hosted');
-  }
-}
-
 function testArticleMetadataExtraction() {
   const longParagraph = `This fixture paragraph contains enough article text to be retained by the mechanical page extractor ${'and extended context '.repeat(330)}.`;
   const metadata = extractArticleMetadata(`<!doctype html>
@@ -700,28 +641,7 @@ function testArticleMetadataExtraction() {
   assert.equal(Object.hasOwn(metadata, 'text'), false);
   assert.equal(Object.hasOwn(metadata, 'providerName'), false);
   assert.equal(Object.hasOwn(metadata, 'providerUrl'), false);
-  assert.equal(metadata.structuredNewsArticles.length, 1);
-  assert.equal(metadata.structuredNewsArticles[0].title, 'Fixture & Markets');
-  assert.equal(metadata.structuredNewsArticles[0].publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
-  assert.equal(metadata.structuredNewsArticles[0].providerName, 'Reuters');
-  assert.equal(metadata.structuredNewsArticles[0].providerUrl, 'https://www.reuters.com/');
-  assert.deepEqual(metadata.structuredNewsArticles[0].linkedUrls, ['https://finance.yahoo.com/news/fixture.html']);
-
-  const unrelatedMetadata = extractArticleMetadata(`<!doctype html>
-    <script type="application/ld+json">{"@graph":[
-      {"@type":"Organization","provider":{"name":"Reuters","url":"https://www.reuters.com/"}},
-      {"@type":"NewsArticle","headline":"Actual Yahoo fixture","datePublished":"2026-07-10T12:30:00Z","provider":{"name":"Yahoo Finance","url":"https://finance.yahoo.com/"}}
-    ]}</script>`);
-  assert.deepEqual(
-    unrelatedMetadata.structuredNewsArticles.map(({ title, providerName, providerUrl }) => ({ title, providerName, providerUrl })),
-    [{ title: 'Actual Yahoo fixture', providerName: 'Yahoo Finance', providerUrl: 'https://finance.yahoo.com/' }],
-    'Provider metadata outside a NewsArticle must not become article provenance.'
-  );
-  assert.deepEqual(
-    extractArticleMetadata('<script type="application/ld+json">{malformed</script>').structuredNewsArticles,
-    [],
-    'Malformed JSON-LD must fail open without manufacturing provenance.'
-  );
+  assert.equal(Object.hasOwn(metadata, 'structuredNewsArticles'), false);
 
   const decryptMetadata = extractArticleMetadata(`<!doctype html>
     <meta property="article:published_time" content="2026-07-23T10:24:09">
@@ -851,6 +771,245 @@ function testApNewsSitemapParsing() {
     language: 'eng',
     publishedAtVerified: true
   }]);
+}
+
+function reutersNewsSitemapEntry({
+  title = 'Reuters fixture headline',
+  url = 'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10/',
+  publishedAt = '2026-07-10T18:30:00.000Z',
+  publicationName = 'Reuters',
+  language = 'en'
+} = {}) {
+  return `<url>
+    <loc>${url}</loc>
+    <news:news>
+      <news:publication><news:name>${publicationName}</news:name><news:language>${language}</news:language></news:publication>
+      <news:publication_date>${publishedAt}</news:publication_date>
+      <news:title><![CDATA[${title}]]></news:title>
+    </news:news>
+  </url>`;
+}
+
+function reutersNewsSitemap(entries) {
+  return `<?xml version="1.0"?><urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">${entries.join('')}</urlset>`;
+}
+
+function testReutersNewsSitemapParsing() {
+  const index = `<?xml version="1.0"?><sitemapindex>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=100</loc></sitemap>
+  </sitemapindex>`;
+  assert.deepEqual(parseReutersNewsSitemapIndex(index), [
+    'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&size=100',
+    'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&size=100&from=100'
+  ], 'Reuters sitemap slices must explicitly request 100 rows so index offsets do not skip records.');
+  for (const malformed of [
+    undefined,
+    null,
+    42,
+    [],
+    {},
+    '<urlset></urlset>',
+    `<root>${index}</root>`
+  ]) {
+    assert.throws(() => parseReutersNewsSitemapIndex(malformed), /sitemapindex/);
+  }
+  for (const malformed of [
+    '<sitemapindex></sitemapindex>',
+    '<sitemapindex><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=100</loc></sitemapindex>'
+  ]) {
+    assert.throws(
+      () => parseReutersNewsSitemapIndex(malformed),
+      /malformed sitemap entries/,
+      'Empty or structurally incomplete Reuters indexes must fail acquisition.'
+    );
+  }
+  assert.throws(
+    () => parseReutersNewsSitemapIndex('<sitemapindex><sitemap><loc>https://evil.example/news.xml</loc></sitemap></sitemapindex>'),
+    /invalid page URL/,
+    'Computed sitemap targets must remain on the fixed Reuters endpoint.'
+  );
+  for (const malformedOffsets of [
+    '<sitemapindex><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap></sitemapindex>',
+    '<sitemapindex><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap><sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=200</loc></sitemap></sitemapindex>'
+  ]) {
+    assert.throws(
+      () => parseReutersNewsSitemapIndex(malformedOffsets),
+      /duplicate or non-contiguous/,
+      'Direct Reuters acquisition must not treat duplicate or gapped index offsets as a complete scan.'
+    );
+  }
+
+  const entries = parseReutersNewsSitemap(reutersNewsSitemap([
+    reutersNewsSitemapEntry(),
+    reutersNewsSitemapEntry({ url: 'https://www.reuters.com/fr/affaires/french-fixture-2026-07-10/' }),
+    reutersNewsSitemapEntry({ url: 'https://www.reuters.com/default/legacy-fixture-2024-11-11/', title: 'مثال موروث' }),
+    reutersNewsSitemapEntry({ url: 'https://evil.example/reuters-fixture', title: 'External fixture' }),
+    reutersNewsSitemapEntry({ publishedAt: 'not-a-date', title: 'Malformed date fixture' }),
+    reutersNewsSitemapEntry({ publicationName: 'Not Reuters', title: 'Wrong publication fixture' })
+  ]));
+  assert.deepEqual(entries, [{
+    title: 'Reuters fixture headline',
+    url: 'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10',
+    publishedAt: '2026-07-10T18:30:00.000Z',
+    language: 'en',
+    publicationName: 'Reuters',
+    providerSourceName: 'Reuters',
+    publishedAtVerified: true
+  }], 'Malformed, external, and non-English entries must be isolated without discarding the valid Reuters entry.');
+  for (const malformed of [
+    undefined,
+    null,
+    42,
+    [],
+    {},
+    '<sitemapindex></sitemapindex>',
+    `<root>${reutersNewsSitemap([reutersNewsSitemapEntry()])}</root>`
+  ]) {
+    assert.throws(() => parseReutersNewsSitemap(malformed), /urlset/);
+  }
+  for (const malformed of [
+    '<urlset></urlset>',
+    `<urlset>${reutersNewsSitemapEntry().replace('</url>', '')}</urlset>`
+  ]) {
+    assert.throws(
+      () => parseReutersNewsSitemap(malformed),
+      /malformed or no URL entries/,
+      'Empty or structurally incomplete Reuters slices must not pass as successful empty acquisitions.'
+    );
+  }
+  for (const unusable of [
+    reutersNewsSitemap([reutersNewsSitemapEntry().replace('</loc>', '')]),
+    reutersNewsSitemap([reutersNewsSitemapEntry({ publicationName: 'Not Reuters' })])
+  ]) {
+    assert.throws(
+      () => parseReutersNewsSitemap(unusable),
+      /no valid English article entries/,
+      'A Reuters slice with zero usable entries must fail instead of reporting a successful empty acquisition.'
+    );
+  }
+
+}
+
+async function testReutersNewsSitemapFetchIsolation() {
+  const pathConfig = {
+    id: 'reuters-public',
+    provider: 'reuters-public',
+    pool: 'generalCandidates',
+    feedUrl: 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml'
+  };
+  const requests = [];
+  const index = `<?xml version="1.0"?><sitemapindex>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=100</loc></sitemap>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=200</loc></sitemap>
+  </sitemapindex>`;
+  const result = await fetchAcquisitionPath(pathConfig, {
+    timeoutMs: 1000,
+    fetchPage: async (url, requestOptions) => {
+      requests.push(String(url));
+      assert.equal(requestOptions.allowRedirect(new URL(url), new URL(url)), true);
+      assert.equal(requestOptions.allowRedirect(new URL('https://evil.example/news.xml'), new URL(url)), false);
+      if (String(url).includes('news-sitemap-index')) return { text: async () => index };
+      if (String(url).includes('from=100')) {
+        return { text: async () => reutersNewsSitemap([reutersNewsSitemapEntry().replace('</loc>', '')]) };
+      }
+      if (String(url).includes('from=200')) return { url: 'https://evil.example/news.xml', text: async () => reutersNewsSitemap([reutersNewsSitemapEntry()]) };
+      return { text: async () => reutersNewsSitemap([reutersNewsSitemapEntry()]) };
+    }
+  });
+  assert.equal(result.pageCount, 3);
+  assert.equal(result.failedPageCount, 2);
+  assert.match(result.error, /2 of 3 slices failed/);
+  assert.equal(result.items.length, 1, 'One unavailable slice must not discard entries from valid Reuters slices.');
+  assert.equal(result.items[0].publishedAtVerified, true);
+  assert.ok(requests.filter((url) => !url.includes('news-sitemap-index')).every((url) => new URL(url).searchParams.get('size') === '100'));
+  await assert.rejects(
+    () => fetchReutersPublic({ ...pathConfig, feedUrl: 'https://evil.example/news.xml' }, { timeoutMs: 1000 }),
+    /fixed public index URL/,
+    'Reuters acquisition must not accept a computed or substituted index target.'
+  );
+}
+
+async function testReutersNewsSitemapCollectionIntegration() {
+  const asOf = new Date('2026-07-10T19:00:00.000Z');
+  const reutersItem = parseReutersNewsSitemap(reutersNewsSitemap([reutersNewsSitemapEntry()]))[0];
+  const yahooItem = {
+    title: 'Yahoo hosted fixture',
+    url: 'https://finance.yahoo.com/news/yahoo-hosted-fixture.html',
+    publishedAt: '2026-07-10T18:45:00.000Z',
+    providerSourceName: 'Yahoo Finance'
+  };
+  const reutersPath = {
+    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates',
+    feedUrl: 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml'
+  };
+  const stockfitPath = { id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates' };
+  const options = {
+    asOf,
+    dashboardData: {
+      stories: [],
+      futuresModule: {
+        sectionTitle: 'Session Futures',
+        stories: [],
+        futures: ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'].map((symbol) => ({ symbol, raw: { sessionDate: '2026-07-10' } }))
+      },
+      crypto: { notes: [] }
+    },
+    acquisitionPaths: [reutersPath, stockfitPath],
+    clock: () => asOf,
+    fetchPath: async (pathConfig) => pathConfig.id === 'reuters-public'
+      ? {
+          items: [reutersItem, { ...reutersItem, title: 'Stale Reuters fixture', publishedAt: '2026-07-01T18:30:00.000Z' }],
+          error: 'Reuters News sitemap partial: 1 of 3 slices failed.'
+        }
+      : { items: [yahooItem] },
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      publishedAt: new Date(candidate.publishedAt),
+      publisherName: 'Reuters'
+    })
+  };
+  const artifact = await collectNewsCandidates(options);
+  const reuters = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'reuters');
+  assert.equal(reuters.provider, 'reuters-public');
+  assert.equal(reuters.url, 'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10');
+  assert.equal(reuters.publishedAt, '2026-07-10T18:30:00.000Z');
+  assert.equal(reuters.publishedAtVerified, true);
+  assert.equal(Object.hasOwn(reuters, 'article'), false, 'Verified sitemap candidates must use the shared review-bypass path.');
+  assert.equal(artifact.futuresCandidates.some((candidate) => candidate.url === reuters.url), true);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale Reuters fixture'), false);
+  assert.equal(artifact.attempts.find((attempt) => attempt.id === 'reuters-public').acceptedCount, 1);
+  assert.match(artifact.attempts.find((attempt) => attempt.id === 'reuters-public').error, /partial/);
+  const yahoo = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'yahoo-finance');
+  assert.equal(yahoo.url, yahooItem.url);
+  assert.equal(yahoo.sourceLabel, 'Yahoo Finance');
+  assert.equal(yahoo.sourceId, 'yahoo-finance', 'Article-page publisher metadata must not replace URL-catalog provenance.');
+  assert.equal(artifact.articleReview.reviewCandidateCount, 1, 'Only the unverified Yahoo item should enter shared article review.');
+
+  const fallback = await collectNewsCandidates({
+    ...options,
+    fetchPath: async (pathConfig) => {
+      if (pathConfig.id === 'reuters-public') throw new Error('fixture sitemap unavailable');
+      return { items: [{
+        title: 'Independent CNBC fixture',
+        url: 'https://www.cnbc.com/2026/07/10/independent-fixture.html',
+        publishedAt: '2026-07-10T18:40:00.000Z'
+      }] };
+    }
+  });
+  assert.match(fallback.attempts.find((attempt) => attempt.id === 'reuters-public').error, /fixture sitemap unavailable/);
+  assert.equal(fallback.generalCandidates.some((candidate) => candidate.sourceId === 'reuters'), false);
+  assert.equal(fallback.generalCandidates.some((candidate) => candidate.sourceId === 'cnbc'), true, 'Reuters unavailability must not discard unrelated News sources.');
+}
+
+function testArticleRedirectPolicy() {
+  const candidateUrl = 'https://www.cnbc.com/2026/07/10/fixture.html';
+  assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://api.cnbc.com/article/fixture')), true);
+  assert.equal(articleRedirectAllowed(candidateUrl, new URL('http://www.cnbc.com/article/fixture')), false);
+  assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://cnbc.com.evil.example/article/fixture')), false);
+  assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://example.com/article/fixture')), false);
 }
 
 async function testNewsFetchResponseTransport() {
@@ -995,11 +1154,26 @@ async function testNewsFetchResponseTransport() {
       /HTTP 403/
     );
 
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/cross-origin`, {
+        timeoutMs: 1000,
+        headers: { Accept: 'text/plain', Authorization: 'Bearer fixture-secret' }
+      }),
+      /outside the request policy/
+    );
+    assert.equal(targetRequests.length, 0, 'A rejected redirect must not contact its target.');
+
     await fetchResponse(`${server.baseUrl}/cross-origin`, {
       timeoutMs: 1000,
-      headers: { Accept: 'text/plain', Authorization: 'Bearer fixture-secret' }
+      headers: { Accept: 'text/plain', Authorization: 'Bearer fixture-secret' },
+      allowRedirect: (nextUrl) => nextUrl.origin === target.baseUrl
     });
     assert.equal(targetRequests[0].authorization, undefined, 'Authorization must not follow a cross-origin redirect.');
+
+    await assert.rejects(
+      () => fetchResponse(`${server.baseUrl}/redirect`, { timeoutMs: 1000, allowRedirect: null }),
+      /redirect policy must be a function/
+    );
 
     await assert.rejects(
       () => fetchResponse(`${server.baseUrl}/slow`, { timeoutMs: 20, headers: { Accept: 'text/plain' } }),
@@ -1099,170 +1273,32 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
   }
 }
 
-async function testMsnReutersProviderVerifiedAcquisition() {
-  const provider = { id: 'AAf3a78', name: 'Reuters' };
-  const cards = [
-    {
-      id: 'AAfixture1', type: 'article', category: 'money', provider,
-      title: 'Markets rally on fixture catalyst', publishedDateTime: '2026-07-10T18:00:00Z',
-      url: 'https://www.msn.com/en-us/money/markets/markets-rally-on-fixture-catalyst/ar-AAfixture1?ocid=test'
-    },
-    {
-      id: 'AAfixture2', type: 'article', category: 'news', provider,
-      title: 'Markets rally on the fixture catalyst', publishedDateTime: '2026-07-10T18:01:00Z',
-      url: 'https://www.msn.com/en-us/news/markets/markets-rally-on-the-fixture-catalyst/ar-AAfixture2'
-    },
-    {
-      id: 'AAwrongtime', type: 'article', category: 'money', provider,
-      title: 'Updated time must not replace publication time', publishedDateTime: '2026-07-10T18:02:00Z',
-      url: 'https://www.msn.com/en-us/money/markets/updated-time-fixture/ar-AAwrongtime'
-    },
-    {
-      id: 'AAwronglegal', type: 'article', category: 'news', provider,
-      title: 'Wrong legal publisher fixture', publishedDateTime: '2026-07-10T18:02:30Z',
-      url: 'https://www.msn.com/en-us/news/markets/wrong-legal-publisher/ar-AAwronglegal'
-    },
-    {
-      id: 'AAsports', type: 'article', category: 'sports', provider,
-      title: 'Sports fixture', publishedDateTime: '2026-07-10T18:03:00Z',
-      url: 'https://www.msn.com/en-us/sports/other/sports-fixture/ar-AAsports'
-    },
-    {
-      id: 'AAspoofed', type: 'article', category: 'money', provider: { id: 'other', name: 'Reuters' },
-      title: 'Spoofed provider fixture', publishedDateTime: '2026-07-10T18:04:00Z',
-      url: 'https://www.msn.com/en-us/money/markets/spoofed-provider/ar-AAspoofed'
-    }
-  ];
-  const articleBody = '<p>This Reuters fixture contains a complete article body for editorial review. '.repeat(5) + '</p>';
-  const detail = (card, overrides = {}) => ({
-    id: card.id,
-    type: 'article',
-    title: card.title,
-    abstract: 'Reuters fixture abstract.',
-    body: articleBody,
-    publishedDateTime: card.publishedDateTime,
-    createdDateTime: '2026-07-10T18:05:00Z',
-    updatedDateTime: '2026-07-10T18:15:00Z',
-    sourceId: 'tag:reuters.com,2026:newsml_KBNFIXTURE1',
-    provider: { ...provider, companyLegalName: 'Reuters News & Media Inc.' },
-    ...overrides
-  });
-  const details = new Map([
-    ['AAfixture1', detail(cards[0])],
-    ['AAfixture2', detail(cards[1])],
-    ['AAwrongtime', detail(cards[2], { publishedDateTime: '2026-07-10T18:15:00Z', sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGTIME' })],
-    ['AAwronglegal', detail(cards[3], { provider: { ...provider, companyLegalName: 'Not Reuters' }, sourceId: 'tag:reuters.com,2026:newsml_KBNWRONGLEGAL' })]
-  ]);
-  const calls = [];
-  const server = await startHttpServer((req, res) => {
-    const url = new URL(req.url, 'http://fixture.local');
-    calls.push(url);
-    if (url.pathname === '/providers/AAf3a78/items') {
-      sendFixtureJson(res, { value: [{ subCards: cards }] });
-      return;
-    }
-    const item = url.pathname.startsWith('/detail/')
-      ? details.get(decodeURIComponent(url.pathname.split('/').pop()))
-      : null;
-    sendFixtureJson(res, item || {}, item ? 200 : 404);
-  });
-  const pathConfig = {
-    id: 'msn-reuters',
-    provider: 'msn-reuters',
-    pool: 'generalCandidates',
-    feedUrl: `${server.baseUrl}/providers/AAf3a78/items`,
-    detailUrl: `${server.baseUrl}/detail/`,
-    providerId: 'AAf3a78',
-    limit: 100
-  };
-  let result;
-  let staleResult;
-  let emptyResult;
-  try {
-    result = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(['2026-07-10']), timeoutMs: 1000 });
-    staleResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(['2026-07-09']), timeoutMs: 1000 });
-    emptyResult = await fetchAcquisitionPath(pathConfig, { eligibleDates: new Set(), timeoutMs: 1000 });
-  } finally {
-    await closeHttpServer(server.server);
-  }
-
-  const feedCall = calls.find((url) => url.pathname === '/providers/AAf3a78/items');
-  assert.equal(feedCall.searchParams.get('contentType'), 'article');
-  assert.equal(feedCall.searchParams.get('$top'), '100');
-  assert.equal(calls.filter((url) => url.pathname.startsWith('/detail/')).length, 4, 'Sports and spoofed-provider cards must be rejected before detail retrieval.');
-  assert.deepEqual(staleResult, { items: [] }, 'Out-of-window cards must be discarded before detail retrieval.');
-  assert.deepEqual(emptyResult, { items: [] }, 'An empty eligible date set must not become a provider failure.');
-  assert.equal(result.items.length, 2, 'Timestamp-mismatched detail records must be rejected without discarding the valid Reuters batch.');
-  assert.ok(result.items.every((item) => item.publishedAtVerified === true));
-  assert.ok(result.items.every((item) => item.publisherStoryId === 'tag:reuters.com,2026:newsml_KBNFIXTURE1'));
-  assert.ok(result.items.every((item) => item.article.excerpt.length > 200));
-  assert.ok(result.items.every((item) => !Object.hasOwn(item.article, 'text')));
-  assert.equal(
-    msnReutersReaderUrl(cards[0].url, cards[0].id),
-    'https://www.msn.com/en-us/money/markets/markets-rally-on-fixture-catalyst/ar-AAfixture1'
-  );
-  assert.equal(msnReutersReaderUrl('https://www.msn.com/en-us/money/not-an-article', 'AAfixture1'), '');
-
-  const asOf = new Date('2026-07-10T21:00:00Z');
-  const artifact = await collectNewsCandidates({
-    asOf,
-    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
-    acquisitionPaths: [pathConfig],
-    clock: () => asOf,
-    fetchPath: async () => result,
-    fetchArticle: async () => {
-      throw new Error('Provider-verified Reuters candidates must bypass article-page timestamp review.');
-    }
-  });
-  assert.equal(artifact.generalCandidates.length, 1, 'Duplicate MSN records for one Reuters NewsML story must collapse.');
-  const candidate = artifact.generalCandidates[0];
-  assert.equal(candidate.provider, 'msn-reuters');
-  assert.equal(candidate.sourceId, 'reuters');
-  assert.equal(candidate.sourceLabel, 'Reuters');
-  assert.equal(candidate.publishedAtVerified, true);
-  assert.equal(candidate.publishedAt, '2026-07-10T18:00:00.000Z');
-  assert.equal(candidate.article.excerpt.length > 200, true);
-  assert.equal(Object.hasOwn(candidate.article, 'text'), false);
-  assert.equal(artifact.articleReview.reviewCandidateCount, 0);
-
-  const prior = priorNewsCandidates({
-    stories: [{
-      tag: 'Markets', title: candidate.title, body: 'Prior Reuters fixture copy.', url: candidate.url,
-      publishedOn: candidate.publishedOn, publishedAt: candidate.publishedAt, sourceLabel: 'Reuters'
-    }],
-    futuresModule: { stories: [] },
-    crypto: { notes: [] }
-  }, new Set([candidate.publishedOn]));
-  assert.equal(prior.generalCandidates.length, 1, 'A previously validated MSN-hosted Reuters card must remain eligible while fresh.');
-}
-
-async function testVerifiedPublishedAtCandidatesBypassReviewCap() {
+async function testVerifiedCandidatesRespectEditorialLimitWithoutSpendingReviewSlots() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
-  const unverifiedCount = ARTICLE_REVIEW_CANDIDATE_LIMIT + 10;
-  const unverifiedItems = Array.from({ length: unverifiedCount }, (_unused, index) => ({
-    publishedAt: new Date(Date.parse('2026-07-10T13:00:00.000Z') + index * 1000).toISOString(),
-    title: `Unverified cap fixture ${String(index).padStart(3, '0')}`,
-    url: `https://www.cnbc.com/2026/07/10/unverified-cap-fixture-${String(index).padStart(3, '0')}.html`
-  }));
-  const verifiedItems = [0, 1].map((index) => ({
+  const verifiedItems = Array.from({ length: EDITORIAL_CANDIDATE_LIMIT + 10 }, (_unused, index) => ({
     publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
-    title: `Verified AP fixture ${index}`,
-    url: `https://apnews.com/article/verified-ap-fixture-${index}`,
+    title: `Verified Reuters fixture ${String(index).padStart(3, '0')}`,
+    url: `https://www.reuters.com/markets/us/verified-reuters-fixture-${String(index).padStart(3, '0')}-2026-07-10/`,
     publishedAtVerified: true
   }));
+  const cryptoItem = {
+    publishedAt: '2026-07-10T20:00:00.000Z',
+    title: 'Independent crypto fixture',
+    url: 'https://www.coindesk.com/markets/2026/07/10/independent-crypto-fixture/'
+  };
   const reviewed = [];
 
   const artifact = await collectNewsCandidates({
     asOf,
     dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
     acquisitionPaths: [
-      { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates' },
-      { id: 'cnbc', provider: 'rss', pool: 'generalCandidates' }
+      { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' },
+      { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates' }
     ],
     clock: () => asOf,
-    fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'ap-public' ? verifiedItems : unverifiedItems }),
+    fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'reuters-public' ? verifiedItems : [cryptoItem] }),
     fetchArticle: async (candidate) => {
-      assert.equal(candidate.sourceId, 'cnbc', 'AP candidates with verified provider timestamps must not spend article-review slots.');
+      assert.equal(candidate.sourceId, 'coindesk', 'Verified Reuters candidates must not spend article-review slots.');
       reviewed.push(candidate.title);
       return {
         finalUrl: candidate.url,
@@ -1274,16 +1310,17 @@ async function testVerifiedPublishedAtCandidatesBypassReviewCap() {
     }
   });
 
-  assert.equal(reviewed.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
-  assert.equal(artifact.articleReview.eligibleDownloadedCount, unverifiedCount + verifiedItems.length);
-  assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
-  assert.equal(artifact.articleReview.skippedCount, 10);
-  assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT + verifiedItems.length);
-  const apCandidates = artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'ap');
-  assert.equal(apCandidates.length, verifiedItems.length);
-  assert.ok(apCandidates.every((candidate) => candidate.sourceLabel === 'AP'));
-  assert.ok(apCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
-  assert.ok(apCandidates.every((candidate) => candidate.publishedAtVerified === true));
+  assert.deepEqual(reviewed, [cryptoItem.title]);
+  assert.equal(artifact.articleReview.eligibleDownloadedCount, verifiedItems.length + 1);
+  assert.equal(artifact.articleReview.reviewCandidateCount, 1);
+  assert.equal(artifact.generalCandidates.length, EDITORIAL_CANDIDATE_LIMIT);
+  assert.equal(artifact.futuresCandidates.length, EDITORIAL_CANDIDATE_LIMIT);
+  assert.equal(artifact.cryptoCandidates.length, 1, 'A large Reuters result must not crowd out the independent Crypto pool.');
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 000'), false);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 259'), true);
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceLabel === 'Reuters'));
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.publishedAtVerified === true));
 }
 
 async function testUpdatedOnlyFeedsDoNotCreatePublishedCandidates() {
@@ -1449,23 +1486,26 @@ async function main() {
   testStoryIdentityContract();
   testDashboardNewsCollections();
   testNewsCoverageState();
+  testFuturesPublicationTimestampValidation();
   testMondayMorningFreshnessWindow();
+  await testAlphaVantageProviderErrorRedaction();
   testArticleMetadataExtraction();
   testNewsTimestampParsing();
   testRssParsing();
   testApNewsSitemapParsing();
+  testReutersNewsSitemapParsing();
+  await testReutersNewsSitemapFetchIsolation();
+  await testReutersNewsSitemapCollectionIntegration();
+  testArticleRedirectPolicy();
   await testNewsFetchResponseTransport();
   await testNewsTransportFailureIsolation();
   await testApPublicAcquisitionUsesOneSitemapFetch();
-  await testMsnReutersProviderVerifiedAcquisition();
-  await testVerifiedPublishedAtCandidatesBypassReviewCap();
+  await testVerifiedCandidatesRespectEditorialLimitWithoutSpendingReviewSlots();
   await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();
   await testFuturesCandidatesUseDisplayedSessionWindow();
   await testNewsCandidateReviewCapAndProgress();
   await testNewsCandidateCapAfterEligibilityAndDedupe();
-  await testYahooOriginalPromotionValidation();
-  await testYahooStructuredProviderReutersValidation();
   testBaselineSanitization();
   testManualBaselineTransition();
   testScheduledBaselineTransition();

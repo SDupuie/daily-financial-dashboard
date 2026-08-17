@@ -77,7 +77,7 @@ const {
   sharedFuturesSessionDate,
   storyIdentity
 } = require('./news_contract');
-const { priorNewsCandidates } = require('./fetch_news_candidates');
+const { EDITORIAL_CANDIDATE_LIMIT, priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
 const { atomicWriteFile, atomicWriteJson } = require('./staging_writer');
 
@@ -870,8 +870,11 @@ function validNewsCandidateArtifact(artifact, asOf) {
     && artifact.generatedAt === asOf.toISOString()
     && Array.isArray(artifact.attempts)
     && Array.isArray(artifact.generalCandidates)
+    && artifact.generalCandidates.length <= EDITORIAL_CANDIDATE_LIMIT
     && Array.isArray(artifact.futuresCandidates)
-    && Array.isArray(artifact.cryptoCandidates);
+    && artifact.futuresCandidates.length <= EDITORIAL_CANDIDATE_LIMIT
+    && Array.isArray(artifact.cryptoCandidates)
+    && artifact.cryptoCandidates.length <= EDITORIAL_CANDIDATE_LIMIT;
 }
 
 function partialNewsCandidateArtifact(asOf, error) {
@@ -1740,7 +1743,7 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
     url: source?.url,
     publishedOn: source?.publishedOn,
     sourceLabel: storySourceLabel(item, candidate),
-    ...(source?.publishedAt ? { publishedAt: source.publishedAt } : {})
+    ...(isIsoDateTime(source?.publishedAt) ? { publishedAt: source.publishedAt } : {})
   };
   return story;
 }
@@ -1835,15 +1838,20 @@ function newsSelection(manifest, key) {
   return Array.isArray(selection?.[key]) ? selection[key] : [];
 }
 
-function readNewsCandidateSource(reviewManifest) {
-  // The editorial handoff seals the reviewed candidate inventory. Apply must
-  // not depend on mutable staging files that can change after Prepare.
-  const generatedAt = new Date(reviewManifest?.preparedAt);
+function readNewsCandidateSource(preparedAt) {
+  // The generated sidecar owns candidate provenance. The handoff copy is
+  // editable review context and must not authenticate its own selections.
+  const generatedAt = new Date(preparedAt);
   if (Number.isNaN(generatedAt.getTime())) {
     return null;
   }
-  const artifact = reviewManifest?.newsSearch;
-  if (!validNewsCandidateArtifact(artifact, generatedAt)) {
+  let artifact;
+  try {
+    artifact = readJson(NEWS_CANDIDATES_PATH);
+  } catch (_error) {
+    return null;
+  }
+  if (artifact?.generatedAt !== preparedAt || !validNewsCandidateArtifact(artifact, generatedAt)) {
     return null;
   }
   return artifact;
@@ -2040,7 +2048,7 @@ function applyDashboardDataJson(args) {
   if (!isIsoDateTime(editorialDashboardData.editionId)) {
     throw new Error('Editorial dashboard-data editionId must be the prepared run edition timestamp; regenerate the editorial handoff.');
   }
-  const newsSource = readNewsCandidateSource(reviewManifest);
+  const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
   const dashboardData = structuredClone(candidateDashboardData);
   // The prepared edition timestamp owns editorial freshness and story windows;
   // wall-clock apply time may drift outside the original handoff window.

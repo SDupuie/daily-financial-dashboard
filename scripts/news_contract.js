@@ -113,6 +113,7 @@ function candidateInFuturesPublicationWindow(candidate, futuresWindow) {
   if (!futuresWindow) return false;
   const publishedAt = Date.parse(candidate?.publishedAt);
   return candidate?.publishedAtVerified === true
+    && isIsoDateTime(candidate?.publishedAt)
     && Number.isFinite(publishedAt)
     && publishedAt >= futuresWindow.start.getTime()
     && publishedAt <= futuresWindow.end.getTime();
