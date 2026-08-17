@@ -90,7 +90,6 @@ const {
 const { buildEarningsPreparationFallback } = require('./earnings_week_contract');
 const { validateEarningsWeekPayload } = require('./earnings_week');
 const { atomicWriteFile } = require('./staging_writer');
-const { EDITORIAL_CANDIDATE_LIMIT } = require('./fetch_news_candidates');
 const { newsAcquisitionPaths } = require('./news_sources');
 const {
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
@@ -3372,6 +3371,39 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(malformedOptionalTimestampFinalized.futuresModule.stories.length, 3, 'One malformed general timestamp must not degrade verified Futures stories.');
   assert.equal(malformedOptionalTimestampFinalized.futuresModule.stories[0].publishedAt, dashboard.futuresModule.stories[0].publishedAt);
 
+  const uncappedArtifact = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
+  while (uncappedArtifact.generalCandidates.length < 260) {
+    const index = uncappedArtifact.generalCandidates.length;
+    uncappedArtifact.generalCandidates.push({
+      title: `Uncapped inventory fixture ${index}`,
+      url: `https://www.reuters.com/markets/us/uncapped-inventory-fixture-${index}-2026-07-10`,
+      publishedOn: '2026-07-10',
+      publishedAt: `2026-07-10T${String(12 + Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}:00.000Z`,
+      sourceLabel: 'Reuters',
+      publishedAtVerified: true
+    });
+  }
+  const beyondFormerLimit = uncappedArtifact.generalCandidates.at(-1);
+  const uncappedPayload = structuredClone(editorialPayload);
+  uncappedPayload.editorialReview.newsSearch.generalCandidates = structuredClone(uncappedArtifact.generalCandidates);
+  uncappedPayload.editorialReview.newsSelection.stories[0] = {
+    url: beyondFormerLimit.url,
+    tag: 'Markets',
+    title: 'Reviewed candidate beyond the former inventory limit',
+    body: 'The complete prepared inventory remains available for editorial selection.'
+  };
+  fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(uncappedArtifact, null, 2)}\n`);
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  fs.writeFileSync(payloadFile, JSON.stringify(uncappedPayload));
+  const uncappedResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(uncappedResult.status, 0, uncappedResult.stderr);
+  const uncappedFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.ok(
+    uncappedFinalized.stories.some((story) => story.url === beyondFormerLimit.url),
+    'Apply must accept a sidecar-owned selection beyond the former 250-candidate inventory limit.'
+  );
+
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
@@ -3386,19 +3418,6 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
       const differentlySpelledTimestamp = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
       differentlySpelledTimestamp.generatedAt = differentlySpelledTimestamp.generatedAt.replace(/Z$/, '+00:00');
       fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(differentlySpelledTimestamp, null, 2)}\n`);
-    },
-    () => {
-      const overLimit = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
-      while (overLimit.generalCandidates.length <= EDITORIAL_CANDIDATE_LIMIT) {
-        const index = overLimit.generalCandidates.length;
-        overLimit.generalCandidates.push({
-          title: `Over-limit candidate ${index}`,
-          url: `https://candidate.test/over-limit-${index}`,
-          publishedOn: '2026-07-10',
-          sourceLabel: 'Fixture News'
-        });
-      }
-      fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(overLimit, null, 2)}\n`);
     }
   ]) {
     writeFixtureNewsCandidates(dashboard);

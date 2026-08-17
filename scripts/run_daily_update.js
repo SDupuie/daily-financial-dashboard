@@ -77,7 +77,7 @@ const {
   sharedFuturesSessionDate,
   storyIdentity
 } = require('./news_contract');
-const { EDITORIAL_CANDIDATE_LIMIT, priorNewsCandidates } = require('./fetch_news_candidates');
+const { priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
 const { atomicWriteFile, atomicWriteJson } = require('./staging_writer');
 
@@ -870,11 +870,8 @@ function validNewsCandidateArtifact(artifact, asOf) {
     && artifact.generatedAt === asOf.toISOString()
     && Array.isArray(artifact.attempts)
     && Array.isArray(artifact.generalCandidates)
-    && artifact.generalCandidates.length <= EDITORIAL_CANDIDATE_LIMIT
     && Array.isArray(artifact.futuresCandidates)
-    && artifact.futuresCandidates.length <= EDITORIAL_CANDIDATE_LIMIT
-    && Array.isArray(artifact.cryptoCandidates)
-    && artifact.cryptoCandidates.length <= EDITORIAL_CANDIDATE_LIMIT;
+    && Array.isArray(artifact.cryptoCandidates);
 }
 
 function partialNewsCandidateArtifact(asOf, error) {

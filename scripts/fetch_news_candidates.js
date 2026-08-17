@@ -34,7 +34,6 @@ const ARTICLE_BYTE_LIMIT = 1_000_000;
 const ARTICLE_EXCERPT_LIMIT = 5000;
 const ARTICLE_CONCURRENCY = 8;
 const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
-const EDITORIAL_CANDIDATE_LIMIT = ARTICLE_REVIEW_CANDIDATE_LIMIT;
 const REUTERS_SITEMAP_CONCURRENCY = 8;
 const REUTERS_SITEMAP_MAX_SLICES = 100;
 const REUTERS_SITEMAP_BODY_LIMIT = 2_000_000;
@@ -45,6 +44,7 @@ const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
 const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
 const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
 const REUTERS_UNSUPPORTED_PATHS = new Set(['ar', 'de', 'default', 'es', 'fr', 'it', 'ja', 'pt', 'ru', 'zh']);
+const STRICT_CRYPTO_TITLE_PATTERN = /\b(?:bitcoin|crypto(?:currenc(?:y|ies))?|ethereum|ether|stablecoins?|blockchain|digital[- ]assets?)\b/i;
 const FIXED_ZONE_OFFSETS = Object.freeze({
   UT: 0,
   UTC: 0,
@@ -611,6 +611,10 @@ function plainText(value) {
     .replace(/\s+/g, ' ').trim();
 }
 
+function highConfidenceCryptoTitle(value) {
+  return STRICT_CRYPTO_TITLE_PATTERN.test(plainText(value));
+}
+
 function xmlValue(block, tag) {
   const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return plainText(block.match(new RegExp(`<${escaped}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escaped}>`, 'i'))?.[1]);
@@ -723,7 +727,15 @@ function parseReutersNewsSitemap(xml) {
     const publicationName = xmlValue(block, 'news:name');
     const language = xmlValue(block, 'news:language');
     const publishedAt = xmlValue(block, 'news:publication_date');
-    return { title, url, publishedAt, language, publicationName, providerSourceName: 'Reuters', publishedAtVerified: true };
+    return {
+      title,
+      url,
+      publishedAt,
+      language,
+      publicationName,
+      providerSourceName: 'Reuters',
+      publishedAtVerified: true
+    };
   }).filter((entry) => entry.url
     && entry.title
     && entry.publicationName === 'Reuters'
@@ -810,6 +822,10 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   if (new URL(url).protocol !== 'https:') return null;
   const publishedOn = chicagoIsoDate(publishedAt);
   if (!eligibleDates.has(publishedOn)) return null;
+  const pool = acquisitionPath.pool === 'cryptoCandidates'
+    || highConfidenceCryptoTitle(title)
+    ? 'cryptoCandidates'
+    : acquisitionPath.pool;
   return {
     title,
     url,
@@ -825,7 +841,7 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     ...(plainText(item.providerSourceName) ? { providerSourceName: plainText(item.providerSourceName) } : {}),
     ...(item.article ? { article: item.article } : {}),
     origin: 'downloaded',
-    pool: acquisitionPath.pool,
+    pool,
     searchPathIds: [acquisitionPath.id]
   };
 }
@@ -1060,8 +1076,7 @@ async function collectNewsCandidates({
     : eligibleDates;
   const attemptsByIndex = Array(acquisitionPaths.length).fill(null);
   const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
-  const reviewBypassDownloaded = [];
-  const reviewedDownloaded = [];
+  const normalizedDownloaded = [];
   const articleReview = {
     candidateLimit: ARTICLE_REVIEW_CANDIDATE_LIMIT,
     eligibleDownloadedCount: 0,
@@ -1078,8 +1093,7 @@ async function collectNewsCandidates({
     // Prior Futures cards compete only inside the Futures pool; they should not
     // stretch the broad-market freshness window after the displayed session rolls.
     const candidates = deduplicateCandidates([
-      ...reviewBypassDownloaded,
-      ...reviewedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
+      ...normalizedDownloaded.filter((candidate) => candidate.pageDateFresh !== false),
       ...prior.generalCandidates,
       ...prior.cryptoCandidates,
       ...futuresPrior.generalCandidates
@@ -1094,18 +1108,15 @@ async function collectNewsCandidates({
       articleReview: { ...articleReview, status },
       generalCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates' && eligibleDates.has(candidate.publishedOn))
-        .sort(candidateOrder)
-        .slice(0, EDITORIAL_CANDIDATE_LIMIT),
+        .sort(candidateOrder),
       futuresCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates'
           && futuresDates.has(candidate.publishedOn)
           && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow)))
-        .sort(candidateOrder)
-        .slice(0, EDITORIAL_CANDIDATE_LIMIT),
+        .sort(candidateOrder),
       cryptoCandidates: candidates
         .filter((candidate) => candidate.pool === 'cryptoCandidates')
         .sort(candidateOrder)
-        .slice(0, EDITORIAL_CANDIDATE_LIMIT)
     };
   };
   const reportProgress = (status = articleReview.status) => {
@@ -1162,9 +1173,8 @@ async function collectNewsCandidates({
   }));
 
   const reviewCandidates = deduplicateCandidates(downloadedCandidates()).sort(candidateOrder);
-  const reviewBypassCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified === true);
   const unverifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified !== true);
-  reviewBypassDownloaded.push(...reviewBypassCandidates);
+  normalizedDownloaded.push(...reviewCandidates);
   const cappedReviewCandidates = unverifiedReviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   articleReview.eligibleDownloadedCount = reviewCandidates.length;
   articleReview.reviewCandidateCount = cappedReviewCandidates.length;
@@ -1179,8 +1189,7 @@ async function collectNewsCandidates({
     fetchArticle,
     articleTimeoutMs
   }), {
-    onSuccess: (candidate) => {
-      reviewedDownloaded.push(candidate);
+    onSuccess: () => {
       articleReview.reviewedCount += 1;
       if (articleReview.reviewedCount % ARTICLE_CONCURRENCY === 0
         || articleReview.reviewedCount === cappedReviewCandidates.length) {
@@ -1219,7 +1228,6 @@ if (require.main === module) {
 
 module.exports = {
   ARTICLE_REVIEW_CANDIDATE_LIMIT,
-  EDITORIAL_CANDIDATE_LIMIT,
   alphaTimeFrom,
   articleRedirectAllowed,
   collectNewsCandidates,

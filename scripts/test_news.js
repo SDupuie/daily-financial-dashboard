@@ -23,7 +23,6 @@ const {
 } = require('./news_contract');
 const {
   ARTICLE_REVIEW_CANDIDATE_LIMIT,
-  EDITORIAL_CANDIDATE_LIMIT,
   articleRedirectAllowed,
   collectNewsCandidates,
   extractArticleMetadata,
@@ -536,9 +535,11 @@ async function testNewsCandidateReviewCapAndProgress() {
   assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   assert.equal(artifact.articleReview.reviewedCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   assert.equal(artifact.articleReview.skippedCount, 10);
-  assert.equal(artifact.generalCandidates.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 000'), false);
+  assert.equal(artifact.generalCandidates.length, itemCount, 'Page-enrichment limits must not truncate the editorial inventory.');
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 000'), true);
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 259'), true);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Cap fixture 000').article, undefined);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Cap fixture 259').article.accessible, true);
   assert.ok(
     progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'acquiring'
       && progressArtifact.generalCandidates.length === 0),
@@ -546,9 +547,8 @@ async function testNewsCandidateReviewCapAndProgress() {
   );
   assert.ok(
     progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'reviewing'
-      && progressArtifact.generalCandidates.length > 0
-      && progressArtifact.generalCandidates.length < ARTICLE_REVIEW_CANDIDATE_LIMIT),
-    'Progress artifacts should expose reviewed candidates incrementally.'
+      && progressArtifact.generalCandidates.length === itemCount),
+    'The complete metadata inventory must be staged before page enrichment finishes.'
   );
 }
 
@@ -889,6 +889,98 @@ function testReutersNewsSitemapParsing() {
     );
   }
 
+}
+
+async function testSharedCryptoPoolPromotion() {
+  const eligibleDates = new Set(['2026-07-10']);
+  const generalPath = { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates' };
+  const baseItem = {
+    url: 'https://apnews.com/article/crypto-routing-fixture',
+    publishedAt: '2026-07-10T18:30:00.000Z',
+    publishedAtVerified: true
+  };
+  for (const title of [
+    'Bitcoin adoption expands',
+    'Crypto regulation advances',
+    'Cryptocurrencies face new rules',
+    'Ethereum upgrade reaches users',
+    'Ether funds attract demand',
+    'Stablecoin legislation clears committee',
+    'Blockchain settlement moves forward',
+    'Digital-asset custody rules change'
+  ]) {
+    const candidate = normalizeProviderCandidate({ ...baseItem, title }, generalPath, eligibleDates);
+    assert.equal(candidate.pool, 'cryptoCandidates', `${title} must promote from General to Crypto.`);
+    assert.equal(candidate.sourceLabel, 'AP');
+    assert.equal(candidate.publishedAtVerified, true, 'Pool promotion must preserve verified timestamp provenance.');
+  }
+  for (const title of [
+    'Token award boosts developer usage',
+    'Wallet maker expands retail distribution',
+    'Mining company raises production target',
+    'Ethernet equipment demand strengthens',
+    'Cryptography conference opens registration'
+  ]) {
+    const candidate = normalizeProviderCandidate({ ...baseItem, title }, generalPath, eligibleDates);
+    assert.equal(candidate.pool, 'generalCandidates', `${title} must remain General without a strict Crypto signal.`);
+  }
+
+  const explicitCrypto = normalizeProviderCandidate({
+    title: 'Artificial intelligence model review',
+    url: 'https://www.coindesk.com/tech/2026/07/10/ai-model-review',
+    publishedAt: baseItem.publishedAt
+  }, { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates' }, eligibleDates);
+  assert.equal(explicitCrypto.pool, 'cryptoCandidates', 'Explicit Crypto acquisition paths must remain Crypto without a title match.');
+
+  const reutersPath = { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' };
+  const [reutersCryptoTitle] = parseReutersNewsSitemap(reutersNewsSitemap([
+    reutersNewsSitemapEntry({
+      title: 'Bitcoin market structure shifts',
+      url: 'https://www.reuters.com/technology/bitcoin-market-structure-2026-07-10/'
+    })
+  ]));
+  const promotedReuters = normalizeProviderCandidate(reutersCryptoTitle, reutersPath, eligibleDates);
+  assert.equal(promotedReuters.pool, 'cryptoCandidates', 'Reuters must use the shared strict-title promotion rule.');
+  assert.equal(promotedReuters.sourceLabel, 'Reuters');
+  assert.equal(promotedReuters.publishedAtVerified, true);
+
+  const artifact = await collectNewsCandidates({
+    asOf: new Date('2026-07-10T19:00:00.000Z'),
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [
+      generalPath,
+      reutersPath
+    ],
+    clock: () => new Date('2026-07-10T19:00:00.000Z'),
+    fetchPath: async (acquisitionPath) => ({
+      items: acquisitionPath.id === 'reuters-public' ? [reutersCryptoTitle] : [{
+        ...baseItem,
+        title: 'Bitcoin adoption expands',
+        url: 'https://apnews.com/article/bitcoin-routing-fixture'
+      }, {
+        ...baseItem,
+        title: 'Token award boosts developer usage',
+        url: 'https://apnews.com/article/token-routing-fixture'
+      }]
+    }),
+    fetchArticle: async () => {
+      throw new Error('Verified fixtures must not require article-page review.');
+    }
+  });
+  assert.deepEqual(
+    artifact.generalCandidates.map((candidate) => candidate.title).sort(),
+    ['Token award boosts developer usage']
+  );
+  assert.deepEqual(
+    artifact.cryptoCandidates.map((candidate) => candidate.title).sort(),
+    ['Bitcoin adoption expands', 'Bitcoin market structure shifts'],
+    'The shared strict-title rule must route AP and Reuters candidates into Crypto exclusively.'
+  );
+  assert.deepEqual(
+    artifact.futuresCandidates.map((candidate) => candidate.title).sort(),
+    ['Token award boosts developer usage'],
+    'Crypto promotion must remove candidates from the General-derived Futures inventory.'
+  );
 }
 
 async function testReutersNewsSitemapFetchIsolation() {
@@ -1273,9 +1365,9 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
   }
 }
 
-async function testVerifiedCandidatesRespectEditorialLimitWithoutSpendingReviewSlots() {
+async function testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
-  const verifiedItems = Array.from({ length: EDITORIAL_CANDIDATE_LIMIT + 10 }, (_unused, index) => ({
+  const verifiedItems = Array.from({ length: ARTICLE_REVIEW_CANDIDATE_LIMIT + 10 }, (_unused, index) => ({
     publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
     title: `Verified Reuters fixture ${String(index).padStart(3, '0')}`,
     url: `https://www.reuters.com/markets/us/verified-reuters-fixture-${String(index).padStart(3, '0')}-2026-07-10/`,
@@ -1313,10 +1405,10 @@ async function testVerifiedCandidatesRespectEditorialLimitWithoutSpendingReviewS
   assert.deepEqual(reviewed, [cryptoItem.title]);
   assert.equal(artifact.articleReview.eligibleDownloadedCount, verifiedItems.length + 1);
   assert.equal(artifact.articleReview.reviewCandidateCount, 1);
-  assert.equal(artifact.generalCandidates.length, EDITORIAL_CANDIDATE_LIMIT);
-  assert.equal(artifact.futuresCandidates.length, EDITORIAL_CANDIDATE_LIMIT);
+  assert.equal(artifact.generalCandidates.length, verifiedItems.length);
+  assert.equal(artifact.futuresCandidates.length, verifiedItems.length);
   assert.equal(artifact.cryptoCandidates.length, 1, 'A large Reuters result must not crowd out the independent Crypto pool.');
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 000'), false);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 000'), true);
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 259'), true);
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceLabel === 'Reuters'));
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
@@ -1494,13 +1586,14 @@ async function main() {
   testRssParsing();
   testApNewsSitemapParsing();
   testReutersNewsSitemapParsing();
+  await testSharedCryptoPoolPromotion();
   await testReutersNewsSitemapFetchIsolation();
   await testReutersNewsSitemapCollectionIntegration();
   testArticleRedirectPolicy();
   await testNewsFetchResponseTransport();
   await testNewsTransportFailureIsolation();
   await testApPublicAcquisitionUsesOneSitemapFetch();
-  await testVerifiedCandidatesRespectEditorialLimitWithoutSpendingReviewSlots();
+  await testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap();
   await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();
   await testFuturesCandidatesUseDisplayedSessionWindow();
