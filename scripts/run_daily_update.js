@@ -68,6 +68,7 @@ const {
   validateTapeCommentaryDisposition
 } = require('./editorial_review_contract');
 const {
+  NEWS_COVERAGE_POLICIES,
   allowedNewsDates,
   applyNewsCoverageState,
   applyScheduledNewsBaseline,
@@ -1755,8 +1756,13 @@ function sanitizeStoryList(editorial, options = {}) {
   const seenUrls = new Set();
   const candidateByUrl = options.candidateByUrl instanceof Map ? options.candidateByUrl : null;
   const blockedUrls = options.blockedUrls instanceof Set ? options.blockedUrls : new Set();
+  const maximum = Number.isInteger(options.maximum) && options.maximum >= 0 ? options.maximum : Infinity;
   const selected = [];
   editorial.forEach((item, index) => {
+    if (selected.length >= maximum) {
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'selection_limit_exceeded' });
+      return;
+    }
     const candidate = candidateByUrl ? candidateByUrl.get(canonicalStoryUrl(item?.url)) : null;
     if (candidateByUrl && !candidate) {
       if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
@@ -2070,6 +2076,7 @@ function applyDashboardDataJson(args) {
     ...dashboardData.futuresModule,
     stories: sanitizeStoryList(newsSelection(reviewManifest, 'futures'), {
       futures: true,
+      maximum: NEWS_COVERAGE_POLICIES.futuresStories.maximum,
       requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'futures-news',
@@ -2079,6 +2086,7 @@ function applyDashboardDataJson(args) {
     })
   };
   dashboardData.stories = sanitizeStoryList(newsSelection(reviewManifest, 'stories'), {
+    maximum: NEWS_COVERAGE_POLICIES.stories.maximum,
     requireSourceLabel: true,
     systemFallbacks: reviewManifest.systemFallbacks,
     section: 'stories',
@@ -2090,6 +2098,7 @@ function applyDashboardDataJson(args) {
   dashboardData.crypto = {
     ...dashboardData.crypto,
     notes: sanitizeStoryList(newsSelection(reviewManifest, 'crypto'), {
+      maximum: NEWS_COVERAGE_POLICIES.cryptoNotes.maximum,
       requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
       section: 'crypto',

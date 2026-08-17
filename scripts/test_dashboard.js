@@ -3404,6 +3404,69 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     'Apply must accept a sidecar-owned selection beyond the former 250-candidate inventory limit.'
   );
 
+  const limitedArtifact = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
+  while (limitedArtifact.cryptoCandidates.length < 15) {
+    const index = limitedArtifact.cryptoCandidates.length + 1;
+    limitedArtifact.cryptoCandidates.push({
+      title: `Extra crypto candidate ${index}`,
+      url: `https://candidate.test/crypto-extra-${index}`,
+      publishedOn: '2026-07-10',
+      sourceLabel: 'Fixture News'
+    });
+  }
+  const extraFuturesCandidate = {
+    ...limitedArtifact.futuresCandidates[0],
+    title: 'Extra futures candidate 4',
+    url: 'https://candidate.test/futures-extra-4'
+  };
+  limitedArtifact.futuresCandidates.push(extraFuturesCandidate);
+  const futuresUrls = new Set(limitedArtifact.futuresCandidates.map((candidate) => candidate.url));
+  const limitedGeneralCandidates = limitedArtifact.generalCandidates
+    .filter((candidate) => !futuresUrls.has(candidate.url))
+    .slice(0, 21);
+  const selectionFromCandidate = (candidate, index) => ({
+    url: candidate.url,
+    tag: 'Markets',
+    title: candidate.title,
+    body: `Reviewed fixture selection ${index + 1}.`
+  });
+  const limitedPayload = structuredClone(editorialPayload);
+  limitedPayload.editorialReview.newsSelection.futures.push({
+    ...selectionFromCandidate(extraFuturesCandidate, 3),
+    tag: 'Futures'
+  });
+  limitedPayload.editorialReview.newsSelection.stories = limitedGeneralCandidates.map(selectionFromCandidate);
+  limitedPayload.editorialReview.newsSelection.crypto = limitedArtifact.cryptoCandidates.slice(0, 15)
+    .map((candidate, index) => ({ ...selectionFromCandidate(candidate, index), tag: 'Crypto' }));
+  fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(limitedArtifact, null, 2)}\n`);
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  fs.writeFileSync(payloadFile, JSON.stringify(limitedPayload));
+  const limitedResult = spawnSync(process.execPath, command, { cwd: root, encoding: 'utf8', env });
+  assert.equal(limitedResult.status, 0, limitedResult.stderr);
+  const limitedFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+  assert.equal(limitedFinalized.stories.length, 18, 'Apply must cap General News at eighteen accepted cards.');
+  assert.equal(limitedFinalized.crypto.notes.length, 12, 'Apply must cap Crypto at twelve accepted cards.');
+  assert.equal(limitedFinalized.futuresModule.stories.length, 3, 'Apply must cap Futures at three accepted cards.');
+  assert.equal(
+    limitedFinalized.futuresModule.stories.some((storyItem) => storyItem.url === extraFuturesCandidate.url),
+    false,
+    'The fourth Futures selection must be omitted.'
+  );
+  assert.equal(limitedFinalized.storiesCoverage, undefined, 'Optional General omissions must not mark a complete primary set partial.');
+  assert.equal(limitedFinalized.crypto.notesCoverage, undefined, 'Optional Crypto omissions must not mark a complete primary set partial.');
+  const limitFallbacks = limitedFinalized.editorialReview.systemFallbacks
+    .filter((item) => item.reason === 'selection_limit_exceeded');
+  assert.equal(limitFallbacks.length, 7, 'Apply must record each independently omitted over-limit selection.');
+  assert.equal(limitFallbacks.filter((item) => item.section === 'stories').length, 3);
+  assert.equal(limitFallbacks.filter((item) => item.section === 'crypto').length, 3);
+  assert.deepEqual(limitFallbacks.filter((item) => item.section === 'futures-news'), [{
+    section: 'futures-news',
+    path: 'editorialReview.newsSelection.futures[3]',
+    action: 'omitted',
+    reason: 'selection_limit_exceeded'
+  }]);
+
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
   fs.writeFileSync(payloadFile, JSON.stringify(editorialPayload));
@@ -4748,6 +4811,38 @@ function testDashboardEmbeddedRuntimeParses() {
   assert.doesNotThrow(() => new Function(runtime), 'The complete dashboard runtime must parse as JavaScript.');
   assert.match(runtime, /data\?\.tape\?\.availability\?\.status === 'unavailable'[\s\S]*?Market data unavailable for this update\./,
     'The runtime must render the explicit unavailable Chart/Tape state without initializing a chart.');
+}
+
+function testNewsMoreDisclosureRendering() {
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const source = extractDashboardRuntimeTestBlock(html, 'news-more-disclosure');
+  const { renderStoryCollection } = Function(`${source}\nreturn { renderStoryCollection };`)();
+  const cards = Array.from({ length: 18 }, (_, index) => `<article data-story="${index + 1}">Story ${index + 1}</article>`);
+
+  const exactGeneral = renderStoryCollection(cards.slice(0, 9), 'story-grid', 9);
+  assert.doesNotMatch(exactGeneral, /data-news-more/, 'The disclosure must be absent when General News has no extras.');
+  assert.equal((exactGeneral.match(/data-story=/g) || []).length, 9);
+
+  const expandedGeneral = renderStoryCollection(cards, 'story-grid', 9);
+  assert.match(expandedGeneral, /<details class="news-more" data-news-more>/);
+  assert.match(expandedGeneral, /More stories <span class="news-more-count">9<\/span>/);
+  assert.match(expandedGeneral, /<span class="news-more-expanded">Show fewer<\/span>/);
+  assert.match(expandedGeneral, /class="story-grid news-more-grid"/);
+  assert.ok(
+    expandedGeneral.indexOf('data-story="9"') < expandedGeneral.indexOf('data-news-more')
+      && expandedGeneral.indexOf('data-story="10"') > expandedGeneral.indexOf('data-news-more'),
+    'The first nine General cards must remain in the primary grid and the remainder must follow the disclosure.'
+  );
+
+  const cryptoCards = cards.slice(0, 12).map((card) => card.replace('data-story', 'data-crypto-story'));
+  const expandedCrypto = renderStoryCollection(cryptoCards, 'crypto-notes', 6);
+  assert.match(expandedCrypto, /More stories <span class="news-more-count">6<\/span>/);
+  assert.match(expandedCrypto, /class="crypto-notes news-more-grid"/);
+  assert.ok(
+    expandedCrypto.indexOf('data-crypto-story="6"') < expandedCrypto.indexOf('data-news-more')
+      && expandedCrypto.indexOf('data-crypto-story="7"') > expandedCrypto.indexOf('data-news-more'),
+    'The first six Crypto cards must remain in the primary grid and the remainder must follow the disclosure.'
+  );
 }
 
 function testEmbeddedChartDecoderSkipsMalformedCompactBars() {
@@ -6362,6 +6457,79 @@ async function testTapeTooltipStacksAboveNeighboringInfoControlsInBrowser() {
   }
 }
 
+async function testNewsMoreDisclosureInBrowser() {
+  const previousBrowserPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
+  const { chromium } = require('playwright');
+  const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((match) => match[1]).join('\n');
+  const source = extractDashboardRuntimeTestBlock(html, 'news-more-disclosure');
+  const { renderStoryCollection } = Function(`${source}\nreturn { renderStoryCollection };`)();
+  const storyCards = Array.from({ length: 18 }, (_, index) => (
+    `<article class="story editorial-card surface card" data-general-story="${index + 1}">General ${index + 1}</article>`
+  ));
+  const cryptoCards = Array.from({ length: 12 }, (_, index) => (
+    `<article class="crypto-note editorial-card surface card" data-crypto-story="${index + 1}">Crypto ${index + 1}</article>`
+  ));
+  const exactCards = storyCards.slice(0, 9).map((card) => card.replace('data-general-story', 'data-exact-story'));
+  let browser;
+  try {
+    browser = await chromium.launch({ executablePath: chromium.executablePath(), headless: true });
+    const page = await browser.newPage();
+    await page.setContent(`<!doctype html><html><head><style>${styles}</style></head><body>
+      <main style="max-width:1180px;margin:32px auto;padding:0 20px">
+        <section id="general-fixture">${renderStoryCollection(storyCards, 'story-grid', 9)}</section>
+        <section id="crypto-fixture" style="margin-top:32px">${renderStoryCollection(cryptoCards, 'crypto-notes', 6)}</section>
+        <section id="exact-fixture" style="margin-top:32px">${renderStoryCollection(exactCards, 'story-grid', 9)}</section>
+      </main>
+    </body></html>`);
+
+    assert.equal(await page.locator('#exact-fixture [data-news-more]').count(), 0, 'A section without extras must not expose a disclosure.');
+
+    for (const viewport of [
+      { width: 390, height: 844, columns: 1, label: 'mobile' },
+      { width: 768, height: 1024, columns: 2, label: 'tablet' },
+      { width: 1440, height: 900, columns: 3, label: 'desktop' }
+    ]) {
+      await page.setViewportSize(viewport);
+      const generalDetails = page.locator('#general-fixture [data-news-more]');
+      const generalSummary = generalDetails.locator('summary');
+      const cryptoDetails = page.locator('#crypto-fixture [data-news-more]');
+      const cryptoSummary = cryptoDetails.locator('summary');
+
+      assert.equal(await generalDetails.evaluate((element) => element.open), false, `${viewport.label}: General extras must start collapsed.`);
+      assert.equal(await page.locator('#general-fixture [data-general-story]:visible').count(), 9, `${viewport.label}: nine General cards must be initially visible.`);
+      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 6, `${viewport.label}: six Crypto cards must be initially visible.`);
+      assert.equal(await page.locator('#general-fixture .story-grid').first().evaluate((element) => (
+        getComputedStyle(element).gridTemplateColumns.split(' ').length
+      )), viewport.columns, `${viewport.label}: the primary General grid must retain its responsive column count.`);
+      const alignment = await page.locator('#general-fixture').evaluate((section) => {
+        const gridRect = section.querySelector('.story-grid').getBoundingClientRect();
+        const summaryRect = section.querySelector('summary').getBoundingClientRect();
+        return Math.abs(gridRect.right - summaryRect.right);
+      });
+      assert.ok(alignment <= 1, `${viewport.label}: the More stories disclosure must align to the right edge.`);
+
+      await generalSummary.click();
+      assert.equal(await generalDetails.evaluate((element) => element.open), true, `${viewport.label}: pointer activation must expand General extras.`);
+      assert.equal(await page.locator('#general-fixture [data-general-story]:visible').count(), 18, `${viewport.label}: all eighteen General cards must be visible after expansion.`);
+      assert.equal(await generalSummary.getByText('Show fewer').isVisible(), true, `${viewport.label}: the expanded label must be visible.`);
+      await generalSummary.press('Enter');
+      assert.equal(await generalDetails.evaluate((element) => element.open), false, `${viewport.label}: keyboard activation must collapse General extras.`);
+
+      await cryptoSummary.click();
+      assert.equal(await cryptoDetails.evaluate((element) => element.open), true, `${viewport.label}: Crypto extras must expand independently.`);
+      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 12, `${viewport.label}: all twelve Crypto cards must be visible after expansion.`);
+      await cryptoSummary.press('Enter');
+      assert.equal(await cryptoDetails.evaluate((element) => element.open), false, `${viewport.label}: Crypto extras must collapse with the keyboard.`);
+    }
+  } finally {
+    if (browser) await browser.close();
+    if (previousBrowserPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath;
+  }
+}
+
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const chartPayloadSource = extractDashboardRuntimeTestBlock(html, 'chart-payload-load');
@@ -6803,6 +6971,7 @@ async function main() {
     testMergedChartAvailabilityFollowsFinalSeries,
     testChartRepairStagesMixedResultForEditorialReview,
     testDashboardEmbeddedRuntimeParses,
+    testNewsMoreDisclosureRendering,
     testEmbeddedChartDecoderSkipsMalformedCompactBars,
     testOpeningRenderingOmitsIncompleteBlocks,
     testEarningsOutcomeLifecycleRendering,
@@ -6819,7 +6988,10 @@ async function main() {
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,
     testExpandedChartScrollsFullyIntoViewport,
-    ...(testArguments.has('--browser') ? [testTapeTooltipStacksAboveNeighboringInfoControlsInBrowser] : []),
+    ...(testArguments.has('--browser') ? [
+      testTapeTooltipStacksAboveNeighboringInfoControlsInBrowser,
+      testNewsMoreDisclosureInBrowser
+    ] : []),
     ...(testArguments.has('--local-refresh') ? localRefreshIntegrationTests : [])
   ];
 

@@ -3,8 +3,8 @@ const { isIsoDate, isIsoDateTime, zonedTimeToUtc } = require('./calendar_contrac
 
 const NEWS_COVERAGE_REASON = 'insufficient_qualifying_fresh_coverage';
 const NEWS_COVERAGE_POLICIES = Object.freeze({
-  stories: Object.freeze({ label: 'stories', minimum: 9, maximum: 9 }),
-  cryptoNotes: Object.freeze({ label: 'crypto.notes', minimum: 6, maximum: 6 }),
+  stories: Object.freeze({ label: 'stories', minimum: 9, maximum: 18 }),
+  cryptoNotes: Object.freeze({ label: 'crypto.notes', minimum: 6, maximum: 12 }),
   futuresStories: Object.freeze({ label: 'futuresModule.stories', minimum: 3, maximum: 3 })
 });
 const MONDAY_MORNING_NEWS_START_MINUTES = 7 * 60 + 45;
@@ -152,6 +152,9 @@ function applyNewsCoverageState(data, { now = new Date() } = {}) {
 function validateNewsCoverageState(coverage, count, policy, { allowIncomplete = false } = {}) {
   const errors = [];
   const coverageLabel = policy.label === 'stories' ? 'storiesCoverage' : `${policy.label}Coverage`;
+  if (count > policy.maximum) {
+    errors.push(`${policy.label} must contain no more than ${policy.maximum} item${policy.maximum === 1 ? '' : 's'}.`);
+  }
   if (coverage === undefined) {
     if (!allowIncomplete && count < policy.minimum) {
       errors.push(`${coverageLabel} must record updater-derived partial coverage when ${policy.label} is below its target.`);

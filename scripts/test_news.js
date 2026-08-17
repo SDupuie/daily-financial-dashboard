@@ -113,6 +113,9 @@ function testDashboardNewsCollections() {
 }
 
 function testNewsCoverageState() {
+  assert.deepEqual(NEWS_COVERAGE_POLICIES.stories, { label: 'stories', minimum: 9, maximum: 18 });
+  assert.deepEqual(NEWS_COVERAGE_POLICIES.cryptoNotes, { label: 'crypto.notes', minimum: 6, maximum: 12 });
+  assert.deepEqual(NEWS_COVERAGE_POLICIES.futuresStories, { label: 'futuresModule.stories', minimum: 3, maximum: 3 });
   assert.deepEqual(validateNewsCoverageState(undefined, 9, NEWS_COVERAGE_POLICIES.stories), []);
   assert.deepEqual(validateNewsCoverageState(undefined, 6, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
   assert.deepEqual(validateNewsCoverageState(undefined, 3, NEWS_COVERAGE_POLICIES.futuresStories), []);
@@ -142,6 +145,14 @@ function testNewsCoverageState() {
     /crypto\.notesCoverage must record updater-derived partial coverage/
   );
   assert.deepEqual(validateNewsCoverageState(undefined, 10, NEWS_COVERAGE_POLICIES.stories), []);
+  assert.match(
+    validateNewsCoverageState(undefined, 19, NEWS_COVERAGE_POLICIES.stories).join(' '),
+    /stories must contain no more than 18 items/
+  );
+  assert.match(
+    validateNewsCoverageState(undefined, 13, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
+    /crypto\.notes must contain no more than 12 items/
+  );
 }
 
 function testFuturesPublicationTimestampValidation() {
