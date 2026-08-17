@@ -31,8 +31,8 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 
 | Selection bucket | Target | AI supplies |
 | --- | --- | --- |
-| `editorialReview.newsSelection.stories` | Target 9 primary broad-market cards, plus up to 9 optional secondary cards (18 maximum) | candidate `url`, `tag`, `title`, `body` |
-| `editorialReview.newsSelection.crypto` | Target 6 primary crypto-specific cards, plus up to 6 optional secondary cards (12 maximum) | candidate `url`, `tag`, `title`, `body` |
+| `editorialReview.newsSelection.stories` | Target 18 broad-market cards: 9 primary cards plus 9 secondary cards | candidate `url`, `tag`, `title`, `body` |
+| `editorialReview.newsSelection.crypto` | Target 12 crypto-specific cards: 6 primary cards plus 6 secondary cards | candidate `url`, `tag`, `title`, `body` |
 | `editorialReview.newsSelection.futures` | Target 3 current catalysts from `editorialReview.newsSearch.futuresCandidates` | candidate `url`, `tag`, `title`, `body` |
 
 - `editorialReview.newsSearch` is read-only source material. Prepare Handoff filters displayed-session Futures stories into `futuresCandidates`: Pre-Market Futures use the overnight futures window from 5:00 PM CT on the prior Chicago calendar day through the prepared run time or 8:30 AM CT, whichever is earlier; Session Futures use the shared `raw.sessionDate` regular-session window. When no shared Futures story window can be proven, Futures stories use the normal News freshness rule. Select Futures only from `futuresCandidates`. Selected article URLs and copy belong only in `editorialReview.newsSelection.futures`, `.stories`, and `.crypto`.
@@ -43,7 +43,7 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 - Futures selections must be major, current catalysts for the displayed futures session. Prefer stories that plausibly explain index-futures direction or broad cross-asset risk: macro data, rates, central banks, inflation, jobs, commodities, geopolitics, trade policy, credit/liquidity stress, global equity moves, or mega-cap earnings only when the article clearly ties the news to index-level market action.
 - Do not use single-company product, partnership, analyst, executive, customer, or routine earnings-preview stories as Futures cards unless the article itself makes a clear index-futures or broad-market impact case. Put those stories in broad-market News instead.
 - A selected URL must come from the generated candidate inventory.
-- Selection order is display priority. The first 9 General and first 6 Crypto cards are visible initially; later accepted cards are secondary coverage behind the section's `More stories` disclosure. Secondary cards must pass the same deep-review, relevance, source-quality, source-fidelity, freshness, and diversity standards as primary cards. They are optional and must not be filled with weaker coverage merely to reach the maximum.
+- Selection order is display priority. The first 9 General and first 6 Crypto cards are visible initially; later accepted cards are secondary coverage behind the section's `More stories` disclosure. The editorial targets are 18 General and 12 Crypto, so reaching the initially visible counts is not a stopping point. Continue deep review and selection until both targets are filled or every eligible candidate in the affected pool has been exhausted. Secondary cards must pass the same deep-review, relevance, source-quality, source-fidelity, freshness, and diversity standards as primary cards; do not lower those standards or invent filler merely to reach a target.
 - Do not set or edit coverage/New-pill fields.
 - Resolve duplicate URLs/titles, wrong section category, missing-inventory URLs, and below-target counts during AI Editorial Work before Apply Handoff; Apply Handoff does not select replacement stories.
 - Use only candidates with a valid publication date/time. Futures selections require a verified offset-bearing ISO `publishedAt`; Apply Handoff mirrors the Prepare Handoff Futures-window check defensively.
@@ -172,7 +172,7 @@ For `footer`, leave the generated footer unchanged.
    - After triage is complete, deeply review the plausible contenders and close alternatives under the News inventory contract. Inspect available summaries, descriptions, `candidate.article.excerpt`, and, when needed, the reader-facing page before ranking or writing. Do not silently skip a candidate because article-page context is missing, and do not select a candidate using metadata alone.
    - Working triage notes and a provisional contender set are allowed, but they do not edit the handoff or establish a fixed shortlist ceiling. Expand deep review whenever coverage is weak, duplicative, below target, or uncertain.
    - Compare all candidates in the generated News inventory with every still-fresh prior card. Retain a prior card only when it remains among the strongest relevant, source-faithful coverage; do not discard or churn it merely because the scheduled window changed.
-   - Treat every candidate in the generated News inventory as eligible for metadata triage. Rank only deeply reviewed contenders. Fill the primary News-card targets first, then add optional secondary cards only while the remaining coverage stays strong and distinct; do not invent filler to reach either maximum.
+   - Treat every candidate in the generated News inventory as eligible for metadata triage. Rank only deeply reviewed contenders. Fill the primary News-card slots first, then continue adding strong, distinct secondary cards until the 18 General and 12 Crypto targets are reached. If either section remains below target, expand deep review until every eligible candidate in that pool has been exhausted; do not invent filler or lower the selection standards to reach a target.
    - For selected News cards, add one entry to `editorialReview.newsSelection.futures`, `.stories`, or `.crypto` with the candidate `url` plus only `tag`, `title`, and `body`; do not hand-build final card arrays.
    - Follow the News-card contract and Story selection policy for required fields, source choice, carry-forward decisions, and link rules.
 
@@ -213,6 +213,7 @@ Run this gate before Apply.
 - Every `editorialReview.newsSelection.crypto[].url` must appear in `editorialReview.newsSearch.cryptoCandidates`.
 - No selected URL may appear twice within a section or across Futures, Stories, and Crypto.
 - Read the Futures eligibility bullets in the News-card contract and verify every Futures selection against them.
+- Treat fewer than 18 General selections or 12 Crypto selections as below target. Continue reviewing eligible candidates until both targets are met or every eligible candidate in the affected pool has been exhausted.
 - If a selected URL fails any check, fix `editorialReview.newsSelection` before Apply Handoff. Do not rely on Apply Handoff to omit or replace it.
 - Inspect intended editorial fallbacks before Apply. Any avoidable editorial fallback, duplicate omission, blank reviewed field, or below-target section caused by AI selection or copy quality must be fixed or repaired in the handoff before Apply.
 - Under the Earnings editorial contract and Week Ahead / Market Lens editorial contract, confirm required commentary is current, company- or event-specific, and not carried forward as completed work.
