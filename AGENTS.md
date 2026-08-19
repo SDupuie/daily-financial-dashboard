@@ -85,3 +85,5 @@ Read only the routed files or README sections needed for the current task:
 ## Safety
 
 Use narrow, task-specific network permissions for production fetches. Avoid broad persistent approvals for interpreters or package managers. Stop and ask if completing a task requires materially broader authority than the user granted.
+
+Run `node scripts/test_dashboard.js --browser` with elevated browser execution permission on the first attempt; do not first run it inside the sandbox. When requesting persistent approval, scope the command prefix to `node scripts/test_dashboard.js --browser`; never request a broad `node` prefix.

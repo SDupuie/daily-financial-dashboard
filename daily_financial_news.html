@@ -792,7 +792,7 @@
     .tape-chart-info-panel {
       z-index: 20;
       top: 24px;
-      width: min(320px, calc(100vw - 44px));
+      width: min(300px, calc(100vw - 44px));
       border-radius: 7px;
       box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
       color: #374151;
@@ -1179,6 +1179,7 @@
       align-items: center;
       justify-content: center;
       gap: 8px;
+      flex: 0 0 auto;
       width: max-content;
       min-height: 32px;
       margin-left: auto;
@@ -7542,7 +7543,7 @@
           const bars = mergeBars(existing.bars, item.bars);
           // Older refresh windows can backfill bars, but must not downgrade provenance for a newer embedded latest bar.
           const merged = existingLatest && refreshedLatest && refreshedLatest < existingLatest
-            ? { ...existing, bars }
+            ? { ...existing, quoteRevision: item.quoteRevision, bars }
             : { ...existing, ...item, bars };
           if (item.quoteRevision === existing?.quoteRevision && !sameJsonValue(existing, merged)) continue;
           if (sameJsonValue(existing, merged)) continue;
@@ -8162,6 +8163,7 @@
       }
       /* TEST BLOCK END: tape-stale-info */
 
+      /* TEST BLOCK START: chart-info-content */
       function chartInfoDataLabel(series) {
         if (isYieldCurveSeries(series)) return 'Yield curve snapshot';
         return `${chartSeriesKindLabel(series)} ${series?.noVolume ? 'only' : '+ Volume'}`;
@@ -8175,17 +8177,22 @@
       function chartInfoContent(series) {
         const ticker = String(series?.ticker || 'Chart');
         const sourceSymbol = String(series?.sourceSymbol || '');
-        const refreshLine = isYieldCurveSeries(series)
+        const isMove = ticker.toUpperCase() === 'MOVE';
+        const source = isMove
+          ? 'EODHD recent data + retained history'
+          : series?.source || 'Embedded generated chart data';
+        const refreshLine = isYieldCurveSeries(series) || isMove
           ? 'Local refresh does not update this chart.'
           : 'Local refresh may update this chart.';
         const lines = [
-          chartInfoLine('Source', series?.source || 'Embedded generated chart data'),
+          chartInfoLine('Source', source),
           chartInfoLine('Data', chartInfoDataLabel(series)),
           chartInfoLine('Refresh', refreshLine, 'muted')
         ];
         if (sourceSymbol && sourceSymbol !== ticker) lines.unshift(chartInfoLine('Symbol', sourceSymbol));
         return lines.join('');
       }
+      /* TEST BLOCK END: chart-info-content */
 
       function chartInfoId(series) {
         return `tape-chart-info-${String(series?.ticker || 'chart').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;

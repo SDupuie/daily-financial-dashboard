@@ -386,14 +386,18 @@ async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, en
   })) };
 }
 
-async function fetchStockfit(acquisitionPath, { timeoutMs, env = process.env }) {
+async function fetchStockfit(acquisitionPath, { timeoutMs, env = process.env, fetchPage = fetchResponse }) {
   const apiKey = String(env.STOCKFIT_API_KEY || '').trim();
   if (!apiKey) throw new Error('STOCKFIT_API_KEY is not configured.');
   const url = new URL(STOCKFIT_URL);
   url.searchParams.set('limit', String(acquisitionPath.limit || 50));
-  const response = await fetchResponse(url, {
+  const response = await fetchPage(url, {
     timeoutMs,
-    headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` }
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+    }
   });
   const payload = await response.json();
   if (!Array.isArray(payload?.news)) throw new Error('StockFit response must contain news[].');

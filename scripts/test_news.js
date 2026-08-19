@@ -245,6 +245,32 @@ async function testAlphaVantageProviderErrorRedaction() {
   }), { items: [] });
 }
 
+async function testStockfitProviderRequestHeaders() {
+  const apiKey = 'fixture-stockfit-key';
+  let request;
+  const result = await fetchAcquisitionPath({
+    id: 'stockfit-market',
+    provider: 'stockfit',
+    pool: 'generalCandidates',
+    limit: 50
+  }, {
+    timeoutMs: 1000,
+    env: { STOCKFIT_API_KEY: apiKey },
+    fetchPage: async (url, options) => {
+      request = { url: url.toString(), ...options };
+      return { json: async () => ({ news: [] }) };
+    }
+  });
+
+  assert.deepEqual(result, { items: [] });
+  assert.equal(request.url, 'https://api.stockfit.io/v1/api/lookup/news/market?limit=50');
+  assert.equal(request.headers.Authorization, `Bearer ${apiKey}`);
+  assert.equal(
+    request.headers['User-Agent'],
+    'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+  );
+}
+
 async function testDeterministicNewsCandidateAcquisition() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const calls = [];
@@ -1592,6 +1618,7 @@ async function main() {
   testFuturesPublicationTimestampValidation();
   testMondayMorningFreshnessWindow();
   await testAlphaVantageProviderErrorRedaction();
+  await testStockfitProviderRequestHeaders();
   testArticleMetadataExtraction();
   testNewsTimestampParsing();
   testRssParsing();

@@ -365,7 +365,6 @@ function validateSeries(errors, series, {
   duplicateMessage,
   missingMessage,
   volumeDescription,
-  closeOnlyPlaceholderSeverity = 'error',
   rangeStartDate = '',
   rangeEndDate = ''
 }) {
@@ -388,7 +387,6 @@ function validateSeries(errors, series, {
     } : null, {
       label,
       volumeDescription,
-      closeOnlyPlaceholderSeverity,
       rangeStartDate,
       rangeEndDate
     });
@@ -514,8 +512,7 @@ function validateChartPayload(errors, payload, {
   absentMessage = 'is not present in dashboard chartable rows.',
   duplicateMessage = 'Duplicate generated chart series for',
   missingMessage = 'Generated chart data is missing',
-  volumeDescription = 'generated',
-  closeOnlyPlaceholderSeverity = 'error'
+  volumeDescription = 'generated'
 }) {
   const prefix = label ? `${label}.` : '';
   errors.push(...validateChartPayloadMetadata(payload, { label: label || 'Chart payload' }));
@@ -541,7 +538,6 @@ function validateChartPayload(errors, payload, {
     duplicateMessage,
     missingMessage,
     volumeDescription,
-    closeOnlyPlaceholderSeverity,
     rangeStartDate,
     rangeEndDate
   });
@@ -598,6 +594,7 @@ function runCompleteTestSuite() {
   process.stdout.write('Running contract and regression tests...\n');
   const testEnvironment = { ...process.env, DASHBOARD_TEST_NO_API_CREDENTIALS: '1' };
   delete testEnvironment.FINNHUB_API_KEY;
+  delete testEnvironment.EODHD_API_KEY;
   delete testEnvironment.EARNINGSAPI_API_KEY;
   // This aggregate command already runs test_dashboard.js; do not launch a
   // second dashboard-test process beside it unless fixture isolation is added.
@@ -1017,8 +1014,7 @@ if (!dashboardMatch) {
           absentMessage: 'is missing its embedded source mapping.',
           duplicateMessage: 'Duplicate embedded chart series for',
           missingMessage: 'Embedded chart data is missing',
-          volumeDescription: 'embedded',
-          closeOnlyPlaceholderSeverity: 'error'
+          volumeDescription: 'embedded'
         });
       }
     }

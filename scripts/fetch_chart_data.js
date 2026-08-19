@@ -18,6 +18,9 @@ const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'chart_data.json
 const DEFAULT_DAYS = 1826;
 const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const FINNHUB_HOST = 'finnhub.io';
+const EODHD_HOST = 'eodhd.com';
+const EODHD_MOVE_SYMBOL = 'MOVE.INDX';
+const EODHD_FREE_HISTORY_DAYS = 365;
 const CHART_ROW_CONCURRENCY = 4;
 const DEFAULT_YAHOO_RATE_LIMIT_RETRIES = 1;
 const DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS = 3000;
@@ -901,7 +904,7 @@ function readTapeRows(input) {
   if (!rows.length) {
     throw new Error('dashboard-data tape.rows is empty or missing');
   }
-  // sourceSymbol is the single dashboard-owned routing key for quote refreshes and embedded chart history.
+  // sourceSymbol is the configured deterministic source key for quote refreshes and embedded chart history.
   return rows.map((row, index) => ({
     index,
     section: 'tape',
@@ -952,6 +955,23 @@ function isoDateFromDate(date) {
 
 function isoDateFromEpochSeconds(value) {
   return isoDateFromDate(new Date(value * 1000));
+}
+
+function isoDateFromEpochSecondsInTimeZone(value, timeZone) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(new Date(seconds * 1000));
+    const part = (type) => parts.find((item) => item.type === type)?.value || '';
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  } catch (_error) {
+    return '';
+  }
 }
 
 function monthKeysBetween(startDate, endDate) {
@@ -1033,6 +1053,20 @@ function finnhubQuoteUrl(symbol, token) {
   return `https://${FINNHUB_HOST}/api/v1/quote?${params.toString()}`;
 }
 
+function eodhdMoveUrl(token, startDate, endDate) {
+  const freeHistoryStart = new Date(endDate.getTime() - EODHD_FREE_HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const requestedStart = startDate > freeHistoryStart ? startDate : freeHistoryStart;
+  const params = new URLSearchParams({
+    api_token: token,
+    from: isoDateFromDate(requestedStart),
+    to: isoDateFromDate(endDate),
+    period: 'd',
+    order: 'a',
+    fmt: 'json'
+  });
+  return `https://${EODHD_HOST}/api/eod/${EODHD_MOVE_SYMBOL}?${params.toString()}`;
+}
+
 function treasuryXmlUrl(monthKey) {
   const params = new URLSearchParams({
     data: 'daily_treasury_yield_curve',
@@ -1049,33 +1083,6 @@ function asFiniteNumber(value) {
 
 function asStoredChartNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function moveDailyChangeReferenceErrors(item, { label = String(item?.ticker || 'Chart series'), latestTime = '' } = {}) {
-  const errors = [];
-  const ticker = String(item?.ticker || '').trim().toUpperCase();
-  const reference = item?.dailyChangeReference;
-  if (ticker !== 'MOVE' || item?.sourceSymbol !== '^MOVE') {
-    errors.push(`${label}.dailyChangeReference is supported only for MOVE from ^MOVE.`);
-  }
-  if (item?.source !== 'Yahoo Finance Chart API' || item?.sourceKey !== 'yahoo_chart') {
-    errors.push(`${label}.dailyChangeReference requires Yahoo Finance Chart API provenance.`);
-  }
-  if (!reference || typeof reference !== 'object' || Array.isArray(reference)) {
-    errors.push(`${label}.dailyChangeReference must be an object.`);
-  } else {
-    if (!isIsoDate(reference.asOf) || reference.asOf !== latestTime) {
-      errors.push(`${label}.dailyChangeReference.asOf must match the latest bar date.`);
-    }
-    if (asStoredChartNumber(reference.previousClose) === null || reference.previousClose <= 0) {
-      errors.push(`${label}.dailyChangeReference.previousClose must be a positive finite JSON number.`);
-    }
-  }
-  return errors;
-}
-
-function isValidMoveDailyChangeReference(item, latestTime = String(objectBar(item?.bars?.at(-1)).time || '')) {
-  return moveDailyChangeReferenceErrors(item, { latestTime }).length === 0;
 }
 
 function fourDecimalNumber(value) {
@@ -1120,15 +1127,8 @@ function roundChartPayload(payload) {
     ...rest,
     series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => {
       const { note: _note, ...seriesFields } = series || {};
-      const dailyChangeReference = series?.dailyChangeReference;
       return {
         ...seriesFields,
-        ...(dailyChangeReference && typeof dailyChangeReference === 'object' && !Array.isArray(dailyChangeReference) ? {
-          dailyChangeReference: {
-            ...dailyChangeReference,
-            previousClose: fourDecimalNumber(dailyChangeReference.previousClose)
-          }
-        } : {}),
         bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
           const bar = objectBar(rawBar);
           return {
@@ -1333,6 +1333,15 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
   if (!ticker) errors.push(`${label}.ticker must be populated.`);
   const expectedSource = String(expectedRow?.sourceSymbol || '');
   if (expectedSource && item.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
+  if (item.providerSymbol !== undefined) {
+    errors.push(`${label}.providerSymbol is not supported; use sourceSymbol for provider identity.`);
+  }
+  if (ticker === 'MOVE' || expectedSource === EODHD_MOVE_SYMBOL) {
+    if (item.sourceSymbol !== EODHD_MOVE_SYMBOL) errors.push(`${label}.sourceSymbol must be ${EODHD_MOVE_SYMBOL}.`);
+    if (item.source !== 'EODHD EOD API') errors.push(`${label}.source must be EODHD EOD API.`);
+    if (item.sourceKey !== 'eodhd_eod') errors.push(`${label}.sourceKey must be eodhd_eod.`);
+    if (item.fetchedFrom !== EODHD_HOST) errors.push(`${label}.fetchedFrom must be ${EODHD_HOST}.`);
+  }
   const expectedSection = String(expectedRow?.section || '');
   if (expectedSection && item.section !== expectedSection) errors.push(`${label}.section must be ${expectedSection}.`);
   if (!isChartQuoteRevision(item.quoteRevision)) errors.push(`${label}.quoteRevision must be an offset-bearing ISO timestamp.`);
@@ -1348,7 +1357,14 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
   }
   if (!['ohlc', 'close'].includes(item.dataKind)) errors.push(`${label}.dataKind must be ohlc or close.`);
   if (typeof item.priceOnly !== 'boolean') errors.push(`${label}.priceOnly must be boolean.`);
+  if (item.sourceKey === 'yahoo_chart') {
+    if (item.dataKind !== 'ohlc') errors.push(`${label}.dataKind must be ohlc for Yahoo chart series.`);
+    if (item.priceOnly !== false) errors.push(`${label}.priceOnly must be false for Yahoo chart series.`);
+  }
   if (typeof item.noVolume !== 'boolean') errors.push(`${label}.noVolume must be boolean.`);
+  if (item.dailyChangeReference !== undefined) {
+    errors.push(`${label}.dailyChangeReference is not supported; daily change is derived from the two latest bars.`);
+  }
   if (item.sourceSymbol === 'TREASURY:CURVE') {
     const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
     validateYieldCurvePointSet(errors, label, 'curvePoints', curvePoints);
@@ -1386,24 +1402,10 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
     if (item.noVolume && bar.volume !== undefined) {
       errors.push(`${barLabel}.volume must be omitted when noVolume is true.`);
     }
-    if (
-      !item.priceOnly
-      && item.dataKind === 'ohlc'
-      && barIndex === item.bars.length - 1
-      && isCloseOnlyPlaceholderBar(bar)
-      && !isValidMoveDailyChangeReference(item, bar.time)
-    ) {
-      const message = `${barLabel} contains a latest quote-only placeholder in an OHLC series; row tooltip discloses unavailable open/high/low data.`;
-      if (options.closeOnlyPlaceholderSeverity === 'warning') warnings.push(message);
-      else errors.push(message);
-    }
   }
   const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
   if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
     errors.push(`${label}.noVolume must be ${!hasVolume} to match its ${options.volumeDescription || 'chart'} volume bars.`);
-  }
-  if (item.dailyChangeReference !== undefined) {
-    errors.push(...moveDailyChangeReferenceErrors(item, { label, latestTime: item.bars.at(-1).time }));
   }
   return { errors, warnings, series: item };
 }
@@ -1440,7 +1442,6 @@ function validateChartStagingPayload(payload, expectedRows = []) {
     const result = validateChartSeriesContract(item, expectedRow, {
       label,
       volumeDescription: 'staging',
-      closeOnlyPlaceholderSeverity: 'error',
       rangeStartDate,
       rangeEndDate
     });
@@ -1507,9 +1508,9 @@ function uniqueBars(bars) {
   return sortBars([...byDate.values()]);
 }
 
-function mergeSparseMoveHistory(item, prior, row, startDate, endDate) {
+function mergeMoveHistory(item, prior, row, startDate, endDate) {
   if (String(item?.ticker || '').toUpperCase() !== 'MOVE'
-    || item?.sourceSymbol !== '^MOVE'
+    || item?.sourceSymbol !== EODHD_MOVE_SYMBOL
     || !Array.isArray(item?.bars)
   ) return item;
 
@@ -1517,51 +1518,23 @@ function mergeSparseMoveHistory(item, prior, row, startDate, endDate) {
   const rangeEndDate = isoDateFromDate(endDate);
   const sourceFreshBars = uniqueBars(item.bars.map(objectBar))
     .filter((bar) => bar.time >= rangeStartDate && bar.time <= rangeEndDate);
-  // A close-only MOVE window cannot replace validated historical candles; only
-  // its latest quote is eligible for the temporary flat-candle merge.
-  const freshBars = item.priceOnly ? sourceFreshBars.slice(-1) : sourceFreshBars;
-  const firstFreshDate = freshBars[0]?.time || '';
-  const startGapDays = chartDayGap(firstFreshDate, rangeStartDate);
-  const sparseRefresh = item.priceOnly || freshBars.length < 2 || (startGapDays !== null && startGapDays > 7);
-  if (!sparseRefresh) return item;
-  if (!isValidMoveDailyChangeReference({ ...item, bars: freshBars })) {
-    throw new Error('MOVE sparse Yahoo refresh did not include a valid dailyChangeReference.');
+  if (item.sourceKey === 'eodhd_eod') {
+    if (!prior) return { ...item, bars: sourceFreshBars };
+    const priorValidation = validateChartSeriesContract(prior, row, { label: 'Prior canonical MOVE' });
+    if (priorValidation.errors.length) {
+      throw new Error(`MOVE prior canonical history is invalid: ${priorValidation.errors.join(' ')}`);
+    }
+    return {
+      ...item,
+      bars: uniqueBars([...priorValidation.series.bars, ...sourceFreshBars].map(objectBar))
+        .filter((bar) => bar.time >= rangeStartDate && bar.time <= rangeEndDate)
+    };
   }
-  if (!prior) {
-    throw new Error('MOVE sparse Yahoo refresh requires prior validated history.');
-  }
-  const priorValidation = validateChartSeriesContract(prior, row, { label: 'Prior canonical MOVE' });
-  if (priorValidation.errors.length) {
-    throw new Error(`MOVE prior canonical history is invalid: ${priorValidation.errors.join(' ')}`);
-  }
-  const bars = uniqueBars([...priorValidation.series.bars, ...freshBars].map(objectBar))
-    .filter((bar) => bar.time >= rangeStartDate && bar.time <= rangeEndDate);
-  const preservesHistoricalOhlc = item.priceOnly
-    && item.dataKind === 'close'
-    && !priorValidation.series.priceOnly
-    && priorValidation.series.dataKind === 'ohlc';
-  return {
-    ...item,
-    ...(preservesHistoricalOhlc ? {
-      dataKind: 'ohlc',
-      priceOnly: false,
-      noVolume: !bars.some((bar) => bar.volume !== undefined)
-    } : {}),
-    bars
-  };
+  return item;
 }
 
 function closeOnlyBar(time, close) {
   return { time, open: close, high: close, low: close, close };
-}
-
-function isCloseOnlyPlaceholderBar(rawBar) {
-  const bar = objectBar(rawBar);
-  return bar?.volume === undefined
-    && Number.isFinite(Number(bar?.open))
-    && Number(bar.open) === Number(bar.high)
-    && Number(bar.high) === Number(bar.low)
-    && Number(bar.low) === Number(bar.close);
 }
 
 function isUsableOhlc(open, high, low, close) {
@@ -1578,6 +1551,11 @@ function supportsFinnhubQuote(row) {
 function finnhubQuoteToken() {
   loadEnv();
   return String(process.env.FINNHUB_API_KEY || '').trim();
+}
+
+function eodhdApiToken() {
+  loadEnv();
+  return String(process.env.EODHD_API_KEY || '').trim();
 }
 
 function finnhubQuoteBarFromPayload(payload) {
@@ -1637,27 +1615,64 @@ function mergeFinnhubQuoteBar(series, quoteBar, volumeByDate = null) {
   };
 }
 
-function yahooLatestCloseDate(payload) {
+function yahooLatestTimestampDate(payload) {
   const result = payload?.chart?.result?.[0];
   const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
-  const closes = Array.isArray(result?.indicators?.quote?.[0]?.close)
-    ? result.indicators.quote[0].close
-    : [];
   for (let index = timestamps.length - 1; index >= 0; index -= 1) {
-    if (Number.isFinite(Number(timestamps[index])) && asFiniteNumber(closes[index]) !== null) {
+    if (Number.isFinite(Number(timestamps[index]))) {
       return isoDateFromEpochSeconds(timestamps[index]);
     }
   }
   return '';
 }
 
-function shouldUseFinnhubQuoteFallback(series, yahooPayload) {
-  if (!Array.isArray(series?.bars) || series.priceOnly || series.dataKind !== 'ohlc') return false;
+function yahooCompletedSessionDate(payload, { endDate = null } = {}) {
+  const meta = payload?.chart?.result?.[0]?.meta || {};
+  const timeZone = String(meta.exchangeTimezoneName || '').trim();
+  const regularEnd = asFiniteNumber(meta.currentTradingPeriod?.regular?.end);
+  const cutoffSeconds = endDate instanceof Date && !Number.isNaN(endDate.getTime())
+    ? endDate.getTime() / 1000
+    : null;
+  if (!timeZone || regularEnd === null || cutoffSeconds === null) return '';
+  const regularEndDate = isoDateFromEpochSecondsInTimeZone(regularEnd, timeZone);
+  if (!isIsoDate(regularEndDate)) return '';
+  if (cutoffSeconds >= regularEnd) return regularEndDate;
+
+  const regularMarketTime = asFiniteNumber(meta.regularMarketTime);
+  const regularMarketDate = regularMarketTime === null
+    ? ''
+    : isoDateFromEpochSecondsInTimeZone(regularMarketTime, timeZone);
+  return isIsoDate(regularMarketDate) && regularMarketDate < regularEndDate
+    ? regularMarketDate
+    : '';
+}
+
+function maxIsoDate(...dates) {
+  return dates.filter(isIsoDate).sort().at(-1) || '';
+}
+
+function yahooFreshnessWatermarkDate(payload, { endDate = null } = {}) {
+  const watermark = maxIsoDate(yahooLatestTimestampDate(payload), yahooCompletedSessionDate(payload, { endDate }));
+  const rangeEndDate = endDate instanceof Date && !Number.isNaN(endDate.getTime()) ? isoDateFromDate(endDate) : '';
+  return rangeEndDate && watermark > rangeEndDate ? rangeEndDate : watermark;
+}
+
+function shouldUseFinnhubQuoteFallback(series, yahooPayload, options = {}) {
+  if (!Array.isArray(series?.bars)) return false;
   const seriesLatestDate = String(series.bars.at(-1)?.time || '');
-  const yahooLatestDate = yahooLatestCloseDate(yahooPayload);
-  // Call Finnhub only when Yahoo exposed a newer close than the usable OHLC bars we could build.
+  const yahooFreshnessDate = yahooFreshnessWatermarkDate(yahooPayload, options);
+  // Call Finnhub only when Yahoo exposes a newer dated row or completed-session watermark than the usable OHLC bars we could build.
   // This catches malformed latest Yahoo candles without making Finnhub a second quote authority.
-  return Boolean(seriesLatestDate && yahooLatestDate && yahooLatestDate > seriesLatestDate);
+  return Boolean(seriesLatestDate && yahooFreshnessDate && yahooFreshnessDate > seriesLatestDate);
+}
+
+function assertFinnhubQuoteRepairFreshness(row, series, yahooPayload, options = {}) {
+  if (!Array.isArray(series?.bars)) return;
+  const seriesLatestDate = String(series.bars.at(-1)?.time || '');
+  const yahooFreshnessDate = yahooFreshnessWatermarkDate(yahooPayload, options);
+  if (seriesLatestDate && yahooFreshnessDate && yahooFreshnessDate > seriesLatestDate) {
+    throw new Error(`${row.ticker} latest Yahoo completed session for ${yahooFreshnessDate} is unavailable or unusable`);
+  }
 }
 
 function numberFormat(value, maximumFractionDigits = 2) {
@@ -1737,18 +1752,10 @@ function quoteRowFromSeries(item) {
   const bars = item.bars || [];
   const latest = bars[bars.length - 1];
   const previous = bars[bars.length - 2];
-  if (!latest || (!previous && item.dailyChangeReference === undefined)) {
+  if (!latest || !previous) {
     throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
   }
-
-  let previousClose = previous?.close;
-  if (item.dailyChangeReference !== undefined) {
-    if (!isValidMoveDailyChangeReference(item, latest.time)) {
-      throw new Error(`${item.ticker} daily change reference is invalid`);
-    }
-    previousClose = item.dailyChangeReference.previousClose;
-  }
-
+  const previousClose = previous.close;
   const delta = latest.close - previousClose;
   const pct = previousClose ? (delta / previousClose) * 100 : 0;
   const isYield = item.unit === 'percent_yield';
@@ -1815,23 +1822,75 @@ function deriveQuoteRowsFromSeries(series) {
   return { tape, crypto };
 }
 
-async function fetchYahooSeries(row, args, startDate, endDate) {
+async function fetchYahooSeries(row, args, startDate, endDate, dependencies = {}) {
   const errors = [];
   // Yahoo occasionally fails one chart host while the other is healthy, so keep both as equivalent fallbacks.
   for (const host of YAHOO_HOSTS) {
     try {
-      const payload = await fetchYahooJsonWithRetry(yahooChartUrl(host, row.sourceSymbol, startDate, endDate), args);
+      const payload = await fetchYahooJsonWithRetry(
+        yahooChartUrl(host, row.sourceSymbol, startDate, endDate),
+        args,
+        {},
+        dependencies
+      );
       const series = parseYahooSeries(row, payload, host);
-      const quoteBar = shouldUseFinnhubQuoteFallback(series, payload)
+      const quoteBar = shouldUseFinnhubQuoteFallback(series, payload, { endDate })
         ? await fetchFinnhubQuoteBar(row, args)
         : null;
-      return mergeFinnhubQuoteBar(series, quoteBar, yahooVolumeByDate(payload));
+      const repairedSeries = mergeFinnhubQuoteBar(series, quoteBar, yahooVolumeByDate(payload));
+      assertFinnhubQuoteRepairFreshness(row, repairedSeries, payload, { endDate });
+      return repairedSeries;
     } catch (error) {
       errors.push(`${host}: ${error.message}`);
       if (args.delayMs) await sleep(args.delayMs);
     }
   }
   throw new Error(errors.join(' | '));
+}
+
+function parseEodhdMoveSeries(row, payload, startDate, endDate) {
+  if (!Array.isArray(payload)) throw new Error(`${EODHD_MOVE_SYMBOL} response must be an array`);
+  const rangeStartDate = isoDateFromDate(startDate);
+  const rangeEndDate = isoDateFromDate(endDate);
+  const bars = [];
+  for (const [index, entry] of payload.entries()) {
+    const time = String(entry?.date || '');
+    if (!isIsoDate(time)) throw new Error(`${EODHD_MOVE_SYMBOL} response row ${index} has an invalid date`);
+    if (time < rangeStartDate || time > rangeEndDate) continue;
+    const open = asFiniteNumber(entry?.open);
+    const high = asFiniteNumber(entry?.high);
+    const low = asFiniteNumber(entry?.low);
+    const close = asFiniteNumber(entry?.close);
+    if (!isUsableOhlc(open, high, low, close)) {
+      throw new Error(`${EODHD_MOVE_SYMBOL} response row ${index} has invalid OHLC data`);
+    }
+    bars.push({ time, open, high, low, close });
+  }
+  const normalizedBars = uniqueBars(bars);
+  if (normalizedBars.length < 2) {
+    throw new Error(`${EODHD_MOVE_SYMBOL} response did not include at least two usable daily bars`);
+  }
+  return {
+    ...seriesBase(row),
+    source: 'EODHD EOD API',
+    sourceKey: 'eodhd_eod',
+    fetchedFrom: EODHD_HOST,
+    dataKind: 'ohlc',
+    priceOnly: false,
+    noVolume: true,
+    currency: 'USD',
+    exchangeTimezoneName: 'America/New_York',
+    bars: normalizedBars
+  };
+}
+
+async function fetchEodhdMoveSeries(row, args, startDate, endDate) {
+  const token = eodhdApiToken();
+  if (!token) throw new Error('EODHD_API_KEY is required to refresh MOVE.');
+  const payload = await fetchJson(eodhdMoveUrl(token, startDate, endDate), args, {
+    'Accept': 'application/json'
+  });
+  return parseEodhdMoveSeries(row, payload, startDate, endDate);
 }
 
 function yahooVolumeByDate(payload) {
@@ -1877,13 +1936,9 @@ function parseYahooSeries(row, payload, host) {
       volume
     };
   }).filter(Boolean);
-  const priceOnly = !points.some((point) => point.hasOhlc);
-  // True close-only feeds get synthetic OHLC; mixed Yahoo feeds keep OHLC and drop isolated bad rows.
   const bars = points.map((point) => {
-    if (!priceOnly && !point.hasOhlc) return null;
-    const bar = priceOnly
-      ? closeOnlyBar(point.time, point.close)
-      : { time: point.time, open: point.open, high: point.high, low: point.low, close: point.close };
+    if (!point.hasOhlc) return null;
+    const bar = { time: point.time, open: point.open, high: point.high, low: point.low, close: point.close };
     if (hasRealVolume && point.volume !== null) {
       bar.volume = point.volume;
     }
@@ -1891,33 +1946,19 @@ function parseYahooSeries(row, payload, host) {
   }).filter(Boolean);
 
   if (!bars.length) {
-    throw new Error(`${row.sourceSymbol} response did not include usable daily bars`);
+    throw new Error(`${row.sourceSymbol} response did not include usable daily OHLC bars`);
   }
-
-  const latestBar = bars.at(-1);
-  const regularMarketPrice = asFiniteNumber(result.meta?.regularMarketPrice);
-  const previousClose = asFiniteNumber(result.meta?.chartPreviousClose);
-  const dailyChangeReference = String(row.ticker || '').toUpperCase() === 'MOVE'
-    && row.sourceSymbol === '^MOVE'
-    && regularMarketPrice !== null
-    && regularMarketPrice > 0
-    && previousClose !== null
-    && previousClose > 0
-    && fourDecimalNumber(regularMarketPrice) === fourDecimalNumber(latestBar.close)
-    ? { asOf: latestBar.time, previousClose }
-    : null;
 
   return {
     ...seriesBase(row),
     source: 'Yahoo Finance Chart API',
     sourceKey: 'yahoo_chart',
     fetchedFrom: host,
-    dataKind: priceOnly ? 'close' : 'ohlc',
-    priceOnly,
+    dataKind: 'ohlc',
+    priceOnly: false,
     noVolume: !hasRealVolume,
     currency: result.meta?.currency || null,
     exchangeTimezoneName: result.meta?.exchangeTimezoneName || null,
-    ...(dailyChangeReference ? { dailyChangeReference } : {}),
     bars: uniqueBars(bars)
   };
 }
@@ -2060,6 +2101,9 @@ async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
   if (row.sourceSymbol.startsWith('TREASURY:')) {
     return fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthCache);
   }
+  if (String(row?.ticker || '').toUpperCase() === 'MOVE') {
+    return fetchEodhdMoveSeries(row, args, startDate, endDate);
+  }
   return fetchYahooSeries(row, args, startDate, endDate);
 }
 
@@ -2124,12 +2168,6 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
       if (tickerKey === 'MOVE') moveHistoryByTicker.set(tickerKey, priorValidation.series);
       continue;
     }
-    if (tickerKey === 'MOVE' && prior.dailyChangeReference !== undefined) {
-      const historyCandidate = { ...prior };
-      delete historyCandidate.dailyChangeReference;
-      const historyValidation = validateChartSeriesContract(historyCandidate, row, { label: `Prior canonical ${tickerKey} history` });
-      if (!historyValidation.errors.length) moveHistoryByTicker.set(tickerKey, historyValidation.series);
-    }
   }
   const seriesByIndex = inputRows.map((row) => {
     const prior = canonicalByTicker.get(String(row.ticker || '').toUpperCase());
@@ -2156,7 +2194,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
       const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
       const prior = tickerKey === 'MOVE' ? moveHistoryByTicker.get(tickerKey) : canonicalByTicker.get(tickerKey);
       const refreshedSeries = {
-        ...mergeSparseMoveHistory(item, prior, row, startDate, endDate),
+        ...mergeMoveHistory(item, prior, row, startDate, endDate),
         quoteRevision
       };
       const validationErrors = validateChartStagingPayload(
@@ -2226,14 +2264,21 @@ module.exports = {
   deriveQuoteRowsFromSeries,
   cryptoQuoteRowFromSeries,
   compactChartPayload,
+  eodhdMoveUrl,
+  assertFinnhubQuoteRepairFreshness,
   fetchSeries,
+  fetchEodhdMoveSeries,
+  fetchYahooSeries,
   fetchYahooJsonWithRetry,
   finnhubQuoteBarFromPayload,
-  isValidMoveDailyChangeReference,
   isoDateFromDate,
   mergeFinnhubQuoteBar,
+  yahooCompletedSessionDate,
+  yahooFreshnessWatermarkDate,
+  yahooLatestTimestampDate,
   quoteRowFromSeries,
   parseArgs,
+  parseEodhdMoveSeries,
   parseYahooSeries,
     parseFuture: futuresModule.parseFuture,
     premarketCutoff: futuresModule.premarketCutoff,

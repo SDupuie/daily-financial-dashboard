@@ -21,18 +21,26 @@ const {
   buildUnavailableFuturesPayload,
   compactChartPayload,
   deriveQuoteRowsFromSeries,
+  eodhdMoveUrl,
+  assertFinnhubQuoteRepairFreshness,
+  fetchYahooSeries,
   fetchYahooJsonWithRetry,
-  isValidMoveDailyChangeReference,
+  mergeFinnhubQuoteBar,
+  parseYahooSeries,
   parseFuture,
   parseArgs: parseFetchChartDataArgs,
-  parseYahooSeries,
+  parseEodhdMoveSeries,
   quoteRowFromSeries,
   roundChartPayload,
   runChart,
   runFutures,
+  shouldUseFinnhubQuoteFallback,
   validateChartPayloadMetadata,
+  validateChartSeriesContract,
   validateChartStagingPayload,
   validateFuturesPayload,
+  yahooFreshnessWatermarkDate,
+  yahooLatestTimestampDate,
 } = chartDataModule;
 const {
   buildAssetAllocationFallback,
@@ -3899,65 +3907,53 @@ function testTapeCommentaryRefreshRequiresNewCopy() {
     && item.action === 'unavailable_disposition'));
 }
 
-async function testMoveSparseYahooHistoryAndDailyChangeReference() {
+async function testMoveEodhdHistoryAndPriorMerge() {
   const quoteRevision = '2026-07-10T12:00:00.000Z';
   const moveRow = {
     ticker: 'MOVE',
     name: 'MOVE Index',
     section: 'tape',
-    sourceSymbol: '^MOVE'
+    sourceSymbol: 'MOVE.INDX'
   };
-  const yahooPayload = {
-    chart: {
-      result: [{
-        meta: {
-          currency: 'USD',
-          exchangeTimezoneName: 'America/New_York',
-          regularMarketPrice: 69.5796,
-          chartPreviousClose: 69.2283
-        },
-        timestamp: [Date.parse('2026-07-10T20:00:00Z') / 1000],
-        indicators: {
-          quote: [{
-            open: [null],
-            high: [null],
-            low: [null],
-            close: [69.5796],
-            volume: [null]
-          }]
-        }
-      }],
-      error: null
-    }
-  };
-  const sparseSeries = parseYahooSeries(moveRow, yahooPayload, 'query1.finance.yahoo.com');
-  assert.equal(sparseSeries.bars.length, 1);
-  assert.equal(sparseSeries.dataKind, 'close');
-  assert.equal(sparseSeries.priceOnly, true);
-  assert.deepEqual(sparseSeries.bars[0], {
-    time: '2026-07-10',
-    open: 69.5796,
-    high: 69.5796,
-    low: 69.5796,
-    close: 69.5796
-  });
-  assert.deepEqual(sparseSeries.dailyChangeReference, {
-    asOf: '2026-07-10',
-    previousClose: 69.2283
-  });
-  assert.equal(isValidMoveDailyChangeReference(sparseSeries), true);
+  const startDate = new Date('2021-07-10T21:00:00.000Z');
+  const endDate = new Date('2026-07-10T21:00:00.000Z');
+  const eodhdPayload = [
+    { date: '2026-07-08', open: 72.41, high: 72.41, low: 68.89, close: 68.89, adjusted_close: 68.89, volume: 0 },
+    { date: '2026-07-09', open: 68.89, high: 69.23, low: 68.89, close: 69.23, adjusted_close: 69.23, volume: 0 },
+    { date: '2026-07-10', open: 69.23, high: 69.58, low: 69.23, close: 69.58, adjusted_close: 69.58, volume: 0 }
+  ];
+  const eodhdSeries = parseEodhdMoveSeries(moveRow, eodhdPayload, startDate, endDate);
+  assert.equal(eodhdSeries.source, 'EODHD EOD API');
+  assert.equal(eodhdSeries.sourceKey, 'eodhd_eod');
+  assert.equal(eodhdSeries.sourceSymbol, 'MOVE.INDX');
+  assert.equal(eodhdSeries.providerSymbol, undefined);
+  assert.equal(eodhdSeries.dataKind, 'ohlc');
+  assert.equal(eodhdSeries.priceOnly, false);
+  assert.equal(eodhdSeries.noVolume, true);
+  assert.deepEqual(eodhdSeries.bars, eodhdPayload.map((bar) => ({
+    time: bar.date,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close
+  })));
+  const requestUrl = new URL(eodhdMoveUrl('fixture-token', startDate, endDate));
+  assert.equal(requestUrl.hostname, 'eodhd.com');
+  assert.equal(requestUrl.pathname, '/api/eod/MOVE.INDX');
+  assert.equal(requestUrl.searchParams.get('from'), '2025-07-10');
+  assert.equal(requestUrl.searchParams.get('to'), '2026-07-10');
+  assert.equal(requestUrl.searchParams.get('period'), 'd');
+  assert.equal(requestUrl.searchParams.get('order'), 'a');
 
   const priorSeries = {
-    ...sparseSeries,
+    ...eodhdSeries,
     quoteRevision,
-    dataKind: 'ohlc',
-    priceOnly: false,
     bars: [
+      { time: '2021-07-11', open: 80, high: 81, low: 79, close: 80 },
       { time: '2026-07-08', open: 76, high: 77, low: 75, close: 76.5 },
       { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 }
     ]
   };
-  delete priorSeries.dailyChangeReference;
   const { dashboard, chartData } = createDashboardValidationFixture();
   chartData.series.push(compactChartPayload({ series: [priorSeries] }).series[0]);
   const priorQuote = quoteRowFromSeries(priorSeries);
@@ -3970,7 +3966,7 @@ async function testMoveSparseYahooHistoryAndDailyChangeReference() {
     sourceSymbol: moveRow.sourceSymbol
   });
 
-  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-move-sparse-');
+  const dir = makeTemporaryDirectory(os.tmpdir(), 'dfd-move-eodhd-');
   const input = path.join(dir, 'input.html');
   const output = path.join(dir, 'chart-data.json');
   fs.writeFileSync(input, renderDashboardValidationFixture(dashboard, chartData));
@@ -3983,20 +3979,24 @@ async function testMoveSparseYahooHistoryAndDailyChangeReference() {
     '--delay-ms', '0'
   ], {
     now: new Date('2026-07-10T21:05:00.000Z'),
-    fetchSeries: async () => structuredClone(sparseSeries)
+    fetchSeries: async () => structuredClone(eodhdSeries)
   });
 
   const staged = JSON.parse(fs.readFileSync(output, 'utf8'));
   const merged = staged.series[0];
   assert.equal(staged.availability, undefined);
-  assert.equal(merged.bars.length, 3);
+  assert.equal(merged.bars.length, 4);
+  assert.equal(merged.source, 'EODHD EOD API');
+  assert.equal(merged.sourceKey, 'eodhd_eod');
+  assert.equal(merged.sourceSymbol, 'MOVE.INDX');
+  assert.equal(merged.providerSymbol, undefined);
+  assert.deepEqual(merged.bars[0], priorSeries.bars[0], 'History older than the free EODHD window must be preserved.');
+  assert.deepEqual(merged.bars.slice(1), eodhdSeries.bars, 'EODHD must replace overlapping dates and append the latest date.');
   assert.equal(merged.bars.at(-1).time, '2026-07-10');
-  assert.equal(merged.bars.at(-1).close, 69.5796);
+  assert.equal(merged.bars.at(-1).close, 69.58);
   assert.equal(merged.dataKind, 'ohlc');
   assert.equal(merged.priceOnly, false);
-  assert.deepEqual(merged.bars.slice(0, 2), priorSeries.bars, 'Sparse close-only MOVE must preserve exact historical OHLC.');
-  assert.deepEqual(merged.bars.at(-1), sparseSeries.bars[0]);
-  assert.deepEqual(merged.dailyChangeReference, sparseSeries.dailyChangeReference);
+  assert.equal(merged.dailyChangeReference, undefined);
   assert.deepEqual(validateChartStagingPayload(staged, [moveRow]), []);
   assert.deepEqual(quoteRowFromSeries(merged), {
     name: 'MOVE Index',
@@ -4005,159 +4005,40 @@ async function testMoveSparseYahooHistoryAndDailyChangeReference() {
     delta: '+0.35',
     pct: '+0.51%',
     dir: 'up',
-    sourceSymbol: '^MOVE',
+    sourceSymbol: 'MOVE.INDX',
     asOf: '2026-07-10'
   });
-  assert.throws(() => quoteRowFromSeries({
-    ...merged,
-    ticker: 'SPX',
-    sourceSymbol: '^GSPC'
-  }), /daily change reference is invalid/);
 
-  const replacementInput = path.join(dir, 'replacement-input.html');
-  const replacementOutput = path.join(dir, 'replacement-output.json');
-  fs.writeFileSync(replacementInput, renderDashboardValidationFixture({
-    ...dashboard,
-    tape: {
-      ...dashboard.tape,
-      rows: dashboard.tape.rows.map((row) => row.ticker === 'MOVE'
-        ? { ...row, ...quoteRowFromSeries(merged) }
-        : row)
-    }
-  }, {
-    ...chartData,
-    series: [compactChartPayload({ series: [merged] }).series[0]]
-  }));
-  await runChart([
-    '--input', replacementInput,
-    '--output', replacementOutput,
-    '--ticker', 'MOVE',
-    '--as-of', '2026-07-10T21:00:00.000Z',
-    '--days', '1826',
-    '--delay-ms', '0'
-  ], {
-    now: new Date('2026-07-10T21:05:15.000Z'),
-    fetchSeries: async () => ({
-      ...sparseSeries,
-      dataKind: 'ohlc',
-      priceOnly: false,
-      bars: [{ time: '2026-07-10', open: 69.3, high: 69.8, low: 69.1, close: 69.5796 }]
-    })
-  });
-  const replaced = JSON.parse(fs.readFileSync(replacementOutput, 'utf8')).series[0];
-  assert.deepEqual(replaced.bars.slice(0, 2), priorSeries.bars);
-  assert.deepEqual(replaced.bars.at(-1), {
-    time: '2026-07-10', open: 69.3, high: 69.8, low: 69.1, close: 69.5796
-  }, 'Later real OHLC must replace the same-date synthetic placeholder.');
-  assert.throws(() => quoteRowFromSeries({
-    ...merged,
-    source: 'Fixture Provider',
-    sourceKey: 'fixture_provider'
-  }), /daily change reference is invalid/);
-
-  const malformedPrior = {
-    ...priorSeries,
-    dailyChangeReference: { asOf: '2026-07-08', previousClose: 77.9153 }
-  };
-  const malformedPriorInput = path.join(dir, 'malformed-prior-input.html');
-  const malformedPriorOutput = path.join(dir, 'malformed-prior-output.json');
-  fs.writeFileSync(malformedPriorInput, renderDashboardValidationFixture(dashboard, {
-    ...chartData,
-    series: [compactChartPayload({ series: [malformedPrior] }).series[0]]
-  }));
-  let malformedPriorFetches = 0;
-  await runChart([
-    '--input', malformedPriorInput,
-    '--output', malformedPriorOutput,
-    '--ticker', 'MOVE',
-    '--as-of', '2026-07-10T21:00:00.000Z',
-    '--days', '1826',
-    '--delay-ms', '0'
-  ], {
-    now: new Date('2026-07-10T21:05:30.000Z'),
-    fetchSeries: async () => {
-      malformedPriorFetches += 1;
-      return structuredClone(sparseSeries);
-    }
-  });
-  const recoveredPrior = JSON.parse(fs.readFileSync(malformedPriorOutput, 'utf8'));
-  assert.equal(malformedPriorFetches, 1, 'Malformed prior MOVE reference must not block the fresh sparse fetch.');
-  assert.equal(recoveredPrior.availability, undefined);
-  assert.equal(recoveredPrior.series[0].bars.length, 3);
-  assert.deepEqual(recoveredPrior.series[0].dailyChangeReference, sparseSeries.dailyChangeReference);
-  await assert.rejects(() => runChart([
-    '--input', malformedPriorInput,
-    '--output', path.join(dir, 'malformed-prior-failed-output.json'),
-    '--ticker', 'MOVE',
-    '--as-of', '2026-07-10T21:00:00.000Z',
-    '--days', '1826',
-    '--delay-ms', '0'
-  ], {
-    now: new Date('2026-07-10T21:05:45.000Z'),
-    fetchSeries: async () => { throw new Error('fixture fresh MOVE failure'); }
-  }), /MOVE refresh failed and no validated embedded series is available/);
-
-  const missingReferenceOutput = path.join(dir, 'missing-reference.json');
+  const fallbackOutput = path.join(dir, 'fallback.json');
   await runChart([
     '--input', input,
-    '--output', missingReferenceOutput,
+    '--output', fallbackOutput,
     '--ticker', 'MOVE',
     '--as-of', '2026-07-10T21:00:00.000Z',
     '--days', '1826',
     '--delay-ms', '0'
   ], {
     now: new Date('2026-07-10T21:06:00.000Z'),
-    fetchSeries: async () => {
-      const series = structuredClone(sparseSeries);
-      series.bars.unshift({ time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 });
-      delete series.dailyChangeReference;
-      return series;
-    }
+    fetchSeries: async () => { throw new Error('fixture EODHD failure'); }
   });
-  const missingReference = JSON.parse(fs.readFileSync(missingReferenceOutput, 'utf8'));
-  assert.equal(missingReference.availability.status, 'partial');
-  assert.equal(missingReference.series[0].availability.status, 'carried_forward');
-  assert.match(missingReference.availability.failures[0].message, /sparse Yahoo refresh did not include a valid dailyChangeReference/);
+  const fallback = JSON.parse(fs.readFileSync(fallbackOutput, 'utf8'));
+  assert.equal(fallback.availability.status, 'partial');
+  assert.equal(fallback.series[0].availability.status, 'carried_forward');
+  assert.equal(fallback.series[0].source, priorSeries.source);
+  assert.deepEqual(fallback.series[0].bars, priorSeries.bars);
+  assert.match(fallback.availability.failures[0].message, /fixture EODHD failure/);
 
-  const fewBarsOutput = path.join(dir, 'few-bars.json');
-  await runChart([
-    '--input', input,
-    '--output', fewBarsOutput,
-    '--ticker', 'MOVE',
-    '--as-of', '2026-07-10T21:00:00.000Z',
-    '--days', '1826',
-    '--delay-ms', '0'
-  ], {
-    now: new Date('2026-07-10T21:07:00.000Z'),
-    fetchSeries: async () => {
-      const series = structuredClone(sparseSeries);
-      series.bars.unshift({ time: '2026-07-09', open: 77.9153, high: 77.9153, low: 77.9153, close: 77.9153 });
-      return series;
-    }
-  });
-  const fewBars = JSON.parse(fs.readFileSync(fewBarsOutput, 'utf8'));
-  assert.equal(fewBars.availability, undefined);
-  assert.equal(fewBars.series[0].bars.length, 3);
-  assert.equal(fewBars.series[0].bars[0].time, '2026-07-08');
-  assert.deepEqual(fewBars.series[0].bars[1], priorSeries.bars[1], 'A close-only source window must not flatten overlapping historical OHLC.');
-  assert.deepEqual(quoteRowFromSeries(fewBars.series[0]), quoteRowFromSeries(merged));
-
-  const malformedCases = [
-    ['null reference', (series) => { series.dailyChangeReference = null; }, /dailyChangeReference must be an object/],
-    ['primitive reference', (series) => { series.dailyChangeReference = 1; }, /dailyChangeReference must be an object/],
-    ['array reference', (series) => { series.dailyChangeReference = []; }, /dailyChangeReference must be an object/],
-    ['malformed member', (series) => { delete series.dailyChangeReference.previousClose; }, /previousClose must be a positive finite JSON number/],
-    ['stale date', (series) => { series.dailyChangeReference.asOf = '2026-07-09'; }, /asOf must match the latest bar date/],
-    ['non-numeric previous close', (series) => { series.dailyChangeReference.previousClose = '69.2283'; }, /previousClose must be a positive finite JSON number/],
-    ['non-positive previous close', (series) => { series.dailyChangeReference.previousClose = 0; }, /previousClose must be a positive finite JSON number/],
-    ['wrong provenance', (series) => { delete series.sourceKey; }, /requires Yahoo Finance Chart API provenance/],
-    ['wrong ticker', (series) => { series.ticker = 'SPX'; }, /supported only for MOVE from \^MOVE/]
-  ];
-  for (const [label, mutate, expected] of malformedCases) {
-    const payload = structuredClone(staged);
-    mutate(payload.series[0]);
-    assert.match(validateChartStagingPayload(payload, [moveRow]).join('\n'), expected, label);
-  }
+  assert.throws(
+    () => parseEodhdMoveSeries(moveRow, {}, startDate, endDate),
+    /response must be an array/
+  );
+  assert.throws(
+    () => parseEodhdMoveSeries(moveRow, [
+      eodhdPayload[0],
+      { ...eodhdPayload[1], close: null }
+    ], startDate, endDate),
+    /invalid OHLC data/
+  );
 }
 
 async function testChartFetcherTickerFilterAndPartialFailure() {
@@ -4538,21 +4419,302 @@ async function testChartFetcherTickerFilterAndPartialFailure() {
   assert.equal(fs.readFileSync(producerInput, 'utf8'), originalProducerInput);
 }
 
-function testChartStagingRejectsLatestCloseOnlyPlaceholder() {
+async function testYahooFreshnessWatermarkAndFinnhubRepairGate() {
+  const row = { ticker: 'VCR', name: 'Consumer Discretionary', section: 'tape', sourceSymbol: 'VCR' };
+  const epoch = (isoTimestamp) => Date.parse(isoTimestamp) / 1000;
+  const yahooPayload = (points, meta = {}) => ({
+    chart: {
+      result: [{
+        meta: { exchangeTimezoneName: 'America/New_York', ...meta },
+        timestamp: points.map((point) => Date.parse(`${point.time}T00:00:00Z`) / 1000),
+        indicators: {
+          quote: [{
+            open: points.map((point) => point.open),
+            high: points.map((point) => point.high),
+            low: points.map((point) => point.low),
+            close: points.map((point) => point.close),
+            volume: points.map((point) => point.volume)
+          }]
+        }
+      }]
+    }
+  });
+  const staleLatestPayload = yahooPayload([
+    { time: '2026-08-14', open: 100, high: 102, low: 99, close: 101, volume: 1000 },
+    { time: '2026-08-17', open: null, high: null, low: null, close: null, volume: null }
+  ]);
+  const staleSeries = parseYahooSeries(row, staleLatestPayload, 'query1.finance.yahoo.com');
+
+  assert.equal(staleSeries.bars.at(-1).time, '2026-08-14');
+  assert.equal(yahooLatestTimestampDate(staleLatestPayload), '2026-08-17');
+  assert.equal(yahooFreshnessWatermarkDate(staleLatestPayload), '2026-08-17');
+  assert.equal(shouldUseFinnhubQuoteFallback(staleSeries, staleLatestPayload), true);
+  assert.throws(
+    () => assertFinnhubQuoteRepairFreshness(row, staleSeries, staleLatestPayload),
+    /VCR latest Yahoo completed session for 2026-08-17 is unavailable or unusable/
+  );
+
+  const repairedSeries = mergeFinnhubQuoteBar(staleSeries, {
+    time: '2026-08-17',
+    open: 103,
+    high: 104,
+    low: 102,
+    close: 103.5,
+    latestQuoteSource: 'Finnhub Quote API'
+  });
+  assert.equal(repairedSeries.bars.at(-1).time, '2026-08-17');
+  assert.equal(repairedSeries.source, 'Yahoo Finance Chart API + Finnhub Quote API');
+  assert.doesNotThrow(() => assertFinnhubQuoteRepairFreshness(row, repairedSeries, staleLatestPayload));
+
+  const indexSeries = parseYahooSeries({ ...row, ticker: 'SPX', sourceSymbol: '^GSPC' }, staleLatestPayload, 'query1.finance.yahoo.com');
+  assert.throws(
+    () => assertFinnhubQuoteRepairFreshness({ ...row, ticker: 'SPX', sourceSymbol: '^GSPC' }, indexSeries, staleLatestPayload),
+    /SPX latest Yahoo completed session for 2026-08-17 is unavailable or unusable/,
+    'Unsupported symbols with an unrepaired latest raw Yahoo row must fall through to carried_forward.'
+  );
+
+  const premarketPayload = yahooPayload([
+    { time: '2026-08-14', open: 100, high: 102, low: 99, close: 101, volume: 1000 }
+  ], {
+    regularMarketTime: epoch('2026-08-17T19:59:15.000Z'),
+    currentTradingPeriod: {
+      regular: {
+        start: epoch('2026-08-18T13:30:00.000Z'),
+        end: epoch('2026-08-18T20:00:00.000Z')
+      }
+    }
+  });
+  const premarketOptions = { endDate: new Date('2026-08-18T12:30:00.000Z') };
+  const premarketSeries = parseYahooSeries(row, premarketPayload, 'query1.finance.yahoo.com');
+  assert.equal(yahooFreshnessWatermarkDate(premarketPayload, premarketOptions), '2026-08-17');
+  assert.equal(shouldUseFinnhubQuoteFallback(premarketSeries, premarketPayload, premarketOptions), true);
+  assert.throws(
+    () => assertFinnhubQuoteRepairFreshness(row, premarketSeries, premarketPayload, premarketOptions),
+    /VCR latest Yahoo completed session for 2026-08-17 is unavailable or unusable/,
+    'A premarket refresh must require the prior completed session even when its daily row is omitted.'
+  );
+
+  const intradayPayload = yahooPayload([
+    { time: '2026-08-17', open: 103, high: 104, low: 102, close: 103.5, volume: 1100 }
+  ], {
+    regularMarketTime: epoch('2026-08-18T18:30:00.000Z'),
+    currentTradingPeriod: {
+      regular: {
+        start: epoch('2026-08-18T13:30:00.000Z'),
+        end: epoch('2026-08-18T20:00:00.000Z')
+      }
+    }
+  });
+  const intradayOptions = { endDate: new Date('2026-08-18T18:30:00.000Z') };
+  const intradaySeries = parseYahooSeries(row, intradayPayload, 'query1.finance.yahoo.com');
+  assert.equal(yahooFreshnessWatermarkDate(intradayPayload, intradayOptions), '2026-08-17');
+  assert.equal(shouldUseFinnhubQuoteFallback(intradaySeries, intradayPayload, intradayOptions), false);
+  assert.doesNotThrow(() => assertFinnhubQuoteRepairFreshness(row, intradaySeries, intradayPayload, intradayOptions));
+
+  const postClosePayload = yahooPayload([
+    { time: '2026-08-17', open: 103, high: 104, low: 102, close: 103.5, volume: 1100 }
+  ], {
+    regularMarketTime: epoch('2026-08-18T19:59:15.000Z'),
+    currentTradingPeriod: {
+      regular: {
+        start: epoch('2026-08-18T13:30:00.000Z'),
+        end: epoch('2026-08-18T20:00:00.000Z')
+      }
+    }
+  });
+  const postCloseOptions = { endDate: new Date('2026-08-18T20:02:00.000Z') };
+  const exactCloseOptions = { endDate: new Date('2026-08-18T20:00:00.000Z') };
+  const postCloseSeries = parseYahooSeries(row, postClosePayload, 'query1.finance.yahoo.com');
+  assert.equal(yahooFreshnessWatermarkDate(postClosePayload, exactCloseOptions), '2026-08-18');
+  assert.equal(yahooFreshnessWatermarkDate(postClosePayload, postCloseOptions), '2026-08-18');
+  assert.equal(shouldUseFinnhubQuoteFallback(postCloseSeries, postClosePayload, postCloseOptions), true);
+  assert.throws(
+    () => assertFinnhubQuoteRepairFreshness(row, postCloseSeries, postClosePayload, postCloseOptions),
+    /VCR latest Yahoo completed session for 2026-08-18 is unavailable or unusable/,
+    'A post-close refresh must use the scheduled session end even when Yahoo omits marketState and the final trade precedes the close.'
+  );
+  const repairedPostCloseSeries = mergeFinnhubQuoteBar(postCloseSeries, {
+    time: '2026-08-18',
+    open: 104,
+    high: 105,
+    low: 103,
+    close: 104.5,
+    latestQuoteSource: 'Finnhub Quote API'
+  });
+  assert.doesNotThrow(() => assertFinnhubQuoteRepairFreshness(
+    row,
+    repairedPostCloseSeries,
+    postClosePayload,
+    postCloseOptions
+  ));
+
+  const timestampOnlyPoint = { time: '2026-08-17', open: 103, high: 104, low: 102, close: 103.5, volume: 1100 };
+  const malformedMetadataCases = [
+    {},
+    { currentTradingPeriod: null },
+    { currentTradingPeriod: 'malformed' },
+    { currentTradingPeriod: { regular: [] } },
+    { currentTradingPeriod: { regular: { end: 'malformed' } } },
+    {
+      exchangeTimezoneName: 'not-a-zone',
+      currentTradingPeriod: { regular: { end: epoch('2026-08-18T20:00:00.000Z') } }
+    }
+  ];
+  for (const meta of malformedMetadataCases) {
+    const malformedMetadataPayload = yahooPayload([timestampOnlyPoint], meta);
+    assert.equal(yahooFreshnessWatermarkDate(malformedMetadataPayload, postCloseOptions), '2026-08-17');
+  }
+  assert.equal(yahooFreshnessWatermarkDate(postClosePayload), '2026-08-17');
+  assert.equal(
+    yahooFreshnessWatermarkDate(postClosePayload, { endDate: new Date('invalid') }),
+    '2026-08-17'
+  );
+
+  const freshPayload = yahooPayload([
+    { time: '2026-08-14', open: 100, high: 102, low: 99, close: 101, volume: 1000 },
+    { time: '2026-08-17', open: 103, high: 104, low: 102, close: 103.5, volume: 1100 }
+  ]);
+  const freshSeries = parseYahooSeries(row, freshPayload, 'query1.finance.yahoo.com');
+  assert.equal(shouldUseFinnhubQuoteFallback(freshSeries, freshPayload), false);
+  assert.doesNotThrow(() => assertFinnhubQuoteRepairFreshness(row, freshSeries, freshPayload));
+
+  const closeOnlyPayload = yahooPayload([
+    { time: '2026-08-14', open: null, high: null, low: null, close: 101, volume: 1000 },
+    { time: '2026-08-17', open: null, high: null, low: null, close: 103.5, volume: 1100 }
+  ], postClosePayload.chart.result[0].meta);
+  assert.throws(
+    () => parseYahooSeries(row, closeOnlyPayload, 'query1.finance.yahoo.com'),
+    /VCR response did not include usable daily OHLC bars/,
+    'Yahoo close-only responses are fulfilled-malformed, not valid price series.'
+  );
+  for (const malformedPayload of [
+    null,
+    { chart: { result: null } },
+    { chart: { result: [{ timestamp: 'wrong-container', indicators: null }] } }
+  ]) {
+    assert.throws(
+      () => parseYahooSeries(row, malformedPayload, 'query1.finance.yahoo.com'),
+      /response did not include (?:chart data|usable daily OHLC bars)/
+    );
+  }
+
+  const legacyCloseOnlySeries = {
+    ...postCloseSeries,
+    sourceKey: 'yahoo_chart',
+    dataKind: 'close',
+    priceOnly: true,
+    quoteRevision: '2026-08-18T20:02:00.000Z',
+    noVolume: true,
+    bars: [
+      { time: '2026-08-14', open: 101, high: 101, low: 101, close: 101 },
+      { time: '2026-08-17', open: 103.5, high: 103.5, low: 103.5, close: 103.5 }
+    ]
+  };
+  assert.equal(shouldUseFinnhubQuoteFallback(legacyCloseOnlySeries, closeOnlyPayload, postCloseOptions), true);
+  assert.throws(
+    () => assertFinnhubQuoteRepairFreshness(row, legacyCloseOnlySeries, closeOnlyPayload, postCloseOptions),
+    /VCR latest Yahoo completed session for 2026-08-18 is unavailable or unusable/
+  );
+  const legacyValidationErrors = validateChartSeriesContract(legacyCloseOnlySeries, row).errors.join('\n');
+  assert.match(legacyValidationErrors, /dataKind must be ohlc for Yahoo chart series/);
+  assert.match(legacyValidationErrors, /priceOnly must be false for Yahoo chart series/);
+
+  const requestedHosts = [];
+  const hostFallbackSeries = await fetchYahooSeries(
+    row,
+    { yahooRateLimitRetries: 0, yahooRateLimitDelayMs: 0, delayMs: 0 },
+    new Date('2026-08-01T00:00:00.000Z'),
+    new Date('2026-08-17T21:00:00.000Z'),
+    {
+      fetchJson: async (url) => {
+        const host = new URL(url).host;
+        requestedHosts.push(host);
+        return host === 'query1.finance.yahoo.com' ? closeOnlyPayload : freshPayload;
+      }
+    }
+  );
+  assert.deepEqual(requestedHosts, ['query1.finance.yahoo.com', 'query2.finance.yahoo.com']);
+  assert.equal(hostFallbackSeries.fetchedFrom, 'query2.finance.yahoo.com');
+  assert.equal(hostFallbackSeries.dataKind, 'ohlc');
+  assert.equal(hostFallbackSeries.priceOnly, false);
+
+  await assert.rejects(
+    () => fetchYahooSeries(
+      row,
+      { yahooRateLimitRetries: 0, yahooRateLimitDelayMs: 0, delayMs: 0 },
+      new Date('2026-08-01T00:00:00.000Z'),
+      new Date('2026-08-18T20:02:00.000Z'),
+      { fetchJson: async () => closeOnlyPayload }
+    ),
+    /query1\.finance\.yahoo\.com: VCR response did not include usable daily OHLC bars.*query2\.finance\.yahoo\.com: VCR response did not include usable daily OHLC bars/
+  );
+}
+
+function testChartStagingAcceptsLatestFlatOhlcAndRejectsMalformedOhlc() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const payload = roundChartPayload(chartData);
+  const series = payload.series[0];
+  Object.assign(dashboard.tape.rows[0], {
+    ticker: 'MOVE',
+    name: 'MOVE Index',
+    sourceSymbol: 'MOVE.INDX'
+  });
+  Object.assign(series, {
+    ticker: 'MOVE',
+    name: 'MOVE Index',
+    sourceSymbol: 'MOVE.INDX',
+    source: 'EODHD EOD API',
+    sourceKey: 'eodhd_eod',
+    fetchedFrom: 'eodhd.com',
+    dataKind: 'ohlc',
+    priceOnly: false,
+    noVolume: true
+  });
+  series.bars = [
+    { time: '2026-07-09', open: 68.89, high: 69.23, low: 68.89, close: 69.23 },
+    { time: '2026-07-10', open: 69.58, high: 69.58, low: 69.58, close: 69.58 }
+  ];
+
+  assert.deepEqual(validateChartStagingPayload(payload, dashboard.tape.rows), []);
+
+  series.bars[1].low = 69.59;
+  assert.match(
+    validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'),
+    /MOVE\.bars\[1\] has incoherent OHLC values/
+  );
+}
+
+function testChartStagingRejectsMalformedLatestOhlc() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const payload = roundChartPayload(chartData);
   const series = payload.series[0];
   series.dataKind = 'ohlc';
   series.priceOnly = false;
   const latestIndex = series.bars.length - 1;
-  delete series.bars[latestIndex].volume;
-  const close = series.bars[latestIndex].close;
-  series.bars[latestIndex] = { time: series.bars[latestIndex].time, open: close, high: close, low: close, close };
+  series.bars[latestIndex].high = series.bars[latestIndex].low - 1;
 
   assert.match(
     validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'),
-    new RegExp(`${series.ticker}\\.bars\\[\\d+\\] contains a latest quote-only placeholder`)
+    new RegExp(`${series.ticker}\\.bars\\[\\d+\\] has incoherent OHLC values`)
   );
+}
+
+function testChartStagingRejectsLegacyDailyChangeReference() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const variants = [
+    null,
+    '69.23',
+    [],
+    { asOf: '2026-07-10', previousClose: 69.23 }
+  ];
+  for (const dailyChangeReference of variants) {
+    const payload = roundChartPayload(chartData);
+    payload.series[0].dailyChangeReference = dailyChangeReference;
+    assert.match(
+      validateChartStagingPayload(payload, dashboard.tape.rows).join('\n'),
+      /dailyChangeReference is not supported; daily change is derived from the two latest bars/
+    );
+  }
 }
 
 function testChartMetadataAndAvailabilityContracts() {
@@ -4605,7 +4767,7 @@ function testChartMetadataAndAvailabilityContracts() {
   }
 }
 
-function chartDataWithLatestCloseOnlyPlaceholder(chartData) {
+function chartDataWithLatestFlatOhlc(chartData) {
   const payload = structuredClone(chartData);
   const series = payload.series[0];
   series.dataKind = 'ohlc';
@@ -5541,17 +5703,49 @@ function testDashboardValidatorTapeNotesAreModeSpecific() {
   assert.equal(published.stdout, '');
 }
 
-function testDashboardValidatorCloseOnlyPlaceholderIsStagedOnly() {
+function testDashboardValidatorAcceptsLatestFlatOhlc() {
   const { dashboard, chartData } = createDashboardValidationFixture();
-  const html = renderDashboardValidationFixture(dashboard, chartDataWithLatestCloseOnlyPlaceholder(chartData));
+  const html = renderDashboardValidationFixture(dashboard, chartDataWithLatestFlatOhlc(chartData));
 
   const staged = dashboardValidationResult(html, FIXTURE_NOW, 'staged');
-  assert.equal(staged.status, 1);
-  assert.match(staged.stderr, /SPX\.bars\[1\] contains a latest quote-only placeholder/);
+  assert.equal(staged.status, 0, staged.stderr);
+  assert.equal(staged.stdout, '');
 
   const published = dashboardValidationResult(html, FIXTURE_NOW, 'published');
-  assert.equal(published.status, 0);
+  assert.equal(published.status, 0, published.stderr);
   assert.equal(published.stdout, '');
+}
+
+function testDashboardValidatorRejectsLegacyMoveQuoteOverride() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const series = chartData.series[0];
+  series.ticker = 'MOVE';
+  series.name = 'MOVE Index';
+  series.sourceSymbol = 'MOVE.INDX';
+  series.source = 'Yahoo Finance Chart API';
+  series.sourceKey = 'yahoo_chart';
+  series.dailyChangeReference = { asOf: '2026-07-10', previousClose: 50 };
+  dashboard.tape.rows[0] = {
+    ...dashboard.tape.rows[0],
+    name: 'MOVE Index',
+    ticker: 'MOVE',
+    sourceSymbol: 'MOVE.INDX',
+    last: '101.00',
+    delta: '+51.00',
+    pct: '+102.00%',
+    dir: 'up',
+    asOf: '2026-07-10'
+  };
+
+  const staged = dashboardValidationResult(
+    renderDashboardValidationFixture(dashboard, chartData),
+    FIXTURE_NOW,
+    'staged'
+  );
+  assert.equal(staged.status, 1);
+  assert.match(staged.stderr, /MOVE\.dailyChangeReference is not supported/);
+  assert.match(staged.stderr, /MOVE\.delta must match the latest chart-data\.series-derived value "\+1\.00"/);
+  assert.match(staged.stderr, /MOVE\.pct must match the latest chart-data\.series-derived value "\+1\.00%"/);
 }
 
 function testPrepareNormalizesStaleTapeCommentary() {
@@ -5598,6 +5792,78 @@ function testDashboardValidatorRejectsChartProvenanceMismatches() {
     dashboard.editionId = '2026-07-10T21:00:01.000Z';
     buildEditorialReview(dashboard, { ...manifest, baseEditionId }, chartData);
   }
+
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const moveSeries = chartData.series[0];
+  Object.assign(moveSeries, {
+    ticker: 'MOVE',
+    name: 'MOVE Index',
+    sourceSymbol: 'MOVE.INDX',
+    source: 'EODHD EOD API',
+    sourceKey: 'eodhd_eod',
+    fetchedFrom: 'eodhd.com',
+    noVolume: true
+  });
+  moveSeries.bars = moveSeries.bars.map((bar) => [...bar.slice(0, 5), null]);
+  Object.assign(dashboard.tape.rows[0], {
+    ticker: 'MOVE',
+    name: 'MOVE Index',
+    sourceSymbol: 'MOVE.INDX'
+  });
+
+  assert.deepEqual(validateChartStagingPayload(roundChartPayload(chartData), dashboard.tape.rows), []);
+  assert.equal(validateDashboardAndChartFixture(dashboard, chartData, 'staged').status, 0);
+
+  const wrongValues = {
+    source: 'Yahoo Finance Chart API',
+    sourceKey: 'yahoo_chart',
+    fetchedFrom: 'query1.finance.yahoo.com'
+  };
+  for (const field of Object.keys(wrongValues)) {
+    const expected = new RegExp(`MOVE\\.${field} must be`);
+    const variants = [
+      ['missing', (series) => { delete series[field]; }],
+      ['null', (series) => { series[field] = null; }],
+      ['wrong primitive', (series) => { series[field] = 42; }],
+      ['wrong container', (series) => { series[field] = {}; }],
+      ['wrong value', (series) => { series[field] = wrongValues[field]; }]
+    ];
+    for (const [label, mutate] of variants) {
+      const malformed = structuredClone(chartData);
+      mutate(malformed.series[0]);
+      assert.match(
+        validateChartStagingPayload(roundChartPayload(malformed), dashboard.tape.rows).join('\n'),
+        expected,
+        `${field} ${label}`
+      );
+    }
+  }
+
+  const staleProviderSymbol = structuredClone(chartData);
+  staleProviderSymbol.series[0].providerSymbol = 'MOVE.INDX';
+  assert.match(
+    validateChartStagingPayload(roundChartPayload(staleProviderSymbol), dashboard.tape.rows).join('\n'),
+    /MOVE\.providerSymbol is not supported; use sourceSymbol for provider identity/
+  );
+
+  const carriedForward = buildChartDataFallback(roundChartPayload(chartData), FIXTURE_NOW);
+  assert.deepEqual(validateChartStagingPayload(carriedForward, dashboard.tape.rows), []);
+  assert.deepEqual(validateChartStagingPayload(buildUnavailableChartData(FIXTURE_NOW), []), []);
+
+  const malformedPublished = structuredClone(chartData);
+  malformedPublished.series[0].sourceKey = 'yahoo_chart';
+  const staged = validateDashboardAndChartFixture(dashboard, malformedPublished, 'staged');
+  assert.equal(staged.status, 1);
+  assert.match(staged.stderr, /MOVE\.sourceKey must be eodhd_eod/);
+  const published = validateDashboardAndChartFixture(dashboard, malformedPublished, 'published');
+  assert.equal(published.status, 0, published.stderr);
+
+  const ordinary = createDashboardValidationFixture();
+  assert.deepEqual(
+    validateChartStagingPayload(roundChartPayload(ordinary.chartData), ordinary.dashboard.tape.rows),
+    [],
+    'The MOVE-only provenance rule must not affect other chart series.'
+  );
 }
 
 function testTouchTooltipControls() {
@@ -5959,7 +6225,6 @@ function testTouchTooltipControls() {
   );
 
   const tapeStaleSource = extractDashboardRuntimeTestBlock(html, 'tape-stale-info');
-  const moveDailyChangeSource = extractDashboardRuntimeTestBlock(html, 'move-daily-change-reference');
   const tapeStaleRuntime = Function('esc', `
     const STALE_CHART_WARNING_BUSINESS_DAYS = 2;
     let chartDataReferenceDate = '2026-07-14';
@@ -5967,31 +6232,13 @@ function testTouchTooltipControls() {
     const isFiniteChartNumber = (value) => typeof value === 'number' && Number.isFinite(value);
     const chartLatestDate = (series) => series?.bars?.at(-1)?.time || '';
     const chartDateLabel = (value) => value;
-    ${moveDailyChangeSource}
     ${tapeStaleSource}
-    return { chartBusinessDayGap, tapeSeriesIsStale, tapeSeriesHasLatestCloseOnlyPlaceholder, tapeStaleInfo, tapeCommentaryInfo };
+    return { chartBusinessDayGap, tapeSeriesIsStale, tapeStaleInfo, tapeCommentaryInfo };
   `)((value) => String(value));
   const moveSeries = { ticker: 'MOVE', bars: [{ time: '2026-07-10' }] };
-  const moveQuoteOnlySeries = {
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    dailyChangeReference: { asOf: '2026-07-14', previousClose: 70.5 },
-    bars: [{ time: '2026-07-14', open: 70.8777, high: 70.8777, low: 70.8777, close: 70.8777 }]
-  };
   assert.equal(tapeStaleRuntime.chartBusinessDayGap('2026-07-10', '2026-07-13'), 1);
   assert.equal(tapeStaleRuntime.chartBusinessDayGap('2026-07-10', '2026-07-14'), 2);
   assert.equal(tapeStaleRuntime.tapeSeriesIsStale(moveSeries), true);
-  assert.equal(tapeStaleRuntime.tapeSeriesHasLatestCloseOnlyPlaceholder(moveQuoteOnlySeries), true);
-  assert.equal(tapeStaleRuntime.tapeSeriesHasLatestCloseOnlyPlaceholder({
-    ...moveQuoteOnlySeries,
-    source: 'Fixture Provider'
-  }), false);
-  assert.match(tapeStaleRuntime.tapeStaleInfo(moveQuoteOnlySeries, { ticker: 'MOVE' }), /MOVE data issue/);
-  assert.match(tapeStaleRuntime.tapeStaleInfo(moveQuoteOnlySeries, { ticker: 'MOVE' }), /open\/high\/low data for that date was unavailable/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /MOVE data is stale/);
   assert.match(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /Last valid quote: 2026-07-10\./);
   assert.doesNotMatch(tapeStaleRuntime.tapeStaleInfo(moveSeries, { ticker: 'MOVE' }), /not updated/);
@@ -6040,6 +6287,36 @@ function testTouchTooltipControls() {
     'Only the commentary text wrapper may own two-line clipping; the tooltip must remain its unclipped sibling.'
   );
   assert.doesNotMatch(html, /Data is stale: latest chart bar is/);
+
+  const chartInfoSource = extractDashboardRuntimeTestBlock(html, 'chart-info-content');
+  const { chartInfoContent } = Function(
+    'esc',
+    'isYieldCurveSeries',
+    'chartSeriesKindLabel',
+    `${chartInfoSource}\nreturn { chartInfoContent };`
+  )(
+    (value) => String(value),
+    () => false,
+    () => 'OHLC'
+  );
+  const moveChartInfo = chartInfoContent({
+    ticker: 'MOVE',
+    sourceSymbol: 'MOVE.INDX',
+    source: 'EODHD EOD API',
+    noVolume: true
+  });
+  assert.match(moveChartInfo, /Symbol:<\/span> <span class="tape-chart-info-value">MOVE\.INDX<\/span>/);
+  assert.match(moveChartInfo, /Source:<\/span> <span class="tape-chart-info-value">EODHD recent data \+ retained history<\/span>/);
+  assert.doesNotMatch(moveChartInfo, />EODHD EOD API<\/span>/, 'MOVE must not attribute retained history entirely to EODHD.');
+  assert.match(moveChartInfo, /Local refresh does not update this chart\./);
+  const spxChartInfo = chartInfoContent({ ticker: 'SPX', sourceSymbol: '^GSPC', source: 'Yahoo Finance Chart API' });
+  assert.match(
+    spxChartInfo,
+    />Yahoo Finance Chart API<\/span>/,
+    'The MOVE disclosure must not change other chart source labels.'
+  );
+  assert.match(spxChartInfo, /Local refresh may update this chart\./);
+  assert.match(chartInfoContent(null), />Embedded generated chart data<\/span>/);
 
   const futuresAvailabilitySource = extractDashboardRuntimeTestBlock(html, 'futures-availability-info');
   const { futuresAvailabilityInfo } = Function(
@@ -6161,11 +6438,10 @@ function testTouchTooltipControls() {
   assert.equal(locallyRefreshed.crypto.stats[0].availability, undefined);
   assert.deepEqual(locallyRefreshed.crypto.dominance, { btc: '54.00%', eth: '11.00%', others: '35.00%' });
 
-  const moveReferenceSource = extractDashboardRuntimeTestBlock(html, 'move-daily-change-reference');
   const localSeriesMergeSource = extractDashboardRuntimeTestBlock(html, 'local-refresh-series-merge');
   const localQuoteRowsSource = extractDashboardRuntimeTestBlock(html, 'local-refresh-quote-rows');
   const localQuoteRowsRuntime = Function(
-    `${moveReferenceSource}\n${localSeriesMergeSource}\n${localQuoteRowsSource}\nreturn { applyTapeQuoteRows, applyCryptoQuoteRows, deriveTapeQuoteRowFromSeries };`
+    `${localSeriesMergeSource}\n${localQuoteRowsSource}\nreturn { applyTapeQuoteRows, applyCryptoQuoteRows, deriveTapeQuoteRowFromSeries };`
   )();
   const reviewedDisposition = {
     status: 'reviewed',
@@ -6310,13 +6586,12 @@ function testTouchTooltipControls() {
   assert.equal(localQuoteDashboard.tape.rows[2].last, '100');
   assert.deepEqual(localQuoteRowsRuntime.deriveTapeQuoteRowFromSeries({
     ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
+    sourceSymbol: 'MOVE.INDX',
+    source: 'EODHD EOD API',
+    sourceKey: 'eodhd_eod',
     quoteRevision: refreshedRevision,
-    dailyChangeReference: { asOf: '2026-07-10', previousClose: 69.2283 },
     bars: [
-      { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 },
+      { time: '2026-07-09', open: 69, high: 70, low: 68, close: 69.2283 },
       { time: '2026-07-10', open: 69.2283, high: 69.5796, low: 69.2283, close: 69.5796 }
     ]
   }), {
@@ -6329,32 +6604,11 @@ function testTouchTooltipControls() {
     quoteRevision: refreshedRevision
   });
   assert.deepEqual(localQuoteRowsRuntime.deriveTapeQuoteRowFromSeries({
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Fixture Provider',
-    sourceKey: 'fixture_provider',
-    quoteRevision: refreshedRevision,
-    dailyChangeReference: { asOf: '2026-07-10', previousClose: 69.2283 },
-    bars: [
-      { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 },
-      { time: '2026-07-10', open: 69.2283, high: 69.5796, low: 69.2283, close: 69.5796 }
-    ]
-  }), {
-    ticker: 'MOVE',
-    last: '69.58',
-    delta: '-8.34',
-    pct: '-10.70%',
-    dir: 'down',
-    asOf: '2026-07-10',
-    quoteRevision: refreshedRevision
-  });
-  assert.deepEqual(localQuoteRowsRuntime.deriveTapeQuoteRowFromSeries({
     ticker: 'SPX',
     sourceSymbol: '^GSPC',
     source: 'Yahoo Finance Chart API',
     sourceKey: 'yahoo_chart',
     quoteRevision: refreshedRevision,
-    dailyChangeReference: { asOf: '2026-07-10', previousClose: 1 },
     bars: [
       { time: '2026-07-09', open: 6000, high: 6100, low: 5900, close: 6000 },
       { time: '2026-07-10', open: 6100, high: 6200, low: 6000, close: 6200 }
@@ -6532,14 +6786,23 @@ async function testNewsMoreDisclosureInBrowser() {
         const headRect = section.querySelector('.section-head').getBoundingClientRect();
         const titleRect = section.querySelector('.section-head > div:first-child').getBoundingClientRect();
         const buttonRect = section.querySelector('[data-news-more-toggle]').getBoundingClientRect();
+        const collapsedLabel = section.querySelector('.news-more-collapsed');
+        const labelRange = document.createRange();
+        labelRange.selectNode(collapsedLabel.firstChild);
+        const labelRect = labelRange.getBoundingClientRect();
+        const countRect = collapsedLabel.querySelector('.news-more-count').getBoundingClientRect();
         return {
           rightOffset: Math.abs(headRect.right - buttonRect.right),
           bottomOffset: Math.abs(titleRect.bottom - buttonRect.bottom),
+          countLineOffset: Math.abs(
+            (labelRect.top + labelRect.bottom) / 2 - (countRect.top + countRect.bottom) / 2
+          ),
           overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth
         };
       });
       assert.ok(headerLayout.rightOffset <= 1, `${viewport.label}: the More stories button must align to the header's right edge.`);
       assert.ok(headerLayout.bottomOffset <= 1, `${viewport.label}: the More stories button must remain on the title row.`);
+      assert.ok(headerLayout.countLineOffset <= 4, `${viewport.label}: the More stories count must remain on the label line.`);
       assert.ok(headerLayout.overflow <= 0, `${viewport.label}: the header button must not cause horizontal overflow.`);
 
       await generalButton.click();
@@ -6580,11 +6843,9 @@ async function testNewsMoreDisclosureInBrowser() {
 function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   const html = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
   const chartPayloadSource = extractDashboardRuntimeTestBlock(html, 'chart-payload-load');
-  const moveReferenceSource = extractDashboardRuntimeTestBlock(html, 'move-daily-change-reference');
   const source = extractDashboardRuntimeTestBlock(html, 'local-refresh-series-merge');
   const { mergeSeriesMap } = Function(`
     ${chartPayloadSource}
-    ${moveReferenceSource}
     ${source}
     return { mergeSeriesMap };
   `)();
@@ -6615,12 +6876,14 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   }]);
 
   assert.equal(changed, true);
-  const staleMerge = seriesMap.get('VAW');
-  assert.equal(staleMerge.source, 'Yahoo Finance Chart API + Finnhub Quote API');
-  assert.equal(staleMerge.latestQuoteSource, 'Finnhub Quote API');
-  assert.equal(staleMerge.staleRefreshOnly, undefined);
-  assert.equal(staleMerge.bars.at(-1).time, '2026-07-06');
-  assert.ok(staleMerge.bars.some((bar) => bar.time === '2026-07-01'));
+  const backfillMerge = seriesMap.get('VAW');
+  assert.equal(backfillMerge.source, 'Yahoo Finance Chart API + Finnhub Quote API');
+  assert.equal(backfillMerge.latestQuoteSource, 'Finnhub Quote API');
+  assert.equal(backfillMerge.staleRefreshOnly, undefined);
+  assert.equal(backfillMerge.quoteRevision, '2026-07-10T13:31:00.000Z');
+  assert.equal(backfillMerge.bars.at(-1).time, '2026-07-06');
+  assert.equal(backfillMerge.bars.at(-2).close, 231.5);
+  assert.ok(backfillMerge.bars.some((bar) => bar.time === '2026-07-01'));
 
   mergeSeriesMap(seriesMap, [{
     ticker: 'VAW',
@@ -6652,74 +6915,7 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   }]), false);
   assert.equal(seriesMap.has('UNKNOWN'), false);
 
-  seriesMap.set('MOVE', {
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    noVolume: true,
-    quoteRevision: '2026-07-10T13:30:00.000Z',
-    bars: [
-      { time: '2026-07-08', open: 76, high: 77, low: 75, close: 76.5 },
-      { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 }
-    ]
-  });
-  assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'close',
-    priceOnly: true,
-    noVolume: true,
-    quoteRevision: '2026-07-10T13:31:00.000Z',
-    dailyChangeReference: { asOf: '2026-07-10', previousClose: 69.2283 },
-    bars: [
-      { time: '2026-07-10', open: 69.5796, high: 69.5796, low: 69.5796, close: 69.5796 }
-    ]
-  }]), true);
-  const sparseMoveMerge = seriesMap.get('MOVE');
-  assert.equal(sparseMoveMerge.bars.length, 3);
-  assert.equal(sparseMoveMerge.bars.at(-1).time, '2026-07-10');
-  assert.equal(sparseMoveMerge.dataKind, 'ohlc');
-  assert.equal(sparseMoveMerge.priceOnly, false);
-  assert.deepEqual(sparseMoveMerge.bars.slice(0, 2), [
-    { time: '2026-07-08', open: 76, high: 77, low: 75, close: 76.5 },
-    { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 }
-  ]);
-  assert.deepEqual(sparseMoveMerge.dailyChangeReference, { asOf: '2026-07-10', previousClose: 69.2283 });
-  assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    noVolume: true,
-    quoteRevision: '2026-07-10T13:32:00.000Z',
-    dailyChangeReference: { asOf: '2026-07-10', previousClose: 69.2283 },
-    bars: [
-      { time: '2026-07-10', open: 69.3, high: 69.8, low: 69.1, close: 69.5796 }
-    ]
-  }]), true);
-  assert.deepEqual(seriesMap.get('MOVE').bars.at(-1), {
-    time: '2026-07-10', open: 69.3, high: 69.8, low: 69.1, close: 69.5796
-  });
-  assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Fixture Provider',
-    sourceKey: 'fixture_provider',
-    quoteRevision: '2026-07-10T13:33:00.000Z',
-    dailyChangeReference: { asOf: '2026-07-11', previousClose: 69.5796 },
-    bars: [
-      { time: '2026-07-11', open: 69.5796, high: 70, low: 69, close: 70 }
-    ]
-  }]), false);
-  assert.equal(seriesMap.get('MOVE').bars.at(-1).time, '2026-07-10');
-  const beforeMalformed = structuredClone(seriesMap.get('MOVE'));
+  const beforeMalformed = structuredClone(seriesMap.get('VAW'));
   const malformedBars = [
     null,
     'malformed',
@@ -6731,65 +6927,104 @@ function testLocalRefreshKeepsNewerEmbeddedSeriesProvenance() {
   ];
   for (const malformedBar of malformedBars) {
     assert.equal(mergeSeriesMap(seriesMap, [{
-      ticker: 'MOVE',
-      sourceSymbol: '^MOVE',
-      source: 'Yahoo Finance Chart API',
-      sourceKey: 'yahoo_chart',
+      ticker: 'VAW',
+      source: 'Local refreshed chart API',
       dataKind: 'ohlc',
       priceOnly: false,
-      noVolume: true,
+      noVolume: false,
       quoteRevision: '2026-07-10T13:34:00.000Z',
-      dailyChangeReference: { asOf: '2026-07-11', previousClose: 69.5796 },
       bars: [malformedBar]
     }]), false);
-    assert.deepEqual(seriesMap.get('MOVE'), beforeMalformed);
+    assert.deepEqual(seriesMap.get('VAW'), beforeMalformed);
   }
   assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    noVolume: true,
+    ticker: 'VAW',
+    source: 'Local refreshed chart API',
     quoteRevision: '2026-07-10T13:29:00.000Z',
-    dailyChangeReference: { asOf: '2026-07-11', previousClose: 69.5796 },
-    bars: [{ time: '2026-07-11', open: 69, high: 70, low: 68, close: 69.5 }]
+    bars: [
+      { time: '2026-07-07', open: 232.1, high: 233, low: 231, close: 232.5 },
+      { time: '2026-07-08', open: 232.5, high: 234, low: 232, close: 233 }
+    ]
   }]), false, 'A stale local quote revision must not replace a newer embedded/local series.');
   for (const malformedRevision of [null, 1, {}, [], 'not-a-timestamp']) {
     assert.equal(mergeSeriesMap(seriesMap, [{
-      ticker: 'MOVE',
-      sourceSymbol: '^MOVE',
-      source: 'Yahoo Finance Chart API',
-      sourceKey: 'yahoo_chart',
-      dataKind: 'ohlc',
-      priceOnly: false,
-      noVolume: true,
+      ticker: 'VAW',
+      source: 'Local refreshed chart API',
       quoteRevision: malformedRevision,
-      dailyChangeReference: { asOf: '2026-07-11', previousClose: 69.5796 },
-      bars: [{ time: '2026-07-11', open: 69, high: 70, low: 68, close: 69.5 }]
+      bars: [
+        { time: '2026-07-07', open: 232.1, high: 233, low: 231, close: 232.5 },
+        { time: '2026-07-08', open: 232.5, high: 234, low: 232, close: 233 }
+      ]
     }]), false);
   }
   assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'MOVE',
-    sourceSymbol: '^MOVE',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    noVolume: true,
-    dailyChangeReference: { asOf: '2026-07-11', previousClose: 69.5796 },
-    bars: [{ time: '2026-07-11', open: 69, high: 70, low: 68, close: 69.5 }]
+    ticker: 'VAW',
+    source: 'Local refreshed chart API',
+    bars: [
+      { time: '2026-07-07', open: 232.1, high: 233, low: 231, close: 232.5 },
+      { time: '2026-07-08', open: 232.5, high: 234, low: 232, close: 233 }
+    ]
   }]), false, 'A local series without quoteRevision must be ignored.');
   assert.equal(mergeSeriesMap(seriesMap, [{
-    ticker: 'SPX',
-    sourceSymbol: '^GSPC',
-    source: 'Yahoo Finance Chart API',
-    sourceKey: 'yahoo_chart',
+    ticker: 'VAW',
+    source: 'Local refreshed chart API',
+    quoteRevision: '2026-07-10T13:35:00.000Z',
+    bars: [{ time: '2026-07-08', open: 232.5, high: 234, low: 232, close: 233 }]
+  }]), false, 'A one-bar local series must be ignored.');
+
+  seriesMap.set('MOVE', {
+    ticker: 'MOVE',
+    sourceSymbol: 'MOVE.INDX',
+    source: 'EODHD EOD API',
+    sourceKey: 'eodhd_eod',
+    quoteRevision: '2026-07-10T13:30:00.000Z',
     bars: [
-      { time: '2026-07-10', open: 6100, high: 6200, low: 6000, close: 6200 }
+      { time: '2026-07-08', open: 76, high: 77, low: 75, close: 76.5 },
+      { time: '2026-07-09', open: 77, high: 79, low: 76, close: 77.9153 }
     ]
-  }]), false);
+  });
+  const embeddedMove = structuredClone(seriesMap.get('MOVE'));
+  const moveOverlays = [
+    {
+      ticker: 'MOVE',
+      sourceSymbol: 'MOVE.INDX',
+      source: 'EODHD EOD API',
+      sourceKey: 'eodhd_eod',
+      quoteRevision: '2026-07-10T13:35:00.000Z',
+      bars: [
+        { time: '2026-07-09', open: 69, high: 70, low: 68, close: 69.2283 },
+        { time: '2026-07-10', open: 69.2283, high: 69.8, low: 69.1, close: 69.5796 }
+      ]
+    },
+    {
+      ticker: 'MOVE',
+      sourceSymbol: 'MOVE.INDX',
+      source: 'Yahoo Finance Chart API',
+      sourceKey: 'yahoo_chart',
+      quoteRevision: '2026-07-10T13:35:00.000Z',
+      bars: [
+        { time: '2026-07-09', open: 69, high: 70, low: 68, close: 69.2283 },
+        { time: '2026-07-10', open: 69.2283, high: 69.8, low: 69.1, close: 69.5796 }
+      ]
+    },
+    { ticker: 'move', quoteRevision: null, bars: 'malformed' }
+  ];
+  for (const overlay of moveOverlays) {
+    assert.equal(mergeSeriesMap(seriesMap, [overlay]), false, 'MOVE must never be accepted from the local overlay.');
+    assert.deepEqual(seriesMap.get('MOVE'), embeddedMove);
+  }
+
+  assert.equal(mergeSeriesMap(seriesMap, [moveOverlays[0], {
+    ticker: 'VAW',
+    source: 'Local refreshed chart API',
+    quoteRevision: '2026-07-10T13:35:00.000Z',
+    bars: [
+      { time: '2026-07-07', open: 232.1, high: 233, low: 231, close: 232.5 },
+      { time: '2026-07-08', open: 232.5, high: 234, low: 232, close: 233 }
+    ]
+  }]), true, 'Ignoring MOVE must not suppress an unrelated local refresh.');
+  assert.deepEqual(seriesMap.get('MOVE'), embeddedMove);
+  assert.equal(seriesMap.get('VAW').bars.at(-1).time, '2026-07-08');
 }
 
 function testExpandedChartScrollsFullyIntoViewport() {
@@ -6831,35 +7066,25 @@ function testExpandedChartScrollsFullyIntoViewport() {
   assert.deepEqual(correctiveScrolls, [], 'A fully visible chart must not move the page after expansion.');
 }
 
-async function testLocalMarketServerNormalizesAllChartSeries() {
+async function testLocalMarketServerNormalizesEligibleSeriesAndExcludesMove() {
   const originalFetchSeries = chartDataModule.fetchSeries;
   const originalFetchCryptoStats = cryptoStatsModule.fetchCryptoStats;
+  const requestedTickers = [];
+  const embeddedHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const embeddedDashboard = readJsonBlock(embeddedHtml, 'dashboard-data');
+  const embeddedChart = roundChartPayload(readJsonBlock(embeddedHtml, 'chart-data'));
+  const embeddedSilverBars = embeddedChart.series.find((series) => series.ticker === 'XAG').bars.slice(-2);
   try {
-    chartDataModule.fetchSeries = async (row) => ({
-      ...row,
-      source: 'Fixture Provider',
-      sourceKey: 'fixture_provider',
-      dataKind: 'ohlc',
-      priceOnly: false,
-      noVolume: false,
-      bars: row.ticker === 'XAG' ? [
-        {
-          time: '2026-08-13',
-          open: 64.87300109863281,
-          high: 64.87300109863281,
-          low: 64.77999877929688,
-          close: 64.87300109863281,
-          volume: 3
-        },
-        {
-          time: '2026-08-14',
-          open: 64.62999725341797,
-          high: 65.875,
-          low: 63.64500045776367,
-          close: 65.10800170898438,
-          volume: 31855
-        }
-      ] : [
+    chartDataModule.fetchSeries = async (row) => {
+      requestedTickers.push(row.ticker);
+      return {
+        ...row,
+        source: 'Fixture Provider',
+        sourceKey: 'fixture_provider',
+        dataKind: 'ohlc',
+        priceOnly: false,
+        noVolume: false,
+        bars: row.ticker === 'XAG' ? embeddedSilverBars : [
         {
           time: '2026-08-13',
           open: 100.123456,
@@ -6876,8 +7101,9 @@ async function testLocalMarketServerNormalizesAllChartSeries() {
           close: 100.358456,
           volume: 1235.4
         }
-      ]
-    });
+        ]
+      };
+    };
     cryptoStatsModule.fetchCryptoStats = async () => ({ stats: [], dominance: {} });
 
     const payload = await buildMarketRefresh(parseLocalMarketServerArgs([
@@ -6886,6 +7112,9 @@ async function testLocalMarketServerNormalizesAllChartSeries() {
     ]));
     assert.deepEqual(payload.errors, []);
     assert.ok(payload.series.length > 1);
+    assert.equal(requestedTickers.includes('MOVE'), false, 'Local refresh must not spend an EODHD request on MOVE.');
+    assert.equal(payload.series.some((series) => series.ticker === 'MOVE'), false, 'MOVE must stay on its embedded scheduled series.');
+    assert.ok(requestedTickers.includes('SPX'), 'Excluding MOVE must not suppress unrelated local chart refreshes.');
     for (const series of payload.series) {
       for (const bar of series.bars) {
         for (const field of ['open', 'high', 'low', 'close']) {
@@ -6896,13 +7125,8 @@ async function testLocalMarketServerNormalizesAllChartSeries() {
     }
 
     const silver = payload.series.find((series) => series.ticker === 'XAG');
-    assert.deepEqual(silver.bars.map((bar) => bar.close), [64.873, 65.108]);
+    assert.deepEqual(silver.bars, embeddedSilverBars);
     const refreshedSilverQuote = quoteRowFromSeries(silver);
-    assert.equal(refreshedSilverQuote.delta, '+0.23');
-    const embeddedDashboard = readJsonBlock(
-      fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8'),
-      'dashboard-data'
-    );
     const embeddedSilverQuote = embeddedDashboard.tape.rows.find((row) => row.ticker === 'XAG');
     for (const field of ['last', 'delta', 'pct', 'dir', 'asOf']) {
       assert.equal(refreshedSilverQuote[field], embeddedSilverQuote[field], `XAG.${field} must not create a false local change.`);
@@ -6989,7 +7213,7 @@ const architectureContractTests = Object.freeze([
 
 const localRefreshIntegrationTests = Object.freeze([
   testLocalRefreshKeepsNewerEmbeddedSeriesProvenance,
-  testLocalMarketServerNormalizesAllChartSeries,
+  testLocalMarketServerNormalizesEligibleSeriesAndExcludesMove,
   testLocalMarketServerOriginPolicyAndTlsOptions
 ]);
 
@@ -7010,9 +7234,12 @@ async function main() {
     testEditorialReviewContract,
     testChartSeriesOwnsDerivedQuoteViews,
     testQuoteRefreshInvalidatesTapeCommentaryWithoutBlocking,
-    testMoveSparseYahooHistoryAndDailyChangeReference,
+    testMoveEodhdHistoryAndPriorMerge,
     testChartFetcherTickerFilterAndPartialFailure,
-    testChartStagingRejectsLatestCloseOnlyPlaceholder,
+    testYahooFreshnessWatermarkAndFinnhubRepairGate,
+    testChartStagingAcceptsLatestFlatOhlcAndRejectsMalformedOhlc,
+    testChartStagingRejectsMalformedLatestOhlc,
+    testChartStagingRejectsLegacyDailyChangeReference,
     testChartMetadataAndAvailabilityContracts,
     testChartRerunUsesExecutionRevision,
     testMergedChartAvailabilityFollowsFinalSeries,
@@ -7030,7 +7257,8 @@ async function main() {
     testDashboardValidatorBlocksStartupCrashSurfaces,
     testDashboardValidatorEnforcesRuntimeNetworkBoundary,
     testDashboardValidatorTapeNotesAreModeSpecific,
-    testDashboardValidatorCloseOnlyPlaceholderIsStagedOnly,
+    testDashboardValidatorAcceptsLatestFlatOhlc,
+    testDashboardValidatorRejectsLegacyMoveQuoteOverride,
     testPrepareNormalizesStaleTapeCommentary,
     testDashboardValidatorRejectsChartProvenanceMismatches,
     testTouchTooltipControls,

@@ -258,8 +258,9 @@ function isPartialRefresh(errors, sections) {
 }
 
 function shouldRefreshChartRow(row) {
-  // Full-curve comparison context belongs to scheduled chart-data, not the short-tail local refresh.
-  return String(row?.sourceSymbol || '') !== 'TREASURY:CURVE';
+  // Full-curve comparison context and quota-limited MOVE data belong to the scheduled update.
+  return String(row?.sourceSymbol || '') !== 'TREASURY:CURVE'
+    && String(row?.ticker || '').toUpperCase() !== 'MOVE';
 }
 
 function localRefreshChartRows(input) {
