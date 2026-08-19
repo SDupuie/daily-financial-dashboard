@@ -3,6 +3,7 @@
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const path = require('path');
 const zlib = require('zlib');
 const {
@@ -19,7 +20,11 @@ const {
   futuresStoryPublicationWindow,
   normalizeStoryTitle
 } = require('./news_contract');
-const { APPROVED_NEWS_SOURCES, newsAcquisitionPaths } = require('./news_sources');
+const {
+  APPROVED_NEWS_SOURCES,
+  MARKETAUX_TICKER_NEWS_PATHS,
+  newsAcquisitionPaths
+} = require('./news_sources');
 const { atomicWriteJson } = require('./staging_writer');
 const { mapConcurrent } = require('./fetch_concurrency');
 
@@ -28,6 +33,7 @@ const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
 const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'news_candidates.json');
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
+const MARKETAUX_URL = 'https://api.marketaux.com/v1/news/all';
 const REUTERS_NEWS_SITEMAP_INDEX_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml';
 const REUTERS_NEWS_SITEMAP_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
@@ -42,7 +48,11 @@ const NEWS_HTTP_MAX_HEADER_SIZE = 65536;
 const NEWS_HTTP_MAX_REDIRECTS = 5;
 const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
 const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
-const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, stockfit: 1 });
+const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, marketaux: 1, stockfit: 1 });
+const MARKETAUX_TICKERS = new Set(MARKETAUX_TICKER_NEWS_PATHS.map((pathEntry) => pathEntry.ticker));
+// Five free-tier pages provide up to 15 candidates per ticker while bounding
+// all three configured ticker paths to 15 Marketaux requests per update.
+const MARKETAUX_MAX_PAGES = 5;
 const REUTERS_UNSUPPORTED_PATHS = new Set(['ar', 'de', 'default', 'es', 'fr', 'it', 'ja', 'pt', 'ru', 'zh']);
 const STRICT_CRYPTO_TITLE_PATTERN = /\b(?:bitcoin|crypto(?:currenc(?:y|ies))?|ethereum|ether|stablecoins?|blockchain|digital[- ]assets?)\b/i;
 const FIXED_ZONE_OFFSETS = Object.freeze({
@@ -410,6 +420,74 @@ async function fetchStockfit(acquisitionPath, { timeoutMs, env = process.env, fe
   })) };
 }
 
+async function fetchMarketaux(acquisitionPath, { eligibleDates, timeoutMs, env = process.env, fetchPage = fetchResponse }) {
+  const apiKey = String(env.MARKETAUX_API_KEY || '').trim();
+  if (!apiKey) throw new Error('MARKETAUX_API_KEY is not configured.');
+  const ticker = marketauxTickerForPath(acquisitionPath);
+  if (!ticker) throw new Error('Marketaux requests are limited to configured single-ticker paths.');
+  const earliestEligibleDate = [...eligibleDates].sort()[0];
+  if (!earliestEligibleDate) throw new Error('Marketaux requires at least one eligible News date.');
+  const publishedAfter = chicagoMidnight(earliestEligibleDate).toISOString().slice(0, 19);
+  const requestPage = async (page) => {
+    const url = new URL(MARKETAUX_URL);
+    url.searchParams.set('search', `"${ticker}"`);
+    url.searchParams.set('language', 'en');
+    url.searchParams.set('published_after', publishedAfter);
+    url.searchParams.set('sort', 'relevance_score');
+    url.searchParams.set('limit', String(acquisitionPath.limit || 3));
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('api_token', apiKey);
+    const response = await fetchPage(url, { timeoutMs, headers: { Accept: 'application/json' } });
+    const payload = await response.json();
+    if (payload?.error) {
+      const message = String(payload.error.message || payload.error.code || 'Marketaux request failed.');
+      throw new Error(message.replaceAll(apiKey, '[redacted]'));
+    }
+    if (!Array.isArray(payload?.data)) throw new Error('Marketaux response must contain data[].');
+    return payload;
+  };
+  const firstPayload = await requestPage(1);
+  if (Number(firstPayload.meta?.page) !== 1) {
+    throw new Error('Marketaux response page metadata did not match requested page 1.');
+  }
+  const found = Number(firstPayload.meta?.found);
+  const pageLimit = Number(firstPayload.meta?.limit);
+  if (!Number.isInteger(found) || found < 0 || found > 20_000
+    || !Number.isInteger(pageLimit) || pageLimit <= 0) {
+    throw new Error('Marketaux response must contain valid bounded meta.found and meta.limit values.');
+  }
+  const items = [...firstPayload.data];
+  const pageErrors = [];
+  const reportedPageCount = Math.ceil(found / pageLimit);
+  const pageCount = Math.min(reportedPageCount, MARKETAUX_MAX_PAGES);
+  for (let page = 2; page <= pageCount; page += 1) {
+    try {
+      const payload = await requestPage(page);
+      if (Number(payload.meta?.page) !== page) {
+        throw new Error(`response page metadata did not match requested page ${page}`);
+      }
+      items.push(...payload.data);
+    } catch (error) {
+      pageErrors.push(`page ${page}: ${String(error?.message || error)}`);
+      break;
+    }
+  }
+  if (!pageErrors.length && reportedPageCount <= MARKETAUX_MAX_PAGES && items.length < found) {
+    pageErrors.push(`received ${items.length} of ${found} reported results`);
+  }
+  return {
+    items: items.map((item) => ({
+      title: item.title,
+      url: item.url,
+      publishedAt: item.published_at,
+      summary: item.description || item.snippet,
+      providerSourceName: item.source,
+      providerRelevanceScore: item.relevance_score
+    })),
+    ...(pageErrors.length ? { error: `Marketaux ${ticker} pagination partial: ${pageErrors.join('; ')}` } : {})
+  };
+}
+
 async function fetchRss(acquisitionPath, { timeoutMs }) {
   const response = await fetchResponse(acquisitionPath.feedUrl, {
     timeoutMs,
@@ -443,6 +521,7 @@ async function fetchApPublic(acquisitionPath, { timeoutMs }) {
 async function fetchAcquisitionPath(acquisitionPath, options) {
   if (acquisitionPath.provider === 'alpha-vantage') return fetchAlphaVantage(acquisitionPath, options);
   if (acquisitionPath.provider === 'stockfit') return fetchStockfit(acquisitionPath, options);
+  if (acquisitionPath.provider === 'marketaux') return fetchMarketaux(acquisitionPath, options);
   if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
   if (acquisitionPath.provider === 'ap-public') return fetchApPublic(acquisitionPath, options);
   if (acquisitionPath.provider === 'reuters-public') return fetchReutersPublic(acquisitionPath, options);
@@ -808,22 +887,50 @@ function sourceForUrl(value) {
   )) || null;
 }
 
+function marketauxTickerForPath(acquisitionPath) {
+  const ticker = String(acquisitionPath?.ticker || '').toUpperCase();
+  return acquisitionPath?.provider === 'marketaux'
+    && MARKETAUX_TICKERS.has(ticker)
+    && MARKETAUX_TICKER_NEWS_PATHS.some((pathEntry) => pathEntry.id === acquisitionPath.id && pathEntry.ticker === ticker)
+    ? ticker
+    : '';
+}
+
+function publisherHostname(value) {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return '';
+    const hostname = url.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
+    const address = hostname.replace(/^\[|\]$/g, '');
+    if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost') || net.isIP(address)) return '';
+    return hostname;
+  } catch (_error) {
+    return '';
+  }
+}
+
 function articleRedirectAllowed(candidateUrl, nextUrl) {
+  const candidateHostname = publisherHostname(candidateUrl);
+  const nextHostname = publisherHostname(nextUrl);
+  if (!candidateHostname || !nextHostname) return false;
   const source = sourceForUrl(candidateUrl);
-  return Boolean(source
-    && nextUrl.protocol === 'https:'
-    && sourceForUrl(nextUrl.toString())?.id === source.id);
+  if (source) {
+    return sourceForUrl(nextUrl.toString())?.id === source.id;
+  }
+  return nextHostname === candidateHostname;
 }
 
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
   const source = sourceForUrl(url);
+  const tickerSearchSymbol = marketauxTickerForPath(acquisitionPath);
   // Normalize before the Chicago-date freshness check; malformed structured
   // provider timestamps must be rejected instead of rolling into an eligible day.
   const publishedAt = parseNewsTimestamp(item?.publishedAt);
   const title = plainText(item?.title);
-  if (!url || !source || !publishedAt || !title) return null;
-  if (new URL(url).protocol !== 'https:') return null;
+  if (!url || (!source && !tickerSearchSymbol) || !publishedAt || !title) return null;
+  const sourceDomain = publisherHostname(url);
+  if (!sourceDomain) return null;
   const publishedOn = chicagoIsoDate(publishedAt);
   if (!eligibleDates.has(publishedOn)) return null;
   const pool = acquisitionPath.pool === 'cryptoCandidates'
@@ -835,15 +942,22 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     url,
     publishedOn,
     publishedAt: publishedAt.toISOString(),
-    dateSource: source.id === 'yahoo-finance' ? 'hosted_syndication' : 'provider_published',
-    ...(item.publishedAtVerified === true && source.id !== 'yahoo-finance' ? { publishedAtVerified: true } : {}),
-    sourceId: source.id,
-    sourceLabel: source.displayName,
-    sourceDomain: new URL(url).hostname.toLowerCase(),
+    dateSource: source?.id === 'yahoo-finance' ? 'hosted_syndication' : 'provider_published',
+    ...(item.publishedAtVerified === true && source?.id !== 'yahoo-finance' ? { publishedAtVerified: true } : {}),
+    sourceId: source?.id || `marketaux:${sourceDomain}`,
+    sourceLabel: source?.displayName || sourceDomain,
+    sourceDomain,
     provider: acquisitionPath.provider,
     ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
     ...(plainText(item.providerSourceName) ? { providerSourceName: plainText(item.providerSourceName) } : {}),
+    ...(item.providerRelevanceScore !== null
+      && item.providerRelevanceScore !== undefined
+      && item.providerRelevanceScore !== ''
+      && Number.isFinite(Number(item.providerRelevanceScore))
+      ? { providerRelevanceScore: Number(item.providerRelevanceScore) }
+      : {}),
     ...(item.article ? { article: item.article } : {}),
+    ...(tickerSearchSymbol ? { tickerSearchSymbols: [tickerSearchSymbol] } : {}),
     origin: 'downloaded',
     pool,
     searchPathIds: [acquisitionPath.id]
@@ -929,12 +1043,11 @@ function priorCandidate(item, pool, eligibleDates) {
   const title = String(item?.title || '').trim();
   const publishedOn = String(item?.publishedOn || '');
   const sourceLabel = String(item?.sourceLabel || '').trim();
-  if (!url || !sourceForUrl(url) || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
-  try {
-    if (new URL(url).protocol !== 'https:') return null;
-  } catch (_error) {
-    return null;
-  }
+  const tickerSearchSymbols = [...new Set((Array.isArray(item?.tickerSearchSymbols) ? item.tickerSearchSymbols : [])
+    .map((ticker) => String(ticker || '').toUpperCase())
+    .filter((ticker) => MARKETAUX_TICKERS.has(ticker)))];
+  if (!url || !publisherHostname(url) || (!sourceForUrl(url) && !tickerSearchSymbols.length)
+    || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   return {
     title,
     url,
@@ -944,6 +1057,7 @@ function priorCandidate(item, pool, eligibleDates) {
     dateSource: 'prior_validated_card',
     origin: 'prior_card',
     priorCard: true,
+    ...(tickerSearchSymbols.length ? { tickerSearchSymbols } : {}),
     priorCollection: pool,
     pool,
     priorCopy: {
@@ -970,12 +1084,14 @@ function candidateProvenancePriority(candidate) {
 
 function combineCandidate(preferred, other) {
   const searchPathIds = [...new Set([...(preferred.searchPathIds || []), ...(other.searchPathIds || [])])];
+  const tickerSearchSymbols = [...new Set([...(preferred.tickerSearchSymbols || []), ...(other.tickerSearchSymbols || [])])];
   return {
     ...other,
     ...preferred,
     ...(preferred.pool === 'cryptoCandidates' || other.pool === 'cryptoCandidates' ? { pool: 'cryptoCandidates' } : {}),
     ...(preferred.priorCard || other.priorCard ? { priorCard: true } : {}),
     ...(preferred.priorCopy || other.priorCopy ? { priorCopy: preferred.priorCopy || other.priorCopy } : {}),
+    ...(tickerSearchSymbols.length ? { tickerSearchSymbols } : {}),
     searchPathIds
   };
 }
@@ -1237,6 +1353,7 @@ module.exports = {
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
+  fetchMarketaux,
   fetchArticlePage,
   fetchReutersPublic,
   fetchResponse,

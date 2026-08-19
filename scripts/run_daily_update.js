@@ -1741,7 +1741,10 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
     url: source?.url,
     publishedOn: source?.publishedOn,
     sourceLabel: storySourceLabel(item, candidate),
-    ...(isIsoDateTime(source?.publishedAt) ? { publishedAt: source.publishedAt } : {})
+    ...(isIsoDateTime(source?.publishedAt) ? { publishedAt: source.publishedAt } : {}),
+    ...(Array.isArray(source?.tickerSearchSymbols) && source.tickerSearchSymbols.length
+      ? { tickerSearchSymbols: [...source.tickerSearchSymbols] }
+      : {})
   };
   return story;
 }

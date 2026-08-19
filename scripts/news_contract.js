@@ -4,7 +4,7 @@ const { isIsoDate, isIsoDateTime, zonedTimeToUtc } = require('./calendar_contrac
 const NEWS_COVERAGE_REASON = 'insufficient_qualifying_fresh_coverage';
 const NEWS_COVERAGE_POLICIES = Object.freeze({
   stories: Object.freeze({ label: 'stories', minimum: 9, maximum: 18 }),
-  cryptoNotes: Object.freeze({ label: 'crypto.notes', minimum: 6, maximum: 12 }),
+  cryptoNotes: Object.freeze({ label: 'crypto.notes', minimum: 9, maximum: 15 }),
   futuresStories: Object.freeze({ label: 'futuresModule.stories', minimum: 3, maximum: 3 })
 });
 const MONDAY_MORNING_NEWS_START_MINUTES = 7 * 60 + 45;

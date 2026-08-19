@@ -36,7 +36,12 @@ const {
   parseReutersNewsSitemap,
   parseReutersNewsSitemapIndex
 } = require('./fetch_news_candidates');
-const { newsAcquisitionPaths } = require('./news_sources');
+const {
+  APPROVED_NEWS_SOURCES,
+  DIRECT_NEWS_FEEDS,
+  MARKETAUX_TICKER_NEWS_PATHS,
+  newsAcquisitionPaths
+} = require('./news_sources');
 const { validateScheduledFinalization, validateScheduledStart } = require('./run_daily_update');
 const temporaryDirectories = new Set();
 
@@ -114,10 +119,10 @@ function testDashboardNewsCollections() {
 
 function testNewsCoverageState() {
   assert.deepEqual(NEWS_COVERAGE_POLICIES.stories, { label: 'stories', minimum: 9, maximum: 18 });
-  assert.deepEqual(NEWS_COVERAGE_POLICIES.cryptoNotes, { label: 'crypto.notes', minimum: 6, maximum: 12 });
+  assert.deepEqual(NEWS_COVERAGE_POLICIES.cryptoNotes, { label: 'crypto.notes', minimum: 9, maximum: 15 });
   assert.deepEqual(NEWS_COVERAGE_POLICIES.futuresStories, { label: 'futuresModule.stories', minimum: 3, maximum: 3 });
   assert.deepEqual(validateNewsCoverageState(undefined, 9, NEWS_COVERAGE_POLICIES.stories), []);
-  assert.deepEqual(validateNewsCoverageState(undefined, 6, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
+  assert.deepEqual(validateNewsCoverageState(undefined, 9, NEWS_COVERAGE_POLICIES.cryptoNotes), []);
   assert.deepEqual(validateNewsCoverageState(undefined, 3, NEWS_COVERAGE_POLICIES.futuresStories), []);
   assert.deepEqual(
     validateNewsCoverageState(undefined, 0, NEWS_COVERAGE_POLICIES.futuresStories, { allowIncomplete: true }),
@@ -150,8 +155,8 @@ function testNewsCoverageState() {
     /stories must contain no more than 18 items/
   );
   assert.match(
-    validateNewsCoverageState(undefined, 13, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
-    /crypto\.notes must contain no more than 12 items/
+    validateNewsCoverageState(undefined, 16, NEWS_COVERAGE_POLICIES.cryptoNotes).join(' '),
+    /crypto\.notes must contain no more than 15 items/
   );
 }
 
@@ -269,6 +274,300 @@ async function testStockfitProviderRequestHeaders() {
     request.headers['User-Agent'],
     'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
   );
+}
+
+async function testMarketauxTickerAcquisition() {
+  const apiKey = 'fixture-marketaux-key';
+  const acquisitionPath = MARKETAUX_TICKER_NEWS_PATHS.find((pathEntry) => pathEntry.ticker === 'IBIT');
+  const requests = [];
+  const providerItems = [{
+    title: 'IBIT fixture story',
+    url: 'https://financefeeds.com/ibit-fixture/',
+    published_at: '2026-08-19T12:00:00.000Z',
+    description: 'Fixture description.',
+    source: 'financefeeds.com',
+    relevance_score: 42.5
+  }, {
+    title: 'Second IBIT fixture',
+    url: 'https://financefeeds.com/ibit-fixture-2/',
+    published_at: '2026-08-18T18:00:00.000Z',
+    source: 'financefeeds.com',
+    relevance_score: 30
+  }, {
+    title: 'Third IBIT fixture',
+    url: 'https://example.com/ibit-fixture-3/',
+    published_at: '2026-08-18T16:00:00.000Z',
+    source: 'example.com',
+    relevance_score: 20
+  }, {
+    title: 'Fourth IBIT fixture from page two',
+    url: 'https://example.com/ibit-fixture-4/',
+    published_at: '2026-08-18T14:00:00.000Z',
+    source: 'example.com',
+    relevance_score: 10
+  }];
+  const result = await fetchAcquisitionPath(acquisitionPath, {
+    eligibleDates: new Set(['2026-08-18', '2026-08-19']),
+    timeoutMs: 1000,
+    env: { MARKETAUX_API_KEY: apiKey },
+    fetchPage: async (url, options) => {
+      const requestUrl = new URL(url);
+      requests.push({ url: requestUrl, ...options });
+      const page = Number(requestUrl.searchParams.get('page'));
+      const data = page === 1 ? providerItems.slice(0, 3) : providerItems.slice(3);
+      return { json: async () => ({ meta: { found: 4, returned: data.length, limit: 3, page }, data }) };
+    }
+  });
+
+  assert.deepEqual(requests.map((request) => request.url.searchParams.get('page')), ['1', '2']);
+  assert.ok(requests.every((request) => request.url.origin + request.url.pathname === 'https://api.marketaux.com/v1/news/all'));
+  assert.ok(requests.every((request) => request.url.searchParams.get('search') === '"IBIT"'));
+  assert.ok(requests.every((request) => request.url.searchParams.get('published_after') === '2026-08-18T05:00:00'));
+  assert.ok(requests.every((request) => request.url.searchParams.get('sort') === 'relevance_score'));
+  assert.ok(requests.every((request) => request.url.searchParams.get('limit') === '3'));
+  assert.ok(requests.every((request) => request.url.searchParams.get('api_token') === apiKey));
+  assert.ok(requests.every((request) => request.headers.Accept === 'application/json'));
+  assert.equal(result.error, undefined);
+  assert.deepEqual(result.items[0], {
+    title: 'IBIT fixture story',
+    url: 'https://financefeeds.com/ibit-fixture/',
+    publishedAt: '2026-08-19T12:00:00.000Z',
+    summary: 'Fixture description.',
+    providerSourceName: 'financefeeds.com',
+    providerRelevanceScore: 42.5
+  });
+  assert.equal(result.items.length, 4, 'Marketaux acquisition must retrieve every reported page within its page budget.');
+
+  const candidate = normalizeProviderCandidate(result.items[0], acquisitionPath, new Set(['2026-08-19']));
+  assert.equal(candidate.sourceId, 'marketaux:financefeeds.com');
+  assert.equal(candidate.sourceLabel, 'financefeeds.com');
+  assert.equal(candidate.sourceDomain, 'financefeeds.com');
+  assert.deepEqual(candidate.tickerSearchSymbols, ['IBIT']);
+  assert.equal(candidate.providerRelevanceScore, 42.5);
+  const approvedCandidate = normalizeProviderCandidate({
+    ...result.items[0],
+    title: 'Approved-source Marketaux fixture',
+    url: 'https://finance.yahoo.com/news/approved-marketaux-fixture'
+  }, acquisitionPath, new Set(['2026-08-19']));
+  assert.equal(approvedCandidate.sourceId, 'yahoo-finance');
+  assert.equal(approvedCandidate.sourceLabel, 'Yahoo Finance');
+  assert.equal(approvedCandidate.sourceDomain, 'finance.yahoo.com');
+  assert.equal(normalizeProviderCandidate(result.items[0], {
+    id: 'fixture-rss', provider: 'rss', pool: 'cryptoCandidates'
+  }, new Set(['2026-08-19'])), null, 'An unapproved publisher must remain rejected outside the configured Marketaux ticker path.');
+  const rejectedMarketauxUrls = [
+    'https://reader:secret@financefeeds.com/ibit-fixture',
+    'https://localhost/ibit-fixture',
+    'https://news.localhost/ibit-fixture',
+    'https://127.0.0.1/ibit-fixture',
+    'https://[::1]/ibit-fixture',
+    'https://financefeeds.com:8443/ibit-fixture',
+    'http://financefeeds.com/ibit-fixture',
+    null
+  ];
+  for (const url of rejectedMarketauxUrls) {
+    assert.equal(
+      normalizeProviderCandidate({ ...result.items[0], url }, acquisitionPath, new Set(['2026-08-19'])),
+      null,
+      `Marketaux must reject unsafe article URL ${String(url)}.`
+    );
+  }
+
+  const articleRequests = [];
+  const enrichedArtifact = await collectNewsCandidates({
+    asOf: new Date('2026-08-19T13:00:00.000Z'),
+    acquisitionPaths: [acquisitionPath],
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    fetchPath: async () => ({ items: [{
+      title: 'Public Marketaux enrichment fixture',
+      url: 'https://financefeeds.com/public-enrichment-fixture',
+      publishedAt: '2026-08-19T12:00:00.000Z'
+    }, {
+      title: 'Rejected local Marketaux enrichment fixture',
+      url: 'https://127.0.0.1/local-enrichment-fixture',
+      publishedAt: '2026-08-19T12:00:00.000Z'
+    }] }),
+    fetchArticle: async (candidate) => {
+      articleRequests.push(candidate.url);
+      return { finalUrl: candidate.url, excerpt: 'Downloaded article context.' };
+    }
+  });
+  assert.deepEqual(articleRequests, ['https://financefeeds.com/public-enrichment-fixture']);
+  assert.equal(enrichedArtifact.cryptoCandidates.length, 1, 'An unsafe Marketaux URL must not discard a valid public candidate.');
+  assert.equal(enrichedArtifact.cryptoCandidates[0].article.excerpt, 'Downloaded article context.');
+
+  const partialRequests = [];
+  const partial = await fetchAcquisitionPath(acquisitionPath, {
+    eligibleDates: new Set(['2026-08-18', '2026-08-19']),
+    timeoutMs: 1000,
+    env: { MARKETAUX_API_KEY: apiKey },
+    fetchPage: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page'));
+      partialRequests.push(page);
+      if (page === 2) throw new Error('fixture second-page failure');
+      return { json: async () => ({
+        meta: { found: 10, returned: 3, limit: 3, page: 1 },
+        data: providerItems.slice(0, 3)
+      }) };
+    }
+  });
+  assert.deepEqual(partialRequests, [1, 2], 'Marketaux must stop after the first failed later page.');
+  assert.equal(partial.items.length, 3, 'A later-page failure must preserve valid earlier Marketaux results.');
+  assert.match(partial.error, /Marketaux IBIT pagination partial: page 2: fixture second-page failure/);
+
+  const cappedRequests = [];
+  const capped = await fetchAcquisitionPath(acquisitionPath, {
+    eligibleDates: new Set(['2026-08-19']),
+    timeoutMs: 1000,
+    env: { MARKETAUX_API_KEY: apiKey },
+    fetchPage: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page'));
+      cappedRequests.push(page);
+      const data = [1, 2, 3].map((item) => ({
+        title: `Capped Marketaux fixture ${page}-${item}`,
+        url: `https://example.com/capped-marketaux-${page}-${item}`,
+        published_at: '2026-08-19T12:00:00.000Z'
+      }));
+      return { json: async () => ({ meta: { found: 100, returned: 3, limit: 3, page }, data }) };
+    }
+  });
+  assert.deepEqual(cappedRequests, [1, 2, 3, 4, 5]);
+  assert.equal(capped.items.length, 15, 'Five Marketaux pages must provide at most fifteen free-tier candidates per ticker.');
+  assert.equal(capped.error, undefined, 'Reaching the documented page budget is not an acquisition failure.');
+
+  const mismatchedPageRequests = [];
+  const mismatchedPage = await fetchAcquisitionPath(acquisitionPath, {
+    eligibleDates: new Set(['2026-08-19']),
+    timeoutMs: 1000,
+    env: { MARKETAUX_API_KEY: apiKey },
+    fetchPage: async (url) => {
+      const page = Number(new URL(url).searchParams.get('page'));
+      mismatchedPageRequests.push(page);
+      const data = providerItems.slice(0, page === 1 ? 3 : 1);
+      return { json: async () => ({ meta: { found: 10, returned: data.length, limit: 3, page: 1 }, data }) };
+    }
+  });
+  assert.deepEqual(mismatchedPageRequests, [1, 2], 'Marketaux must stop after the first mismatched page response.');
+  assert.equal(mismatchedPage.items.length, 3);
+  assert.match(mismatchedPage.error, /page 2: response page metadata did not match requested page 2/);
+
+  await assert.rejects(
+    () => fetchAcquisitionPath(acquisitionPath, {
+      eligibleDates: new Set(['2026-08-19']),
+      timeoutMs: 1000,
+      env: { MARKETAUX_API_KEY: apiKey },
+      fetchPage: async () => ({ json: async () => ({
+        meta: { found: 1, returned: 1, limit: 3 },
+        data: providerItems.slice(0, 1)
+      }) })
+    }),
+    /Marketaux response page metadata did not match requested page 1/
+  );
+
+  await assert.rejects(
+    () => fetchAcquisitionPath(acquisitionPath, {
+      eligibleDates: new Set(['2026-08-19']),
+      timeoutMs: 1000,
+      env: { MARKETAUX_API_KEY: apiKey },
+      fetchPage: async () => ({ json: async () => ({ error: { message: `Rejected ${apiKey}.` } }) })
+    }),
+    (error) => {
+      assert.equal(error.message, 'Rejected [redacted].');
+      return true;
+    }
+  );
+}
+
+async function testMarketauxTickerPriorCardCarryForward() {
+  const asOf = new Date('2026-08-19T13:00:00.000Z');
+  const artifact = await collectNewsCandidates({
+    asOf,
+    acquisitionPaths: [],
+    dashboardData: {
+      stories: [],
+      futuresModule: { stories: [] },
+      crypto: { notes: [{
+        title: 'Still-fresh IBIT fixture',
+        url: 'https://financefeeds.com/still-fresh-ibit-fixture',
+        publishedOn: '2026-08-19',
+        sourceLabel: 'financefeeds.com',
+        tickerSearchSymbols: ['IBIT'],
+        tag: 'Crypto',
+        body: 'Previously reviewed ticker coverage.'
+      }, {
+        title: 'Unmarked dynamic fixture',
+        url: 'https://unapproved.example/unmarked-fixture',
+        publishedOn: '2026-08-19',
+        sourceLabel: 'unapproved.example',
+        tag: 'Crypto',
+        body: 'This must not bypass the ordinary prior-card source gate.'
+      }, {
+        title: 'Credentialed dynamic fixture',
+        url: 'https://reader:secret@unapproved.example/credentialed-fixture',
+        publishedOn: '2026-08-19',
+        sourceLabel: 'unapproved.example',
+        tickerSearchSymbols: ['IBIT'],
+        tag: 'Crypto',
+        body: 'This must not pass the carried-forward URL gate.'
+      }, {
+        title: 'Local dynamic fixture',
+        url: 'https://localhost/local-fixture',
+        publishedOn: '2026-08-19',
+        sourceLabel: 'localhost',
+        tickerSearchSymbols: ['IBIT'],
+        tag: 'Crypto',
+        body: 'This must not pass the carried-forward URL gate.'
+      }] }
+    },
+    clock: () => asOf
+  });
+
+  assert.equal(artifact.cryptoCandidates.length, 1);
+  assert.equal(artifact.cryptoCandidates[0].priorCard, true);
+  assert.equal(artifact.cryptoCandidates[0].sourceLabel, 'financefeeds.com');
+  assert.deepEqual(artifact.cryptoCandidates[0].tickerSearchSymbols, ['IBIT']);
+}
+
+function testCryptoRssSourceManifest() {
+  const sources = new Map(APPROVED_NEWS_SOURCES.map((source) => [source.id, source]));
+  const feeds = new Map(DIRECT_NEWS_FEEDS.map((feed) => [feed.id, feed]));
+  const expected = [{
+    id: 'crypto-news',
+    displayName: 'Crypto.news',
+    domains: ['crypto.news'],
+    feedUrl: 'https://crypto.news/feed/',
+    articleUrl: 'https://crypto.news/fixture-story/'
+  }, {
+    id: 'crypto-slate',
+    displayName: 'CryptoSlate',
+    domains: ['cryptoslate.com'],
+    feedUrl: 'https://cryptoslate.com/feed/',
+    articleUrl: 'https://cryptoslate.com/fixture-story/'
+  }];
+
+  for (const fixture of expected) {
+    assert.deepEqual(sources.get(fixture.id), {
+      id: fixture.id,
+      displayName: fixture.displayName,
+      domains: fixture.domains
+    });
+    const acquisitionPath = feeds.get(fixture.id);
+    assert.deepEqual(acquisitionPath, {
+      id: fixture.id,
+      provider: 'rss',
+      pool: 'cryptoCandidates',
+      feedUrl: fixture.feedUrl
+    });
+    const candidate = normalizeProviderCandidate({
+      title: `${fixture.displayName} RSS fixture`,
+      url: fixture.articleUrl,
+      publishedAt: '2026-08-19T12:00:00.000Z'
+    }, acquisitionPath, new Set(['2026-08-19']));
+    assert.equal(candidate.sourceId, fixture.id);
+    assert.equal(candidate.sourceLabel, fixture.displayName);
+    assert.equal(candidate.provider, 'rss');
+    assert.equal(candidate.pool, 'cryptoCandidates');
+  }
 }
 
 async function testDeterministicNewsCandidateAcquisition() {
@@ -1137,8 +1436,19 @@ function testArticleRedirectPolicy() {
   const candidateUrl = 'https://www.cnbc.com/2026/07/10/fixture.html';
   assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://api.cnbc.com/article/fixture')), true);
   assert.equal(articleRedirectAllowed(candidateUrl, new URL('http://www.cnbc.com/article/fixture')), false);
+  assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://www.cnbc.com:8443/article/fixture')), false);
   assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://cnbc.com.evil.example/article/fixture')), false);
   assert.equal(articleRedirectAllowed(candidateUrl, new URL('https://example.com/article/fixture')), false);
+  const dynamicUrl = 'https://financefeeds.com/ibit-fixture';
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://www.financefeeds.com/ibit-fixture-final')), true);
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://news.financefeeds.com/ibit-fixture-final')), false);
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://financefeeds.com.evil.example/ibit-fixture-final')), false);
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://reader:secret@financefeeds.com/ibit-fixture-final')), false);
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://financefeeds.com:8443/ibit-fixture-final')), false);
+  assert.equal(articleRedirectAllowed(dynamicUrl, new URL('https://127.0.0.1/ibit-fixture-final')), false);
+  assert.equal(articleRedirectAllowed('https://127.0.0.1/ibit-fixture', new URL('https://127.0.0.1/ibit-fixture-final')), false);
+  const approvedMarketauxUrl = 'https://finance.yahoo.com/news/ibit-fixture';
+  assert.equal(articleRedirectAllowed(approvedMarketauxUrl, new URL('https://news.finance.yahoo.com/news/ibit-fixture-final')), true);
 }
 
 async function testNewsFetchResponseTransport() {
@@ -1619,6 +1929,9 @@ async function main() {
   testMondayMorningFreshnessWindow();
   await testAlphaVantageProviderErrorRedaction();
   await testStockfitProviderRequestHeaders();
+  await testMarketauxTickerAcquisition();
+  await testMarketauxTickerPriorCardCarryForward();
+  testCryptoRssSourceManifest();
   testArticleMetadataExtraction();
   testNewsTimestampParsing();
   testRssParsing();

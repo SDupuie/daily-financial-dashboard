@@ -23,6 +23,7 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
   { id: 'decrypt', displayName: 'Decrypt', domains: ['decrypt.co'] },
   { id: 'the-block', displayName: 'The Block', domains: ['theblock.co'] },
   { id: 'crypto-news', displayName: 'Crypto.news', domains: ['crypto.news'] },
+  { id: 'crypto-slate', displayName: 'CryptoSlate', domains: ['cryptoslate.com'] },
   { id: 'fx-news-group', displayName: 'FX News Group', domains: ['fxnewsgroup.com'] },
   { id: 'coingecko', displayName: 'CoinGecko', domains: ['coingecko.com'] },
   { id: 'coinmarketcap', displayName: 'CoinMarketCap', domains: ['coinmarketcap.com'] },
@@ -53,6 +54,12 @@ const STOCKFIT_NEWS_PATHS = Object.freeze([
   { id: 'stockfit-market', provider: 'stockfit', pool: 'generalCandidates', limit: 50 }
 ].map((entry) => Object.freeze(entry)));
 
+const MARKETAUX_TICKER_NEWS_PATHS = Object.freeze([
+  { id: 'marketaux-ibit', provider: 'marketaux', pool: 'cryptoCandidates', ticker: 'IBIT', limit: 3 },
+  { id: 'marketaux-etha', provider: 'marketaux', pool: 'cryptoCandidates', ticker: 'ETHA', limit: 3 },
+  { id: 'marketaux-mstr', provider: 'marketaux', pool: 'cryptoCandidates', ticker: 'MSTR', limit: 3 }
+].map((entry) => Object.freeze(entry)));
+
 const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'ap-public', provider: 'ap-public', pool: 'generalCandidates', feedUrl: 'https://apnews.com/news-sitemap-content.xml' },
   { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates', feedUrl: 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml' },
@@ -67,6 +74,8 @@ const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'kiplinger', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.kiplinger.com/feed/all' },
   { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
   { id: 'decrypt', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://decrypt.co/feed' },
+  { id: 'crypto-news', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://crypto.news/feed/' },
+  { id: 'crypto-slate', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://cryptoslate.com/feed/' },
   { id: 'cnbc', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' }
 ].map((entry) => Object.freeze(entry)));
 
@@ -74,6 +83,7 @@ function newsAcquisitionPaths() {
   return Object.freeze([
     ...ALPHA_VANTAGE_NEWS_PATHS,
     ...STOCKFIT_NEWS_PATHS,
+    ...MARKETAUX_TICKER_NEWS_PATHS,
     ...DIRECT_NEWS_FEEDS
   ]);
 }
@@ -82,6 +92,7 @@ module.exports = {
   APPROVED_NEWS_SOURCES,
   ALPHA_VANTAGE_NEWS_PATHS,
   DIRECT_NEWS_FEEDS,
+  MARKETAUX_TICKER_NEWS_PATHS,
   STOCKFIT_NEWS_PATHS,
   newsAcquisitionPaths
 };

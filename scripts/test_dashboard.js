@@ -359,7 +359,7 @@ function createDashboardValidationFixture() {
     series: chartSeries
   });
   const stories = Array.from({ length: 9 }, (_item, index) => story('market', index + 1));
-  const cryptoNotes = Array.from({ length: 6 }, (_item, index) => story('crypto', index + 1));
+  const cryptoNotes = Array.from({ length: 9 }, (_item, index) => story('crypto', index + 1));
   const futuresStories = Array.from({ length: 3 }, (_item, index) => ({
     ...story('futures', index + 1),
     tag: 'Futures',
@@ -459,7 +459,7 @@ function fixtureNewsSearch(dashboard) {
       sourceLabel: 'Fixture News'
     });
   }
-  while (cryptoCandidates.length < 12) {
+  while (cryptoCandidates.length < 15) {
     const index = cryptoCandidates.length + 1;
     cryptoCandidates.push({
       title: `Crypto candidate ${index}`,
@@ -3341,7 +3341,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   const mixedNewsFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
   assert.equal(mixedNewsFinalized.stories.length, 7);
   assert.equal(mixedNewsFinalized.storiesCoverage.status, 'partial');
-  assert.equal(mixedNewsFinalized.crypto.notes.length, 6);
+  assert.equal(mixedNewsFinalized.crypto.notes.length, 9);
   assert.equal(mixedNewsFinalized.crypto.notesCoverage, undefined);
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === 'https://outside.test/story'));
   assert.ok(!mixedNewsFinalized.stories.some((story) => story.url === mixedNewsPayload.editorialReview.newsSelection.futures[0].url));
@@ -3413,7 +3413,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   );
 
   const limitedArtifact = fixtureNewsSearchArtifact(dashboard, editorialPayload.editorialReview.preparedAt);
-  while (limitedArtifact.cryptoCandidates.length < 15) {
+  while (limitedArtifact.cryptoCandidates.length < 18) {
     const index = limitedArtifact.cryptoCandidates.length + 1;
     limitedArtifact.cryptoCandidates.push({
       title: `Extra crypto candidate ${index}`,
@@ -3422,6 +3422,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
       sourceLabel: 'Fixture News'
     });
   }
+  limitedArtifact.cryptoCandidates[0].tickerSearchSymbols = ['IBIT'];
   const extraFuturesCandidate = {
     ...limitedArtifact.futuresCandidates[0],
     title: 'Extra futures candidate 4',
@@ -3444,7 +3445,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     tag: 'Futures'
   });
   limitedPayload.editorialReview.newsSelection.stories = limitedGeneralCandidates.map(selectionFromCandidate);
-  limitedPayload.editorialReview.newsSelection.crypto = limitedArtifact.cryptoCandidates.slice(0, 15)
+  limitedPayload.editorialReview.newsSelection.crypto = limitedArtifact.cryptoCandidates.slice(0, 18)
     .map((candidate, index) => ({ ...selectionFromCandidate(candidate, index), tag: 'Crypto' }));
   fs.writeFileSync(newsCandidatesPath, `${JSON.stringify(limitedArtifact, null, 2)}\n`);
   fs.writeFileSync(dashboardFile, originalHtml);
@@ -3454,7 +3455,12 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(limitedResult.status, 0, limitedResult.stderr);
   const limitedFinalized = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
   assert.equal(limitedFinalized.stories.length, 18, 'Apply must cap General News at eighteen accepted cards.');
-  assert.equal(limitedFinalized.crypto.notes.length, 12, 'Apply must cap Crypto at twelve accepted cards.');
+  assert.equal(limitedFinalized.crypto.notes.length, 15, 'Apply must cap Crypto at fifteen accepted cards.');
+  assert.deepEqual(
+    limitedFinalized.crypto.notes[0].tickerSearchSymbols,
+    ['IBIT'],
+    'Apply must copy the generated single-ticker marker from the candidate sidecar rather than editorial input.'
+  );
   assert.equal(limitedFinalized.futuresModule.stories.length, 3, 'Apply must cap Futures at three accepted cards.');
   assert.equal(
     limitedFinalized.futuresModule.stories.some((storyItem) => storyItem.url === extraFuturesCandidate.url),
@@ -3505,7 +3511,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
     assert.equal(unavailable.futuresModule.storiesCoverage.status, 'partial');
     assert.equal(unavailable.crypto.notesCoverage.status, 'partial');
     const newsFallbacks = unavailable.editorialReview.systemFallbacks.filter((item) => ['futures-news', 'stories', 'crypto'].includes(item.section));
-    assert.equal(newsFallbacks.length, 18);
+    assert.equal(newsFallbacks.length, 21);
     assert.ok(newsFallbacks.every((item) => item.reason === 'not_in_candidate_inventory'));
   }
 
@@ -3521,7 +3527,7 @@ function testArchitectureFinalizationValidatesBeforeReplace() {
   assert.equal(finalized.opening.headline, 'Reviewed fixture headline');
   assert.equal(finalized.stories.length, 9);
   assert.equal(finalized.futuresModule.stories.length, 3);
-  assert.equal(finalized.crypto.notes.length, 6);
+  assert.equal(finalized.crypto.notes.length, 9);
   assert.equal(finalized.stories[0].title, 'Reviewed market story');
   assert.equal(finalized.stories[0].sourceLabel, 'Fixture News');
   assert.equal(finalized.futuresModule.stories[0].title, 'Reviewed futures story');
@@ -4998,15 +5004,15 @@ function testNewsMoreDisclosureRendering() {
     'The first nine General cards must remain in the primary grid and the remainder must follow in the controlled panel.'
   );
 
-  const cryptoCards = cards.slice(0, 12).map((card) => card.replace('data-story', 'data-crypto-story'));
-  const expandedCrypto = renderStoryCollection(cryptoCards, 'crypto-notes', 6, 'crypto');
+  const cryptoCards = cards.slice(0, 15).map((card) => card.replace('data-story', 'data-crypto-story'));
+  const expandedCrypto = renderStoryCollection(cryptoCards, 'crypto-notes', 9, 'crypto');
   assert.match(expandedCrypto.actionHtml, /More stories <span class="news-more-count">6<\/span>/);
   assert.match(expandedCrypto.actionHtml, /aria-controls="news-more-crypto"/);
   assert.match(expandedCrypto.body, /class="crypto-notes news-more-grid" id="news-more-crypto"/);
   assert.ok(
-    expandedCrypto.body.indexOf('data-crypto-story="6"') < expandedCrypto.body.indexOf('data-news-more-panel')
-      && expandedCrypto.body.indexOf('data-crypto-story="7"') > expandedCrypto.body.indexOf('data-news-more-panel'),
-    'The first six Crypto cards must remain in the primary grid and the remainder must follow in the controlled panel.'
+    expandedCrypto.body.indexOf('data-crypto-story="9"') < expandedCrypto.body.indexOf('data-news-more-panel')
+      && expandedCrypto.body.indexOf('data-crypto-story="10"') > expandedCrypto.body.indexOf('data-news-more-panel'),
+    'The first nine Crypto cards must remain in the primary grid and the remainder must follow in the controlled panel.'
   );
 }
 
@@ -6728,12 +6734,12 @@ async function testNewsMoreDisclosureInBrowser() {
   const storyCards = Array.from({ length: 18 }, (_, index) => (
     `<article class="story editorial-card surface card" data-general-story="${index + 1}">General ${index + 1}</article>`
   ));
-  const cryptoCards = Array.from({ length: 12 }, (_, index) => (
+  const cryptoCards = Array.from({ length: 15 }, (_, index) => (
     `<article class="crypto-note editorial-card surface card" data-crypto-story="${index + 1}">Crypto ${index + 1}</article>`
   ));
   const exactCards = storyCards.slice(0, 9).map((card) => card.replace('data-general-story', 'data-exact-story'));
   const generalCollection = renderStoryCollection(storyCards, 'story-grid', 9, 'general-fixture');
-  const cryptoCollection = renderStoryCollection(cryptoCards, 'crypto-notes', 6, 'crypto-fixture');
+  const cryptoCollection = renderStoryCollection(cryptoCards, 'crypto-notes', 9, 'crypto-fixture');
   const exactCollection = renderStoryCollection(exactCards, 'story-grid', 9, 'exact-fixture');
   let browser;
   try {
@@ -6778,7 +6784,7 @@ async function testNewsMoreDisclosureInBrowser() {
       assert.equal(await generalButton.getAttribute('aria-expanded'), 'false', `${viewport.label}: General extras must start collapsed.`);
       assert.equal(await generalPanel.getAttribute('hidden'), '', `${viewport.label}: the collapsed General panel must be hidden.`);
       assert.equal(await page.locator('#general-fixture [data-general-story]:visible').count(), 9, `${viewport.label}: nine General cards must be initially visible.`);
-      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 6, `${viewport.label}: six Crypto cards must be initially visible.`);
+      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 9, `${viewport.label}: nine Crypto cards must be initially visible.`);
       assert.equal(await page.locator('#general-fixture .story-grid').first().evaluate((element) => (
         getComputedStyle(element).gridTemplateColumns.split(' ').length
       )), viewport.columns, `${viewport.label}: the primary General grid must retain its responsive column count.`);
@@ -6820,7 +6826,7 @@ async function testNewsMoreDisclosureInBrowser() {
 
       await cryptoButton.click();
       assert.equal(await cryptoButton.getAttribute('aria-expanded'), 'true', `${viewport.label}: Crypto extras must expand independently.`);
-      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 12, `${viewport.label}: all twelve Crypto cards must be visible after expansion.`);
+      assert.equal(await page.locator('#crypto-fixture [data-crypto-story]:visible').count(), 15, `${viewport.label}: all fifteen Crypto cards must be visible after expansion.`);
       const cryptoGap = await page.locator('#crypto-fixture').evaluate((section) => {
         const primaryRect = section.querySelector('.crypto-notes').getBoundingClientRect();
         const extrasRect = section.querySelector('.news-more-grid').getBoundingClientRect();
