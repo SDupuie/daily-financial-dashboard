@@ -8,6 +8,7 @@ const path = require('path');
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
 const { mapConcurrent } = require('./fetch_concurrency');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 
 // Bind the reserved primary-LAN address explicitly; network policy, not this process, keeps guest and WAN clients out.
 const DEFAULT_HOST = '192.168.2.2';
@@ -192,10 +193,12 @@ function isoDateToUtcMs(value) {
 }
 
 function readEmbeddedChartData(input) {
-  const html = fs.readFileSync(input, 'utf8');
-  const match = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
-  if (!match) return null;
-  return JSON.parse(match[1]);
+  try {
+    const html = fs.readFileSync(input, 'utf8');
+    return JSON.parse(singleScriptBlockById(html, 'chart-data', { type: 'application/json' }).content);
+  } catch (_error) {
+    return null;
+  }
 }
 
 function latestEmbeddedChartDate(input) {

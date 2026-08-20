@@ -1,26 +1,37 @@
 #!/usr/bin/env node
 
 const fs = require('fs');
+const https = require('https');
 const path = require('path');
 const { atomicWriteJson } = require('./staging_writer');
 const { mapConcurrent, sleep, withRetry } = require('./fetch_concurrency');
-const { addDays, dateFromIso, isIsoDate } = require('./calendar_contract');
+const { addDays, compareIsoDate, dateFromIso, displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const {
+  attachReactions,
   combinedOutcome,
   computeEarningsSourceStatus,
   computeEarningsWeekCounts,
   earningsApiUsageDay,
   earningsCalendarRangeNeedsBuild,
+  earningsHasActual,
   earningsNarrativeDispositions,
   earningsRowKey: rowKey,
+  emptyEarningsApiUsage,
+  hasEarningsApiBudget,
+  isEarningsApiUsage,
+  migrateEarningsApiUsage,
   applyEarningsLifecycle,
   earningsCloseAvailable,
   metricResult,
   isDisplayEligibleEarningsRow,
   needsYahooReactionFetch,
+  normalizeFinnhubCalendarFields,
+  normalizeEarningsTiming: normalizeTiming,
   numberOrNull,
   pctChange,
   reactionWindow,
+  recordEarningsApiRequest,
+  recordEarningsApiResponse,
   reportWindowArrived
 } = require('./earnings_week_contract');
 const {
@@ -194,10 +205,6 @@ function earningsCalendarFailedAttemptNeedsRetry(range, earningsWeekPath = DEFAU
   }
 }
 
-function writeJson(file, payload) {
-  atomicWriteJson(file, payload);
-}
-
 function parseApplyNarrativeArgs(argv) {
   const args = {
     input: DEFAULT_EARNINGS_WEEK,
@@ -364,39 +371,10 @@ function applyNarrativeCommand(argv) {
   });
   const outputErrors = validateEarningsWeekPayload(output);
   if (outputErrors.length) throw new Error(`Narrative-applied earnings week payload is invalid: ${outputErrors.join(' ')}`);
-  writeJson(args.output, output);
+  atomicWriteJson(args.output, output);
   process.stdout.write(`Applied ${output.narrativeApply.applied.length} earnings narrative row(s) to ${args.output}\n`);
 }
 
-// Command factories keep refresh helper names private while the public
-// earnings CLI and tests share this single implementation file.
-function createRefreshCommand() {
-
-const fs = require('fs');
-const path = require('path');
-const https = require('https');
-const {
-  attachReactions,
-  combinedOutcome,
-  computeEarningsSourceStatus,
-  computeEarningsWeekCounts,
-  emptyEarningsApiUsage,
-  earningsRowKey: rowKey,
-  hasEarningsApiBudget,
-  isEarningsApiUsage,
-  migrateEarningsApiUsage,
-  metricResult,
-  normalizeFinnhubCalendarFields,
-  normalizeEarningsTiming: normalizeTiming,
-  numberOrNull,
-  pctChange,
-  recordEarningsApiRequest,
-  recordEarningsApiResponse
-} = require('./earnings_week_contract');
-const { compareIsoDate, displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
-
-const root = path.resolve(__dirname, '..');
-const DEFAULT_INPUT = path.resolve(root, 'generated', 'earnings_week.json');
 const DEFAULT_EARNINGSAPI_USAGE = path.resolve(root, 'generated', 'earningsapi_usage.json');
 const DEFAULT_EARNINGSAPI_DAILY_LIMIT = 100;
 // The slate build holds back 20 calls. Result refresh may use that remaining
@@ -406,7 +384,7 @@ const REQUEST_TIMEOUT_MS = 20000;
 
 function parseArgs(argv) {
   const args = {
-    input: DEFAULT_INPUT,
+    input: DEFAULT_EARNINGS_WEEK,
     output: '',
     asOf: new Date().toISOString(),
     timeoutMs: REQUEST_TIMEOUT_MS,
@@ -420,7 +398,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--input') {
-      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_INPUT);
+      args.input = path.resolve(process.cwd(), argv[i + 1] || DEFAULT_EARNINGS_WEEK);
       i += 1;
       continue;
     }
@@ -513,14 +491,6 @@ function loadEnv(file = path.resolve(root, '.env')) {
     const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, '');
     if (key && !process.env[key]) process.env[key] = value;
   }
-}
-
-function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-
-function writeJson(file, data) {
-  atomicWriteJson(file, data);
 }
 
 function metricPayload(current, incoming, metric, options = {}) {
@@ -619,7 +589,7 @@ function readEarningsApiUsage(file) {
 }
 
 function writeEarningsApiUsage(file, usage) {
-  writeJson(file, usage);
+  atomicWriteJson(file, usage);
 }
 
 function canUseEarningsApi(args, usage, token) {
@@ -698,13 +668,9 @@ function deterministicSnapshot(row) {
   });
 }
 
-function hasActual(row) {
-  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
-}
-
 function actualsObservedAtForRefresh(currentRow, providerRow) {
-  if (!hasActual(providerRow)) return '';
-  if (hasActual(currentRow) && isIsoDateTime(currentRow.actualsObservedAt)) return currentRow.actualsObservedAt;
+  if (!earningsHasActual(providerRow)) return '';
+  if (earningsHasActual(currentRow) && isIsoDateTime(currentRow.actualsObservedAt)) return currentRow.actualsObservedAt;
   return isIsoDateTime(providerRow.actualsObservedAt) ? providerRow.actualsObservedAt : '';
 }
 
@@ -1319,26 +1285,9 @@ async function run(argv) {
   });
   const outputErrors = validateEarningsWeekPayload(result.payload);
   if (outputErrors.length) throw new Error(`Refreshed earnings week payload is invalid: ${outputErrors.join(' ')}`);
-  writeJson(args.output, result.payload);
+  atomicWriteJson(args.output, result.payload);
   printReport(result, args.output, args.compact);
 }
-
-
-return {
-  run,
-  applyEarningsApiCompanyRefresh,
-  applyFinnhubRefresh,
-  collectRefreshData,
-  mergeFinnhubConflictCandidates,
-  refreshEarningsResults,
-  refreshTargetRows,
-  reportWindowArrived,
-  selectFinnhubRefreshRow
-};
-}
-
-const refreshCommand = createRefreshCommand();
-
 
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
@@ -1347,7 +1296,7 @@ async function main() {
     process.exit(command ? 0 : 1);
   }
   if (command === 'build') return runBuild(argv);
-  if (command === 'refresh') return refreshCommand.run(argv);
+  if (command === 'refresh') return run(argv);
   if (command === 'validate') return runValidation(argv);
   if (command === 'apply-narrative') return applyNarrativeCommand(argv);
   if (command === 'repair-source-audit') return repairSourceAuditCommand(argv);
@@ -1366,16 +1315,16 @@ if (require.main === module) {
 
 module.exports = {
   applyEarningsNarrative,
-  applyEarningsApiCompanyRefresh: refreshCommand.applyEarningsApiCompanyRefresh,
-  applyFinnhubRefresh: refreshCommand.applyFinnhubRefresh,
-  collectRefreshData: refreshCommand.collectRefreshData,
+  applyEarningsApiCompanyRefresh,
+  applyFinnhubRefresh,
+  collectRefreshData,
   earningsCalendarFailedAttemptNeedsRetry,
   earningsCalendarNeedsBuild,
-  mergeFinnhubConflictCandidates: refreshCommand.mergeFinnhubConflictCandidates,
+  mergeFinnhubConflictCandidates,
   repairRecoveredEarningsSourceAudit,
-  refreshEarningsResults: refreshCommand.refreshEarningsResults,
-  refreshTargetRows: refreshCommand.refreshTargetRows,
-  reportWindowArrived: refreshCommand.reportWindowArrived,
-  selectFinnhubRefreshRow: refreshCommand.selectFinnhubRefreshRow,
+  refreshEarningsResults,
+  refreshTargetRows,
+  reportWindowArrived,
+  selectFinnhubRefreshRow,
   validateEarningsWeekPayload
 };

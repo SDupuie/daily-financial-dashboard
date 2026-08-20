@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { isDeepStrictEqual } = require('util');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 const {
   acceptedFreshChartTickers,
   buildChartDataFallback,
@@ -28,6 +29,7 @@ const {
   applyEarningsLifecycle,
   combinedOutcome,
   computeEarningsWeekCounts,
+  earningsHasActual,
   earningsReactionBasisForRow,
   isDisplayEligibleEarningsRow,
   narrativeEditorialComplete,
@@ -58,7 +60,7 @@ const {
   prepareWeekAheadForEditorial,
   validateWeekAheadPayload
 } = require('./week_ahead_contract');
-const { addDays, isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const { addDays, chicagoDateParts, isIsoDate, isIsoDateTime, scheduledNow } = require('./calendar_contract');
 const {
   buildEditorialReview,
   editorialTextEntries,
@@ -80,7 +82,7 @@ const {
 } = require('./news_contract');
 const { priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
-const { atomicWriteFile, atomicWriteJson } = require('./staging_writer');
+const { atomicWriteJson } = require('./staging_writer');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_DASHBOARD = path.join(ROOT, 'daily_financial_news.html');
@@ -88,7 +90,6 @@ const GENERATED_DIR = path.join(ROOT, 'generated');
 const DEFAULT_CANDIDATE = path.join(GENERATED_DIR, 'daily_financial_news.candidate.html');
 const DEFAULT_EDITORIAL_DIR = path.join(GENERATED_DIR, 'editorial');
 const DEFAULT_EDITORIAL_DASHBOARD_DATA = path.join(DEFAULT_EDITORIAL_DIR, 'dashboard-data.json');
-const LAST_GOOD_DASHBOARD = path.join(GENERATED_DIR, 'daily_financial_news.last_good.html');
 const EARNINGS_WEEK_PATH = path.join(GENERATED_DIR, 'earnings_week.json');
 const EARNINGS_NARRATIVE_PATH = path.join(GENERATED_DIR, 'earnings_narrative.json');
 const WEEK_AHEAD_PATH = path.join(GENERATED_DIR, 'week_ahead.json');
@@ -139,33 +140,6 @@ function failIncompletePreparation(message) {
 process.on('exit', () => {
   failIncompletePreparation('preparation ended without terminal status');
 });
-
-function chicagoDateParts(date) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago',
-    weekday: 'short',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  const part = (type) => parts.find((item) => item.type === type)?.value || '';
-  const hour = Number(part('hour'));
-  const minute = Number(part('minute'));
-  return {
-    weekday: part('weekday'),
-    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
-    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
-  };
-}
-
-function scheduledNow() {
-  const override = process.env.SCHEDULED_NOW_ISO;
-  const parsed = override ? new Date(override) : new Date();
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
-}
 
 function calendarRolloverRange(windowMode, now = scheduledNow()) {
   // Calendar membership changes only at these two handoff windows; all other
@@ -674,19 +648,8 @@ function weekAheadPreparationCommandArgs(args, canonicalWeekAhead) {
   };
 }
 
-function writeJson(filePath, value) {
-  atomicWriteJson(filePath, value);
-}
-
 function assertCandidateMatchesCanonical(args, candidateData) {
-  let canonicalHtml;
-  try {
-    canonicalHtml = fs.readFileSync(args.dashboard, 'utf8');
-    readJsonBlock(canonicalHtml, 'dashboard-data');
-  } catch (error) {
-    if (path.resolve(args.dashboard) !== DEFAULT_DASHBOARD) throw error;
-    canonicalHtml = loadDashboardBase(args.dashboard).html;
-  }
+  const canonicalHtml = fs.readFileSync(args.dashboard, 'utf8');
   const canonicalData = readJsonBlock(canonicalHtml, 'dashboard-data');
   if (candidateData.editionId !== canonicalData.editionId) {
     throw new Error('Staged dashboard candidate is stale; rerun deterministic preparation before editorial work.');
@@ -722,10 +685,6 @@ function markPendingNarrative(target, textField, dispositionField) {
   if (verifiedNarrativeDisposition(target?.[dispositionField], target?.[textField])) return;
   target[textField] = '';
   target[dispositionField] = { status: 'pending_review' };
-}
-
-function earningsHasActual(row) {
-  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
 }
 
 function editorialAssignmentStatus(disposition, text = '', required = false) {
@@ -923,12 +882,12 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
     const partial = partialNewsCandidateArtifact(asOf, error);
     if (partial) {
       process.stderr.write(`News candidate acquisition did not finish; continuing with partial staged candidates: ${error.message}\n`);
-      writeJson(NEWS_CANDIDATES_PATH, partial);
+      atomicWriteJson(NEWS_CANDIDATES_PATH, partial);
       return partial;
     }
     process.stderr.write(`News candidate acquisition failed before staging candidates; continuing with still-fresh prior cards: ${error.message}\n`);
     const artifact = emptyNewsCandidateArtifact(asOf, error, dashboardData);
-    writeJson(NEWS_CANDIDATES_PATH, artifact);
+    atomicWriteJson(NEWS_CANDIDATES_PATH, artifact);
     return artifact;
   }
 }
@@ -994,7 +953,7 @@ async function prepareEditorialWorkspace(args) {
     const stalePath = path.join(args.prepareEditorialDir, staleName);
     if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
   }
-  writeJson(path.join(args.prepareEditorialDir, 'dashboard-data.json'), dashboardData);
+  atomicWriteJson(path.join(args.prepareEditorialDir, 'dashboard-data.json'), dashboardData);
   return { dashboardData, reviewManifest };
 }
 
@@ -1004,50 +963,22 @@ function weekAheadEventDayCount(weekAhead) {
 }
 
 function readJsonBlock(html, id) {
-  const match = html.match(new RegExp(`<script type="application/json" id="${escapeRegExp(id)}">([\\s\\S]*?)<\\/script>`));
-  if (!match) {
-    throw new Error(`Could not find ${id} JSON block in dashboard HTML.`);
-  }
-  return JSON.parse(match[1]);
-}
-
-function validateDashboardBaseHtml(html) {
-  readJsonBlock(html, 'dashboard-data');
-  readJsonBlock(html, 'chart-data');
-  return html;
-}
-
-function loadDashboardBase(dashboardPath, { lastGoodPath = LAST_GOOD_DASHBOARD, allowRecovery = path.resolve(dashboardPath) === DEFAULT_DASHBOARD } = {}) {
-  try {
-    return { html: validateDashboardBaseHtml(fs.readFileSync(dashboardPath, 'utf8')), sourcePath: dashboardPath, recovered: false };
-  } catch (canonicalError) {
-    if (!allowRecovery || !fs.existsSync(lastGoodPath)) throw canonicalError;
-    try {
-      const html = validateDashboardBaseHtml(fs.readFileSync(lastGoodPath, 'utf8'));
-      process.stderr.write(`Canonical dashboard is unreadable; assembling from the last validated dashboard snapshot: ${canonicalError.message}\n`);
-      return { html, sourcePath: lastGoodPath, recovered: true };
-    } catch (recoveryError) {
-      throw new Error(`Canonical dashboard and last-good snapshot are both unusable: ${canonicalError.message} Recovery: ${recoveryError.message}`);
-    }
-  }
+  return JSON.parse(singleScriptBlockById(html, id, { type: 'application/json' }).content);
 }
 
 function loadFocusedRepairBase(args) {
   if (!fs.existsSync(args.candidate)) {
     throw new Error(`Staged dashboard candidate not found: ${args.candidate}. Run deterministic preparation first.`);
   }
-  const html = validateDashboardBaseHtml(fs.readFileSync(args.candidate, 'utf8'));
+  const html = fs.readFileSync(args.candidate, 'utf8');
   const dashboardData = readJsonBlock(html, 'dashboard-data');
   assertCandidateMatchesCanonical(args, dashboardData);
   return { html, dashboardData };
 }
 
 function replaceJsonBlock(html, id, serializedJson) {
-  return html.replace(
-    new RegExp(`<script type="application/json" id="${escapeRegExp(id)}">([\\s\\S]*?)<\\/script>`),
-    // Use a replacer callback so `$` inside serialized prices and copy is not treated as a replacement token.
-    () => `<script type="application/json" id="${id}">${serializedJson}</script>`
-  );
+  const block = singleScriptBlockById(html, id, { type: 'application/json' });
+  return `${html.slice(0, block.index)}<script type="application/json" id="${id}">${serializedJson}</script>${html.slice(block.end)}`;
 }
 
 function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, reviewChartData = null, { stampEdition = true, selectEarningsRows = false } = {}) {
@@ -1090,11 +1021,7 @@ function stripPublishedEarningsStagingState(data) {
   return data;
 }
 
-function commitDashboardCandidate(args, nextHtml, {
-  refreshLastGood = path.resolve(args.dashboard) === DEFAULT_DASHBOARD,
-  lastGoodPath = LAST_GOOD_DASHBOARD,
-  snapshotWriter = atomicWriteFile
-} = {}) {
+function commitDashboardCandidate(args, nextHtml, { validationStdio = 'inherit' } = {}) {
   const directory = path.dirname(args.dashboard);
   const candidate = path.join(directory, `.${path.basename(args.dashboard)}.${process.pid}.${Date.now()}.tmp`);
   try {
@@ -1104,24 +1031,13 @@ function commitDashboardCandidate(args, nextHtml, {
     const validationArgs = [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'published', candidate];
     const result = spawnSync(process.execPath, validationArgs, {
       cwd: ROOT,
-      stdio: 'inherit'
+      stdio: validationStdio
     });
     if (result.status !== 0) throw new Error('Editorial candidate failed render-safety validation; the published dashboard was not changed.');
     fs.renameSync(candidate, args.dashboard);
-    if (refreshLastGood) {
-      try {
-        snapshotWriter(lastGoodPath, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-      } catch (error) {
-        process.stderr.write(`Dashboard committed, but the last-good snapshot could not be refreshed: ${error.message}\n`);
-      }
-    }
   } finally {
     if (fs.existsSync(candidate)) fs.unlinkSync(candidate);
   }
-}
-
-function commitEditorialCandidate(args, nextHtml, options = {}) {
-  commitDashboardCandidate(args, nextHtml, options);
 }
 
 function stageDashboardCandidate(args, nextHtml) {
@@ -1138,10 +1054,6 @@ function stageDashboardCandidate(args, nextHtml) {
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function applyTapeQuoteRows(data, quoteRows) {
@@ -1485,7 +1397,7 @@ function patchDashboard(args) {
     args.windowMode = 'afternoon';
     process.stderr.write('Weekend manual run detected; using latest regular-session futures path and Weekend Edition masthead.\n');
   }
-  const html = args.baseDashboardHtml || loadDashboardBase(args.dashboard).html;
+  const html = args.baseDashboardHtml || fs.readFileSync(args.dashboard, 'utf8');
   let dashboardData = readJsonBlock(html, 'dashboard-data');
   if (dashboardData.earnings?.week) delete dashboardData.earnings.week.outputPath;
   const previousDashboardData = dashboardData;
@@ -1844,7 +1756,7 @@ function newsSelection(manifest, key) {
   return Array.isArray(selection?.[key]) ? selection[key] : [];
 }
 
-function readNewsCandidateSource(preparedAt) {
+function readNewsCandidateSource(preparedAt, inputPath = NEWS_CANDIDATES_PATH) {
   // The generated sidecar owns candidate provenance. The handoff copy is
   // editable review context and must not authenticate its own selections.
   const generatedAt = new Date(preparedAt);
@@ -1853,7 +1765,7 @@ function readNewsCandidateSource(preparedAt) {
   }
   let artifact;
   try {
-    artifact = readJson(NEWS_CANDIDATES_PATH);
+    artifact = readJson(inputPath);
   } catch (_error) {
     return null;
   }
@@ -2032,7 +1944,7 @@ function normalizeEarningsCommentaryForPublication(row) {
 }
 
 function applyDashboardDataJson(args) {
-  const canonicalHtml = loadDashboardBase(args.dashboard).html;
+  const canonicalHtml = fs.readFileSync(args.dashboard, 'utf8');
   const candidateHtml = fs.readFileSync(args.candidate, 'utf8');
   const candidateDashboardData = readJsonBlock(candidateHtml, 'dashboard-data');
   const windowMode = windowModeFromDashboard(candidateDashboardData);
@@ -2054,7 +1966,7 @@ function applyDashboardDataJson(args) {
   if (!isIsoDateTime(editorialDashboardData.editionId)) {
     throw new Error('Editorial dashboard-data editionId must be the prepared run edition timestamp; regenerate the editorial handoff.');
   }
-  const newsSource = readNewsCandidateSource(reviewManifest.preparedAt);
+  const newsSource = readNewsCandidateSource(reviewManifest.preparedAt, args.newsCandidatesPath || NEWS_CANDIDATES_PATH);
   const dashboardData = structuredClone(candidateDashboardData);
   // The prepared edition timestamp owns editorial freshness and story windows;
   // wall-clock apply time may drift outside the original handoff window.
@@ -2171,10 +2083,8 @@ function applyDashboardDataJson(args) {
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData, { stampEdition: false });
   const publishingDefaultDashboard = path.resolve(args.dashboard) === DEFAULT_DASHBOARD;
   const recoveredEarningsPublication = isEmptyEarningsRecoveryWeek(finalizedEarnings?.week);
-  // A carried-forward Earnings monitor keeps the page safe, but it is not a new
-  // known-good deterministic baseline for future empty-row recovery.
-  commitEditorialCandidate(args, nextHtml, {
-    refreshLastGood: publishingDefaultDashboard && !recoveredEarningsPublication
+  commitDashboardCandidate(args, nextHtml, {
+    validationStdio: args.validationStdio || 'inherit'
   });
   if (finalizedEarnings && publishingDefaultDashboard) {
     if (recoveredEarningsPublication) {
@@ -2182,7 +2092,7 @@ function applyDashboardDataJson(args) {
       return;
     }
     try {
-      if (finalizedEarnings.narrativePayload) writeJson(EARNINGS_NARRATIVE_PATH, finalizedEarnings.narrativePayload);
+      if (finalizedEarnings.narrativePayload) atomicWriteJson(EARNINGS_NARRATIVE_PATH, finalizedEarnings.narrativePayload);
     } catch (error) {
       process.stderr.write(`Dashboard was committed, but Earnings narrative synchronization failed and will retry later: ${error.message}\n`);
     }
@@ -2386,10 +2296,9 @@ async function main() {
   reportPreparationStatus('preparing');
   await repairMissingZacksBrowserBeforePrepare();
 
-  const canonicalBase = loadDashboardBase(args.dashboard);
-  args.baseDashboardHtml = canonicalBase.html;
-  args.sourceDashboard = canonicalBase.sourcePath;
-  const canonicalHtml = canonicalBase.html;
+  const canonicalHtml = fs.readFileSync(args.dashboard, 'utf8');
+  args.baseDashboardHtml = canonicalHtml;
+  args.sourceDashboard = args.dashboard;
   const canonicalDashboardData = readJsonBlock(canonicalHtml, 'dashboard-data');
   const canonicalChartData = roundChartPayload(readJsonBlock(canonicalHtml, 'chart-data'));
   const checkedAt = scheduledNow();
@@ -2631,7 +2540,6 @@ module.exports = {
   patchDashboard,
   parseArgs,
   prepareEditorialWorkspace,
-  loadDashboardBase,
   readJsonBlock,
   replaceJsonBlock,
   requiresUnavailableRolloverRetry,

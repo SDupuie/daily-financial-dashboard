@@ -1,6 +1,27 @@
 // Calendar rules shared by generated dashboard sections. ISO-date helpers stay
 // UTC-only; zoned helpers require an explicit IANA zone so host locale never
 // decides which instant a dashboard contract means.
+function chicagoDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || '';
+  const hour = Number(part('hour'));
+  const minute = Number(part('minute'));
+  return {
+    weekday: part('weekday'),
+    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
+    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
+  };
+}
+
+function scheduledNow() {
+  const override = process.env.SCHEDULED_NOW_ISO;
+  const parsed = override ? new Date(override) : new Date();
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 function isIsoDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split('-').map(Number);
@@ -125,6 +146,7 @@ function displayDatesForRange(from, to) {
 
 module.exports = {
   addDays,
+  chicagoDateParts,
   compareIsoDate,
   dateFromIso,
   displayDatesForRange,
@@ -134,6 +156,7 @@ module.exports = {
   isSupportedFiveTradingDayRange,
   isoFromDate,
   sameDateTimeParts,
+  scheduledNow,
   validDateTimeParts,
   zonedDateParts,
   zonedTimeToUtc

@@ -7,6 +7,7 @@ const https = require('https');
 const { isIsoDate, isIsoDateTime } = require('./calendar_contract');
 const { withRetry } = require('./fetch_concurrency');
 const { atomicWriteJson } = require('./staging_writer');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 
 const REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_PORTFOLIO_OUTPUT = path.resolve(process.cwd(), 'generated', 'asset_allocation_portfolio.json');
@@ -440,8 +441,7 @@ async function fetchHolding(holding, args, period1, period2, monthStart, now, cu
 function readCanonicalPortfolio(input) {
   try {
     const html = fs.readFileSync(input, 'utf8');
-    const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-    return match ? JSON.parse(match[1])?.assetAllocationPortfolio || null : null;
+    return JSON.parse(singleScriptBlockById(html, 'dashboard-data', { type: 'application/json' }).content)?.assetAllocationPortfolio || null;
   } catch (_error) {
     return null;
   }
@@ -859,10 +859,6 @@ async function fetchPortfolioSummary(args) {
   return normalizedSummary(raw, stale, refreshError);
 }
 
-function writeJson(file, payload) {
-  atomicWriteJson(file, payload);
-}
-
 function compactPortfolioText(portfolio) {
   return portfolio.rows
     .map((row) => `${row.ticker} ${row.price} ${Number.isFinite(row.monthDivPerShareValue) ? asMoney(row.monthDivPerShareValue) : 'Unavailable'} ${row.dailyPriceChange} ${row.dailyTR} ${row.mtdPriceChange} ${row.mtdTR}`)
@@ -884,7 +880,7 @@ async function main() {
 
   if (!args.skipPortfolio) {
     portfolio = await fetchPortfolioRows(args);
-    writeJson(args.portfolioOutput, portfolio);
+    atomicWriteJson(args.portfolioOutput, portfolio);
     messages.push(args.compact ? compactPortfolioText(portfolio) : `Wrote ${args.portfolioOutput}`);
   }
 
@@ -900,7 +896,7 @@ async function main() {
         refreshError: error.message
       };
     }
-    writeJson(args.summaryOutput, summary);
+    atomicWriteJson(args.summaryOutput, summary);
     messages.push(args.compact ? compactSummaryText(summary) : `Wrote ${args.summaryOutput}`);
   }
 

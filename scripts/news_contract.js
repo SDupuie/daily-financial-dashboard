@@ -1,5 +1,5 @@
 const SCHEDULED_WINDOW_NAMES = new Set(['morning', 'afternoon']);
-const { isIsoDate, isIsoDateTime, zonedTimeToUtc } = require('./calendar_contract');
+const { chicagoDateParts, isIsoDate, isIsoDateTime, zonedTimeToUtc } = require('./calendar_contract');
 
 const NEWS_COVERAGE_REASON = 'insufficient_qualifying_fresh_coverage';
 const NEWS_COVERAGE_POLICIES = Object.freeze({
@@ -9,21 +9,6 @@ const NEWS_COVERAGE_POLICIES = Object.freeze({
 });
 const MONDAY_MORNING_NEWS_START_MINUTES = 7 * 60 + 45;
 const MONDAY_MORNING_NEWS_END_MINUTES = 9 * 60;
-
-function chicagoDateParts(date) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Chicago', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false
-  }).formatToParts(date);
-  const part = (type) => parts.find((item) => item.type === type)?.value || '';
-  const hour = Number(part('hour'));
-  const minute = Number(part('minute'));
-  return {
-    weekday: part('weekday'),
-    isoDate: `${part('year')}-${part('month')}-${part('day')}`,
-    clockMinutes: Number.isFinite(hour) && Number.isFinite(minute) ? (hour % 24) * 60 + minute : null
-  };
-}
 
 function chicagoIsoDate(date) {
   return chicagoDateParts(date).isoDate;

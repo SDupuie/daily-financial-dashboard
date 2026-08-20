@@ -203,10 +203,9 @@ build_pages_url() {
 extract_dashboard_markers() {
   node -e '
 const fs = require("fs");
+const { singleScriptBlockById } = require("./scripts/dashboard_script_blocks");
 const html = fs.readFileSync("daily_financial_news.html", "utf8");
-const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-if (!m) process.exit(1);
-const data = JSON.parse(m[1]);
+const data = JSON.parse(singleScriptBlockById(html, "dashboard-data", { type: "application/json" }).content);
 const editionId = data.editionId || "";
 const date = (data.masthead && data.masthead.date) || "";
 const edition = (data.masthead && data.masthead.edition) || "";
@@ -326,10 +325,9 @@ verify_pages_content() {
   html="$(curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" "$pages_url")" || return 1
   if EXPECTED_EDITION_ID="$expected_edition_id" node -e '
 const fs = require("fs");
+const { singleScriptBlockById } = require("./scripts/dashboard_script_blocks");
 const html = fs.readFileSync(0, "utf8");
-const m = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-if (!m) process.exit(1);
-const data = JSON.parse(m[1]);
+const data = JSON.parse(singleScriptBlockById(html, "dashboard-data", { type: "application/json" }).content);
 process.exit(data?.editionId === process.env.EXPECTED_EDITION_ID ? 0 : 2);
 ' <<<"$html"; then
     echo "Pages content verified at ${pages_url} (${expected_edition}; ${expected_date}; ${expected_edition_id})."

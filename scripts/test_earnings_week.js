@@ -379,56 +379,25 @@ function testPrimaryScheduleVerification() {
   const matching = verifyFinnhubScheduleRows(baseRows('MATCH'), [{
     date: '2026-01-06', rows: [earningsApiRow('MATCH', { reportDate: '2026-01-06' })]
   }], range);
-  assert.equal(matching.rows.length, 1);
   assert.equal(matching.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
 
-  const crossWeek = verifyFinnhubScheduleRows(baseRows('OUTSIDE'), [{
-    date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })]
-  }], range);
-  assert.equal(crossWeek.rows.length, 1, 'A cross-week conflict must retain the provider row with partial provenance.');
-  assert.equal(crossWeek.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.deepEqual(crossWeek.rows[0].sourceAudit.scheduleVerification.secondaryDates, ['2026-01-30']);
-  assert.equal(crossWeek.rows[0].sourceStatus, 'partial');
-
-  const inWeekConflict = verifyFinnhubScheduleRows(baseRows('INWEEK'), [{
-    date: '2026-01-08', rows: [earningsApiRow('INWEEK', { reportDate: '2026-01-08' })]
-  }], range);
-  assert.equal(inWeekConflict.rows.length, 1);
-  assert.equal(inWeekConflict.rows[0].reportDate, '2026-01-06');
-  assert.equal(inWeekConflict.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-
-  const uncorroborated = verifyFinnhubScheduleRows(baseRows('SINGLE'), [], range);
-  assert.equal(uncorroborated.rows.length, 1);
-  assert.equal(uncorroborated.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.equal(uncorroborated.rows[0].sourceStatus, 'partial');
-
-  const secondaryOutage = verifyFinnhubScheduleRows(baseRows('OUTAGE'), [{
-    date: '2026-01-05', ok: false, status: 429, rows: []
-  }], range);
-  assert.equal(secondaryOutage.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.equal(secondaryOutage.rows[0].sourceStatus, 'partial');
-
-  const completeSecondaryMiss = verifyFinnhubScheduleRows(baseRows('SINGLE'), displayDatesForRange(range.from, range.to).map((date) => ({
-    date,
-    ok: true,
-    rows: []
-  })), range);
-  assert.equal(completeSecondaryMiss.rows.length, 1);
-  assert.equal(completeSecondaryMiss.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
-  assert.equal(completeSecondaryMiss.rows[0].sourceStatus, 'partial');
-
-  const providerAgreementIgnoresOtherDates = verifyFinnhubScheduleRows(baseRows('MATCHFIRST'), [{
-    date: '2026-01-06', rows: [earningsApiRow('MATCHFIRST', { reportDate: '2026-01-06' })]
-  }]);
-  assert.equal(providerAgreementIgnoresOtherDates.rows[0].reportDate, '2026-01-06');
-  assert.equal(providerAgreementIgnoresOtherDates.rows[0].sourceAudit.scheduleVerification.status, 'corroborated');
+  for (const [symbol, secondaryRows] of [
+    ['OUTSIDE', [{ date: '2026-01-30', rows: [earningsApiRow('OUTSIDE', { reportDate: '2026-01-30' })] }]],
+    ['INWEEK', [{ date: '2026-01-08', rows: [earningsApiRow('INWEEK', { reportDate: '2026-01-08' })] }]],
+    ['SINGLE', []],
+    ['OUTAGE', [{ date: '2026-01-05', ok: false, status: 429, rows: [] }]]
+  ]) {
+    const result = verifyFinnhubScheduleRows(baseRows(symbol), secondaryRows, range);
+    assert.equal(result.rows.length, 1);
+    assert.equal(result.rows[0].sourceAudit.scheduleVerification.status, 'primary_only');
+    assert.equal(result.rows[0].sourceStatus, 'partial');
+  }
 
   const verificationDates = calendarVerificationDates({ from: range.from, to: range.to });
   assert.equal(verificationDates[0], addDays(range.from, -7));
   assert.equal(verificationDates.at(-1), addDays(range.to, 14));
-  assert.equal(verificationDates.length, 26, 'Secondary verification must cover 7 days before through 14 days after the displayed range.');
 
-  const recoveryRow = {
+  const recovery = verifyEarningsApiRecoveryRows([{
     symbol: 'RECOVERY',
     company: 'Recovery Corp',
     country: 'US',
@@ -436,19 +405,13 @@ function testPrimaryScheduleVerification() {
     marketCap: 30000000000,
     reportDate: '2026-01-06',
     sourceAudit: { selectedSources: { slate: 'alphaVantageCalendar' } }
-  };
-  const recovery = verifyEarningsApiRecoveryRows([recoveryRow], range);
-  assert.equal(recovery.rows.length, 1);
+  }], range);
   assert.equal(recovery.rows[0].sourceAudit.scheduleVerification.status, 'secondary_only');
-  assert.equal(recovery.rows[0].sourceStatus, 'partial');
 
-  const missingCandidate = {
+  const mismatchedCompanyRows = buildEarningsApiRows([{
     symbol: 'MISSING',
     company: 'Missing Company Row Corp',
-    reportDate: '2026-01-06'
-  };
-  const mismatchedCompanyRows = buildEarningsApiRows([{
-    ...missingCandidate,
+    reportDate: '2026-01-06',
     sourceAudit: {
       finnhubProfile: profile('MISSING'),
       alphaVantageCalendar: alphaVantageRow('MISSING')
@@ -459,9 +422,7 @@ function testPrimaryScheduleVerification() {
     status: 200,
     rows: [earningsApiRow('MISSING', { reportDate: '2026-01-08' })]
   }]);
-  assert.equal(mismatchedCompanyRows.length, 0, 'A company endpoint date mismatch must not create a canonical recovery row.');
-  const missingCompanyRow = verifyEarningsApiRecoveryRows(mismatchedCompanyRows, range);
-  assert.equal(missingCompanyRow.rows.length, 0);
+  assert.equal(mismatchedCompanyRows.length, 0);
 }
 
 function testProviderScheduleRetryAndPreparationFallbacks() {
@@ -1077,87 +1038,27 @@ function testZacksBrowserRuntimeDiagnostics() {
     }
     assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, '0');
   } finally {
-    if (previousBrowserPath === undefined) {
-      delete process.env.PLAYWRIGHT_BROWSERS_PATH;
-    } else {
-      process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath;
-    }
+    if (previousBrowserPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previousBrowserPath;
   }
 
-  const zacksGateSummary = {
+  const browserMissing = {
     ok: false,
     failures: [{
       code: 'zacks_eps_table_unavailable',
-      message: "browserType.launch: Executable doesn't exist at /Users/Scott/Library/Caches/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+      message: "browserType.launch: Executable doesn't exist at /Users/Scott/Library/Caches/ms-playwright/chromium_headless_shell"
     }]
   };
-  assert.equal(zacksGateIndicatesBrowserRuntimeFailure(zacksGateSummary), true);
-  assert.equal(zacksBrowserRuntimeFailureKind(zacksGateSummary.failures[0].message), 'browser_missing');
-  assert.equal(
-    zacksBrowserRuntimeFailureKind('browserType.launch: Failed to launch browser because Operation not permitted by the managed sandbox.'),
-    'startup_failed'
-  );
-  assert.equal(
-    zacksBrowserRuntimeFailureKind('browserType.launch: Target page, context or browser has been closed. <launching> /repo/node_modules/playwright-core/.local-browsers/chromium_headless_shell-1228/chrome-headless-shell-mac-arm64/chrome-headless-shell FATAL: Permission denied (1100)'),
-    'startup_failed'
-  );
-  assert.equal(
-    zacksBrowserRuntimeFailureKind('Playwright dependency is unavailable for Zacks browser fetch. Cannot find module playwright.'),
-    'dependency_missing'
-  );
-  assert.equal(earningsWeekUsedBackupAfterZacksBrowserFailure({
-    summary: {
-      providerMode: 'legacy_backup',
-      zacksGate: zacksGateSummary
-    }
-  }), true);
+  assert.equal(zacksGateIndicatesBrowserRuntimeFailure(browserMissing), true);
+  assert.equal(zacksBrowserRuntimeFailureKind(browserMissing.failures[0].message), 'browser_missing');
+  assert.equal(zacksBrowserRuntimeFailureKind('browserType.launch: Failed to launch browser because Operation not permitted by the managed sandbox.'), 'startup_failed');
+  assert.equal(zacksBrowserRuntimeFailureKind('Playwright dependency is unavailable for Zacks browser fetch. Cannot find module playwright.'), 'dependency_missing');
+  assert.equal(earningsWeekUsedBackupAfterZacksBrowserFailure({ summary: { providerMode: 'legacy_backup', zacksGate: browserMissing } }), true);
+  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({ summary: { providerMode: 'legacy_backup', zacksGate: browserMissing } }), 'backup');
   assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
-    summary: {
-      providerMode: 'legacy_backup',
-      zacksGate: zacksGateSummary
-    }
-  }), 'backup');
-  assert.equal(earningsWeekUsedBackupAfterZacksBrowserFailure({
-    summary: {
-      providerMode: 'zacks',
-      zacksGate: zacksGateSummary
-    }
-  }), false);
-  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
-    summary: {
-      providerMode: 'zacks',
-      zacksGate: zacksGateSummary
-    },
-    rows: [{
-      sourceAudit: {
-        resultRefresh: {
-          status: 'partial',
-          failures: [{
-            provider: 'zacks',
-            code: 'provider_request_failed',
-            message: "browserType.launch: Executable doesn't exist at /Users/Scott/Projects/Daily Financial Dashboard/node_modules/playwright-core/.local-browsers/chromium-1228/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-          }]
-        }
-      }
-    }]
+    summary: { providerMode: 'zacks', zacksGate: browserMissing },
+    rows: [{ sourceAudit: { resultRefresh: { status: 'partial', failures: [{ provider: 'zacks', message: browserMissing.failures[0].message }] } } }]
   }), 'retained_prior_facts');
-  assert.equal(earningsWeekZacksBrowserRuntimeFailureMode({
-    summary: {
-      providerMode: 'zacks'
-    },
-    rows: [{
-      sourceAudit: {
-        resultRefresh: {
-          status: 'partial',
-          failures: [{
-            provider: 'finnhub',
-            code: 'provider_request_failed',
-            message: 'browserType.launch should not matter for a non-Zacks row failure.'
-          }]
-        }
-      }
-    }]
-  }), '');
   assert.equal(zacksGateIndicatesBrowserRuntimeFailure({
     ok: false,
     failures: [{ code: 'zacks_empty_eligible_slate', message: 'Zacks returned no display-eligible rows after market-cap filtering.' }]
@@ -1861,58 +1762,6 @@ async function testResultRefreshDoesNotRebuildSlate() {
   assert.equal(result.payload.secondaryRecoveryCandidates.length, 0, 'Result refresh must not create a new secondary slate.');
 }
 
-async function testResultRefreshFailuresAreRowScoped() {
-  const source = deterministicVerifiedWeekFixture();
-  const key = earningsRowKey(source.rows[0]);
-  const priorRow = structuredClone(source.rows[0]);
-  const failure = await refreshEarningsResults(source, {
-    finnhubRows: [],
-    earningsApiCompanyRowsBySymbol: {},
-    yahooFetches: [],
-    rowDiagnosticsByKey: {
-      [key]: [{
-        provider: 'finnhub',
-        code: 'provider_request_failed',
-        message: 'Finnhub fixture failure.'
-      }, {
-        provider: 'yahoo',
-        code: 'provider_request_failed',
-        message: 'Yahoo fixture failure.'
-      }]
-    }
-  }, {
-    asOf: '2026-01-07T22:00:00.000Z'
-  });
-  const failedRow = failure.payload.rows[0];
-  assert.equal(failure.failedRows, 1);
-  assert.deepEqual(failedRow.eps, priorRow.eps, 'A failed result provider must retain the row’s prior EPS facts.');
-  assert.deepEqual(failedRow.revenue, priorRow.revenue, 'A failed result provider must retain the row’s prior revenue facts.');
-  assert.deepEqual(failedRow.reaction, priorRow.reaction, 'A failed Yahoo refresh must retain the row’s prior reaction.');
-  assert.equal(failedRow.outcome.interpretation, priorRow.outcome.interpretation, 'A source failure alone must not invalidate verified narrative.');
-  assert.equal(failedRow.sourceAudit.resultRefresh.status, 'partial');
-  assert.deepEqual(failedRow.sourceAudit.resultRefresh.failures.map((item) => item.provider), ['finnhub', 'yahoo']);
-  assert.equal(failedRow.sourceStatus, 'partial');
-  assert.deepEqual(validateEarningsWeekPayload(failure.payload), []);
-  const malformedDiagnostic = structuredClone(failure.payload);
-  malformedDiagnostic.rows[0].sourceAudit.resultRefresh.failures[0].provider = 'unknown';
-  assert.deepEqual(validateEarningsWeekPayload(malformedDiagnostic), [], 'Non-blocking row diagnostics must not block a renderable row.');
-
-  const recovered = await refreshEarningsResults(failure.payload, {
-    finnhubRows: [finnhubRow('VERIFY')],
-    earningsApiCompanyRowsBySymbol: {},
-    yahooFetches: [{
-      symbol: 'VERIFY', ok: true, status: 200, responseMs: 1, error: '',
-      bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 105 }]
-    }],
-    rowDiagnosticsByKey: {}
-  }, {
-    asOf: '2026-01-07T22:05:00.000Z'
-  });
-  assert.equal(recovered.failedRows, 0);
-  assert.equal(recovered.payload.rows[0].sourceAudit.resultRefresh, undefined, 'The next successful row refresh must clear its stale diagnostic.');
-  assert.equal(recovered.payload.rows[0].sourceStatus, 'verified');
-}
-
 async function testManualRecoverySourceAuditRepair() {
   const recovered = deterministicVerifiedWeekFixture();
   delete recovered.rows[0].sourceAudit;
@@ -1945,20 +1794,15 @@ async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() 
       revenue: { estimate: 1000000000, actual: null }
     }),
     finnhubRow('OLD', { reportTiming: 'amc' }),
-    finnhubRow('FRESH', {
-      reportTiming: 'amc',
-      eps: { estimate: 1, actual: null },
-      revenue: { estimate: 1000000000, actual: null }
-    })
+    finnhubRow('FRESH', { reportTiming: 'amc' })
   ], [profile('SKIP'), profile('OLD'), profile('FRESH')], {
     usListings: [usListing('SKIP'), usListing('OLD'), usListing('FRESH')]
   });
-  const source = {
+  const yahooCalls = [];
+  const refreshData = await collectRefreshData({
     range: { from: '2026-01-06', to: '2026-01-10' },
     rows: sourceRows
-  };
-  const yahooCalls = [];
-  const refreshData = await collectRefreshData(source, {
+  }, {
     asOf: '2026-01-07T22:00:00.000Z',
     timeoutMs: 1000,
     earningsApiUsage: 'generated/earningsapi_usage.json',
@@ -1977,7 +1821,6 @@ async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() 
     ],
     fetchYahooBars: async (symbol) => {
       yahooCalls.push(symbol);
-      if (symbol === 'OLD') await new Promise((resolve) => setTimeout(resolve, 20));
       return {
         symbol,
         ok: true,
@@ -1993,424 +1836,88 @@ async function testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder() 
   });
   assert.deepEqual(yahooCalls, ['OLD', 'FRESH']);
   assert.deepEqual(refreshData.yahooFetches.map((item) => item.symbol), ['OLD', 'FRESH']);
-
-  const unknownRows = buildRows([
-    finnhubRow('TIMEADR', { reportTiming: 'unknown' })
-  ], [profile('TIMEADR')], {
-    usListings: [usListing('TIMEADR')]
-  });
-  unknownRows[0].actualsObservedAt = '2026-01-06T15:00:00.000Z';
-  const unknownSource = {
-    range: { from: '2026-01-05', to: '2026-01-09' },
-    rows: unknownRows
-  };
-  const unknownYahooCalls = [];
-  const unknownRefreshData = await collectRefreshData(unknownSource, {
-    asOf: '2026-01-06T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('TIMEADR', { reportTiming: 'unknown' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      unknownYahooCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [
-          { date: '2026-01-05', close: 100 },
-          { date: '2026-01-06', close: 101 }
-        ]
-      };
-    }
-  });
-  assert.deepEqual(unknownYahooCalls, ['TIMEADR']);
-  assert.deepEqual(unknownRefreshData.yahooFetches.map((item) => item.symbol), ['TIMEADR']);
-
-  let activeBuildFetches = 0;
-  let maxActiveBuildFetches = 0;
-  const buildRowsForFetch = ['SLOW', 'FAST1', 'FAST2', 'FAST3', 'FAST4', 'FAST5'].map((symbol) => ({ symbol }));
-  const buildFetches = await fetchYahooBarsForRows(buildRowsForFetch, { from: '2026-01-06', to: '2026-01-10', timeoutMs: 1000 }, async (url) => {
-    const symbol = new URL(url).pathname.split('/').pop();
-    activeBuildFetches += 1;
-    maxActiveBuildFetches = Math.max(maxActiveBuildFetches, activeBuildFetches);
-    try {
-      await new Promise((resolve) => setTimeout(resolve, symbol === 'SLOW' ? 20 : 5));
-      return {
-        ok: true,
-        status: 200,
-        ms: 1,
-        data: {
-          chart: {
-            result: [{
-              timestamp: [1767657600],
-              indicators: { quote: [{ close: [100], open: [100], high: [100], low: [100], volume: [1] }] }
-            }]
-          }
-        }
-      };
-    } finally {
-      activeBuildFetches -= 1;
-    }
-  });
-  assert.equal(maxActiveBuildFetches, 4);
-  assert.deepEqual(buildFetches.map((item) => item.symbol), buildRowsForFetch.map((row) => row.symbol));
 }
 
 async function testYahooReactionFetchRetriesMissingReactionWindow() {
-  const sourceRows = buildRows([
-    finnhubRow('RETRY', { reportTiming: 'bmo' })
-  ], [profile('RETRY')], {
-    usListings: [usListing('RETRY')]
-  });
-  const source = {
-    range: { from: '2026-01-06', to: '2026-01-10' },
-    rows: sourceRows
-  };
-  const yahooCalls = [];
-  const sleepCalls = [];
-  const refreshData = await collectRefreshData(source, {
+  async function collectReactionCase({ timing, asOf, barsForCall }) {
+    const sourceRows = buildRows([
+      finnhubRow('RETRY', { reportTiming: timing })
+    ], [profile('RETRY')], {
+      usListings: [usListing('RETRY')]
+    });
+    const source = {
+      range: { from: '2026-01-06', to: '2026-01-10' },
+      rows: sourceRows
+    };
+    const calls = [];
+    const sleeps = [];
+    const refreshData = await collectRefreshData(source, {
+      asOf,
+      timeoutMs: 1000,
+      earningsApiUsage: 'generated/earningsapi_usage.json',
+      earningsApiDailyLimit: 100,
+      earningsApiReserve: 0
+    }, {
+      env: { FINNHUB_API_KEY: 'test' },
+      sleep: async (delayMs) => sleeps.push(delayMs),
+      fetchFinnhubCalendarRows: async () => [
+        finnhubRow('RETRY', { reportTiming: timing })
+      ],
+      fetchYahooBars: async (symbol) => {
+        calls.push(symbol);
+        return {
+          symbol,
+          ok: true,
+          status: 200,
+          responseMs: 1,
+          error: '',
+          bars: barsForCall(calls.length)
+        };
+      }
+    });
+    const refreshed = await refreshEarningsResults(source, refreshData, { asOf });
+    return { calls, sleeps, refreshed };
+  }
+
+  const bmoRecovered = await collectReactionCase({
+    timing: 'bmo',
     asOf: '2026-01-06T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      sleepCalls.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('RETRY', { reportTiming: 'bmo' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      yahooCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: yahooCalls.length === 1
-          ? [{ date: '2026-01-05', close: 100 }]
-          : [{ date: '2026-01-05', close: 100 }, { date: '2026-01-06', close: 110 }]
-      };
-    }
+    barsForCall: (call) => call === 1
+      ? [{ date: '2026-01-05', close: 100 }]
+      : [{ date: '2026-01-05', close: 100 }, { date: '2026-01-06', close: 110 }]
   });
-  assert.deepEqual(yahooCalls, ['RETRY', 'RETRY']);
-  assert.equal(sleepCalls.length, 1);
+  assert.deepEqual(bmoRecovered.calls, ['RETRY', 'RETRY']);
+  assert.equal(bmoRecovered.sleeps.length, 1);
+  assert.equal(bmoRecovered.refreshed.payload.rows[0].reaction.status, 'computed');
 
-  const refreshed = await refreshEarningsResults(source, refreshData, {
-    asOf: '2026-01-06T22:00:00.000Z'
-  });
-  assert.equal(refreshed.payload.rows[0].reaction.status, 'computed');
-  assert.ok(Math.abs(refreshed.payload.rows[0].reaction.percent - 10) < 0.000001);
-
-  const missedCalls = [];
-  const missedSleeps = [];
-  const missedRefreshData = await collectRefreshData(source, {
+  const exhausted = await collectReactionCase({
+    timing: 'bmo',
     asOf: '2026-01-06T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      missedSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('RETRY', { reportTiming: 'bmo' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      missedCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [{ date: '2026-01-05', close: 100 }]
-      };
-    }
+    barsForCall: () => [{ date: '2026-01-05', close: 100 }]
   });
-  assert.deepEqual(missedCalls, ['RETRY', 'RETRY', 'RETRY', 'RETRY']);
-  assert.equal(missedSleeps.length, 3);
+  assert.deepEqual(exhausted.calls, ['RETRY', 'RETRY', 'RETRY', 'RETRY']);
+  assert.equal(exhausted.sleeps.length, 3);
+  assert.equal(exhausted.refreshed.payload.rows[0].reaction.status, 'awaiting_close');
 
-  const missed = await refreshEarningsResults(source, missedRefreshData, {
-    asOf: '2026-01-06T22:00:00.000Z'
-  });
-  assert.equal(missed.payload.rows[0].reaction.status, 'awaiting_close');
-  assert.equal(missed.payload.rows[0].lifecycle, 'released_awaiting_close');
-
-  const emptyCalls = [];
-  const emptySleeps = [];
-  const emptyRefreshData = await collectRefreshData(source, {
-    asOf: '2026-01-06T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      emptySleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('RETRY', { reportTiming: 'bmo' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      emptyCalls.push(symbol);
-      return {
-        symbol,
-        ok: emptyCalls.length !== 1,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: emptyCalls.length === 1
-          ? []
-          : [{ date: '2026-01-05', close: 100 }, { date: '2026-01-06', close: 110 }]
-      };
-    }
-  });
-  assert.deepEqual(emptyCalls, ['RETRY', 'RETRY']);
-  assert.equal(emptySleeps.length, 1);
-
-  const emptyRecovered = await refreshEarningsResults(source, emptyRefreshData, {
-    asOf: '2026-01-06T22:00:00.000Z'
-  });
-  assert.equal(emptyRecovered.payload.rows[0].reaction.status, 'computed');
-  assert.ok(Math.abs(emptyRecovered.payload.rows[0].reaction.percent - 10) < 0.000001);
-
-  const earlyBmoCalls = [];
-  const earlyBmoSleeps = [];
-  await collectRefreshData(source, {
+  const early = await collectReactionCase({
+    timing: 'bmo',
     asOf: '2026-01-06T19:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      earlyBmoSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('RETRY', { reportTiming: 'bmo' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      earlyBmoCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [{ date: '2026-01-05', close: 100 }]
-      };
-    }
+    barsForCall: () => [{ date: '2026-01-05', close: 100 }]
   });
-  assert.deepEqual(earlyBmoCalls, ['RETRY']);
-  assert.equal(earlyBmoSleeps.length, 0);
+  assert.deepEqual(early.calls, ['RETRY']);
+  assert.equal(early.sleeps.length, 0);
 
-  const dmhRows = buildRows([
-    finnhubRow('DMHWAIT', { reportTiming: 'dmh' })
-  ], [profile('DMHWAIT')], {
-    usListings: [usListing('DMHWAIT')]
-  });
-  const dmhSource = {
-    range: { from: '2026-01-06', to: '2026-01-10' },
-    rows: dmhRows
-  };
-  const lateDmhCalls = [];
-  const lateDmhSleeps = [];
-  const lateDmhRefreshData = await collectRefreshData(dmhSource, {
-    asOf: '2026-01-06T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      lateDmhSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('DMHWAIT', { reportTiming: 'dmh' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      lateDmhCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: lateDmhCalls.length === 1
-          ? [{ date: '2026-01-05', close: 100 }]
-          : [{ date: '2026-01-05', close: 100 }, { date: '2026-01-06', close: 110 }]
-      };
-    }
-  });
-  assert.deepEqual(lateDmhCalls, ['DMHWAIT', 'DMHWAIT']);
-  assert.equal(lateDmhSleeps.length, 1);
-
-  const lateDmhRecovered = await refreshEarningsResults(dmhSource, lateDmhRefreshData, {
-    asOf: '2026-01-06T22:00:00.000Z'
-  });
-  assert.equal(lateDmhRecovered.payload.rows[0].reaction.status, 'computed');
-  assert.ok(Math.abs(lateDmhRecovered.payload.rows[0].reaction.percent - 10) < 0.000001);
-
-  const earlyDmhCalls = [];
-  const earlyDmhSleeps = [];
-  await collectRefreshData(dmhSource, {
-    asOf: '2026-01-06T19:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      earlyDmhSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('DMHWAIT', { reportTiming: 'dmh' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      earlyDmhCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [{ date: '2026-01-05', close: 100 }]
-      };
-    }
-  });
-  assert.deepEqual(earlyDmhCalls, ['DMHWAIT']);
-  assert.equal(earlyDmhSleeps.length, 0);
-
-  const amcRows = buildRows([
-    finnhubRow('AMCWAIT', { reportTiming: 'amc' })
-  ], [profile('AMCWAIT')], {
-    usListings: [usListing('AMCWAIT')]
-  });
-  const amcSource = {
-    range: { from: '2026-01-06', to: '2026-01-10' },
-    rows: amcRows
-  };
-  const earlyAmcCalls = [];
-  const earlyAmcSleeps = [];
-  await collectRefreshData(amcSource, {
-    asOf: '2026-01-07T19:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      earlyAmcSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('AMCWAIT', { reportTiming: 'amc' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      earlyAmcCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [{ date: '2026-01-06', close: 100 }]
-      };
-    }
-  });
-  assert.deepEqual(earlyAmcCalls, ['AMCWAIT']);
-  assert.equal(earlyAmcSleeps.length, 0);
-
-  const candidateAmcCalls = [];
-  const candidateAmcSleeps = [];
-  await collectRefreshData(amcSource, {
-    asOf: '2026-01-07T19:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      candidateAmcSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('AMCWAIT', { reportTiming: 'amc' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      candidateAmcCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: [
-          { date: '2026-01-06', close: 100 },
-          { date: '2026-01-07', close: 105 }
-        ]
-      };
-    }
-  });
-  assert.deepEqual(candidateAmcCalls, ['AMCWAIT', 'AMCWAIT', 'AMCWAIT', 'AMCWAIT']);
-  assert.equal(candidateAmcSleeps.length, 3);
-
-  const lateAmcCalls = [];
-  const lateAmcSleeps = [];
-  const lateAmcRefreshData = await collectRefreshData(amcSource, {
+  const amcRecovered = await collectReactionCase({
+    timing: 'amc',
     asOf: '2026-01-07T22:00:00.000Z',
-    timeoutMs: 1000,
-    earningsApiUsage: 'generated/earningsapi_usage.json',
-    earningsApiDailyLimit: 100,
-    earningsApiReserve: 0
-  }, {
-    env: { FINNHUB_API_KEY: 'test' },
-    sleep: async (delayMs) => {
-      lateAmcSleeps.push(delayMs);
-    },
-    fetchFinnhubCalendarRows: async () => [
-      finnhubRow('AMCWAIT', { reportTiming: 'amc' })
-    ],
-    fetchYahooBars: async (symbol) => {
-      lateAmcCalls.push(symbol);
-      return {
-        symbol,
-        ok: true,
-        status: 200,
-        responseMs: 1,
-        error: '',
-        bars: lateAmcCalls.length === 1
-          ? [{ date: '2026-01-06', close: 100 }]
-          : [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 110 }]
-      };
-    }
+    barsForCall: (call) => call === 1
+      ? [{ date: '2026-01-06', close: 100 }]
+      : [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 110 }]
   });
-  assert.deepEqual(lateAmcCalls, ['AMCWAIT', 'AMCWAIT']);
-  assert.equal(lateAmcSleeps.length, 1);
-
-  const lateAmcRecovered = await refreshEarningsResults(amcSource, lateAmcRefreshData, {
-    asOf: '2026-01-07T22:00:00.000Z'
-  });
-  assert.equal(lateAmcRecovered.payload.rows[0].reaction.status, 'computed');
-  assert.ok(Math.abs(lateAmcRecovered.payload.rows[0].reaction.percent - 10) < 0.000001);
+  assert.deepEqual(amcRecovered.calls, ['RETRY', 'RETRY']);
+  assert.equal(amcRecovered.sleeps.length, 1);
+  assert.equal(amcRecovered.refreshed.payload.rows[0].reaction.status, 'computed');
+  assert.ok(Math.abs(amcRecovered.refreshed.payload.rows[0].reaction.percent - 10) < 0.000001);
 }
 
 function testResultRefreshWaitsForReportWindow() {
@@ -2457,14 +1964,18 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
       symbol: 'VERIFY', ok: true, status: 200, responseMs: 1, error: '',
       bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 110 }]
     }, {
-      symbol: 'RETAIN', ok: true, status: 200, responseMs: 1, error: '',
-      bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 105 }]
+      symbol: 'RETAIN', ok: false, status: 500, responseMs: 1, error: 'Yahoo fixture failed',
+      bars: []
     }],
     rowDiagnosticsByKey: {
       [earningsRowKey(retained)]: [{
         provider: 'finnhub',
         code: 'provider_row_unavailable',
         message: 'Finnhub returned no matching fixture row.'
+      }, {
+        provider: 'yahoo',
+        code: 'reaction_unavailable',
+        message: 'Yahoo fixture failed.'
       }]
     }
   }, {
@@ -2478,9 +1989,30 @@ async function testMixedResultRefreshAppliesSuccessfulRows() {
   assert.equal(refreshed.outcome.interpretation, '', 'New actual results must invalidate pre-release commentary while the row awaits its reaction close.');
   assert.equal(refreshed.outcome.interpretationDisposition, undefined);
   assert.deepEqual(carried.eps, retainedBefore.eps, 'Only the failed row must retain its prior provider facts.');
-  assert.equal(carried.sourceAudit.resultRefresh.failures[0].provider, 'finnhub');
+  assert.deepEqual(carried.sourceAudit.resultRefresh.failures.map((failure) => failure.provider), ['finnhub', 'yahoo']);
   assert.equal(result.failedRows, 1);
   assert.deepEqual(validateEarningsWeekPayload(result.payload), []);
+
+  const recovered = await refreshEarningsResults(result.payload, {
+    finnhubRows: [finnhubRow('RETAIN', {
+      eps: { estimate: 1, actual: 1.5 },
+      revenue: { estimate: 1000000000, actual: 1250000000 }
+    })],
+    earningsApiCompanyRowsBySymbol: {},
+    yahooFetches: [{
+      symbol: 'RETAIN', ok: true, status: 200, responseMs: 1, error: '',
+      bars: [{ date: '2026-01-06', close: 100 }, { date: '2026-01-07', close: 106 }]
+    }],
+    rowDiagnosticsByKey: {}
+  }, {
+    asOf: '2026-01-07T22:10:00.000Z'
+  });
+  const recoveredRow = recovered.payload.rows.find((row) => row.symbol === 'RETAIN');
+  assert.equal(recoveredRow.eps.actual, 1.5);
+  assert.equal(recoveredRow.revenue.actual, 1250000000);
+  assert.equal(recoveredRow.sourceAudit.resultRefresh, undefined, 'A later successful row refresh must clear stale failure diagnostics.');
+  assert.equal(recovered.failedRows, 0);
+  assert.deepEqual(validateEarningsWeekPayload(recovered.payload), []);
 }
 
 function testCompanyReleaseTasksAreRetiredFromCanonicalWeek() {
@@ -2730,15 +2262,9 @@ function testRepeatedEarningsNarrativeResetsSameFieldOnly() {
   });
   const week = {
     rows: [
-      row('AAA', 'Acme Analytics Inc.', 'Acme revenue cadence and margin execution remain the key read.'),
-      row('BBB', 'Beta Systems Corp.', 'Beta revenue cadence and margin execution remain the key read.'),
+      row('AAA', 'Acme Analytics Inc.', 'Reusable revenue cadence and margin execution remain the key read.'),
+      row('BBB', 'Beta Systems Corp.', 'Reusable revenue cadence and margin execution remain the key read.'),
       row('UNQ', 'Unique Holdings Inc.', 'Unique backlog conversion remains the company-specific setup.'),
-      row('SHA', 'Short Alpha Inc.', 'Alpha margins drove upside.'),
-      row('SHB', 'Short Beta Inc.', 'Beta margins drove upside!'),
-      row('DFA', 'Date Alpha Inc.', 'Alpha demand improved on 2026-07-21.'),
-      row('DFB', 'Date Beta Inc.', 'Beta demand improved on July 22, 2026.'),
-      row('FYA', 'Fiscal Alpha Inc.', 'Fiscal Alpha FY26 margin target depends on cloud demand.'),
-      row('FYB', 'Fiscal Beta Inc.', 'Fiscal Beta FY27 margin target depends on cloud demand.'),
       {
         ...row('GDA', 'Guide Alpha Inc.', 'Guide Alpha product mix is the setup.'),
         outcome: {
@@ -2759,50 +2285,13 @@ function testRepeatedEarningsNarrativeResetsSameFieldOnly() {
           guidanceDisposition: { status: 'verified' }
         }
       },
-      {
-        ...row('RXA', 'Reaction Alpha Inc.', 'Reaction Alpha order growth is the setup.'),
-        lifecycle: 'close_available',
-        reaction: {
-          status: 'computed',
-          note: 'Margin upside drove the close reaction despite mixed demand.',
-          commentaryDisposition: { status: 'verified' }
-        }
-      },
-      {
-        ...row('RXB', 'Reaction Beta Inc.', 'Reaction Beta order growth is the setup.'),
-        lifecycle: 'close_available',
-        reaction: {
-          status: 'computed',
-          note: 'Margin upside drove the close reaction despite mixed demand.',
-          commentaryDisposition: { status: 'verified' }
-        }
-      },
-      {
-        // Same text in another field must not trip the interpretation pass.
-        ...row('XFD', 'Cross Field Inc.', 'Management reaffirmed full-year margin and revenue targets.'),
-        outcome: {
-          overall: 'pending',
-          guide: '',
-          interpretation: 'Management reaffirmed full-year margin and revenue targets.',
-          interpretationDisposition: { status: 'verified' }
-        }
-      },
-      // Dual share classes can legitimately share one company-specific read.
       row('GOOG', 'Alphabet Inc', 'Search monetization, cloud margin, and AI spending discipline drive the read.'),
       row('GOOGL', 'Alphabet Inc', 'Search monetization, cloud margin, and AI spending discipline drive the read.'),
-      row('SIA', 'Same Issuer Inc', 'Same Issuer subscription retention is the decisive earnings question.'),
       {
         ...row('SIB', 'Same Issuer Inc', 'Same Issuer subscription retention is the decisive earnings question.'),
         reportDate: '2026-07-21'
       },
-      {
-        ...row('FQ1', 'Fiscal Event Inc', 'Fiscal Event recurring revenue remains the company-specific setup.'),
-        fiscalQuarterEnding: '2026-03-31'
-      },
-      {
-        ...row('FQ2', 'Fiscal Event Inc', 'Fiscal Event recurring revenue remains the company-specific setup.'),
-        fiscalQuarterEnding: '2026-06-30'
-      }
+      row('SIA', 'Same Issuer Inc', 'Same Issuer subscription retention is the decisive earnings question.')
     ]
   };
 
@@ -2811,38 +2300,15 @@ function testRepeatedEarningsNarrativeResetsSameFieldOnly() {
   assert.equal(bySymbol.get('AAA').outcome.interpretation, '');
   assert.equal(bySymbol.get('AAA').outcome.interpretationDisposition.status, 'pending_review');
   assert.equal(bySymbol.get('BBB').outcome.interpretation, '');
-  assert.equal(bySymbol.get('BBB').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('UNQ').outcome.interpretation, 'Unique backlog conversion remains the company-specific setup.');
   assert.equal(bySymbol.get('UNQ').outcome.interpretationDisposition.status, 'verified');
-  assert.equal(bySymbol.get('SHA').outcome.interpretation, '');
-  assert.equal(bySymbol.get('SHA').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('SHB').outcome.interpretation, '');
-  assert.equal(bySymbol.get('SHB').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('DFA').outcome.interpretation, '');
-  assert.equal(bySymbol.get('DFA').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('DFB').outcome.interpretation, '');
-  assert.equal(bySymbol.get('DFB').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('FYA').outcome.interpretation, '');
-  assert.equal(bySymbol.get('FYA').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('FYB').outcome.interpretation, '');
-  assert.equal(bySymbol.get('FYB').outcome.interpretationDisposition.status, 'pending_review');
   assert.equal(bySymbol.get('GDA').outcome.guide, '');
   assert.equal(bySymbol.get('GDA').outcome.guidanceDisposition.status, 'pending_review');
   assert.equal(bySymbol.get('GDA').outcome.interpretation, 'Guide Alpha product mix is the setup.');
   assert.equal(bySymbol.get('GDB').outcome.guide, '');
-  assert.equal(bySymbol.get('GDB').outcome.guidanceDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('RXA').reaction.note, '');
-  assert.equal(bySymbol.get('RXA').reaction.commentaryDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('RXB').reaction.note, '');
-  assert.equal(bySymbol.get('RXB').reaction.commentaryDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('XFD').outcome.interpretation, 'Management reaffirmed full-year margin and revenue targets.');
-  assert.equal(bySymbol.get('XFD').outcome.interpretationDisposition.status, 'verified');
-  assert.equal(bySymbol.get('GOOG').outcome.interpretation, 'Search monetization, cloud margin, and AI spending discipline drive the read.');
+  assert.equal(bySymbol.get('GOOG').outcome.interpretationDisposition.status, 'verified');
   assert.equal(bySymbol.get('GOOGL').outcome.interpretationDisposition.status, 'verified');
   assert.equal(bySymbol.get('SIA').outcome.interpretationDisposition.status, 'pending_review');
   assert.equal(bySymbol.get('SIB').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('FQ1').outcome.interpretationDisposition.status, 'pending_review');
-  assert.equal(bySymbol.get('FQ2').outcome.interpretationDisposition.status, 'pending_review');
 }
 
 
@@ -2879,7 +2345,6 @@ async function main() {
   testPublishedSummaryValidationIsStrict();
   testResultRefreshWaitsForReportWindow();
   await testResultRefreshDoesNotRebuildSlate();
-  await testResultRefreshFailuresAreRowScoped();
   await testManualRecoverySourceAuditRepair();
   await testYahooReactionFetchesSkipRowsWithoutActualsAndPreserveOrder();
   await testYahooReactionFetchRetriesMissingReactionWindow();

@@ -5,6 +5,12 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const acorn = require('acorn');
 const { displayDatesForRange, isIsoDate, isIsoDateTime } = require('./calendar_contract');
+const {
+  blocksWithId,
+  elementsWithId,
+  scanHtml,
+  singleScriptBlockById
+} = require('./dashboard_script_blocks');
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const {
@@ -291,7 +297,7 @@ function validateDashboardRenderSurface(errors, warnings, data, chartData) {
   // startup. Financial completeness, provenance, and freshness stay in staged
   // contract checks so recoverable content issues do not take the page offline.
   if (!renderObject(errors, data, 'dashboard-data')) return;
-  if (chartData === null || !renderObject(errors, chartData, 'chart-data') || !renderArray(errors, chartData.series, 'chart-data.series')) return;
+  if (!renderObject(errors, chartData, 'chart-data') || !renderArray(errors, chartData.series, 'chart-data.series')) return;
   for (const [seriesIndex, series] of chartData.series.entries()) {
     const label = `chart-data.series[${seriesIndex}]`;
     if (!series || typeof series !== 'object' || Array.isArray(series)) {
@@ -596,9 +602,9 @@ function runCompleteTestSuite() {
   delete testEnvironment.FINNHUB_API_KEY;
   delete testEnvironment.EODHD_API_KEY;
   delete testEnvironment.EARNINGSAPI_API_KEY;
-  // This aggregate command already runs test_dashboard.js; do not launch a
-  // second dashboard-test process beside it unless fixture isolation is added.
-  for (const file of ['test_news.js', 'test_earnings_week.js', 'test_week_ahead.js', 'test_dashboard.js']) {
+  // This aggregate command owns focused test ordering; keep callers from
+  // launching duplicate dashboard-test processes beside it.
+  for (const file of ['test_news.js', 'test_earnings_week.js', 'test_week_ahead.js', 'test_market_data.js', 'test_dashboard.js']) {
     runReadinessCommand(process.execPath, [path.join('scripts', file)], { env: testEnvironment });
   }
   process.stdout.write('Validating the canonical dashboard artifact...\n');
@@ -698,9 +704,8 @@ function chartableRowsFromDashboardData(data) {
 }
 
 function chartableRowsFromDashboardHtml(dashboardHtml) {
-  const match = dashboardHtml.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  if (!match) throw new Error('Could not find dashboard-data JSON block.');
-  return chartableRowsFromDashboardData(JSON.parse(match[1]));
+  const block = singleScriptBlockById(dashboardHtml, 'dashboard-data', { type: 'application/json' });
+  return chartableRowsFromDashboardData(JSON.parse(block.content));
 }
 
 function chartExpectationsFromRows(errors, chartableRows) {
@@ -759,94 +764,33 @@ function runChartDataValidation(argv) {
 
 function validateDashboardHtml(html, options = {}) {
 const validationMode = normalizedDashboardValidationMode(options.validationMode);
-const dashboardMatch = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-const chartDataMatch = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
-const runtimeScriptMatches = [...html.matchAll(/<script id="dashboard-runtime">([\s\S]*?)<\/script>/g)];
+const { elements, scripts } = scanHtml(html);
+const dashboardDataElements = elementsWithId(elements, 'dashboard-data');
+const chartDataElements = elementsWithId(elements, 'chart-data');
+const runtimeElements = elementsWithId(elements, 'dashboard-runtime');
+const dashboardDataScripts = blocksWithId(scripts, 'dashboard-data');
+const chartDataScripts = blocksWithId(scripts, 'chart-data');
+const runtimeScripts = blocksWithId(scripts, 'dashboard-runtime');
+const dashboardScript = dashboardDataScripts.length === 1 ? dashboardDataScripts[0] : null;
+const chartDataScript = chartDataScripts.length === 1 ? chartDataScripts[0] : null;
+const runtimeScriptBlock = runtimeScripts.length === 1 ? runtimeScripts[0] : null;
 const errors = [];
 const warnings = [];
 
-function countMatches(pattern) {
-  return [...html.matchAll(pattern)].length;
-}
-
-function dashboardShellElements(shell) {
-  const elements = [];
-  const stack = [];
-  const voidTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
-  const decodeAttributeValue = (value) => String(value)
-    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (_match, hex, decimal) => {
-      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
-      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : '\ufffd';
-    })
-    .replace(/&(amp|quot|apos|lt|gt);/gi, (_match, name) => ({
-      amp: '&', quot: '"', apos: "'", lt: '<', gt: '>'
-    })[name.toLowerCase()]);
-  let cursor = 0;
-  while (cursor < shell.length) {
-    const openIndex = shell.indexOf('<', cursor);
-    if (openIndex < 0) break;
-    if (shell.startsWith('<!--', openIndex)) {
-      const commentEnd = shell.indexOf('-->', openIndex + 4);
-      cursor = commentEnd < 0 ? shell.length : commentEnd + 3;
-      continue;
-    }
-    const closing = shell[openIndex + 1] === '/';
-    const nameOffset = openIndex + (closing ? 2 : 1);
-    const nameMatch = shell.slice(nameOffset).match(/^([A-Za-z][A-Za-z0-9:-]*)/);
-    if (!nameMatch) {
-      cursor = openIndex + 1;
-      continue;
-    }
-    let quote = '';
-    let closeIndex = -1;
-    for (let index = openIndex + 1; index < shell.length; index += 1) {
-      const character = shell[index];
-      if (quote) {
-        if (character === quote) quote = '';
-      } else if (character === '"' || character === "'") {
-        quote = character;
-      } else if (character === '>') {
-        closeIndex = index;
-        break;
-      }
-    }
-    if (closeIndex < 0) break;
-    const name = nameMatch[1].toLowerCase();
-    if (closing) {
-      const matchingIndex = stack.map((elementIndex) => elements[elementIndex].name).lastIndexOf(name);
-      if (matchingIndex >= 0) stack.length = matchingIndex;
-      cursor = closeIndex + 1;
-      continue;
-    }
-    const source = shell.slice(openIndex, closeIndex + 1);
-    const attributes = {};
-    const attributeSource = shell.slice(nameOffset + nameMatch[1].length, closeIndex);
-    const attributePattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
-    for (const match of attributeSource.matchAll(attributePattern)) {
-      const attributeName = match[1].toLowerCase();
-      if (!(attributeName in attributes)) {
-        attributes[attributeName] = decodeAttributeValue(match[2] ?? match[3] ?? match[4] ?? '');
-      }
-    }
-    const element = {
-      name,
-      source,
-      attributes,
-      parentIndex: stack.length ? stack[stack.length - 1] : -1
-    };
-    elements.push(element);
-    // HTML ignores self-closing slashes on non-void elements, so the shell
-    // stack must do the same to match browser DOM ancestry.
-    if (!voidTags.has(name)) stack.push(elements.length - 1);
-    cursor = closeIndex + 1;
+function requireReservedScriptElement(id, elementsForId) {
+  if (elementsForId.length !== 1) {
+    errors.push(`Expected exactly 1 active #${id} element; found ${elementsForId.length}.`);
+    return;
   }
-  return elements;
+  if (elementsForId[0].name !== 'script') {
+    errors.push(`#${id} must be a <script>; found <${elementsForId[0].name}>.`);
+  }
 }
 
 function requireOrderedMarkerSequence(markers, shell) {
-  const elements = dashboardShellElements(shell);
+  // Include inert elements so the shell gate can reject containers that would
+  // hide required runtime markers from the browser DOM.
+  const { elements } = scanHtml(shell, { activeOnly: false });
   const inertContainer = elements.find((element) => [
     'iframe', 'noembed', 'noscript', 'plaintext', 'script', 'style', 'template', 'textarea', 'title', 'xmp'
   ].includes(element.name));
@@ -897,11 +841,32 @@ function requireOrderedMarkerSequence(markers, shell) {
 }
 
 // This main dashboard runtime block is isolated from generated JSON and the vendored chart bundle, which are not runtime endpoint sources.
-if (runtimeScriptMatches.length !== 1) {
-  errors.push(`Expected exactly 1 dashboard-runtime script; found ${runtimeScriptMatches.length}.`);
+requireReservedScriptElement('dashboard-data', dashboardDataElements);
+requireReservedScriptElement('chart-data', chartDataElements);
+requireReservedScriptElement('dashboard-runtime', runtimeElements);
+if (runtimeScripts.length !== 1) {
+  errors.push(`Expected exactly 1 dashboard-runtime script; found ${runtimeScripts.length}.`);
 }
-const runtimeScript = runtimeScriptMatches.length === 1 ? runtimeScriptMatches[0][1] : '';
-if (runtimeScript) {
+if (runtimeScriptBlock && runtimeScriptBlock.type && !['application/javascript', 'text/javascript'].includes(runtimeScriptBlock.type)) {
+  errors.push('dashboard-runtime script must be executable JavaScript.');
+}
+if (runtimeScriptBlock && 'src' in runtimeScriptBlock.attributes) {
+  errors.push('dashboard-runtime script must be inline and must not use src.');
+}
+if (runtimeScriptBlock && 'nomodule' in runtimeScriptBlock.attributes) {
+  errors.push('dashboard-runtime script must run in supported browsers and must not use nomodule.');
+}
+const runtimeLanguage = String(runtimeScriptBlock?.attributes?.language || '').trim().toLowerCase();
+if (runtimeScriptBlock && !('type' in runtimeScriptBlock.attributes)
+  && runtimeLanguage
+  && !/^(?:ecmascript|javascript(?:1\.[0-5])?|jscript|livescript|x-(?:ecmascript|javascript))$/.test(runtimeLanguage)) {
+  errors.push('dashboard-runtime script language must identify JavaScript.');
+}
+const runtimeScript = runtimeScriptBlock ? runtimeScriptBlock.content : '';
+if (runtimeScriptBlock && !runtimeScript.trim()) {
+  errors.push('dashboard-runtime script must not be empty.');
+}
+if (runtimeScript.trim()) {
   let runtimeProgram = null;
   try {
     // Compile only: executing the dashboard runtime would touch DOM/browser APIs.
@@ -913,26 +878,26 @@ if (runtimeScript) {
   if (runtimeProgram) validateDashboardRuntimeNetworkContract(errors, runtimeProgram);
 }
 
-const dashboardDataScriptCount = countMatches(/<script type="application\/json" id="dashboard-data">[\s\S]*?<\/script>/g);
-const chartDataScriptCount = countMatches(/<script type="application\/json" id="chart-data">[\s\S]*?<\/script>/g);
-if (dashboardDataScriptCount !== 1) {
-  errors.push(`Expected exactly 1 dashboard-data JSON block; found ${dashboardDataScriptCount}.`);
+if (dashboardDataScripts.length !== 1) {
+  errors.push(`Expected exactly 1 dashboard-data JSON block; found ${dashboardDataScripts.length}.`);
+} else if (dashboardScript.type !== 'application/json') {
+  errors.push('dashboard-data script must use type="application/json".');
 }
-if (chartDataScriptCount !== 1) {
-  errors.push(`Expected exactly 1 chart-data JSON block; found ${chartDataScriptCount}.`);
+if (chartDataScripts.length !== 1) {
+  errors.push(`Expected exactly 1 chart-data JSON block; found ${chartDataScripts.length}.`);
+} else if (chartDataScript.type !== 'application/json') {
+  errors.push('chart-data script must use type="application/json".');
 }
 
 const dataStartIndex = html.indexOf('<!-- ============ DATA START');
 const dataEndIndex = html.indexOf('<!-- ============ DATA END ============ -->');
-const chartDataIndex = html.indexOf('<script type="application/json" id="chart-data">');
-const runtimeScriptIndex = html.indexOf('<script id="dashboard-runtime">');
-const chartDataEndIndex = chartDataMatch ? chartDataMatch.index + chartDataMatch[0].length : -1;
-const firstScriptAfterChartOffset = chartDataEndIndex >= 0
-  ? html.slice(chartDataEndIndex).search(/<script\b/i)
-  : -1;
-const firstScriptAfterChartIndex = firstScriptAfterChartOffset >= 0
-  ? chartDataEndIndex + firstScriptAfterChartOffset
-  : -1;
+const chartDataIndex = chartDataScripts[0]?.index ?? -1;
+const runtimeScriptIndex = runtimeScripts[0]?.index ?? -1;
+const chartDataEndIndex = chartDataScripts[0]?.end ?? -1;
+const firstScriptAfterChart = chartDataEndIndex >= 0
+  ? scripts.find((block) => block.index >= chartDataEndIndex)
+  : null;
+const firstScriptAfterChartIndex = firstScriptAfterChart?.index ?? -1;
 
 if (dataStartIndex < 0) {
   errors.push('Could not find the DATA START marker.');
@@ -969,24 +934,24 @@ requireOrderedMarkerSequence([
   ? html.slice(chartDataEndIndex, firstScriptAfterChartIndex)
   : '');
 
-if (!dashboardMatch) {
-  errors.push('Could not find dashboard-data JSON block.');
+if (!dashboardScript) {
+  if (!dashboardDataScripts.length) errors.push('Could not find dashboard-data JSON block.');
 } else {
   let data;
   try {
-    data = JSON.parse(dashboardMatch[1]);
+    data = JSON.parse(dashboardScript.content);
   } catch (error) {
     errors.push(`Embedded dashboard JSON is invalid: ${error.message}`);
   }
 
-  if (data) {
+  if (data !== undefined) {
     let chartData = null;
 
-    if (!chartDataMatch) {
-      errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
+    if (!chartDataScript) {
+      if (!chartDataScripts.length) errors.push('Could not find chart-data JSON block; production charts must use embedded generated data.');
     } else {
       try {
-        chartData = JSON.parse(chartDataMatch[1]);
+        chartData = JSON.parse(chartDataScript.content);
       } catch (error) {
         errors.push(`Embedded chart-data JSON is invalid: ${error.message}`);
       }
@@ -994,7 +959,7 @@ if (!dashboardMatch) {
 
     validateDashboardRenderSurface(errors, warnings, data, chartData);
 
-    if (validationMode === 'staged') {
+    if (validationMode === 'staged' && data !== null && typeof data === 'object' && !Array.isArray(data)) {
       const chartableRows = chartableRowsFromDashboardData(data);
       validateCalendarSectionRanges(errors, data);
       validateEmbeddedWeekAheadContract(errors, data);

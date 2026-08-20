@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
+const { earningsHasActual, isDisplayEligibleEarningsRow } = require('./earnings_week_contract');
 const { isIsoDate } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
 const { mapConcurrent, withRetry } = require('./fetch_concurrency');
@@ -147,15 +147,11 @@ function daysBetween(left, right) {
   return Math.round((new Date(`${right}T00:00:00Z`).getTime() - new Date(`${left}T00:00:00Z`).getTime()) / 86400000);
 }
 
-function hasActuals(row) {
-  return Number.isFinite(row?.eps?.actual) || Number.isFinite(row?.revenue?.actual);
-}
-
 function guidanceTargetRows(week, options = {}) {
   const rows = Array.isArray(week?.rows) ? week.rows : [];
   const targets = rows
     .filter((row) => isDisplayEligibleEarningsRow(row))
-    .filter(hasActuals)
+    .filter(earningsHasActual)
     .map((row) => ({
       symbol: String(row.symbol || '').trim().toUpperCase(),
       company: String(row.company || '').trim(),
@@ -624,7 +620,7 @@ async function buildEarningsGuidanceEvidencePayload(week, options = {}) {
     sourceArtifact: options.sourceArtifact || 'generated/earnings_week.json',
     range: week?.range || null,
     rows: [],
-    summary: summarizeEvidenceRows([], targets.length, allRows.filter((row) => isDisplayEligibleEarningsRow(row) && !hasActuals(row)).length)
+    summary: summarizeEvidenceRows([], targets.length, allRows.filter((row) => isDisplayEligibleEarningsRow(row) && !earningsHasActual(row)).length)
   };
   if (!targets.length) return payload;
   if (options.networkDisabled || process.env.DASHBOARD_TEST_NO_NETWORK === '1') {

@@ -1055,7 +1055,6 @@ function validateWeekAheadPayload(payload, {
       }
     });
   });
-  void ids;
   return errors;
 }
 

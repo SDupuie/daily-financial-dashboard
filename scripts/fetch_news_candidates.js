@@ -27,6 +27,7 @@ const {
 } = require('./news_sources');
 const { atomicWriteJson } = require('./staging_writer');
 const { mapConcurrent } = require('./fetch_concurrency');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_INPUT = path.join(ROOT, 'daily_financial_news.html');
@@ -1033,9 +1034,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
 function readDashboardData(input) {
   if (!input || !fs.existsSync(input)) return null;
   const html = fs.readFileSync(input, 'utf8');
-  const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  if (!match) throw new Error(`Could not find dashboard-data JSON in ${input}.`);
-  return JSON.parse(match[1]);
+  return JSON.parse(singleScriptBlockById(html, 'dashboard-data', { type: 'application/json' }).content);
 }
 
 function priorCandidate(item, pool, eligibleDates) {

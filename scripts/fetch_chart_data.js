@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { atomicWriteJson } = require('./staging_writer');
-const { isIsoDate } = require('./calendar_contract');
+const { isIsoDate, scheduledNow } = require('./calendar_contract');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 const {
   mapConcurrent,
   retryAfterDelayMs,
@@ -359,14 +360,6 @@ function signedNumber(value) {
   return value > 0 ? `+${formatted}` : formatted;
 }
 
-function signedPct(value) {
-  return `${new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-    signDisplay: 'always'
-  }).format(value)}%`;
-}
-
 function timeText(epochSeconds) {
   if (!Number.isFinite(epochSeconds)) return 'Live update';
   return `Updated ${new Intl.DateTimeFormat('en-US', {
@@ -584,12 +577,6 @@ function latestRegularSessionClose(points, symbol, latestTimestamp = Number.POSI
     referenceDate,
     referenceTime: referencePoint[0]
   };
-}
-
-function scheduledNow() {
-  const override = process.env.SCHEDULED_NOW_ISO;
-  const parsed = override ? new Date(override) : new Date();
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
 function parseFuture(spec, payload, args, referencePayload = null, runAt = new Date()) {
@@ -891,11 +878,7 @@ function loadEnv(file = path.resolve(process.cwd(), '.env')) {
 
 function readDashboardData(input) {
   const html = fs.readFileSync(input, 'utf8');
-  const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-  if (!match) {
-    throw new Error(`Could not find dashboard-data JSON block in ${input}`);
-  }
-  return JSON.parse(match[1]);
+  return JSON.parse(singleScriptBlockById(html, 'dashboard-data', { type: 'application/json' }).content);
 }
 
 function readTapeRows(input) {
@@ -940,9 +923,7 @@ function readChartableRows(input) {
 function readEmbeddedChartPayload(input) {
   try {
     const html = fs.readFileSync(input, 'utf8');
-    const match = html.match(/<script type="application\/json" id="chart-data">([\s\S]*?)<\/script>/);
-    if (!match) return null;
-    const payload = roundChartPayload(JSON.parse(match[1]));
+    const payload = roundChartPayload(JSON.parse(singleScriptBlockById(html, 'chart-data', { type: 'application/json' }).content));
     return Array.isArray(payload.series) ? payload : null;
   } catch (_error) {
     return null;

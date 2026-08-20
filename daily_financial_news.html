@@ -10747,118 +10747,37 @@
           ${separateDisclaimer ? `<div class="footer-disclaimer">${esc(disclaimer)}</div>` : ''}
         `;
       }
-      function closeLocalRefreshTooltip(except = null) {
-        document.querySelectorAll('.local-refresh-indicator.is-open').forEach((wrap) => {
+      function closeTooltipGroup(wrapperSelector, buttonSelector, except = null) {
+        document.querySelectorAll(`${wrapperSelector}.is-open`).forEach((wrap) => {
           if (wrap === except) return;
           wrap.classList.remove('is-open');
-          wrap.querySelector('[data-local-refresh-toggle]')?.setAttribute('aria-expanded', 'false');
+          wrap.querySelector(buttonSelector)?.setAttribute('aria-expanded', 'false');
         });
       }
 
-      function routeLocalRefreshTooltipClick(event) {
-        const wrap = event.target.closest?.('[data-local-refresh-indicator]');
-        const button = event.target.closest?.('[data-local-refresh-toggle]');
+      function routeTooltipClick(event, wrapperSelector, buttonSelector) {
+        const wrap = event.target.closest?.(wrapperSelector);
+        const button = event.target.closest?.(buttonSelector);
         if (!wrap) {
-          closeLocalRefreshTooltip();
+          closeTooltipGroup(wrapperSelector, buttonSelector);
           return false;
         }
         if (!button) return false;
         const shouldOpen = !wrap.classList.contains('is-open');
-        closeLocalRefreshTooltip(wrap);
+        closeTooltipGroup(wrapperSelector, buttonSelector, wrap);
         wrap.classList.toggle('is-open', shouldOpen);
         button.setAttribute('aria-expanded', String(shouldOpen));
         if (!shouldOpen) button.blur?.();
         return true;
       }
 
-      function closeStaleInfoTooltips(except = null) {
-        document.querySelectorAll('.stale-info.is-open').forEach((wrap) => {
-          if (wrap === except) return;
-          wrap.classList.remove('is-open');
-          wrap.querySelector('[data-stale-button]')?.setAttribute('aria-expanded', 'false');
-        });
-      }
-
-      function routeStaleInfoTooltipClick(event) {
-        const wrap = event.target.closest?.('[data-stale-info]');
-        const button = event.target.closest?.('[data-stale-button]');
-        if (!wrap) {
-          closeStaleInfoTooltips();
-          return false;
-        }
-        if (!button) return false;
-        const shouldOpen = !wrap.classList.contains('is-open');
-        closeStaleInfoTooltips(wrap);
-        wrap.classList.toggle('is-open', shouldOpen);
-        button.setAttribute('aria-expanded', String(shouldOpen));
-        if (!shouldOpen) button.blur?.();
-        return true;
-      }
-
-      function closeTouchTooltipsOnEscape(event) {
+      function closeTooltipsOnEscape(event) {
         if (event.key !== 'Escape') return;
-        closeLocalRefreshTooltip();
-        closeStaleInfoTooltips();
-        event.target.closest?.('[data-local-refresh-toggle], [data-stale-button]')?.blur?.();
-      }
-
-      function closeDividendTooltips(except = null) {
-        document.querySelectorAll('.div-info.is-open').forEach((wrap) => {
-          if (wrap === except) return;
-          wrap.classList.remove('is-open');
-          wrap.querySelector('[data-dividend-button]')?.setAttribute('aria-expanded', 'false');
-        });
-      }
-
-      function routeDividendTooltipClick(event) {
-        const wrap = event.target.closest?.('[data-dividend-info]');
-        const button = event.target.closest?.('[data-dividend-button]');
-        if (!wrap) {
-          closeDividendTooltips();
-          return;
-        }
-        if (!button) return;
-        const shouldOpen = !wrap.classList.contains('is-open');
-        closeDividendTooltips(wrap);
-        wrap.classList.toggle('is-open', shouldOpen);
-        button.setAttribute('aria-expanded', String(shouldOpen));
-        if (!shouldOpen) button.blur?.();
-      }
-
-      function closeDividendTooltipsOnEscape(event) {
-        if (event.key !== 'Escape') return;
-        closeDividendTooltips();
-        event.target.closest?.('[data-dividend-button]')?.blur?.();
-      }
-
-      function closeChartInfoTooltips(except = null) {
-        document.querySelectorAll('.tape-chart-info.is-open').forEach((wrap) => {
-          if (wrap === except) return;
-          wrap.classList.remove('is-open');
-          wrap.querySelector('[data-chart-info-button]')?.setAttribute('aria-expanded', 'false');
-        });
-      }
-
-      function routeChartInfoClick(event) {
-        const wrap = event.target.closest?.('[data-chart-info]');
-        const button = event.target.closest?.('[data-chart-info-button]');
-        if (!wrap) {
-          closeChartInfoTooltips();
-          return false;
-        }
-        if (!button) return false;
-        const shouldOpen = !wrap.classList.contains('is-open');
-        closeChartInfoTooltips(wrap);
-        wrap.classList.toggle('is-open', shouldOpen);
-        button.setAttribute('aria-expanded', String(shouldOpen));
-        if (!shouldOpen) button.blur?.();
-        return true;
-      }
-
-      function closeChartInfoTooltipsOnEscape(event) {
-        if (event.key !== 'Escape') return;
-        closeChartInfoTooltips();
-        event.target.closest?.('[data-chart-info-button]')?.blur?.();
+        closeTooltipGroup('[data-local-refresh-indicator]', '[data-local-refresh-toggle]');
+        closeTooltipGroup('[data-stale-info]', '[data-stale-button]');
+        closeTooltipGroup('[data-dividend-info]', '[data-dividend-button]');
+        closeTooltipGroup('[data-chart-info]', '[data-chart-info-button]');
+        event.target.closest?.('[data-local-refresh-toggle], [data-stale-button], [data-dividend-button], [data-chart-info-button]')?.blur?.();
       }
 
       function routeTapeSelectorKeydown(event) {
@@ -10884,9 +10803,7 @@
       }
 
       function routeDashboardKeydown(event) {
-        closeTouchTooltipsOnEscape(event);
-        closeDividendTooltipsOnEscape(event);
-        closeChartInfoTooltipsOnEscape(event);
+        closeTooltipsOnEscape(event);
         if (event.key === 'Escape') {
           const control = $('appearance-control');
           if (control?.open) control.open = false;
@@ -10898,10 +10815,10 @@
         closeAppearanceControl(event);
         // Tooltip routers consume their own clicks; dynamic section handlers
         // below should only see unclaimed dashboard interactions.
-        if (routeLocalRefreshTooltipClick(event)) return;
-        if (routeStaleInfoTooltipClick(event)) return;
-        routeDividendTooltipClick(event);
-        if (routeChartInfoClick(event)) return;
+        if (routeTooltipClick(event, '[data-local-refresh-indicator]', '[data-local-refresh-toggle]')) return;
+        if (routeTooltipClick(event, '[data-stale-info]', '[data-stale-button]')) return;
+        routeTooltipClick(event, '[data-dividend-info]', '[data-dividend-button]');
+        if (routeTooltipClick(event, '[data-chart-info]', '[data-chart-info-button]')) return;
         const newsMoreToggle = event.target.closest?.('[data-news-more-toggle]');
         if (newsMoreToggle && toggleNewsMore(newsMoreToggle)) return;
         const weekImpactToggle = event.target.closest?.('[data-week-impact-toggle]');

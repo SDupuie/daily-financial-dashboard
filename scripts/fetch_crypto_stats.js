@@ -5,6 +5,7 @@ const path = require('path');
 const https = require('https');
 const { isIsoDateTime } = require('./calendar_contract');
 const { atomicWriteJson } = require('./staging_writer');
+const { singleScriptBlockById } = require('./dashboard_script_blocks');
 
 const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'crypto_stats.json');
 const DEFAULT_INPUT = path.resolve(process.cwd(), 'daily_financial_news.html');
@@ -385,8 +386,7 @@ async function main() {
 function canonicalCryptoState(input) {
   try {
     const html = fs.readFileSync(input, 'utf8');
-    const match = html.match(/<script type="application\/json" id="dashboard-data">([\s\S]*?)<\/script>/);
-    const data = match ? JSON.parse(match[1]) : null;
+    const data = JSON.parse(singleScriptBlockById(html, 'dashboard-data', { type: 'application/json' }).content);
     return {
       stats: Array.isArray(data?.crypto?.stats) ? data.crypto.stats : [],
       dominance: data?.crypto?.dominance,
