@@ -635,7 +635,12 @@
     .tape-row .stale-info:hover,
     .tape-row .stale-info:focus-within,
     .tape-row .stale-info.is-open { z-index: 3; }
-    .tape-row .stale-info-tooltip { left: 0; transform: translate(0, 3px); }
+    .tape-row .stale-info-tooltip {
+      top: auto;
+      bottom: 0;
+      left: calc(100% + 7px);
+      transform: translate(3px, 0);
+    }
     .tape-row .stale-info:hover .stale-info-tooltip,
     .tape-row .stale-info:focus-within .stale-info-tooltip,
     .tape-row .stale-info.is-open .stale-info-tooltip { transform: translate(0, 0); }
