@@ -11505,13 +11505,6 @@
           .filter((event) => typeof event.name === 'string' && event.name.trim() && ['high', 'medium'].includes(event.impact));
       }
 
-      function visibleWeekAheadEvents(events) {
-        const available = renderableWeekAheadEvents(events);
-        return showMediumImpact
-          ? available
-          : available.filter((event) => event.impact === 'high');
-      }
-
       function weekAheadImpactCueHtml() {
         return `<button class="week-impact-cue" type="button" data-week-impact-toggle aria-pressed="${showMediumImpact}">
           <span class="week-impact-cue-icon" aria-hidden="true"><svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5"></rect><path class="week-impact-check" d="m5 8 2 2 4-4"></path></svg></span>
@@ -11534,7 +11527,11 @@
         }
         const days = renderableWeekAheadItems(week.days).map((day) => {
           const allEvents = renderableWeekAheadEvents(day.events);
-          const events = visibleWeekAheadEvents(allEvents);
+          const allGroups = weekAheadEventGroups(allEvents);
+          const groups = showMediumImpact
+            ? allGroups
+            : allGroups.filter((group) => group.events.some((event) => event.impact === 'high'));
+          const events = groups.flatMap((group) => group.events);
           const hiddenMediumCount = allEvents.length - events.length;
           const visibleCount = `${events.length} ${events.length === 1 ? 'event' : 'events'}`;
           const count = day.closure
@@ -11544,7 +11541,7 @@
               : visibleCount;
           const calendar = [
             day.closure ? `<div class="week-closure"><strong>${esc(day.closure.label)}</strong> &middot; ${esc(day.closure.reason)}</div>` : '',
-            events.length ? `<div class="week-events">${weekAheadEventGroups(events, allEvents).map((group) => weekAheadEventGroupHtml(day, group)).join('')}</div>` : '',
+            events.length ? `<div class="week-events">${groups.map((group) => weekAheadEventGroupHtml(day, group)).join('')}</div>` : '',
             !events.length && !day.closure
               ? `<div class="week-quiet">${showMediumImpact ? 'No high- or medium-impact U.S. releases scheduled.' : 'No high-impact U.S. releases scheduled.'}</div>`
               : ''

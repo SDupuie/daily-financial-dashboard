@@ -884,7 +884,32 @@ async function testActualDashboardStartsInBrowser() {
       }
     }
 
-    async function assertDashboardStarts(file, { testTooltips = false } = {}) {
+    async function assertWeekAheadImpactFiltering(page) {
+      const section = page.locator('.section-week-ahead');
+      const toggle = section.locator('[data-week-impact-toggle]');
+      if (await toggle.getAttribute('aria-pressed') === 'true') await toggle.click();
+
+      const familyRow = (name) => section.locator('.week-event-row').filter({ hasText: name });
+      const pce = familyRow('PCE Price Index');
+      const durableGoods = familyRow('Durable Goods Orders');
+      assert.equal(await pce.count(), 1);
+      assert.equal(await durableGoods.count(), 1);
+      assert.equal(await pce.locator('.week-event-variant').count(), 2);
+      assert.equal(await durableGoods.locator('.week-event-variant').count(), 2);
+      assert.match(await pce.innerText(), /Core · MoM/i);
+      assert.match(await pce.innerText(), /Headline · MoM/i);
+      assert.match(await durableGoods.innerText(), /Core · MoM/i);
+      assert.match(await durableGoods.innerText(), /Headline · MoM/i);
+      assert.equal(await section.getByText('Corporate Profits', { exact: true }).count(), 0);
+
+      await toggle.click();
+      assert.equal(await section.getByText('Corporate Profits', { exact: true }).count(), 1);
+      assert.equal(await familyRow('PCE Price Index').locator('.week-event-variant').count(), 2);
+      assert.equal(await familyRow('Durable Goods Orders').locator('.week-event-variant').count(), 2);
+      await section.locator('[data-week-impact-toggle]').click();
+    }
+
+    async function assertDashboardStarts(file, { testTooltips = false, testWeekAheadImpactFilter = false } = {}) {
       const errors = [];
       const page = await browser.newPage();
       try {
@@ -912,6 +937,7 @@ async function testActualDashboardStartsInBrowser() {
         const more = page.locator('[data-news-more-toggle]').first();
         if (await more.count()) await more.click();
         if (testTooltips) await assertTooltipInteractions(page);
+        if (testWeekAheadImpactFilter) await assertWeekAheadImpactFiltering(page);
         assert.deepEqual(errors, []);
       } finally {
         await page.close();
@@ -946,6 +972,43 @@ async function testActualDashboardStartsInBrowser() {
     tooltipPortfolioRow.monthDivPerShareValue = 0.25;
     fs.writeFileSync(tooltipFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(tooltipData)));
     await assertDashboardStarts(tooltipFile, { testTooltips: true });
+
+    const weekAheadFilterFile = path.join(recoverableDir, 'dashboard-week-ahead-filter.html');
+    const weekAheadFilterData = readJsonBlock(recoverableHtml, 'dashboard-data');
+    const weekAheadEvent = (id, name, agency, impact) => ({
+      id,
+      time: '08:30',
+      name,
+      agency,
+      period: 'MoM',
+      impact,
+      actual: null,
+      forecast: '0.2%',
+      previous: '0.1%',
+      forecastType: 'consensus',
+      valuesApplicable: true,
+      lensPath: 'broad-growth',
+      surprise: null,
+      status: 'scheduled'
+    });
+    weekAheadFilterData.weekAhead = {
+      range: { from: '2026-07-13', to: '2026-07-17', timeZone: 'America/Chicago', marketTimeZone: 'America/New_York' },
+      source: { status: 'fresh' },
+      days: [{
+        date: '2026-07-13',
+        label: 'Mon, Jul 13',
+        closure: null,
+        events: [
+          weekAheadEvent('core-pce', 'Core PCE Price Index', 'BEA', 'high'),
+          weekAheadEvent('headline-pce', 'PCE Price Index', 'BEA', 'medium'),
+          weekAheadEvent('core-durable', 'Core Durable Goods Orders', 'Census', 'medium'),
+          weekAheadEvent('headline-durable', 'Durable Goods Orders', 'Census', 'high'),
+          weekAheadEvent('corporate-profits', 'Corporate Profits', 'BEA', 'medium')
+        ]
+      }]
+    };
+    fs.writeFileSync(weekAheadFilterFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(weekAheadFilterData)));
+    await assertDashboardStarts(weekAheadFilterFile, { testWeekAheadImpactFilter: true });
 
     const absentSectionsFile = path.join(recoverableDir, 'dashboard-empty-object.html');
     fs.writeFileSync(absentSectionsFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', '{}'));
