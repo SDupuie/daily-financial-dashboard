@@ -2059,8 +2059,7 @@
     }
     .week {
       --week-ledger-columns: 92px minmax(0, 0.85fr) minmax(340px, 0.65fr);
-      --week-values-width: 280px;
-      --week-calendar-columns: 60px 10px minmax(0, 1fr) minmax(var(--week-values-width), 0.64fr);
+      --week-calendar-columns: 60px 10px minmax(0, 1fr) minmax(250px, 0.64fr);
     }
     .week-ledger-head,
     .week-day-row {
@@ -2149,7 +2148,7 @@
       align-items: start;
       display: grid;
       gap: var(--gap-sm);
-      grid-template-columns: minmax(0, 1fr) minmax(var(--week-values-width), 0.64fr);
+      grid-template-columns: minmax(0, 1fr) minmax(250px, 0.64fr);
     }
     .week-event-time {
       color: var(--muted);
@@ -2717,7 +2716,7 @@
         display: grid;
         gap: var(--gap-sm);
         grid-column: 1;
-        grid-template-columns: minmax(0, 1fr) minmax(var(--week-values-width), 0.64fr);
+        grid-template-columns: minmax(0, 1fr) minmax(250px, 0.64fr);
         padding: 10px 14px;
       }
       .week-day-row > :not(.week-day-header) { margin-left: 14px; margin-right: 14px; }
@@ -2728,10 +2727,10 @@
         grid-column: 1;
       }
       .week-event-row { column-gap: 7px; row-gap: 8px; }
-      .week-event-values { width: min(100%, var(--week-values-width)); }
+      .week-event-values { width: min(100%, 250px); }
       .week-event-group-body { grid-column: 3; }
       .week-event-variant .week-event-values { grid-column: 2; }
-      .week-day-values-header { display: grid; justify-self: end; width: min(100%, var(--week-values-width)); }
+      .week-day-values-header { display: grid; justify-self: end; width: min(100%, 250px); }
       .week-event-values .week-value-key {
         clip: rect(0 0 0 0);
         clip-path: inset(50%);
@@ -2789,37 +2788,9 @@
         row-gap: 10px;
       }
       .week-day-label { grid-column: 1 / -1; }
-      .week-day-values-header { grid-column: 1 / -1; justify-self: start; }
-      .week-event-row > .week-event-time {
-        grid-column: 1;
-        grid-row: 1;
-        z-index: 1;
-      }
-      .week-event-row > .week-impact-dot {
-        grid-column: 2;
-        grid-row: 1;
-        z-index: 1;
-      }
-      .week-event-group-body {
-        column-gap: 7px;
-        display: grid;
-        grid-column: 1 / -1;
-        grid-row: 1;
-        grid-template-columns: 60px 10px minmax(0, 1fr);
-      }
-      .week-event-title-line { grid-column: 3; }
-      .week-event-variant-rows { grid-column: 1 / -1; }
-      .week-event-variant {
-        column-gap: 7px;
-        grid-template-columns: 60px 10px minmax(0, 1fr);
-      }
-      .week-event-kind-line { grid-column: 3; }
-      .week-event-variant .week-event-values { grid-column: 1 / -1; }
-      .week-event-values,
-      .week-day-values-header {
-        gap: 4px;
-        width: 100%;
-      }
+      .week-day-values-header { grid-column: 3; justify-self: start; }
+      .week-event-variant { grid-template-columns: 1fr; }
+      .week-event-variant .week-event-values { grid-column: 1; }
       .section-week-ahead .section-head {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
