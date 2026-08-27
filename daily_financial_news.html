@@ -11211,8 +11211,23 @@
           : `${month.format(from)} ${day.format(from)}-${month.format(to)} ${day.format(to)}`;
       }
 
+      const WEEK_AHEAD_AGENCY_LABELS = new Map([
+        ['American Petroleum Institute (API)', 'API'],
+        ['Department of the Treasury', 'Treasury'],
+        ['Federal Reserve', 'Fed'],
+        ['Mortgage Bankers Association of America', 'MBA'],
+        ['National Association of Home Builders', 'NAHB'],
+        ['National Association of Realtors', 'NAR'],
+        ['S&P Global', 'S&P'],
+        ["Standard and Poor's", 'S&P']
+      ]);
+
+      function weekAheadAgencyLabel(agency) {
+        return WEEK_AHEAD_AGENCY_LABELS.get(agency) || agency;
+      }
+
       function weekAheadEventKindHtml(event, label = null) {
-        const kind = label || `${event.agency} \u00b7 ${event.period}`;
+        const kind = label || `${weekAheadAgencyLabel(event.agency)} \u00b7 ${event.period}`;
         const surprise = event.surprise?.direction
           ? `<span class="week-surprise">${esc(event.surprise.direction === 'in_line' ? 'In line' : `${event.surprise.direction} forecast`)}</span>`
           : '';

@@ -902,6 +902,22 @@ async function testActualDashboardStartsInBrowser() {
       assert.match(await durableGoods.innerText(), /Headline · MoM/i);
       assert.equal(await section.getByText('Corporate Profits', { exact: true }).count(), 0);
 
+      for (const [title, subtitle] of [
+        ['API Crude Oil Stock Change', 'API · Weekly'],
+        ['Net Long-term TIC Flows', 'Treasury · Release'],
+        ['Industrial Production', 'Fed · MoM'],
+        ['MBA 30-Year Mortgage Rate', 'MBA · Release'],
+        ['NAHB Housing Market Index', 'NAHB · Index'],
+        ['Pending Home Sales', 'NAR · MoM'],
+        ['S&P Global Manufacturing PMI', 'S&P · Index'],
+        ['S&P/Case-Shiller Home Price', 'S&P · YoY'],
+        ['Fixture Indicator', 'Fixture Research Institute · Index']
+      ]) {
+        const row = familyRow(title);
+        assert.equal(await row.count(), 1);
+        assert.equal((await row.locator('.week-event-kind').textContent()).trim(), subtitle);
+      }
+
       await toggle.click();
       assert.equal(await section.getByText('Corporate Profits', { exact: true }).count(), 1);
       assert.equal(await familyRow('PCE Price Index').locator('.week-event-variant').count(), 2);
@@ -975,12 +991,12 @@ async function testActualDashboardStartsInBrowser() {
 
     const weekAheadFilterFile = path.join(recoverableDir, 'dashboard-week-ahead-filter.html');
     const weekAheadFilterData = readJsonBlock(recoverableHtml, 'dashboard-data');
-    const weekAheadEvent = (id, name, agency, impact) => ({
+    const weekAheadEvent = (id, name, agency, impact, period = 'MoM') => ({
       id,
       time: '08:30',
       name,
       agency,
-      period: 'MoM',
+      period,
       impact,
       actual: null,
       forecast: '0.2%',
@@ -1003,7 +1019,16 @@ async function testActualDashboardStartsInBrowser() {
           weekAheadEvent('headline-pce', 'PCE Price Index', 'BEA', 'medium'),
           weekAheadEvent('core-durable', 'Core Durable Goods Orders', 'Census', 'medium'),
           weekAheadEvent('headline-durable', 'Durable Goods Orders', 'Census', 'high'),
-          weekAheadEvent('corporate-profits', 'Corporate Profits', 'BEA', 'medium')
+          weekAheadEvent('corporate-profits', 'Corporate Profits', 'BEA', 'medium'),
+          weekAheadEvent('api-crude', 'API Crude Oil Stock Change', 'American Petroleum Institute (API)', 'high', 'Weekly'),
+          weekAheadEvent('tic-flows', 'Net Long-term TIC Flows', 'Department of the Treasury', 'high', 'Release'),
+          weekAheadEvent('industrial-production', 'Industrial Production', 'Federal Reserve', 'high'),
+          weekAheadEvent('mortgage-rate', 'MBA 30-Year Mortgage Rate', 'Mortgage Bankers Association of America', 'high', 'Release'),
+          weekAheadEvent('nahb-index', 'NAHB Housing Market Index', 'National Association of Home Builders', 'high', 'Index'),
+          weekAheadEvent('pending-home-sales', 'Pending Home Sales', 'National Association of Realtors', 'high'),
+          weekAheadEvent('sp-global-pmi', 'S&P Global Manufacturing PMI', 'S&P Global', 'high', 'Index'),
+          weekAheadEvent('case-shiller', 'S&P/Case-Shiller Home Price', "Standard and Poor's", 'high', 'YoY'),
+          weekAheadEvent('unmapped-agency', 'Fixture Indicator', 'Fixture Research Institute', 'high', 'Index')
         ]
       }]
     };
