@@ -10,6 +10,7 @@ const {
   applyWeekAheadEditorial,
   applyWeekAheadLifecycle,
   buildWeekAheadPreparationFallback,
+  comparableWeekAheadSurprise,
   defaultMarketLensForEvents,
   displayDatesForRange,
   finalizeWeekAheadOutcomes,
@@ -193,6 +194,7 @@ function testTradingViewNormalization() {
   assert.equal(formatTradingViewValue(4.1, { title: 'PCE Price Index YoY' }), '4.1%');
   assert.equal(formatTradingViewValue(6.69, { title: 'MBA 30-Year Mortgage Rate' }), '6.69%');
   assert.equal(formatTradingViewValue(2.011, { title: 'EIA Crude Oil Stocks Change' }), '2.011M');
+  assert.deepEqual(comparableWeekAheadSurprise('-$118.8B', '-$99B'), { direction: 'below', delta: -19.8, unit: 'B' });
 }
 
 function testMarketLensPriorityOrdering() {

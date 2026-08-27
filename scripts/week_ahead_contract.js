@@ -477,7 +477,7 @@ function tradingViewEvent(row) {
 }
 
 function comparableWeekAheadSurprise(actual, forecast) {
-  const parse = (value) => String(value ?? '').trim().match(/^([+-]?\d+(?:\.\d+)?)(%|K|M|B|T)?$/);
+  const parse = (value) => String(value ?? '').trim().replace(/^([+-]?)\$/, '$1').match(/^([+-]?\d+(?:\.\d+)?)(%|K|M|B|T)?$/);
   const actualMatch = parse(actual);
   const forecastMatch = parse(forecast);
   if (!actualMatch || !forecastMatch || (actualMatch[2] || '') !== (forecastMatch[2] || '')) return null;
