@@ -7,6 +7,7 @@ const net = require('net');
 const path = require('path');
 const zlib = require('zlib');
 const {
+  isIsoDate,
   isIsoDateTime,
   sameDateTimeParts,
   validDateTimeParts,
@@ -794,6 +795,15 @@ function englishReutersArticleUrl(value) {
   return REUTERS_UNSUPPORTED_PATHS.has(firstPath) ? '' : url;
 }
 
+function reutersArticlePublishedOn(value) {
+  try {
+    const match = new URL(value).pathname.match(/-(\d{4}-\d{2}-\d{2})\/?$/);
+    return isIsoDate(match?.[1]) ? match[1] : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
 function parseReutersNewsSitemap(xml) {
   if (typeof xml !== 'string'
     || !/^\s*(?:<\?xml\b[^?]*\?>\s*)?<urlset\b[\s\S]*<\/urlset>\s*$/i.test(xml)) {
@@ -810,21 +820,28 @@ function parseReutersNewsSitemap(xml) {
     const title = xmlValue(block, 'news:title');
     const publicationName = xmlValue(block, 'news:name');
     const language = xmlValue(block, 'news:language');
-    const publishedAt = xmlValue(block, 'news:publication_date');
+    const sitemapPublishedAt = xmlValue(block, 'news:publication_date');
+    if (!isIsoDateTime(sitemapPublishedAt)) return null;
+    const parsedSitemapPublishedAt = parseNewsTimestamp(sitemapPublishedAt);
+    if (!parsedSitemapPublishedAt) return null;
+    const publishedOn = reutersArticlePublishedOn(url);
+    const sitemapDateMatchesUrl = parsedSitemapPublishedAt
+      && chicagoIsoDate(parsedSitemapPublishedAt) === publishedOn;
     return {
       title,
       url,
-      publishedAt,
+      publishedOn,
+      ...(sitemapDateMatchesUrl ? { publishedAt: parsedSitemapPublishedAt.toISOString() } : {}),
       language,
       publicationName,
       providerSourceName: 'Reuters',
-      publishedAtVerified: true
+      ...(sitemapDateMatchesUrl ? { publishedAtVerified: true } : {})
     };
-  }).filter((entry) => entry.url
+  }).filter((entry) => entry?.url
     && entry.title
     && entry.publicationName === 'Reuters'
     && entry.language === 'en'
-    && isIsoDateTime(entry.publishedAt));
+    && isIsoDate(entry.publishedOn));
   if (!entries.length) {
     throw new Error('Reuters News sitemap urlset contains no valid English article entries.');
   }
@@ -928,11 +945,16 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   // Normalize before the Chicago-date freshness check; malformed structured
   // provider timestamps must be rejected instead of rolling into an eligible day.
   const publishedAt = parseNewsTimestamp(item?.publishedAt);
+  const sourcePublishedOn = acquisitionPath?.provider === 'reuters-public'
+    && source?.id === 'reuters'
+    && isIsoDate(item?.publishedOn)
+    ? item.publishedOn
+    : '';
   const title = plainText(item?.title);
-  if (!url || (!source && !tickerSearchSymbol) || !publishedAt || !title) return null;
+  if (!url || (!source && !tickerSearchSymbol) || (!publishedAt && !sourcePublishedOn) || !title) return null;
   const sourceDomain = publisherHostname(url);
   if (!sourceDomain) return null;
-  const publishedOn = chicagoIsoDate(publishedAt);
+  const publishedOn = sourcePublishedOn || chicagoIsoDate(publishedAt);
   if (!eligibleDates.has(publishedOn)) return null;
   const pool = acquisitionPath.pool === 'cryptoCandidates'
     || highConfidenceCryptoTitle(title)
@@ -942,9 +964,15 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     title,
     url,
     publishedOn,
-    publishedAt: publishedAt.toISOString(),
-    dateSource: source?.id === 'yahoo-finance' ? 'hosted_syndication' : 'provider_published',
-    ...(item.publishedAtVerified === true && source?.id !== 'yahoo-finance' ? { publishedAtVerified: true } : {}),
+    ...(publishedAt ? { publishedAt: publishedAt.toISOString() } : {}),
+    dateSource: source?.id === 'yahoo-finance'
+      ? 'hosted_syndication'
+      : source?.id === 'reuters' && sourcePublishedOn && !publishedAt
+        ? 'url_published_date'
+        : 'provider_published',
+    ...(publishedAt && item.publishedAtVerified === true && source?.id !== 'yahoo-finance'
+      ? { publishedAtVerified: true }
+      : {}),
     sourceId: source?.id || `marketaux:${sourceDomain}`,
     sourceLabel: source?.displayName || sourceDomain,
     sourceDomain,
@@ -1039,20 +1067,27 @@ function readDashboardData(input) {
 
 function priorCandidate(item, pool, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
+  const source = sourceForUrl(url);
   const title = String(item?.title || '').trim();
-  const publishedOn = String(item?.publishedOn || '');
+  const publishedOn = source?.id === 'reuters'
+    ? reutersArticlePublishedOn(url)
+    : String(item?.publishedOn || '');
+  const publishedAt = isIsoDateTime(item?.publishedAt)
+    && (source?.id !== 'reuters' || chicagoIsoDate(new Date(item.publishedAt)) === publishedOn)
+    ? item.publishedAt
+    : '';
   const sourceLabel = String(item?.sourceLabel || '').trim();
   const tickerSearchSymbols = [...new Set((Array.isArray(item?.tickerSearchSymbols) ? item.tickerSearchSymbols : [])
     .map((ticker) => String(ticker || '').toUpperCase())
     .filter((ticker) => MARKETAUX_TICKERS.has(ticker)))];
-  if (!url || !publisherHostname(url) || (!sourceForUrl(url) && !tickerSearchSymbols.length)
+  if (!url || !publisherHostname(url) || (!source && !tickerSearchSymbols.length)
     || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   return {
     title,
     url,
     publishedOn,
     sourceLabel,
-    ...(isIsoDateTime(item?.publishedAt) ? { publishedAt: item.publishedAt } : {}),
+    ...(publishedAt ? { publishedAt } : {}),
     dateSource: 'prior_validated_card',
     origin: 'prior_card',
     priorCard: true,

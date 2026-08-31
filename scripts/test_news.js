@@ -466,6 +466,22 @@ async function testDeterministicNewsCandidateAcquisition() {
       sourceLabel: 'Fixture News',
       tag: 'Prior',
       body: 'Previously reviewed market copy.'
+    }, {
+      title: 'Stale misdated prior Reuters card',
+      url: 'https://www.reuters.com/markets/us/stale-prior-fixture-2026-07-08',
+      publishedOn: '2026-07-10',
+      publishedAt: '2026-07-10T18:30:00.000Z',
+      sourceLabel: 'Reuters',
+      tag: 'Prior',
+      body: 'This card must not re-enter through stale stored provenance.'
+    }, {
+      title: 'Fresh prior Reuters card',
+      url: 'https://www.reuters.com/markets/us/fresh-prior-fixture-2026-07-10',
+      publishedOn: '2026-07-10',
+      publishedAt: '2026-07-11T08:30:00.000Z',
+      sourceLabel: 'Reuters',
+      tag: 'Prior',
+      body: 'This card remains fresh by its URL date without conflicting precision.'
     }],
     futuresModule: { stories: [] },
     crypto: { notes: [] }
@@ -520,6 +536,8 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc').provider, 'rss');
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'yahoo-finance').publishedAtVerified, undefined);
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.priorCard), true);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale misdated prior Reuters card'), false);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Fresh prior Reuters card').publishedAt, undefined);
   assert.equal(artifact.cryptoCandidates.find((candidate) => candidate.sourceId === 'coindesk').sourceLabel, 'CoinDesk');
 }
 
@@ -853,21 +871,68 @@ function testReutersNewsSitemapParsing() {
 
   const entries = parseReutersNewsSitemap(reutersNewsSitemap([
     reutersNewsSitemapEntry(),
+    reutersNewsSitemapEntry({
+      title: 'Reuters modified-date fixture',
+      url: 'https://www.reuters.com/markets/us/reuters-modified-date-fixture-2026-07-09/',
+      publishedAt: '2026-07-10T18:30:00.000Z'
+    }),
     reutersNewsSitemapEntry({ url: 'https://www.reuters.com/fr/affaires/french-fixture-2026-07-10/' }),
     reutersNewsSitemapEntry({ url: 'https://www.reuters.com/default/legacy-fixture-2024-11-11/', title: 'مثال موروث' }),
     reutersNewsSitemapEntry({ url: 'https://evil.example/reuters-fixture', title: 'External fixture' }),
+    reutersNewsSitemapEntry({ url: 'https://www.reuters.com/markets/us/undated-fixture/', title: 'Undated fixture' }),
     reutersNewsSitemapEntry({ publishedAt: 'not-a-date', title: 'Malformed date fixture' }),
+    reutersNewsSitemapEntry({ publishedAt: '2026-07-10T18:30:00', title: 'Timezone-free date fixture' }),
     reutersNewsSitemapEntry({ publicationName: 'Not Reuters', title: 'Wrong publication fixture' })
   ]));
   assert.deepEqual(entries, [{
     title: 'Reuters fixture headline',
     url: 'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10',
+    publishedOn: '2026-07-10',
     publishedAt: '2026-07-10T18:30:00.000Z',
     language: 'en',
     publicationName: 'Reuters',
     providerSourceName: 'Reuters',
     publishedAtVerified: true
+  }, {
+    title: 'Reuters modified-date fixture',
+    url: 'https://www.reuters.com/markets/us/reuters-modified-date-fixture-2026-07-09',
+    publishedOn: '2026-07-09',
+    language: 'en',
+    publicationName: 'Reuters',
+    providerSourceName: 'Reuters'
   }], 'Malformed, external, and non-English entries must be isolated without discarding the valid Reuters entry.');
+
+  const matchingCandidate = normalizeProviderCandidate(entries[0], {
+    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
+  }, new Set(['2026-07-10']));
+  assert.equal(matchingCandidate.publishedAtVerified, true);
+  assert.equal(matchingCandidate.dateSource, 'provider_published');
+
+  const modifiedCandidate = normalizeProviderCandidate(entries[1], {
+    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
+  }, new Set(['2026-07-09']));
+  assert.equal(modifiedCandidate.publishedOn, '2026-07-09');
+  assert.equal(modifiedCandidate.publishedAt, undefined);
+  assert.equal(modifiedCandidate.publishedAtVerified, undefined);
+  assert.equal(modifiedCandidate.dateSource, 'url_published_date');
+  assert.equal(normalizeProviderCandidate({ ...entries[1], publishedAtVerified: true }, {
+    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
+  }, new Set(['2026-07-09'])).publishedAtVerified, undefined,
+  'A date-only candidate must not retain verified status without an exact timestamp.');
+  assert.equal(candidateInFuturesPublicationWindow(modifiedCandidate, {
+    start: new Date('2026-07-09T00:00:00.000Z'),
+    end: new Date('2026-07-11T00:00:00.000Z')
+  }), false, 'A conflicting Reuters sitemap timestamp must not qualify for an exact Futures window.');
+  assert.equal(normalizeProviderCandidate(entries[1], {
+    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
+  }, new Set(['2026-07-10'])), null, 'A fresh sitemap modification must not make a stale Reuters URL date eligible.');
+  assert.equal(normalizeProviderCandidate({
+    title: 'Non-Reuters date-only fixture',
+    url: 'https://www.cnbc.com/2026/07/10/date-only-fixture.html',
+    publishedOn: '2026-07-10'
+  }, {
+    id: 'cnbc', provider: 'rss', pool: 'generalCandidates'
+  }, new Set(['2026-07-10'])), null, 'Date-only freshness must remain restricted to the Reuters URL contract.');
   for (const malformed of [
     undefined,
     null,
