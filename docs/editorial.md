@@ -59,6 +59,7 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 - Preferred general sources: AP, Reuters, CNBC, Yahoo Finance, Axios, Kiplinger, Investing.com, Investopedia, Morningstar, TheStreet, U.S. News Money, and official exchange or index-provider pages. Prefer primary sources for company, policy, or market-structure claims; preferred crypto sources include CoinDesk, Decrypt, CoinGecko, CoinMarketCap, Alternative.me, issuer pages, SEC filings, and official protocol, exchange, or company announcements.
 - Match every story's headline and body to its linked article's main reported theme. Narrow a card to a company, earnings, product, or subtheme angle when that is all the reporting supports; do not use it to imply a broader market, sector, or macro claim.
 - `READ MORE` links must be reader-facing HTML pages, never raw APIs, feeds, JSON, or CSV downloads.
+- Judge the selected News deck as a collection, not only as individual cards. Before finalizing, compare the first 9 General stories with the Opening catalysts, Futures cards, Week Ahead, Earnings, Tape drivers, and Crypto section. The primary deck should provide a coherent, balanced view of the edition's most important distinct drivers and forward risks without unnecessary duplication. If individually strong cards produce a collectively scattered, repetitive, or incomplete deck, revise the selection as needed, replacing narrow, redundant, or comparatively weak cards with stronger reviewed contenders until the deck provides coherent, balanced coverage. Do not force coverage when the candidate pool lacks suitable source-faithful articles.
 
 ### Futures contract
 
@@ -216,6 +217,7 @@ Run this gate before Apply.
 - No selected URL may appear twice within a section or across Futures, Stories, and Crypto.
 - Read the Futures eligibility bullets in the News-card contract and verify every Futures selection against them.
 - Treat fewer than 18 General selections or 15 Crypto selections as below target. Continue reviewing eligible candidates until both targets are met or every eligible candidate in the affected pool has been exhausted.
+- Review the first 9 General stories as a collection. Confirm that they reflect the edition's major catalysts and forward risks without excessive duplication or important unexplained gaps. If the deck is scattered, repetitive, or incomplete despite stronger reviewed alternatives, revise the selection as needed by replacing narrow, redundant, or comparatively weak cards. Do not treat 9 individually acceptable cards as sufficient.
 - If a selected URL fails any check, fix `editorialReview.newsSelection` before Apply Handoff. Do not rely on Apply Handoff to omit or replace it.
 - Inspect intended editorial fallbacks before Apply. Any avoidable editorial fallback, duplicate omission, blank reviewed field, or below-target section caused by AI selection or copy quality must be fixed or repaired in the handoff before Apply.
 - Under the Earnings editorial contract and Week Ahead / Market Lens editorial contract, confirm required commentary is current, company- or event-specific, and not carried forward as completed work.
