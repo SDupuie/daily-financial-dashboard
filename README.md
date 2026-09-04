@@ -84,4 +84,10 @@ Run the applicable checks after content, structural, layout, script, or contract
 - After each dashboard update commit, run `./scripts/publish_main.sh`.
 - Confirm publication succeeds and `git status --short --branch` no longer shows local commits ahead of `origin/main`.
 
-Normal daily updates stop here. `docs/reference.md` is not AI Editorial Work guidance. During Prepare Handoff, AI Editorial Work, or Apply Handoff, read only the applicable `docs/reference.md` subsection, and do so only when this runbook explicitly points to it, when debugging a failed run, or when changing code or data contracts.
+### Weekly Git maintenance
+
+- After successful publication, run this step only for the scheduled Friday afternoon edition. Determine eligibility from the scheduled run's start date and edition in `America/Chicago`; retain that decision if publication finishes later. Other editions and manual updates stop after publication.
+- From the repository root, record `du -sk .git`, run ordinary `git gc` with escalated local command execution and default settings, then record `du -sk .git` again. Wait for a numeric exit code before reporting completion. Do not add `--aggressive`, `--prune=now`, or `--force`.
+- Include the maintenance result and space recovered in the run's completion report. If maintenance fails or cannot run, report that separately while preserving the successful publication result; do not repeat Prepare, Apply, commit, or publish to retry maintenance.
+
+Normal daily updates stop after publication and any eligible weekly Git maintenance. `docs/reference.md` is not AI Editorial Work guidance. During Prepare Handoff, AI Editorial Work, or Apply Handoff, read only the applicable `docs/reference.md` subsection, and do so only when this runbook explicitly points to it, when debugging a failed run, or when changing code or data contracts.
