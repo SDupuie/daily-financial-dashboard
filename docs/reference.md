@@ -57,6 +57,12 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 - Owner: `scripts/fetch_chart_data.js` owns Futures payloads.
 - Boundary rules: `futuresModule.futures[]` contains exactly four index-futures rows unless `availability.status` is explicitly `unavailable`; Futures story rules live in the News-card contract.
 
+### Scheduled market calendar
+
+- Owners: the private, read-only `scripts/market_calendar.js` module retrieves and interprets Finnhub's U.S. market-holiday response; `scripts/run_daily_update.js` applies its result to scheduler-driven preparation.
+- Scheduled Prepare checks the current `America/Chicago` date before any section fetch. A matching Finnhub holiday row with an empty `tradingHour` is a full closure and skips the run without changing staging, the canonical dashboard, or the completed-window marker. A matching row with populated trading hours is a shortened session and proceeds normally. Manual Prepare and scheduled Apply do not call this gate.
+- The check fails open: a missing credential, request failure, malformed payload, or missing date does not suppress an update. Finnhub responses must identify exchange `US`, timezone `America/New_York`, and a `data` array before they can authorize a skip.
+
 ### Prepare fallback contracts
 
 Prepare validates fresh deterministic payloads. Where a domain permits prior-canonical carry-forward, Prepare validates that fallback before using it. If no permitted fallback validates, it emits the domain's explicit unavailable state and continues. Chart and Tape are resolved as one atomic bundle. Section-level source or contract failures do not block publication.

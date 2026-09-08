@@ -22,6 +22,11 @@ const {
 } = require('./run_daily_update');
 const { reviewedTapeCommentary } = require('./editorial_review_contract');
 const { chicagoDateParts, scheduledNow } = require('./calendar_contract');
+const {
+  finnhubApiKey,
+  fullMarketClosure,
+  scheduledFullMarketClosure
+} = require('./market_calendar');
 const { normalizeWeekAhead } = require('./week_ahead_contract');
 const { chartableRowsFromDashboardHtml, validateDashboardHtml } = require('./validate_dashboard');
 
@@ -75,6 +80,60 @@ function testSharedCalendarClockHelpers() {
     const after = Date.now();
     assert.equal(actual >= before && actual <= after, true);
   });
+}
+
+async function testScheduledMarketHolidayGate() {
+  const payload = {
+    exchange: 'US',
+    timezone: 'America/New_York',
+    data: [
+      { eventName: 'Labor Day', atDate: '2026-09-07', tradingHour: '', postMarket: '' },
+      { eventName: 'Thanksgiving Day', atDate: '2026-11-27', tradingHour: '09:30-13:00', postMarket: '13:00:17:00' }
+    ]
+  };
+  assert.deepEqual(fullMarketClosure(payload, '2026-09-07'), {
+    date: '2026-09-07',
+    eventName: 'Labor Day'
+  });
+  assert.equal(fullMarketClosure(payload, '2026-11-27'), null, 'shortened sessions must still publish');
+  assert.equal(fullMarketClosure(payload, '2026-09-08'), null, 'ordinary trading dates must still publish');
+  assert.throws(
+    () => fullMarketClosure({ exchange: 'US', timezone: 'America/New_York', data: {} }, '2026-09-07'),
+    /invalid top-level shape/
+  );
+  assert.throws(
+    () => fullMarketClosure({ ...payload, data: [{ eventName: 'Labor Day', atDate: '2026-09-07' }] }, '2026-09-07'),
+    /entry for 2026-09-07 was malformed/
+  );
+  assert.equal(
+    finnhubApiKey({ FINNHUB_API_KEY: 'fixture-key' }, '/does/not/exist'),
+    'fixture-key'
+  );
+  assert.equal(
+    finnhubApiKey({ FINNHUB_API_KEY: 'fixture-key', DASHBOARD_TEST_NO_API_CREDENTIALS: '1' }, '/does/not/exist'),
+    ''
+  );
+  const requested = [];
+  assert.deepEqual(await scheduledFullMarketClosure('2026-09-07', {
+    apiKey: 'fixture-key',
+    requestJson: async (url, timeoutMs) => {
+      requested.push({ url, timeoutMs });
+      return payload;
+    }
+  }), {
+    date: '2026-09-07',
+    eventName: 'Labor Day'
+  });
+  assert.equal(requested.length, 1);
+  assert.equal(requested[0].url.hostname, 'finnhub.io');
+  assert.equal(requested[0].url.pathname, '/api/v1/stock/market-holiday');
+  assert.equal(requested[0].url.searchParams.get('exchange'), 'US');
+  assert.equal(requested[0].url.searchParams.get('token'), 'fixture-key');
+  assert.equal(requested[0].timeoutMs, 10000);
+  await assert.rejects(
+    () => scheduledFullMarketClosure('2026-09-07', { apiKey: '', requestJson: async () => payload }),
+    /FINNHUB_API_KEY is not configured/
+  );
 }
 
 function story(kind, index, extra = {}) {
@@ -1060,6 +1119,7 @@ async function main() {
 
   try {
     testSharedCalendarClockHelpers();
+    await testScheduledMarketHolidayGate();
     testArchitectureSingleWriterAndCliBoundaries();
     testPreparationStagesWithoutCanonicalWrite();
     testCommitValidatesBeforeReplace();

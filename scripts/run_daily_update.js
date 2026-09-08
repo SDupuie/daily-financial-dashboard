@@ -82,6 +82,7 @@ const {
 } = require('./news_contract');
 const { priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
+const { scheduledFullMarketClosure } = require('./market_calendar');
 const { atomicWriteJson } = require('./staging_writer');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -2254,11 +2255,22 @@ async function main() {
   // Only scheduler-driven preparation owns the wall-clock guard. Finalization
   // rechecks completion without turning the start window into a deadline.
   if (args.scheduled && !args.applyDashboardDataJson) {
+    const scheduledStart = scheduledNow();
     try {
-      validateScheduledStart(args.dashboard, args.windowMode);
+      validateScheduledStart(args.dashboard, args.windowMode, scheduledStart);
     } catch (error) {
       reportPreparationStatus('skipped', `${error.message}; canonical dashboard unchanged`);
       return;
+    }
+    try {
+      const localDate = chicagoDateParts(scheduledStart).isoDate;
+      const closure = await scheduledFullMarketClosure(localDate);
+      if (closure) {
+        reportPreparationStatus('skipped', `U.S. equity market closed for ${closure.eventName} on ${closure.date}; canonical dashboard unchanged`);
+        return;
+      }
+    } catch (error) {
+      process.stderr.write(`Scheduled market-calendar check unavailable; continuing preparation: ${error.message}\n`);
     }
   }
 
