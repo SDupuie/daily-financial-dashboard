@@ -11,7 +11,7 @@ const {
   NEWS_COVERAGE_REASON,
   allowedNewsDates,
   applyNewsCoverageState,
-  applyScheduledNewsBaseline,
+  applyNewsBaseline,
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,
@@ -1362,44 +1362,58 @@ function testBaselineSanitization() {
   assert.deepEqual(sanitizeNewsBaseline(null), {
     lastScheduledUpdateAt: null,
     lastScheduledWindow: null,
-    previousScheduledStoryIds: [],
-    currentScheduledStoryIds: []
+    previousPublishedStoryIds: [],
+    currentPublishedStoryIds: []
   });
   assert.deepEqual(sanitizeNewsBaseline({
     lastScheduledUpdateAt: 42,
     lastScheduledWindow: '2026-07-06:morning',
-    previousScheduledStoryIds: ['url:b', 'url:a', 'url:a', null],
-    currentScheduledStoryIds: 'invalid'
+    previousPublishedStoryIds: ['url:b', 'url:a', 'url:a', null],
+    currentPublishedStoryIds: 'invalid'
   }), {
     lastScheduledUpdateAt: null,
     lastScheduledWindow: '2026-07-06:morning',
-    previousScheduledStoryIds: ['url:a', 'url:b'],
-    currentScheduledStoryIds: []
+    previousPublishedStoryIds: ['url:a', 'url:b'],
+    currentPublishedStoryIds: []
   });
 }
 
 function testManualBaselineTransition() {
-  const previousStory = story('Previous', 'https://example.com/previous');
+  const morningStory = story('Morning', 'https://example.com/morning');
   const currentStory = story('Current', 'https://example.com/current');
   const incomingStory = story('Incoming', 'https://example.com/incoming');
   const previousData = {
+    stories: [currentStory, { title: '', url: 'not a URL' }],
+    crypto: { notes: [] },
     newsBaseline: {
       lastScheduledUpdateAt: '2026-07-06T12:00:00.000Z',
       lastScheduledWindow: '2026-07-06:morning',
-      previousScheduledStoryIds: [storyIdentity(previousStory)],
-      currentScheduledStoryIds: [storyIdentity(currentStory)]
+      previousPublishedStoryIds: [storyIdentity(morningStory)],
+      currentPublishedStoryIds: [storyIdentity(currentStory)]
     }
   };
-  const data = { stories: [previousStory, currentStory, incomingStory], crypto: { notes: [] } };
-  applyScheduledNewsBaseline(data, previousData);
-  assert.equal(data.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
-  assert.deepEqual(data.newsBaseline, previousData.newsBaseline);
+  const data = { stories: [currentStory, incomingStory], crypto: { notes: [] } };
+  applyNewsBaseline(data, previousData);
+  assert.equal(data.stories.some((item) => Object.keys(item).some((key) => key.startsWith('isNew'))), false);
+  assert.deepEqual(data.newsBaseline, {
+    lastScheduledUpdateAt: '2026-07-06T12:00:00.000Z',
+    lastScheduledWindow: '2026-07-06:morning',
+    previousPublishedStoryIds: [storyIdentity(currentStory)],
+    currentPublishedStoryIds: [storyIdentity(currentStory), storyIdentity(incomingStory)].sort()
+  });
 
   const currentFallbackData = { stories: [currentStory, incomingStory], crypto: { notes: [] } };
-  applyScheduledNewsBaseline(currentFallbackData, {
-    newsBaseline: { ...previousData.newsBaseline, previousScheduledStoryIds: [] }
+  applyNewsBaseline(currentFallbackData, {
+    stories: [currentStory],
+    crypto: { notes: [] },
+    newsBaseline: { ...previousData.newsBaseline, currentPublishedStoryIds: 'invalid' }
   });
-  assert.equal(currentFallbackData.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
+  assert.deepEqual(currentFallbackData.newsBaseline, {
+    lastScheduledUpdateAt: null,
+    lastScheduledWindow: null,
+    previousPublishedStoryIds: [storyIdentity(currentStory)],
+    currentPublishedStoryIds: [storyIdentity(currentStory), storyIdentity(incomingStory)].sort()
+  });
 }
 
 function testScheduledBaselineTransition() {
@@ -1409,31 +1423,33 @@ function testScheduledBaselineTransition() {
   const newCrypto = story('New Crypto', 'https://example.com/crypto/new');
   const previousIds = [storyIdentity(existingMarket), storyIdentity(existingCrypto)].sort();
   const previousData = {
+    stories: [existingMarket],
+    crypto: { notes: [existingCrypto] },
     newsBaseline: {
       lastScheduledUpdateAt: '2026-07-05T12:00:00.000Z',
       lastScheduledWindow: '2026-07-05:afternoon',
-      previousScheduledStoryIds: [],
-      currentScheduledStoryIds: previousIds
+      previousPublishedStoryIds: [],
+      currentPublishedStoryIds: previousIds
     }
   };
   const data = {
     stories: [existingMarket, newMarket],
     crypto: { notes: [existingCrypto, newCrypto] }
   };
-  applyScheduledNewsBaseline(data, previousData, {
+  applyNewsBaseline(data, previousData, {
     scheduled: true,
     scheduledWindow: 'morning',
     now: new Date('2026-07-06T12:00:00.000Z')
   });
-  assert.equal(data.stories.some((item) => 'isNewSinceScheduledUpdate' in item), false);
-  assert.equal(data.crypto.notes.some((item) => 'isNewSinceScheduledUpdate' in item), false);
-  assert.deepEqual(data.newsBaseline.previousScheduledStoryIds, previousIds);
-  assert.deepEqual(data.newsBaseline.currentScheduledStoryIds, sortedDashboardNewsIds(data));
+  assert.equal(data.stories.some((item) => Object.keys(item).some((key) => key.startsWith('isNew'))), false);
+  assert.equal(data.crypto.notes.some((item) => Object.keys(item).some((key) => key.startsWith('isNew'))), false);
+  assert.deepEqual(data.newsBaseline.previousPublishedStoryIds, previousIds);
+  assert.deepEqual(data.newsBaseline.currentPublishedStoryIds, sortedDashboardNewsIds(data));
   assert.equal(data.newsBaseline.lastScheduledUpdateAt, '2026-07-06T12:00:00.000Z');
   assert.equal(data.newsBaseline.lastScheduledWindow, '2026-07-06:morning');
 
   const afternoon = { stories: [existingMarket], crypto: { notes: [] } };
-  applyScheduledNewsBaseline(afternoon, previousData, {
+  applyNewsBaseline(afternoon, previousData, {
     scheduled: true,
     scheduledWindow: 'afternoon',
     now: new Date('2026-07-07T01:00:00.000Z')
@@ -1441,7 +1457,7 @@ function testScheduledBaselineTransition() {
   assert.equal(afternoon.newsBaseline.lastScheduledWindow, '2026-07-06:afternoon');
 
   assert.throws(
-    () => applyScheduledNewsBaseline({ stories: [], crypto: { notes: [] } }, previousData, {
+    () => applyNewsBaseline({ stories: [], crypto: { notes: [] } }, previousData, {
       scheduled: true,
       scheduledWindow: 'overnight',
       now: new Date('2026-07-06T12:00:00.000Z')
@@ -1456,8 +1472,8 @@ function testScheduledStartAndFinalizationGuards() {
   const baseline = {
     lastScheduledUpdateAt: '2026-07-08T21:00:00.000Z',
     lastScheduledWindow: '2026-07-08:afternoon',
-    previousScheduledStoryIds: [],
-    currentScheduledStoryIds: []
+    previousPublishedStoryIds: [],
+    currentPublishedStoryIds: []
   };
   fs.writeFileSync(dashboardFile, `<script type="application/json" id="dashboard-data">${JSON.stringify({ newsBaseline: baseline })}</script>`);
   assert.throws(

@@ -73,7 +73,7 @@ const {
   NEWS_COVERAGE_POLICIES,
   allowedNewsDates,
   applyNewsCoverageState,
-  applyScheduledNewsBaseline,
+  applyNewsBaseline,
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   futuresStoryPublicationWindow,
@@ -431,11 +431,11 @@ Options:
   --help                              Show this help
 
 Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
-Manual finalization is time-unrestricted and preserves the scheduled News baseline.
+Manual finalization is time-unrestricted, preserves scheduler completion metadata, and advances the published News comparison baseline.
 
 This orchestrator standardizes the daily workflow:
   1. prepare: refresh deterministic data, download News candidates, and write one dashboard-data handoff
-  2. apply: merge editorial work, advance the scheduled baseline, stamp, receipt, validate, and atomically apply
+  2. apply: merge editorial work, advance the published News baseline, stamp, receipt, validate, and atomically apply
 
 Publish remains a separate explicit step via ./scripts/publish_main.sh.
 `);
@@ -1439,9 +1439,9 @@ function patchDashboard(args) {
 
   applyEditionMetadata(dashboardData, args.windowMode);
   prepareCandidateNews(dashboardData);
-  // Preparation never advances scheduled News state. Only a successful final
-  // editorial application records completion and rotates the comparison set.
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: false, now: scheduledNow() });
+  // Preparation seeds the candidate's published-story comparison from the
+  // canonical dashboard without advancing scheduler completion metadata.
+  applyNewsBaseline(dashboardData, previousDashboardData, { scheduled: false, now: scheduledNow() });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, null, null, { stampEdition: false });
   return nextHtml;
 }
@@ -2080,7 +2080,7 @@ function applyDashboardDataJson(args) {
   if (reviewErrors.length) process.stderr.write(`Editorial review receipt will be best-effort: ${reviewErrors.join(' ')}\n`);
   const reviewChartData = compactChartPayload(candidateChartData);
   let nextHtml = replaceJsonBlock(canonicalHtml, 'chart-data', JSON.stringify(reviewChartData));
-  applyScheduledNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: windowMode, now: editorialNow });
+  applyNewsBaseline(dashboardData, previousDashboardData, { scheduled: args.scheduled, scheduledWindow: windowMode, now: editorialNow });
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData, { stampEdition: false });
   const publishingDefaultDashboard = path.resolve(args.dashboard) === DEFAULT_DASHBOARD;
   const recoveredEarningsPublication = isEmptyEarningsRecoveryWeek(finalizedEarnings?.week);

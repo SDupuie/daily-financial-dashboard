@@ -256,8 +256,8 @@ function validNewsBaseline(value) {
     && value.lastScheduledUpdateAt !== undefined
     && !isIsoDateTime(value.lastScheduledUpdateAt)) return false;
   if (!validScheduledWindowMarker(value.lastScheduledWindow)) return false;
-  return validBaselineArray(value.previousScheduledStoryIds)
-    && validBaselineArray(value.currentScheduledStoryIds);
+  return validBaselineArray(value.previousPublishedStoryIds)
+    && validBaselineArray(value.currentPublishedStoryIds);
 }
 
 function sanitizeNewsBaseline(value) {
@@ -269,12 +269,12 @@ function sanitizeNewsBaseline(value) {
     lastScheduledWindow: typeof baseline.lastScheduledWindow === 'string' && validScheduledWindowMarker(baseline.lastScheduledWindow)
       ? baseline.lastScheduledWindow
       : null,
-    previousScheduledStoryIds: [...arrayStringSet(baseline.previousScheduledStoryIds)].sort(),
-    currentScheduledStoryIds: [...arrayStringSet(baseline.currentScheduledStoryIds)].sort()
+    previousPublishedStoryIds: [...arrayStringSet(baseline.previousPublishedStoryIds)].sort(),
+    currentPublishedStoryIds: [...arrayStringSet(baseline.currentPublishedStoryIds)].sort()
   };
 }
 
-function applyScheduledNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
+function applyNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
   // The baseline stores comparison identities only. Renderers derive the visible
   // "New" badge so individual story rows stay source-shaped.
   const rawBaseline = previousData?.newsBaseline ?? data.newsBaseline;
@@ -285,18 +285,18 @@ function applyScheduledNewsBaseline(data, previousData, { scheduled = false, sch
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
       throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
     }
-    // Scheduled runs advance the comparison window; manual/on-demand applies
-    // retain the prior baseline so ad hoc repairs do not churn New badges.
-    data.newsBaseline = {
-      lastScheduledUpdateAt: now.toISOString(),
-      lastScheduledWindow: `${chicagoIsoDate(now)}:${scheduledWindow}`,
-      previousScheduledStoryIds: [...arrayStringSet(previousBaseline.currentScheduledStoryIds)].sort(),
-      currentScheduledStoryIds: sortedDashboardNewsIds(data)
-    };
-    return;
   }
 
-  data.newsBaseline = previousBaseline;
+  // Every completed Apply advances the published comparison pair. Scheduler
+  // completion metadata advances only for a scheduled run.
+  data.newsBaseline = {
+    lastScheduledUpdateAt: scheduled ? now.toISOString() : previousBaseline.lastScheduledUpdateAt,
+    lastScheduledWindow: scheduled
+      ? `${chicagoIsoDate(now)}:${scheduledWindow}`
+      : previousBaseline.lastScheduledWindow,
+    previousPublishedStoryIds: sortedDashboardNewsIds(previousData),
+    currentPublishedStoryIds: sortedDashboardNewsIds(data)
+  };
 }
 
 module.exports = {
@@ -304,7 +304,7 @@ module.exports = {
   NEWS_COVERAGE_REASON,
   allowedNewsDates,
   applyNewsCoverageState,
-  applyScheduledNewsBaseline,
+  applyNewsBaseline,
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,

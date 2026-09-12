@@ -288,8 +288,8 @@ function createDashboardValidationFixture() {
       newsBaseline: {
         lastScheduledUpdateAt: '2026-07-10T12:00:00.000Z',
         lastScheduledWindow: '2026-07-10:afternoon',
-        previousScheduledStoryIds: [],
-        currentScheduledStoryIds: scheduledIds
+        previousPublishedStoryIds: [],
+        currentPublishedStoryIds: scheduledIds
       },
       masthead: { edition: 'Afternoon Edition', date: 'Friday, July 10, 2026' },
       tape: {
