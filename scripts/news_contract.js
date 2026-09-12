@@ -274,6 +274,12 @@ function sanitizeNewsBaseline(value) {
   };
 }
 
+function publishedEditionKey(data) {
+  const edition = typeof data?.masthead?.edition === 'string' ? data.masthead.edition.trim() : '';
+  const date = typeof data?.masthead?.date === 'string' ? data.masthead.date.trim() : '';
+  return edition && date ? `${edition}\n${date}` : '';
+}
+
 function applyNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
   // The baseline stores comparison identities only. Renderers derive the visible
   // "New" badge so individual story rows stay source-shaped.
@@ -281,20 +287,25 @@ function applyNewsBaseline(data, previousData, { scheduled = false, scheduledWin
   const previousBaseline = validNewsBaseline(rawBaseline)
     ? sanitizeNewsBaseline(rawBaseline)
     : sanitizeNewsBaseline(null);
+  const currentEditionKey = publishedEditionKey(data);
+  const repeatsPublishedEdition = currentEditionKey
+    && currentEditionKey === publishedEditionKey(previousData);
   if (scheduled) {
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
       throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
     }
   }
 
-  // Every completed Apply advances the published comparison pair. Scheduler
-  // completion metadata advances only for a scheduled run.
+  // A same-edition refresh keeps the comparison point so its existing New
+  // pills survive. A new edition rotates it, regardless of how it was run.
   data.newsBaseline = {
     lastScheduledUpdateAt: scheduled ? now.toISOString() : previousBaseline.lastScheduledUpdateAt,
     lastScheduledWindow: scheduled
       ? `${chicagoIsoDate(now)}:${scheduledWindow}`
       : previousBaseline.lastScheduledWindow,
-    previousPublishedStoryIds: sortedDashboardNewsIds(previousData),
+    previousPublishedStoryIds: repeatsPublishedEdition
+      ? previousBaseline.previousPublishedStoryIds
+      : sortedDashboardNewsIds(previousData),
     currentPublishedStoryIds: sortedDashboardNewsIds(data)
   };
 }

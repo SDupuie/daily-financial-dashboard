@@ -1383,6 +1383,7 @@ function testManualBaselineTransition() {
   const currentStory = story('Current', 'https://example.com/current');
   const incomingStory = story('Incoming', 'https://example.com/incoming');
   const previousData = {
+    masthead: { edition: 'Morning Edition', date: 'Monday, July 6, 2026' },
     stories: [currentStory, { title: '', url: 'not a URL' }],
     crypto: { notes: [] },
     newsBaseline: {
@@ -1392,18 +1393,43 @@ function testManualBaselineTransition() {
       currentPublishedStoryIds: [storyIdentity(currentStory)]
     }
   };
-  const data = { stories: [currentStory, incomingStory], crypto: { notes: [] } };
+  const data = {
+    masthead: { edition: 'Morning Edition', date: 'Monday, July 6, 2026' },
+    stories: [currentStory, incomingStory],
+    crypto: { notes: [] }
+  };
   applyNewsBaseline(data, previousData);
   assert.equal(data.stories.some((item) => Object.keys(item).some((key) => key.startsWith('isNew'))), false);
   assert.deepEqual(data.newsBaseline, {
     lastScheduledUpdateAt: '2026-07-06T12:00:00.000Z',
     lastScheduledWindow: '2026-07-06:morning',
-    previousPublishedStoryIds: [storyIdentity(currentStory)],
+    previousPublishedStoryIds: [storyIdentity(morningStory)],
     currentPublishedStoryIds: [storyIdentity(currentStory), storyIdentity(incomingStory)].sort()
   });
 
-  const currentFallbackData = { stories: [currentStory, incomingStory], crypto: { notes: [] } };
+  const newEditionData = {
+    masthead: { edition: 'Weekend Edition', date: 'Saturday, July 11, 2026' },
+    stories: [currentStory, incomingStory],
+    crypto: { notes: [] }
+  };
+  applyNewsBaseline(newEditionData, previousData);
+  assert.deepEqual(newEditionData.newsBaseline.previousPublishedStoryIds, [storyIdentity(currentStory)]);
+
+  const malformedEditionData = {
+    masthead: { edition: 42, date: null },
+    stories: [currentStory, incomingStory],
+    crypto: { notes: [] }
+  };
+  applyNewsBaseline(malformedEditionData, previousData);
+  assert.deepEqual(malformedEditionData.newsBaseline.previousPublishedStoryIds, [storyIdentity(currentStory)]);
+
+  const currentFallbackData = {
+    masthead: { edition: 'Morning Edition', date: 'Monday, July 6, 2026' },
+    stories: [currentStory, incomingStory],
+    crypto: { notes: [] }
+  };
   applyNewsBaseline(currentFallbackData, {
+    masthead: { edition: 'Morning Edition', date: 'Monday, July 6, 2026' },
     stories: [currentStory],
     crypto: { notes: [] },
     newsBaseline: { ...previousData.newsBaseline, currentPublishedStoryIds: 'invalid' }
@@ -1411,7 +1437,7 @@ function testManualBaselineTransition() {
   assert.deepEqual(currentFallbackData.newsBaseline, {
     lastScheduledUpdateAt: null,
     lastScheduledWindow: null,
-    previousPublishedStoryIds: [storyIdentity(currentStory)],
+    previousPublishedStoryIds: [],
     currentPublishedStoryIds: [storyIdentity(currentStory), storyIdentity(incomingStory)].sort()
   });
 }
@@ -1423,6 +1449,7 @@ function testScheduledBaselineTransition() {
   const newCrypto = story('New Crypto', 'https://example.com/crypto/new');
   const previousIds = [storyIdentity(existingMarket), storyIdentity(existingCrypto)].sort();
   const previousData = {
+    masthead: { edition: 'Afternoon Edition', date: 'Sunday, July 5, 2026' },
     stories: [existingMarket],
     crypto: { notes: [existingCrypto] },
     newsBaseline: {
@@ -1433,6 +1460,7 @@ function testScheduledBaselineTransition() {
     }
   };
   const data = {
+    masthead: { edition: 'Morning Edition', date: 'Monday, July 6, 2026' },
     stories: [existingMarket, newMarket],
     crypto: { notes: [existingCrypto, newCrypto] }
   };
@@ -1448,13 +1476,30 @@ function testScheduledBaselineTransition() {
   assert.equal(data.newsBaseline.lastScheduledUpdateAt, '2026-07-06T12:00:00.000Z');
   assert.equal(data.newsBaseline.lastScheduledWindow, '2026-07-06:morning');
 
-  const afternoon = { stories: [existingMarket], crypto: { notes: [] } };
+  const afternoon = {
+    masthead: { edition: 'Afternoon Edition', date: 'Monday, July 6, 2026' },
+    stories: [existingMarket],
+    crypto: { notes: [] }
+  };
   applyNewsBaseline(afternoon, previousData, {
     scheduled: true,
     scheduledWindow: 'afternoon',
     now: new Date('2026-07-07T01:00:00.000Z')
   });
   assert.equal(afternoon.newsBaseline.lastScheduledWindow, '2026-07-06:afternoon');
+
+  const repeatedEdition = {
+    masthead: { ...previousData.masthead },
+    stories: [existingMarket, newMarket],
+    crypto: { notes: [existingCrypto] }
+  };
+  applyNewsBaseline(repeatedEdition, previousData, {
+    scheduled: true,
+    scheduledWindow: 'afternoon',
+    now: new Date('2026-07-05T21:00:00.000Z')
+  });
+  assert.deepEqual(repeatedEdition.newsBaseline.previousPublishedStoryIds, []);
+  assert.deepEqual(repeatedEdition.newsBaseline.currentPublishedStoryIds, sortedDashboardNewsIds(repeatedEdition));
 
   assert.throws(
     () => applyNewsBaseline({ stories: [], crypto: { notes: [] } }, previousData, {

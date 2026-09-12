@@ -431,11 +431,11 @@ Options:
   --help                              Show this help
 
 Scheduled preparation checks the weekday/time window and completion marker before fetching. Finalization rechecks only the completion marker, so a run that started correctly may finish after the window closes.
-Manual finalization is time-unrestricted, preserves scheduler completion metadata, and advances the published News comparison baseline.
+Manual finalization is time-unrestricted and preserves scheduler completion metadata. Any repeated edition keeps the News comparison point; any new edition rotates it, whether scheduled or manual.
 
 This orchestrator standardizes the daily workflow:
   1. prepare: refresh deterministic data, download News candidates, and write one dashboard-data handoff
-  2. apply: merge editorial work, advance the published News baseline, stamp, receipt, validate, and atomically apply
+  2. apply: merge editorial work, update the published News baseline, stamp, receipt, validate, and atomically apply
 
 Publish remains a separate explicit step via ./scripts/publish_main.sh.
 `);
