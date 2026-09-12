@@ -274,22 +274,21 @@ function sanitizeNewsBaseline(value) {
   };
 }
 
-function publishedEditionKey(data) {
-  const edition = typeof data?.masthead?.edition === 'string' ? data.masthead.edition.trim() : '';
-  const date = typeof data?.masthead?.date === 'string' ? data.masthead.date.trim() : '';
-  return edition && date ? `${edition}\n${date}` : '';
-}
-
 function applyNewsBaseline(data, previousData, { scheduled = false, scheduledWindow = '', now = new Date() } = {}) {
   // The baseline stores comparison identities only. Renderers derive the visible
   // "New" badge so individual story rows stay source-shaped.
+  const editionKey = (dashboard) => {
+    const edition = typeof dashboard?.masthead?.edition === 'string' ? dashboard.masthead.edition.trim() : '';
+    const date = typeof dashboard?.masthead?.date === 'string' ? dashboard.masthead.date.trim() : '';
+    return edition && date ? `${edition}\n${date}` : '';
+  };
   const rawBaseline = previousData?.newsBaseline ?? data.newsBaseline;
   const previousBaseline = validNewsBaseline(rawBaseline)
     ? sanitizeNewsBaseline(rawBaseline)
     : sanitizeNewsBaseline(null);
-  const currentEditionKey = publishedEditionKey(data);
+  const currentEditionKey = editionKey(data);
   const repeatsPublishedEdition = currentEditionKey
-    && currentEditionKey === publishedEditionKey(previousData);
+    && currentEditionKey === editionKey(previousData);
   if (scheduled) {
     if (!SCHEDULED_WINDOW_NAMES.has(scheduledWindow)) {
       throw new Error('Scheduled finalization requires a staged Morning Edition or Afternoon Edition dashboard.');
