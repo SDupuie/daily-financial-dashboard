@@ -10,9 +10,14 @@ const {
   buildChartDataFallback,
   buildUnavailableChartData,
   compactChartPayload,
+  fetchFuture,
+  futuresContractCandidates,
+  priorFuturesContracts,
   quoteRowFromSeries,
+  resolveFuturesContract,
   roundChartPayload,
-  validateChartStagingPayload
+  validateChartStagingPayload,
+  validateFuturesPayload
 } = chartData;
 const {
   buildAssetAllocationFallback,
@@ -62,6 +67,238 @@ function chartSeries(overrides = {}) {
     ],
     ...overrides
   };
+}
+
+function futuresChartPayload(symbol, exchangeName, bars, overrides = {}) {
+  const last = bars.at(-1);
+  return {
+    chart: {
+      result: [{
+        meta: {
+          symbol,
+          instrumentType: 'FUTURE',
+          exchangeName,
+          chartPreviousClose: overrides.previousClose ?? bars[0].close,
+          regularMarketPrice: overrides.price ?? last.close,
+          regularMarketTime: overrides.time ?? last.timestamp
+        },
+        timestamp: bars.map((bar) => bar.timestamp),
+        indicators: {
+          quote: [{
+            open: bars.map((bar) => bar.open),
+            high: bars.map((bar) => bar.high),
+            low: bars.map((bar) => bar.low),
+            close: bars.map((bar) => bar.close),
+            volume: bars.map((bar) => bar.volume ?? 1)
+          }]
+        }
+      }],
+      error: null
+    }
+  };
+}
+
+function futuresBars(startIso, prices) {
+  const start = Date.parse(startIso) / 1000;
+  return prices.map((close, index) => ({
+    timestamp: start + index * 300,
+    open: close - 0.25,
+    high: close + 0.5,
+    low: close - 0.5,
+    close,
+    volume: 100 + index
+  }));
+}
+
+async function testFuturesContractResolutionAndFallback() {
+  const spec = {
+    symbol: 'ES=F',
+    contractRoot: 'ES',
+    contractExchange: 'CME',
+    label: 'S&P Futures'
+  };
+  assert.deepEqual(futuresContractCandidates(spec, new Date('2026-01-15T18:00:00Z')), ['ESH26.CME', 'ESM26.CME']);
+  assert.deepEqual(futuresContractCandidates(spec, new Date('2026-09-30T18:00:00Z')), ['ESU26.CME', 'ESZ26.CME']);
+  assert.deepEqual(futuresContractCandidates(spec, new Date('2026-10-01T18:00:00Z')), ['ESZ26.CME', 'ESH27.CME']);
+
+  const priorOld = futuresBars('2026-07-09T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 112 + index));
+  const currentOld = futuresBars('2026-07-10T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 102 + index));
+  const priorNext = futuresBars('2026-07-09T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 212 + index));
+  const currentNext = futuresBars('2026-07-10T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 202 + index));
+  const oldPayload = futuresChartPayload('ESU26.CME', 'CME', [...priorOld, ...currentOld]);
+  const nextPayload = futuresChartPayload('ESZ26.CME', 'CME', [...priorNext, ...currentNext]);
+  const mixedBars = [
+    ...priorOld,
+    ...currentOld.slice(0, 11),
+    { ...currentOld[11], open: 150, high: 151, low: 149, close: 150 },
+    currentNext[12]
+  ];
+  const mixedAlias = futuresChartPayload('ES=F', 'CME', mixedBars);
+  const runAt = new Date('2026-07-10T14:36:00Z');
+  const payloads = new Map([
+    ['ESU26.CME', oldPayload],
+    ['ESZ26.CME', nextPayload]
+  ]);
+  assert.equal(resolveFuturesContract(mixedAlias, payloads, runAt), '', 'A mixed roll tail must not guess a contract.');
+
+  const responses = new Map([
+    ['ES=F|5d', mixedAlias],
+    ['ESU26.CME|5d', oldPayload],
+    ['ESZ26.CME|5d', nextPayload]
+  ]);
+  const previousRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(previousRow.raw.contractSymbol, 'ESU26.CME');
+  assert.equal(previousRow.raw.price, currentOld.at(-1).close, 'The fallback must use fresh explicit-contract prices.');
+  assert.equal(previousRow.raw.referencePrice, priorOld.at(-1).close);
+
+  const malformedAlias = structuredClone(mixedAlias);
+  malformedAlias.chart.result[0].timestamp = {};
+  responses.set('ES=F|5d', malformedAlias);
+  const malformedAliasRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(malformedAliasRow.raw.contractSymbol, 'ESU26.CME', 'Malformed alias bars must use the eligible prior identity.');
+
+  responses.delete('ES=F|5d');
+  const aliasFailureRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(aliasFailureRow.raw.contractSymbol, 'ESU26.CME');
+  assert.equal(aliasFailureRow.raw.price, currentOld.at(-1).close, 'Alias failure must retain identity while using fresh contract data.');
+  const rolledAliasFailureRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESZ26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(rolledAliasFailureRow.raw.contractSymbol, 'ESZ26.CME', 'Alias failure must preserve a previously confirmed next contract.');
+
+  const nextAlias = futuresChartPayload('ES=F', 'CME', [...priorOld, ...currentNext]);
+  responses.set('ES=F|5d', nextAlias);
+  const matchedRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(matchedRow.raw.contractSymbol, 'ESZ26.CME');
+  assert.equal(matchedRow.raw.price, currentNext.at(-1).close);
+
+  const malformedOldPayload = structuredClone(oldPayload);
+  malformedOldPayload.chart.result[0].timestamp = {};
+  responses.set('ESU26.CME|5d', malformedOldPayload);
+  const isolatedCandidateRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, runAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(isolatedCandidateRow.raw.contractSymbol, 'ESZ26.CME', 'One malformed candidate must not discard the valid match.');
+
+  const overnightNext = futuresBars('2026-07-10T07:35:00Z', [301, 302, 303]);
+  const overnightOld = futuresBars('2026-07-10T07:35:00Z', [201, 202, 203]);
+  assert.equal(resolveFuturesContract(
+    futuresChartPayload('ES=F', 'CME', overnightNext),
+    new Map([
+      ['ESU26.CME', futuresChartPayload('ESU26.CME', 'CME', overnightOld)],
+      ['ESZ26.CME', futuresChartPayload('ESZ26.CME', 'CME', overnightNext)]
+    ]),
+    new Date('2026-07-10T07:55:00Z')
+  ), 'ESZ26.CME', 'Overnight bars must resolve without regular-session assumptions.');
+
+  const futuresRows = [
+    ['ES=F', 'ESU26.CME', 'CME'],
+    ['NQ=F', 'NQU26.CME', 'CME'],
+    ['YM=F', 'YMU26.CBT', 'CBT'],
+    ['RTY=F', 'RTYU26.CME', 'CME']
+  ].map(([symbol, contractSymbol, exchangeName], index) => ({
+    ...previousRow,
+    symbol,
+    label: `Fixture future ${index + 1}`,
+    raw: { ...previousRow.raw, contractSymbol, exchangeName }
+  }));
+  const staging = {
+    compiledAt: runAt.toISOString(),
+    source: 'Yahoo Finance Chart API',
+    mode: 'session',
+    futures: futuresRows
+  };
+  assert.deepEqual(validateFuturesPayload(staging, { expectedMode: 'session' }), []);
+  const missingContract = structuredClone(staging);
+  delete missingContract.futures[0].raw.contractSymbol;
+  assert.match(validateFuturesPayload(missingContract).join('\n'), /contractSymbol/);
+}
+
+async function testStaleFuturesContractCannotRetainPriority() {
+  const spec = {
+    symbol: 'ES=F',
+    contractRoot: 'ES',
+    contractExchange: 'CME',
+    label: 'S&P Futures'
+  };
+  const stalePrior = futuresBars('2026-09-16T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 90 + index));
+  const staleCurrent = futuresBars('2026-09-17T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 100 + index));
+  const freshPrior = futuresBars('2026-09-24T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 190 + index));
+  const freshCurrent = futuresBars('2026-09-25T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 200 + index));
+  const sessionRunAt = new Date('2026-09-25T21:00:00Z');
+  const responses = new Map([
+    ['ESU26.CME|5d', futuresChartPayload('ESU26.CME', 'CME', [...stalePrior, ...staleCurrent])],
+    ['ESZ26.CME|5d', futuresChartPayload('ESZ26.CME', 'CME', [...freshPrior, ...freshCurrent])]
+  ]);
+  const sessionRow = await fetchFuture(spec, { mode: 'session', delayMs: 0 }, sessionRunAt, 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(sessionRow.raw.contractSymbol, 'ESZ26.CME');
+  assert.equal(sessionRow.raw.sessionDate, '2026-09-25');
+
+  const stalePremarket = futuresBars('2026-09-17T10:00:00Z', Array.from({ length: 13 }, (_value, index) => 110 + index));
+  const freshPremarket = futuresBars('2026-09-25T10:00:00Z', Array.from({ length: 13 }, (_value, index) => 210 + index));
+  responses.set('ESU26.CME|1d', futuresChartPayload('ESU26.CME', 'CME', stalePremarket));
+  responses.set('ESZ26.CME|1d', futuresChartPayload('ESZ26.CME', 'CME', freshPremarket, { previousClose: freshPrior.at(-1).close }));
+  const premarketRow = await fetchFuture(spec, { mode: 'premarket', delayMs: 0 }, new Date('2026-09-25T12:30:00Z'), 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => responses.get(`${symbol}|${range}`)
+  });
+  assert.equal(premarketRow.raw.contractSymbol, 'ESZ26.CME');
+  assert.equal(new Date(premarketRow.raw.regularMarketTime * 1000).toISOString().slice(0, 10), '2026-09-25');
+}
+
+async function testPremarketFuturesUsesOneExplicitContract() {
+  const spec = {
+    symbol: 'ES=F',
+    contractRoot: 'ES',
+    contractExchange: 'CME',
+    label: 'S&P Futures'
+  };
+  const oldBars = futuresBars('2026-07-10T10:00:00Z', Array.from({ length: 13 }, (_value, index) => 100 + index));
+  const nextBars = futuresBars('2026-07-10T10:00:00Z', Array.from({ length: 13 }, (_value, index) => 200 + index));
+  const priorNext = futuresBars('2026-07-09T13:30:00Z', Array.from({ length: 13 }, (_value, index) => 205 + index));
+  const responses = new Map([
+    ['ES=F|1d', futuresChartPayload('ES=F', 'CME', nextBars)],
+    ['ESU26.CME|1d', futuresChartPayload('ESU26.CME', 'CME', oldBars)],
+    ['ESZ26.CME|1d', futuresChartPayload('ESZ26.CME', 'CME', nextBars, { previousClose: priorNext.at(-1).close })],
+    ['ESZ26.CME|5d', futuresChartPayload('ESZ26.CME', 'CME', [...priorNext, ...nextBars], { previousClose: priorNext.at(-1).close })]
+  ]);
+  const requests = [];
+  const row = await fetchFuture(spec, { mode: 'premarket', delayMs: 0 }, new Date('2026-07-10T12:30:00Z'), 'ESU26.CME', {
+    fetchFuturesPayload: async (symbol, range) => {
+      requests.push(`${symbol}|${range}`);
+      return responses.get(`${symbol}|${range}`);
+    }
+  });
+  assert.equal(row.raw.contractSymbol, 'ESZ26.CME');
+  assert.equal(row.raw.referencePrice, priorNext.at(-1).close);
+  assert.equal(requests.includes('ESZ26.CME|5d'), true);
+  assert.equal(requests.includes('ESU26.CME|5d'), false, 'Premarket must fetch reference history only for the selected contract.');
+}
+
+function testPriorFuturesContractIdentity() {
+  const dir = makeTemporaryDirectory('dfd-futures-contract-');
+  const input = path.join(dir, 'dashboard.html');
+  fs.writeFileSync(input, `<script type="application/json" id="dashboard-data">${JSON.stringify({
+    futuresModule: {
+      futures: [
+        { symbol: 'ES=F', raw: { contractSymbol: 'ESZ26.CME' } },
+        { symbol: 'YM=F', raw: { contractSymbol: 'invalid' } }
+      ]
+    }
+  })}</script>`);
+  const contracts = priorFuturesContracts(input);
+  assert.equal(contracts.get('ES=F'), 'ESZ26.CME');
+  assert.equal(contracts.get('YM=F'), '');
+  assert.deepEqual([...priorFuturesContracts(path.join(dir, 'missing.html')).entries()], []);
 }
 
 function assetRows() {
@@ -365,6 +602,10 @@ async function testBuildMarketRefreshNormalizesAndIsolatesFailures() {
 
 async function main() {
   try {
+    await testFuturesContractResolutionAndFallback();
+    await testStaleFuturesContractCannotRetainPriority();
+    await testPremarketFuturesUsesOneExplicitContract();
+    testPriorFuturesContractIdentity();
     testChartSeriesOwnsDerivedQuoteRows();
     testChartStagingFallbackAndIsolation();
     await testCurrentMarketFailuresStayIsolated();

@@ -112,12 +112,19 @@ const DEFAULT_OUTPUT = path.resolve(process.cwd(), 'generated', 'futures_module.
 
 // Staging helper only: production reads embedded futuresModule.futures from daily_financial_news.html.
 const FUTURES = [
-  { symbol: 'ES=F', label: 'S&P Futures', body: 'S&P 500 futures before the cash open.' },
-  { symbol: 'NQ=F', label: 'Nasdaq Futures', body: 'Growth and AI tone before the cash open.' },
-  { symbol: 'YM=F', label: 'Dow Futures', body: 'Blue-chip and defensive leadership read.' },
-  { symbol: 'RTY=F', label: 'Russell Futures', body: 'Small-cap and domestic cyclicals read.' }
+  { symbol: 'ES=F', contractRoot: 'ES', contractExchange: 'CME', label: 'S&P Futures', body: 'S&P 500 futures before the cash open.' },
+  { symbol: 'NQ=F', contractRoot: 'NQ', contractExchange: 'CME', label: 'Nasdaq Futures', body: 'Growth and AI tone before the cash open.' },
+  { symbol: 'YM=F', contractRoot: 'YM', contractExchange: 'CBT', label: 'Dow Futures', body: 'Blue-chip and defensive leadership read.' },
+  { symbol: 'RTY=F', contractRoot: 'RTY', contractExchange: 'CME', label: 'Russell Futures', body: 'Small-cap and domestic cyclicals read.' }
 ];
 const FUTURES_MODES = new Set(['premarket', 'session']);
+const FUTURES_QUARTERS = [
+  { month: 3, code: 'H' },
+  { month: 6, code: 'M' },
+  { month: 9, code: 'U' },
+  { month: 12, code: 'Z' }
+];
+const FUTURES_MATCH_BAR_COUNT = 3;
 const MIN_FUTURES_CHART_POINTS = 12;
 const MIN_FUTURES_CHART_SPAN_MINUTES = 60;
 
@@ -125,6 +132,90 @@ function isOffsetIsoTimestamp(value) {
   return typeof value === 'string'
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
     && !Number.isNaN(Date.parse(value));
+}
+
+function isExplicitFuturesContract(spec, symbol) {
+  return new RegExp(`^${spec.contractRoot}[HMUZ]\\d{2}\\.${spec.contractExchange}$`).test(String(symbol || ''));
+}
+
+// These index futures are quarterly, so the calendar quarter and its successor
+// cover both sides of a roll without encoding an expiration or roll schedule.
+function futuresContractCandidates(spec, runAt = new Date()) {
+  const date = chicagoIsoDate(new Date(runAt).getTime() / 1000);
+  const [year, month] = String(date || '').split('-').map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) throw new Error('Futures contract date is invalid.');
+  const index = FUTURES_QUARTERS.findIndex((quarter) => quarter.month >= month);
+  const currentIndex = index < 0 ? 0 : index;
+  const currentYear = index < 0 ? year + 1 : year;
+  const nextIndex = (currentIndex + 1) % FUTURES_QUARTERS.length;
+  const nextYear = currentYear + (currentIndex === FUTURES_QUARTERS.length - 1 ? 1 : 0);
+  const contract = (quarter, contractYear) => `${spec.contractRoot}${quarter.code}${String(contractYear).slice(-2)}.${spec.contractExchange}`;
+  return [
+    contract(FUTURES_QUARTERS[currentIndex], currentYear),
+    contract(FUTURES_QUARTERS[nextIndex], nextYear)
+  ];
+}
+
+// Prior dashboard data contributes identity only. Every selected contract is
+// fetched again below; prior Futures prices are never carried into this run.
+function priorFuturesContracts(input) {
+  try {
+    const rows = readDashboardData(input)?.futuresModule?.futures;
+    return new Map(FUTURES.map((spec) => {
+      const row = Array.isArray(rows) ? rows.find((item) => item?.symbol === spec.symbol) : null;
+      const contractSymbol = String(row?.raw?.contractSymbol || '');
+      return [spec.symbol, isExplicitFuturesContract(spec, contractSymbol) ? contractSymbol : ''];
+    }));
+  } catch (_error) {
+    return new Map();
+  }
+}
+
+function futuresMatchBars(payload, runAt = new Date()) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  // Yahoo appends a live quote at an irregular or still-open timestamp. Matching
+  // only completed five-minute buckets prevents request timing from choosing a contract.
+  const completedCutoff = Math.floor(new Date(runAt).getTime() / 300000) * 300 - 300;
+  return timestamps.map((timestamp, index) => ({
+    timestamp: Number(timestamp),
+    open: quote.open?.[index],
+    high: quote.high?.[index],
+    low: quote.low?.[index],
+    close: quote.close?.[index]
+  })).filter((bar) => bar.timestamp % 300 === 0
+    && bar.timestamp <= completedCutoff
+    && [bar.open, bar.high, bar.low, bar.close].every(Number.isFinite));
+}
+
+function sameFuturesBar(left, right) {
+  return ['open', 'high', 'low', 'close']
+    .every((field) => Math.abs(left[field] - right[field]) <= 1e-9);
+}
+
+function resolveFuturesContract(aliasPayload, contractPayloads, runAt = new Date()) {
+  const aliasBars = futuresMatchBars(aliasPayload, runAt).slice(-FUTURES_MATCH_BAR_COUNT);
+  if (aliasBars.length < FUTURES_MATCH_BAR_COUNT) return '';
+  const matches = [...contractPayloads.entries()].filter(([_symbol, payload]) => {
+    const byTimestamp = new Map(futuresMatchBars(payload, runAt).map((bar) => [bar.timestamp, bar]));
+    return aliasBars.every((bar) => byTimestamp.has(bar.timestamp)
+      && sameFuturesBar(bar, byTimestamp.get(bar.timestamp)));
+  });
+  // A roll may contain one mixed boundary bar. No unique match deliberately
+  // hands selection to the fresh prior-contract fallback instead of guessing.
+  return matches.length === 1 ? matches[0][0] : '';
+}
+
+function assertFuturesPayload(spec, symbol, payload) {
+  const meta = payload?.chart?.result?.[0]?.meta;
+  if (meta?.symbol !== symbol || meta?.instrumentType !== 'FUTURE') {
+    throw new Error(`${symbol} response did not identify the requested futures contract`);
+  }
+  if (symbol !== spec.symbol && (meta.exchangeName !== spec.contractExchange || !isExplicitFuturesContract(spec, symbol))) {
+    throw new Error(`${symbol} response did not identify a supported ${spec.contractRoot} contract`);
+  }
+  return payload;
 }
 
 function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
@@ -192,6 +283,13 @@ function validateFuturesPayload(payload, { expectedMode = '' } = {}) {
       errors.push(`${label}.raw must be an object.`);
       continue;
     }
+    // This field is selection state for the next refresh, not permission to
+    // carry a prior row or prior price through Futures staging.
+    if (!isExplicitFuturesContract(spec, row.raw.contractSymbol)) {
+      errors.push(`${label}.raw.contractSymbol must identify an explicit ${spec.contractRoot} quarterly contract.`);
+    }
+    if (row.raw.instrumentType !== 'FUTURE') errors.push(`${label}.raw.instrumentType must be FUTURE.`);
+    if (row.raw.exchangeName !== spec.contractExchange) errors.push(`${label}.raw.exchangeName must be ${spec.contractExchange}.`);
     for (const field of ['price', 'regularMarketTime', 'referencePrice', 'previousClose', 'delta', 'pct']) {
       if (!Number.isFinite(row.raw[field])) errors.push(`${label}.raw.${field} must be numeric.`);
     }
@@ -258,6 +356,7 @@ function unavailableFutureRow(spec, error, checkedAt = new Date()) {
 
 function parseArgs(argv) {
   const args = {
+    input: DEFAULT_INPUT,
     output: DEFAULT_OUTPUT,
     timeoutMs: REQUEST_TIMEOUT_MS,
     delayMs: DEFAULT_FUTURES_DELAY_MS,
@@ -270,6 +369,12 @@ function parseArgs(argv) {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === '--input') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--input requires a path.');
+      args.input = path.resolve(process.cwd(), argv[i + 1]);
+      i += 1;
+      continue;
+    }
     if (arg === '--output') {
       if (!argv[i + 1] || argv[i + 1].startsWith('-')) throw new Error('--output requires a path.');
       args.output = path.resolve(process.cwd(), argv[i + 1]);
@@ -333,9 +438,10 @@ function printHelp() {
   process.stdout.write(`Usage: node scripts/fetch_chart_data.js futures [options]
 
 Options:
+  --input PATH        Dashboard HTML containing the prior selected contracts
   --output PATH       JSON output path (default: generated/futures_module.json)
   --timeout-ms 10000  HTTP timeout in ms per request
-  --delay-ms 750      Delay between futures contracts and Yahoo host fallbacks
+  --delay-ms 750      Delay between futures requests and Yahoo host fallbacks
   --yahoo-rate-limit-retries 1      Retries for Yahoo rate limits and transient source errors
   --yahoo-rate-limit-delay-ms 3000  Fallback delay before retrying Yahoo rate limits
   --compact           Print one-line symbol summary
@@ -629,6 +735,7 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
     body: `${numberFormat(2).format(price)} last · ${signedNumber(delta)} vs ${referenceLabel} · ${timeText(regularMarketTime)}`,
     series: downsample(comparisonPoints),
     raw: {
+      contractSymbol: meta?.symbol || null,
       instrumentType: meta?.instrumentType || null,
       exchangeName: meta?.exchangeName || null,
       ...(activeSessionComparison || premarketReference ? {
@@ -659,18 +766,78 @@ function parseFuture(spec, payload, args, referencePayload = null, runAt = new D
   };
 }
 
-async function fetchFuture(spec, args, runAt = new Date()) {
-  const { payload } = await fetchYahooChartJson(
-    (host) => yahooFuturesChartUrl(host, spec.symbol, args),
-    args
-  );
-  const referencePayload = args.mode === 'premarket'
-    ? (await fetchYahooChartJson(
-      (host) => yahooFuturesChartUrl(host, spec.symbol, args, '5d'),
+async function fetchFuture(spec, args, runAt = new Date(), priorContract = '', dependencies = {}) {
+  const calendarCandidates = futuresContractCandidates(spec, runAt);
+  const previousContract = calendarCandidates.includes(priorContract) ? priorContract : '';
+  const fetchPayload = dependencies.fetchFuturesPayload || (async (symbol, range) => (
+    await fetchYahooChartJson(
+      (host) => yahooFuturesChartUrl(host, symbol, args, range),
       args
-    )).payload
-    : null;
-  return parseFuture(spec, payload, args, referencePayload, runAt);
+    )
+  ).payload);
+  const requestErrors = [];
+  let requestCount = 0;
+  const loadPayload = async (symbol, range) => {
+    if (requestCount && args.delayMs) await (dependencies.sleep || sleep)(args.delayMs);
+    requestCount += 1;
+    try {
+      return assertFuturesPayload(spec, symbol, await fetchPayload(symbol, range, args));
+    } catch (error) {
+      requestErrors.push(`${symbol}: ${error.message}`);
+      return null;
+    }
+  };
+
+  const matchRange = args.mode === 'session' ? '5d' : '1d';
+  const aliasPayload = await loadPayload(spec.symbol, matchRange);
+  const contractPayloads = new Map();
+  for (const symbol of calendarCandidates) {
+    const payload = await loadPayload(symbol, matchRange);
+    if (payload) contractPayloads.set(symbol, payload);
+  }
+
+  const latestCompletedByContract = new Map([...contractPayloads].map(([symbol, payload]) => [
+    symbol,
+    futuresMatchBars(payload, runAt).at(-1)?.timestamp
+  ]));
+  const freshestCompleted = Math.max(
+    ...[...latestCompletedByContract.values()].filter(Number.isFinite)
+  );
+  // An expired contract can remain queryable with old bars. Give prior/calendar
+  // preference only to candidates no more than one completed bucket behind.
+  const eligibleContractPayloads = new Map([...contractPayloads].filter(([symbol]) => {
+    const timestamp = latestCompletedByContract.get(symbol);
+    return Number.isFinite(timestamp) && timestamp >= freshestCompleted - 300;
+  }));
+  const matchedContract = aliasPayload
+    ? resolveFuturesContract(aliasPayload, eligibleContractPayloads, runAt)
+    : '';
+  // A confirmed match can advance the roll; otherwise prior identity keeps the
+  // row available, and calendar order bootstraps dashboards without that field.
+  // Every option here still uses a fresh explicit-contract payload from this run.
+  const selectionOrder = [...new Set([
+    matchedContract,
+    previousContract,
+    ...calendarCandidates
+  ].filter(Boolean))];
+  const parseErrors = [];
+  for (const symbol of selectionOrder) {
+    const payload = eligibleContractPayloads.get(symbol);
+    if (!payload) continue;
+    // Premarket uses a one-day display series but must obtain its reference from
+    // the same explicit contract's five-day history, never from the mixed alias.
+    const referencePayload = args.mode === 'premarket'
+      ? await loadPayload(symbol, '5d')
+      : null;
+    if (args.mode === 'premarket' && !referencePayload) continue;
+    try {
+      return parseFuture(spec, payload, args, referencePayload, runAt);
+    } catch (error) {
+      parseErrors.push(`${symbol}: ${error.message}`);
+    }
+  }
+
+  throw new Error([...requestErrors, ...parseErrors].join(' | ') || `${spec.symbol} explicit contract data was unavailable`);
 }
 
 function futuresOutput(args, checkedAt, results, failures) {
@@ -694,6 +861,7 @@ function futuresOutput(args, checkedAt, results, failures) {
 async function main(argv = process.argv.slice(2), dependencies = {}) {
   const args = parseArgs(argv);
   const checkedAt = args.asOf || (dependencies.now instanceof Date ? dependencies.now : scheduledNow());
+  const previousContracts = dependencies.priorContracts || priorFuturesContracts(args.input);
   const results = FUTURES.map((spec) => unavailableFutureRow(
     spec,
     new Error('Refresh did not complete before this staging snapshot.'),
@@ -714,7 +882,13 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
 
   for (const [index, spec] of FUTURES.entries()) {
     try {
-      results[index] = await (dependencies.fetchFuture || fetchFuture)(spec, args, checkedAt);
+      results[index] = await (dependencies.fetchFuture || fetchFuture)(
+        spec,
+        args,
+        checkedAt,
+        previousContracts.get(spec.symbol) || '',
+        dependencies
+      );
       failuresBySymbol.delete(spec.symbol);
     } catch (error) {
       failuresBySymbol.set(spec.symbol, { symbol: spec.symbol, message: error?.message || 'source unavailable' });
@@ -743,9 +917,13 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   return {
     buildUnavailableFuturesPayload,
     easternCashOpen,
+    fetchFuture,
+    futuresContractCandidates,
     parseArgs,
     parseFuture,
     premarketCutoff,
+    priorFuturesContracts,
+    resolveFuturesContract,
     run: main,
     scheduledNow,
     validateFuturesPayload
@@ -2249,9 +2427,11 @@ module.exports = {
   assertFinnhubQuoteRepairFreshness,
   fetchSeries,
   fetchEodhdMoveSeries,
+  fetchFuture: futuresModule.fetchFuture,
   fetchYahooSeries,
   fetchYahooJsonWithRetry,
   finnhubQuoteBarFromPayload,
+  futuresContractCandidates: futuresModule.futuresContractCandidates,
   isoDateFromDate,
   mergeFinnhubQuoteBar,
   yahooCompletedSessionDate,
@@ -2263,6 +2443,8 @@ module.exports = {
   parseYahooSeries,
     parseFuture: futuresModule.parseFuture,
     premarketCutoff: futuresModule.premarketCutoff,
+  priorFuturesContracts: futuresModule.priorFuturesContracts,
+  resolveFuturesContract: futuresModule.resolveFuturesContract,
     scheduledNow: futuresModule.scheduledNow,
   runFutures: futuresModule.run,
   roundChartPayload,

@@ -56,6 +56,7 @@ The embedded `dashboard-data` JSON block lives between the `DATA START` / `DATA 
 
 - Owner: `scripts/fetch_chart_data.js` owns Futures payloads.
 - Boundary rules: `futuresModule.futures[]` contains exactly four index-futures rows unless `availability.status` is explicitly `unavailable`; Futures story rules live in the News-card contract.
+- Contract-roll normalization: Yahoo's continuous index-futures aliases identify the active contract but never supply comparison prices directly. For each alias, the fetcher generates the current and following quarterly contract symbols from the Chicago calendar month and matches the alias's latest three completed five-minute OHLC bars to those explicit contracts. A unique match selects the contract. During a mixed transition or alias failure, the previously published contract identity remains selected when it is one of those two candidates and its latest completed bar does not trail the freshest explicit candidate by more than one five-minute bucket; all prices are freshly fetched from the selected explicit contract, and prior Futures prices are never carried forward. Without an eligible prior identity, calendar order is the deterministic fallback. The selected explicit contract supplies both the displayed price and reference price, so continuous-series roll gaps are never spliced or interpreted as returns. Each available row records `raw.contractSymbol`; a row becomes unavailable only when neither explicit candidate can produce a valid current-run comparison.
 
 ### Scheduled market calendar
 

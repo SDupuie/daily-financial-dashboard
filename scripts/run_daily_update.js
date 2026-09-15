@@ -2322,7 +2322,14 @@ async function main() {
   }
 
   const futuresMode = args.windowMode === 'afternoon' ? 'session' : 'premarket';
-  const futuresArgs = ['scripts/fetch_chart_data.js', 'futures', '--as-of', checkedAt.toISOString()];
+  // Futures reads only the prior explicit-contract identity from this canonical
+  // input; its displayed and reference prices remain current-run source data.
+  const futuresArgs = [
+    'scripts/fetch_chart_data.js',
+    'futures',
+    '--input', args.sourceDashboard,
+    '--as-of', checkedAt.toISOString()
+  ];
   if (futuresMode === 'session') futuresArgs.push('--session');
   const futuresPreparation = runWithSectionFallback(
     () => runCommand('node', futuresArgs),
