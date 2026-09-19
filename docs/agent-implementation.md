@@ -38,10 +38,10 @@ Work from this order of preference:
 When implementing audit findings, use the frozen changed-contract matrix from `docs/agent-review.md` as the implementation scope. Do not narrow the fix to the single failing example if the contract also covers adjacent renderer, validator, fallback, documentation, or test behavior.
 
 - Fix the owning contract path and every transitive consumer needed to keep renderer, validator, generated data, fallback behavior, documentation, and tests in sync.
-- Preserve the repo's fail-open publication policy. Do not add a publication-blocking or canonical-write-blocking condition unless it prevents the overall dashboard from displaying or is explicitly documented as publication-blocking.
+- Preserve the repo's fail-open publication policy. Do not add a publication-blocking or canonical-write-blocking condition unless it prevents the overall dashboard from displaying or is explicitly marked as publication-blocking by the owning contract in `docs/reference.md`.
 - Verify behavior classes for the changed contract: rejected, fulfilled-malformed, absent, null, wrong type, stale, carried-forward, and unavailable inputs, or document why a class is not applicable.
 - Verify isolation explicitly: one bad ticker, row, card, event, provider, section, or fallback input must not degrade unrelated data unless the documented contract is intentionally atomic.
-- Verify staged and published modes separately when both are affected, and run an actual browser-startup check for malformed published-data shapes that published validation can allow through.
+- Verify staged and published modes separately when both are affected. Run an actual browser-startup check for each malformed published-data shape that published validation allows through and that reaches a renderer or startup path changed by the fix. A change confined to staging metadata, validation, documentation, or another non-runtime path does not require browser verification unless it changes the published shapes that can reach runtime.
 - Before marking the fix complete, make sure every matrix row and every finding is resolved, intentionally accepted, or outside scope with evidence.
 
 ## Architecture and Ownership

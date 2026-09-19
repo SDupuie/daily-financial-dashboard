@@ -13,6 +13,7 @@ const {
 } = require('./dashboard_script_blocks');
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
 const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
+const { futuresStoryPublicationWindow } = require('./news_contract');
 const {
   deriveQuoteRowsFromSeries,
   roundChartPayload,
@@ -215,8 +216,8 @@ function validateEmbeddedWeekAheadContract(errors, data) {
 
 function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options = {}) {
   if (!Array.isArray(cards)) return;
-  // Staged contract validation proves embedded cards kept immutable provenance
-  // from Prepare/Apply; it does not re-rank or replace stories.
+  // Embedded cards retain metadata, not the candidate's verification flag.
+  // Prepare/Apply own provenance verification; this checks format and article time range.
   cards.forEach((card, index) => {
     const itemLabel = `${label}[${index}]`;
     if (!card || typeof card !== 'object' || Array.isArray(card)) {
@@ -237,8 +238,13 @@ function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options 
     if (!isIsoDate(card.publishedOn)) {
       errors.push(`${itemLabel}.publishedOn must be an ISO date.`);
     }
-    if ((options.requirePublishedAt || card.publishedAt !== undefined) && !isIsoDateTime(card.publishedAt)) {
+    if ((options.futuresWindow || card.publishedAt !== undefined) && !isIsoDateTime(card.publishedAt)) {
       errors.push(`${itemLabel}.publishedAt must be an offset-bearing ISO timestamp.`);
+    } else if (options.futuresWindow) {
+      const publishedAt = Date.parse(card.publishedAt);
+      if (publishedAt < options.futuresWindow.start.getTime() || publishedAt > options.futuresWindow.end.getTime()) {
+        errors.push(`${itemLabel}.publishedAt must fall within the applicable Futures article publication window.`);
+      }
     }
     if (typeof card.sourceLabel !== 'string' || !card.sourceLabel.trim()) {
       errors.push(`${itemLabel}.sourceLabel must be populated.`);
@@ -246,9 +252,20 @@ function validateEmbeddedNewsCardMetadataContract(errors, label, cards, options 
   });
 }
 
-function validateEmbeddedNewsMetadataContract(errors, data) {
+function validateEmbeddedNewsMetadataContract(errors, data, options = {}) {
+  const futures = data?.futuresModule;
+  // Deterministic candidates retain the canonical edition as a stale-write guard,
+  // so Prepare supplies its run time explicitly. Standalone checks use the embedded
+  // edition, never the validation clock. Session windows depend only on row dates.
+  const articleAsOf = options.preparedAt === undefined ? data?.editionId : options.preparedAt;
+  if (options.preparedAt !== undefined && !isIsoDateTime(options.preparedAt)) {
+    errors.push('Prepared validation time must be an offset-bearing ISO timestamp.');
+  }
+  const futuresWindow = futures?.sectionTitle === 'Pre-Market Futures' && !isIsoDateTime(articleAsOf)
+    ? null
+    : futuresStoryPublicationWindow(futures?.sectionTitle, articleAsOf, null, futures?.futures);
   validateEmbeddedNewsCardMetadataContract(errors, 'stories', data?.stories);
-  validateEmbeddedNewsCardMetadataContract(errors, 'futuresModule.stories', data?.futuresModule?.stories, { requirePublishedAt: true });
+  validateEmbeddedNewsCardMetadataContract(errors, 'futuresModule.stories', futures?.stories, { futuresWindow });
   validateEmbeddedNewsCardMetadataContract(errors, 'crypto.notes', data?.crypto?.notes);
 }
 
@@ -964,7 +981,7 @@ if (!dashboardScript) {
       validateCalendarSectionRanges(errors, data);
       validateEmbeddedWeekAheadContract(errors, data);
       validateEmbeddedEarningsWeekContract(errors, data);
-      validateEmbeddedNewsMetadataContract(errors, data);
+      validateEmbeddedNewsMetadataContract(errors, data, options);
       validateDashboardTapeCommentary(errors, data);
 
       const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
@@ -993,6 +1010,7 @@ return { errors, warnings };
 function runDashboardValidation(argv) {
   let inputFile = '';
   let validationMode = 'published';
+  let preparedAt;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--mode') {
@@ -1002,6 +1020,13 @@ function runDashboardValidation(argv) {
         process.exit(1);
       }
       validationMode = next;
+      index += 1;
+    } else if (arg === '--prepared-at') {
+      preparedAt = argv[index + 1];
+      if (!isIsoDateTime(preparedAt)) {
+        console.error('--prepared-at must be an offset-bearing ISO timestamp.');
+        process.exit(1);
+      }
       index += 1;
     } else if (arg.startsWith('-')) {
       console.error(`Unknown argument: ${arg}`);
@@ -1013,6 +1038,10 @@ function runDashboardValidation(argv) {
       inputFile = arg;
     }
   }
+  if (preparedAt !== undefined && validationMode !== 'staged') {
+    console.error('--prepared-at is only supported with --mode staged.');
+    process.exit(1);
+  }
   inputFile ||= 'daily_financial_news.html';
   const file = path.resolve(root, inputFile);
   // Allow staging copies to be validated while keeping the checker scoped to this repository.
@@ -1020,7 +1049,7 @@ function runDashboardValidation(argv) {
     console.error(`Refusing to validate a file outside this repository: ${inputFile}`);
     process.exit(1);
   }
-  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'), { validationMode });
+  const { errors, warnings } = validateDashboardHtml(fs.readFileSync(file, 'utf8'), { validationMode, preparedAt });
 
   if (errors.length) {
     console.error('Dashboard validation failed:');
@@ -1036,7 +1065,7 @@ function runDashboardValidation(argv) {
 
 function main(argv = process.argv.slice(2)) {
   if (argv[0] === '--help' || argv[0] === '-h') {
-    process.stdout.write('Usage: node scripts/validate_dashboard.js [--mode staged|published] [dashboard.html]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n');
+    process.stdout.write('Usage: node scripts/validate_dashboard.js [--mode staged|published] [--prepared-at ISO] [dashboard.html]\n       node scripts/validate_dashboard.js chart-data [options]\n       node scripts/validate_dashboard.js readiness [options]\n       node scripts/validate_dashboard.js test\n\n--prepared-at supplies the preparation time for staged Futures article validation; staged mode only.\n');
     return;
   }
   if (argv[0] === 'chart-data') return runChartDataValidation(argv.slice(1));

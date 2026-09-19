@@ -17,7 +17,7 @@ function chicagoIsoDate(date) {
 function allowedNewsDates(now = new Date()) {
   const current = chicagoDateParts(now);
   const allowed = new Set([current.isoDate, chicagoIsoDate(new Date(now.getTime() - 86400000))]);
-  // During the scheduled Monday-morning window, include Saturday so the normal
+  // During the Monday-morning time window, include Saturday so the normal
   // two-date rule does not discard still-relevant weekend coverage before review.
   if (current.weekday === 'Mon'
     && current.clockMinutes >= MONDAY_MORNING_NEWS_START_MINUTES

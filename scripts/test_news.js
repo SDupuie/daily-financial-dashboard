@@ -15,6 +15,7 @@ const {
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,
+  futuresStoryPublicationWindow,
   normalizeStoryTitle,
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,
@@ -161,17 +162,72 @@ function testNewsCoverageState() {
 }
 
 function testFuturesPublicationTimestampValidation() {
-  const futuresWindow = {
-    start: new Date('2026-07-10T18:30:00.000Z'),
-    end: new Date('2026-07-10T19:00:00.000Z')
-  };
+  const futuresRows = ['ES=F', 'NQ=F', 'YM=F', 'RTY=F']
+    .map((symbol) => ({ symbol, raw: { sessionDate: '2026-07-10' } }));
+  const sessionWindow = futuresStoryPublicationWindow(
+    'Session Futures',
+    'malformed-edition-id',
+    null,
+    futuresRows
+  );
+  assert.equal(sessionWindow.start.toISOString(), '2026-07-10T13:30:00.000Z');
+  assert.equal(sessionWindow.end.toISOString(), '2026-07-10T20:00:00.000Z');
+  for (const publishedAt of [
+    '2026-07-10T13:30:00.000Z',
+    '2026-07-10T18:45:00.000Z',
+    '2026-07-10T20:00:00.000Z'
+  ]) {
+    assert.equal(candidateInFuturesPublicationWindow({ publishedAt, publishedAtVerified: true }, sessionWindow), true);
+  }
+  for (const publishedAt of [undefined, null, 42, [], {}, '', 'not-a-time', '2026-07-10', '2026-07-10T18:45:00']) {
+    assert.equal(candidateInFuturesPublicationWindow({ publishedAt, publishedAtVerified: true }, sessionWindow), false);
+  }
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T13:29:59.999Z',
+    publishedAtVerified: true
+  }, sessionWindow), false);
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T20:00:00.001Z',
+    publishedAtVerified: true
+  }, sessionWindow), false);
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T18:45:00.000Z'
+  }, sessionWindow), false);
   assert.equal(candidateInFuturesPublicationWindow({
     publishedAt: '2026-07-10T18:45:00.000Z',
-    publishedAtVerified: true
-  }, futuresWindow), true);
-  for (const publishedAt of [undefined, null, 42, [], {}, '', 'not-a-time', '2026-07-10', '2026-07-10T18:45:00']) {
-    assert.equal(candidateInFuturesPublicationWindow({ publishedAt, publishedAtVerified: true }, futuresWindow), false);
+    publishedAtVerified: false
+  }, sessionWindow), false);
+
+  const preMarketWindow = futuresStoryPublicationWindow(
+    'Pre-Market Futures',
+    '2026-07-10T13:00:00.000Z',
+    null,
+    futuresRows
+  );
+  assert.equal(preMarketWindow.start.toISOString(), '2026-07-09T22:00:00.000Z');
+  assert.equal(preMarketWindow.end.toISOString(), '2026-07-10T13:00:00.000Z');
+  for (const publishedAt of [
+    '2026-07-09T22:00:00.000Z',
+    '2026-07-10T04:00:00-05:00',
+    '2026-07-10T13:00:00.000Z'
+  ]) {
+    assert.equal(candidateInFuturesPublicationWindow({ publishedAt, publishedAtVerified: true }, preMarketWindow), true);
   }
+  const postOpenPreMarketWindow = futuresStoryPublicationWindow(
+    'Pre-Market Futures',
+    '2026-07-10T14:00:00.000Z',
+    null,
+    futuresRows
+  );
+  assert.equal(postOpenPreMarketWindow.end.toISOString(), '2026-07-10T13:30:00.000Z');
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T13:30:00.000Z',
+    publishedAtVerified: true
+  }, postOpenPreMarketWindow), true);
+  assert.equal(candidateInFuturesPublicationWindow({
+    publishedAt: '2026-07-10T13:30:00.001Z',
+    publishedAtVerified: true
+  }, postOpenPreMarketWindow), false);
 }
 
 function testMondayMorningFreshnessWindow() {
@@ -596,6 +652,36 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
     })
   });
   assert.deepEqual(fallbackArtifact.futuresCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
+
+  const dateOnlyArtifact = await collectNewsCandidates({
+    asOf,
+    dashboardData: { ...dashboardData, futuresModule: { sectionTitle: 'Session Futures', futures: [], stories: [] } },
+    acquisitionPaths: [{ id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' }],
+    clock: () => asOf,
+    fetchPath: async () => ({ items: [{
+      publishedOn: '2026-07-18',
+      title: 'Fresh date-only Reuters fixture',
+      url: 'https://www.reuters.com/markets/us/fresh-date-only-fixture-2026-07-18/'
+    }, {
+      publishedOn: '2026-07-17',
+      title: 'Stale date-only Reuters fixture',
+      url: 'https://www.reuters.com/markets/us/stale-date-only-fixture-2026-07-17/'
+    }] }),
+    fetchArticle: async (candidate) => ({
+      finalUrl: candidate.url,
+      pageTitle: candidate.title,
+      description: 'Fixture description.',
+      excerpt: 'Fixture article content.',
+      publishedAt: null
+    })
+  });
+  assert.deepEqual(
+    dateOnlyArtifact.futuresCandidates.map((candidate) => candidate.title),
+    ['Fresh date-only Reuters fixture'],
+    'Without a derived session window, acquisition must retain normal date freshness for date-only candidates.'
+  );
+  assert.equal(dateOnlyArtifact.futuresCandidates[0].publishedAt, undefined,
+    'Article review must not invent precision for a date-only provider candidate.');
 }
 
 async function testNewsCandidateReviewCapAndProgress() {

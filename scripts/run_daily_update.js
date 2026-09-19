@@ -1046,7 +1046,9 @@ function stageDashboardCandidate(args, nextHtml) {
   const temporary = `${args.candidate}.${process.pid}.${Date.now()}.tmp`;
   try {
     fs.writeFileSync(temporary, nextHtml, { mode: fs.statSync(args.dashboard).mode });
-    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'staged', temporary], {
+    // The candidate keeps the canonical edition ID for the stale-candidate guard;
+    // validate its Futures articles against this preparation, not that prior edition.
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, 'validate_dashboard.js'), '--mode', 'staged', '--prepared-at', scheduledNow().toISOString(), temporary], {
       cwd: ROOT,
       stdio: 'inherit'
     });

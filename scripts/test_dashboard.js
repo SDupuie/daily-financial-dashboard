@@ -428,7 +428,7 @@ function testPreparationStagesWithoutCanonicalWrite() {
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, originalHtml);
 
-  const nextHtml = withScheduledNow(FIXTURE_NOW, () => patchDashboard({
+  const patchArgs = {
     dashboard: dashboardFile,
     candidate: candidateFile,
     windowMode: 'afternoon',
@@ -458,7 +458,8 @@ function testPreparationStagesWithoutCanonicalWrite() {
     },
     weekAheadPayload: dashboard.weekAhead,
     earningsWeekPayload: dashboard.earnings.week
-  }));
+  };
+  const nextHtml = withScheduledNow(FIXTURE_NOW, () => patchDashboard(patchArgs));
   withScheduledNow(FIXTURE_NOW, () => stageDashboardCandidate({
     dashboard: dashboardFile,
     candidate: candidateFile
@@ -467,6 +468,40 @@ function testPreparationStagesWithoutCanonicalWrite() {
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
   assert.equal(fs.existsSync(candidateFile), true);
   assert.equal(readJsonBlock(fs.readFileSync(candidateFile, 'utf8'), 'dashboard-data').editorialReview, undefined);
+
+  const preMarketNow = '2026-07-13T13:00:00.000Z';
+  const preMarketDashboardFile = path.join(dir, 'premarket-dashboard.html');
+  const preMarketCandidateFile = path.join(dir, 'premarket-dashboard-candidate.html');
+  const preMarketDashboard = structuredClone(dashboard);
+  preMarketDashboard.futuresModule.stories = preMarketDashboard.futuresModule.stories.map((item, index) => ({
+    ...item,
+    publishedOn: '2026-07-13',
+    publishedAt: new Date(Date.parse('2026-07-13T12:45:00.000Z') + index * 1000).toISOString()
+  }));
+  const preMarketOriginalHtml = renderDashboardValidationFixture(preMarketDashboard, chartData);
+  fs.writeFileSync(preMarketDashboardFile, preMarketOriginalHtml);
+  const preMarketNextHtml = withScheduledNow(preMarketNow, () => patchDashboard({
+    ...patchArgs,
+    dashboard: preMarketDashboardFile,
+    candidate: preMarketCandidateFile,
+    windowMode: 'morning',
+    baseDashboardHtml: preMarketOriginalHtml,
+    futuresPayload: {
+      compiledAt: preMarketNow,
+      source: 'Fixture Futures',
+      mode: 'premarket',
+      futures: preMarketDashboard.futuresModule.futures
+    }
+  }));
+  withScheduledNow(preMarketNow, () => stageDashboardCandidate({
+    dashboard: preMarketDashboardFile,
+    candidate: preMarketCandidateFile
+  }, preMarketNextHtml));
+  const stagedPreMarket = readJsonBlock(fs.readFileSync(preMarketCandidateFile, 'utf8'), 'dashboard-data');
+  assert.equal(stagedPreMarket.editionId, dashboard.editionId,
+    'Deterministic staging must preserve the canonical edition guard.');
+  assert.equal(stagedPreMarket.futuresModule.stories.length, 3,
+    'Staged validation must use the explicit Prepare time for current Pre-Market stories.');
 }
 
 function testCommitValidatesBeforeReplace() {
@@ -573,6 +608,128 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
     assert.equal(casePublished.crypto.notes.length, 0, `Crypto News must fail open for ${testCase.name} sidecar.`);
     assert.equal(casePublished.futuresModule.stories.length, 0, `Futures News must fail open for ${testCase.name} sidecar.`);
   }
+}
+
+function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+
+  const applyCase = (name, {
+    configureDashboard = () => {},
+    configureCandidates = () => {},
+    expectedFutures
+  }) => {
+    const dir = makeTemporaryDirectory(`dfd-futures-publication-${name}-`);
+    const dashboardFile = path.join(dir, 'dashboard.html');
+    const candidateFile = path.join(dir, 'dashboard-candidate.html');
+    const payloadFile = path.join(dir, 'dashboard-data.json');
+    const newsCandidatesPath = path.join(dir, 'news_candidates.json');
+    const candidateDashboard = structuredClone(dashboard);
+    candidateDashboard.editionId = new Date(candidateDashboard.editionId).toISOString();
+    configureDashboard(candidateDashboard);
+    const candidateHtml = renderDashboardValidationFixture(candidateDashboard, chartData);
+    fs.writeFileSync(dashboardFile, candidateHtml);
+    fs.writeFileSync(candidateFile, candidateHtml);
+
+    const newsCandidates = fixtureNewsSearchArtifact(candidateDashboard, candidateDashboard.editionId);
+    configureCandidates(newsCandidates.futuresCandidates);
+    writeJson(newsCandidatesPath, newsCandidates);
+    const editorialPayload = structuredClone(candidateDashboard);
+    editorialPayload.editorialReview = {
+      schemaVersion: 1,
+      preparedAt: candidateDashboard.editionId,
+      reviewedAt: null,
+      baseEditionId: candidateDashboard.editionId,
+      verifiedClaims: [],
+      newsSearch: newsCandidates,
+      newsSelection: fixtureNewsSelection(candidateDashboard),
+      openingDecision: { action: 'reviewed' }
+    };
+    writeJson(payloadFile, editorialPayload);
+
+    withScheduledNow('2026-07-13T22:00:00.000Z', () => applyDashboardDataJson({
+      dashboard: dashboardFile,
+      candidate: candidateFile,
+      applyDashboardDataJson: payloadFile,
+      newsCandidatesPath,
+      validationStdio: 'pipe'
+    }));
+    const published = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
+    assert.equal(published.futuresModule.stories.length, expectedFutures, `${name} futures count`);
+    assert.equal(published.stories.length, 9, `${name} must preserve General News.`);
+    assert.equal(published.crypto.notes.length, 9, `${name} must preserve Crypto News.`);
+    assert.equal(
+      published.futuresModule.stories.some((item) => Object.prototype.hasOwnProperty.call(item, 'publishedAtVerified')),
+      false,
+      'Candidate verification is an Apply eligibility fact, not embedded card metadata.'
+    );
+    return published;
+  };
+
+  applyCase('all-known-invalid', {
+    configureCandidates: (candidates) => {
+      candidates[0].publishedAt = '2026-07-10T13:29:59.999Z';
+      delete candidates[1].publishedAt;
+      delete candidates[1].publishedAtVerified;
+      candidates[2].publishedAtVerified = false;
+    },
+    expectedFutures: 0
+  });
+
+  const mixed = applyCase('mixed-known-validity', {
+    configureCandidates: (candidates) => {
+      candidates[0].publishedAt = '2026-07-10T20:00:00.001Z';
+    },
+    expectedFutures: 2
+  });
+  assert.equal(mixed.futuresModule.stories.some((item) => item.title === 'futures fixture story 1'), false,
+    'A failed known-window article must not fall back to date-only freshness.');
+
+  const verification = applyCase('known-verification-required', {
+    configureCandidates: (candidates) => {
+      delete candidates[0].publishedAtVerified;
+      candidates[1].publishedAtVerified = false;
+    },
+    expectedFutures: 1
+  });
+  assert.deepEqual(verification.futuresModule.stories.map((item) => item.title), ['futures fixture story 3']);
+
+  const unknownWindow = applyCase('unknown-session-date-only', {
+    configureDashboard: (data) => {
+      data.futuresModule.futures = [];
+    },
+    configureCandidates: (candidates) => {
+      for (const candidate of candidates) {
+        delete candidate.publishedAt;
+        delete candidate.publishedAtVerified;
+      }
+    },
+    expectedFutures: 3
+  });
+  assert.equal(unknownWindow.futuresModule.stories.some((item) => 'publishedAt' in item), false);
+
+  applyCase('known-session-date-only', {
+    configureCandidates: (candidates) => {
+      for (const candidate of candidates) {
+        delete candidate.publishedAt;
+        delete candidate.publishedAtVerified;
+      }
+    },
+    expectedFutures: 0
+  });
+
+  applyCase('delayed-premarket-anchored-to-edition', {
+    configureDashboard: (data) => {
+      data.editionId = '2026-07-10T13:00:00.000Z';
+      data.futuresModule.sectionTitle = 'Pre-Market Futures';
+    },
+    configureCandidates: (candidates) => {
+      candidates.forEach((candidate, index) => {
+        candidate.publishedAt = new Date(Date.parse('2026-07-10T12:45:00.000Z') + index * 1000).toISOString();
+        candidate.publishedAtVerified = true;
+      });
+    },
+    expectedFutures: 3
+  });
 }
 
 function testRefreshedQuoteCannotReusePriorCommentary() {
@@ -722,6 +879,146 @@ function testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell() {
       `${validationMode} validation must reject top-level chart-data null.`
     );
   }
+}
+
+function testFuturesStoryPublicationWindowValidation() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const stagedErrors = (data, options = {}) => validateDashboardHtml(
+    renderDashboardValidationFixture(data, chartData),
+    { validationMode: 'staged', ...options }
+  ).errors;
+  const withFuturesPublishedAt = (data, publishedAt) => {
+    data.futuresModule.stories = data.futuresModule.stories.map((item) => {
+      const next = { ...item };
+      if (publishedAt === undefined) delete next.publishedAt;
+      else next.publishedAt = publishedAt;
+      return next;
+    });
+    return data;
+  };
+
+  assert.deepEqual(stagedErrors(dashboard), []);
+  assert.equal(
+    stagedErrors(dashboard, { preparedAt: 'not-an-offset-timestamp' })
+      .some((error) => error.includes('Prepared validation time')),
+    true,
+    'An explicit staged-validation preparation time must be an offset-bearing ISO timestamp.'
+  );
+  for (const publishedAt of [
+    '2026-07-10T13:30:00.000Z',
+    '2026-07-10T18:45:00.000Z',
+    '2026-07-10T20:00:00.000Z'
+  ]) {
+    assert.deepEqual(stagedErrors(withFuturesPublishedAt(structuredClone(dashboard), publishedAt)), []);
+  }
+
+  const knownWindowInvalidValues = [
+    undefined,
+    null,
+    42,
+    [],
+    {},
+    '',
+    'not-a-time',
+    '2026-07-10',
+    '2026-07-10T18:45:00',
+    '2026-07-10T13:29:59.999Z',
+    '2026-07-10T20:00:00.001Z'
+  ];
+  for (const publishedAt of knownWindowInvalidValues) {
+    const errors = stagedErrors(withFuturesPublishedAt(structuredClone(dashboard), publishedAt));
+    assert.equal(errors.some((error) => error.includes('futuresModule.stories[0].publishedAt')), true,
+      `Known Session Futures window must reject publishedAt ${JSON.stringify(publishedAt)}.`);
+  }
+
+  const preMarket = structuredClone(dashboard);
+  preMarket.editionId = '2026-07-10T13:00:00.000Z';
+  preMarket.futuresModule.sectionTitle = 'Pre-Market Futures';
+  for (const publishedAt of [
+    '2026-07-09T22:00:00.000Z',
+    '2026-07-10T04:00:00-05:00',
+    '2026-07-10T13:00:00.000Z'
+  ]) {
+    assert.deepEqual(stagedErrors(withFuturesPublishedAt(structuredClone(preMarket), publishedAt)), [],
+      `Pre-Market Futures must accept inclusive window timestamp ${publishedAt}.`);
+  }
+  for (const publishedAt of ['2026-07-09T21:59:59.999Z', '2026-07-10T13:00:00.001Z']) {
+    const errors = stagedErrors(withFuturesPublishedAt(structuredClone(preMarket), publishedAt));
+    assert.equal(errors.some((error) => error.includes('futuresModule.stories[0].publishedAt')), true,
+      `Pre-Market Futures must reject out-of-window timestamp ${publishedAt}.`);
+  }
+
+  const preservedCanonicalEdition = withFuturesPublishedAt(structuredClone(preMarket), '2026-07-10T12:45:00.000Z');
+  preservedCanonicalEdition.editionId = '2026-07-09T13:00:00.000Z';
+  assert.equal(
+    stagedErrors(preservedCanonicalEdition)
+      .some((error) => error.includes('futuresModule.stories[0].publishedAt')),
+    true,
+    'Direct staged validation must remain reproducibly anchored to the embedded edition.'
+  );
+  assert.deepEqual(
+    stagedErrors(preservedCanonicalEdition, { preparedAt: '2026-07-10T13:00:00.000Z' }),
+    [],
+    'Prepare may explicitly validate current Pre-Market stories while preserving the canonical edition guard.'
+  );
+
+  const unknownSessionRows = [
+    { name: 'missing', rows: [] },
+    {
+      name: 'mismatched',
+      rows: dashboard.futuresModule.futures.map((row, index) => ({
+        ...row,
+        raw: { ...row.raw, sessionDate: index === 0 ? '2026-07-09' : '2026-07-10' }
+      }))
+    },
+    {
+      name: 'unavailable',
+      rows: dashboard.futuresModule.futures.map((row) => ({
+        ...row,
+        availability: { status: 'unavailable' }
+      }))
+    }
+  ];
+  for (const testCase of unknownSessionRows) {
+    const unknownSession = structuredClone(dashboard);
+    unknownSession.futuresModule.futures = testCase.rows;
+    assert.deepEqual(stagedErrors(withFuturesPublishedAt(unknownSession, undefined)), [],
+      `A futures card may remain date-only when ${testCase.name} rows cannot determine a session window.`);
+    assert.equal(
+      stagedErrors(withFuturesPublishedAt(structuredClone(unknownSession), 'not-a-time'))
+        .some((error) => error.includes('futuresModule.stories[0].publishedAt')),
+      true,
+      `A malformed supplied timestamp must fail when ${testCase.name} rows leave the session window unknown.`
+    );
+  }
+
+  for (const editionId of [undefined, 'not-an-edition']) {
+    const unknownPreMarket = structuredClone(preMarket);
+    if (editionId === undefined) delete unknownPreMarket.editionId;
+    else unknownPreMarket.editionId = editionId;
+    assert.deepEqual(stagedErrors(withFuturesPublishedAt(unknownPreMarket, undefined)), [],
+      'Pre-Market Futures without a usable edition timestamp must use date-only freshness.');
+    assert.equal(
+      stagedErrors(withFuturesPublishedAt(structuredClone(unknownPreMarket), 'not-a-time'))
+        .some((error) => error.includes('futuresModule.stories[0].publishedAt')),
+      true,
+      'Unknown Pre-Market windows must still reject malformed supplied timestamps.'
+    );
+  }
+
+  const mixed = structuredClone(dashboard);
+  mixed.futuresModule.stories[0].publishedAt = '2026-07-10T20:00:00.001Z';
+  const mixedErrors = stagedErrors(mixed);
+  assert.equal(mixedErrors.some((error) => error.includes('futuresModule.stories[0].publishedAt')), true);
+  assert.equal(mixedErrors.some((error) => error.includes('futuresModule.stories[1].publishedAt')), false,
+    'One invalid futures card must not make an in-window sibling invalid.');
+
+  const publishedMalformed = withFuturesPublishedAt(structuredClone(dashboard), 'not-a-time');
+  assert.deepEqual(
+    validateDashboardHtml(renderDashboardValidationFixture(publishedMalformed, chartData), { validationMode: 'published' }).errors,
+    [],
+    'Published render-safety validation must remain permissive for recoverable futures metadata.'
+  );
 }
 
 function testValidatorUsesBrowserEquivalentScriptIdentity() {
@@ -1124,8 +1421,10 @@ async function main() {
     testPreparationStagesWithoutCanonicalWrite();
     testCommitValidatesBeforeReplace();
     testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts();
+    testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage();
     testRefreshedQuoteCannotReusePriorCommentary();
     testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell();
+    testFuturesStoryPublicationWindowValidation();
     testValidatorUsesBrowserEquivalentScriptIdentity();
     testSectionFallbackControllerStateTransitions();
     if (testArguments.has('--browser')) {
