@@ -44,6 +44,11 @@ Use each repository artifact only for the scope it owns:
 - Ask before creating a new top-level directory.
 - Do not use destructive Git commands unless the user explicitly requests them.
 
+## Delegation by Work Type
+
+- **Scheduled and manual dashboard data updates:** Do not use subagents unless the user explicitly requests them. This overrides general delegation guidance for the entire update workflow.
+- **Work outside dashboard data updates:** Follow general delegation guidance, including for separate development work.
+
 ## Canonical Files and Writer Boundary
 
 - `daily_financial_news.html` is the canonical generated dashboard and embedded production data.
