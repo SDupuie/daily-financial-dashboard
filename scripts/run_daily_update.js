@@ -878,18 +878,16 @@ function prepareNewsCandidatesForEditorial(asOf, args, dashboardData) {
     if (!validNewsCandidateArtifact(artifact, asOf)) {
       throw new Error('News candidate artifact is malformed.');
     }
-    return artifact;
   } catch (error) {
     const partial = partialNewsCandidateArtifact(asOf, error);
     if (partial) {
       process.stderr.write(`News candidate acquisition did not finish; continuing with partial staged candidates: ${error.message}\n`);
       atomicWriteJson(NEWS_CANDIDATES_PATH, partial);
-      return partial;
+      return;
     }
     process.stderr.write(`News candidate acquisition failed before staging candidates; continuing with still-fresh prior cards: ${error.message}\n`);
     const artifact = emptyNewsCandidateArtifact(asOf, error, dashboardData);
     atomicWriteJson(NEWS_CANDIDATES_PATH, artifact);
-    return artifact;
   }
 }
 
@@ -914,14 +912,13 @@ async function prepareEditorialWorkspace(args) {
     deck: '',
     catalysts: Array.from({ length: 4 }, () => ({ label: '', body: '' }))
   };
-  const newsSearch = prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
+  prepareNewsCandidatesForEditorial(preparedAt, args, dashboardData);
   const reviewManifest = {
     schemaVersion: 1,
     preparedAt: preparedAt.toISOString(),
     reviewedAt: null,
     baseEditionId,
     verifiedClaims: [],
-    newsSearch,
     newsSelection: { futures: [], stories: [], crypto: [] },
     openingDecision: { action: null }
   };
@@ -1760,8 +1757,8 @@ function newsSelection(manifest, key) {
 }
 
 function readNewsCandidateSource(preparedAt, inputPath = NEWS_CANDIDATES_PATH) {
-  // The generated sidecar owns candidate provenance. The handoff copy is
-  // editable review context and must not authenticate its own selections.
+  // The generated sidecar owns candidate provenance; editorial selections
+  // in the editable handoff cannot authenticate themselves.
   const generatedAt = new Date(preparedAt);
   if (Number.isNaN(generatedAt.getTime())) {
     return null;

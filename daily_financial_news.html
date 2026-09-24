@@ -7094,7 +7094,7 @@
       }
 
       function mergeSeriesMap(seriesMap, refreshedSeries) {
-        let changed = false;
+        const acceptedTickers = new Set();
         for (const item of refreshedSeries) {
           const ticker = String(item?.ticker || '').toUpperCase();
           // MOVE is scheduled-only; the local overlay must not replace its embedded EODHD series.
@@ -7116,9 +7116,9 @@
           if (item.quoteRevision === existing?.quoteRevision && !sameJsonValue(existing, merged)) continue;
           if (sameJsonValue(existing, merged)) continue;
           seriesMap.set(ticker, merged);
-          changed = true;
+          acceptedTickers.add(ticker);
         }
-        return changed;
+        return acceptedTickers;
       }
       function marketNumber(value, maximumFractionDigits = 2) {
         return new Intl.NumberFormat('en-US', {
@@ -7448,10 +7448,11 @@
       function applyLocalMarketRefresh(data, payload) {
         if (!payload || payload.schemaVersion !== 1) return false;
         const sections = localRefreshSections(payload);
-        let changed = false;
-        const refreshedTickers = [...new Set(sections.series.map((item) => String(item?.ticker || '').toUpperCase()).filter(Boolean))];
-        changed = mergeSeriesMap(chartSeriesByTicker, sections.series) || changed;
-        changed = syncDashboardPricesFromSeriesMap(data, chartSeriesByTicker, refreshedTickers) || changed;
+        const acceptedTickers = mergeSeriesMap(chartSeriesByTicker, sections.series);
+        let changed = acceptedTickers.size > 0;
+        if (acceptedTickers.size) {
+          changed = syncDashboardPricesFromSeriesMap(data, chartSeriesByTicker, acceptedTickers) || changed;
+        }
         changed = applyCryptoStats(data, sections.cryptoStats, sections.cryptoDominance) || changed;
         if (changed) chartDataReferenceDate = chartPayloadReferenceDate(payload) || chartDataReferenceDate;
         return changed;

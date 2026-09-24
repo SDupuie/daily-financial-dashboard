@@ -355,7 +355,7 @@ async function refreshLocalMarketData() {
 }</script>`;
 }
 
-function fixtureNewsSearch(dashboard) {
+function fixtureNewsCandidatePools(dashboard) {
   const cardFields = ({ title, url, publishedOn, publishedAt, sourceLabel }) => ({
     title,
     url,
@@ -375,7 +375,7 @@ function fixtureNewsSearch(dashboard) {
   return { generalCandidates, futuresCandidates, cryptoCandidates };
 }
 
-function fixtureNewsSearchArtifact(dashboard, generatedAt = '2026-07-10T21:00:00.000Z') {
+function fixtureNewsCandidatesArtifact(dashboard, generatedAt = '2026-07-10T21:00:00.000Z') {
   return {
     schemaVersion: 2,
     generatedAt,
@@ -384,7 +384,7 @@ function fixtureNewsSearchArtifact(dashboard, generatedAt = '2026-07-10T21:00:00
     sourceCatalog: [],
     attempts: [],
     articleReview: { status: 'complete' },
-    ...fixtureNewsSearch(dashboard)
+    ...fixtureNewsCandidatePools(dashboard)
   };
 }
 
@@ -536,7 +536,7 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
-  writeJson(newsCandidatesPath, fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
+  writeJson(newsCandidatesPath, fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
 
   const editorialPayload = structuredClone(dashboard);
   editorialPayload.editionId = '2026-07-10T21:00:00.000Z';
@@ -547,7 +547,6 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
     reviewedAt: null,
     baseEditionId: dashboard.editionId,
     verifiedClaims: [],
-    newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
     openingDecision: { action: 'reviewed' }
   };
@@ -569,7 +568,7 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
     { name: 'unparsable', write: (file) => fs.writeFileSync(file, '{') },
     {
       name: 'timestamp mismatch',
-      write: (file) => writeJson(file, fixtureNewsSearchArtifact(dashboard, '2026-07-10T20:59:59.000Z'))
+      write: (file) => writeJson(file, fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T20:59:59.000Z'))
     },
     {
       name: 'malformed',
@@ -578,7 +577,7 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
     {
       name: 'outside inventory',
       write: (file) => writeJson(file, {
-        ...fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
+        ...fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
         generalCandidates: [],
         futuresCandidates: [],
         cryptoCandidates: []
@@ -630,7 +629,7 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
     fs.writeFileSync(dashboardFile, candidateHtml);
     fs.writeFileSync(candidateFile, candidateHtml);
 
-    const newsCandidates = fixtureNewsSearchArtifact(candidateDashboard, candidateDashboard.editionId);
+    const newsCandidates = fixtureNewsCandidatesArtifact(candidateDashboard, candidateDashboard.editionId);
     configureCandidates(newsCandidates.futuresCandidates);
     writeJson(newsCandidatesPath, newsCandidates);
     const editorialPayload = structuredClone(candidateDashboard);
@@ -640,7 +639,6 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
       reviewedAt: null,
       baseEditionId: candidateDashboard.editionId,
       verifiedClaims: [],
-      newsSearch: newsCandidates,
       newsSelection: fixtureNewsSelection(candidateDashboard),
       openingDecision: { action: 'reviewed' }
     };
@@ -784,7 +782,7 @@ function testRefreshedQuoteCannotReusePriorCommentary() {
   assert.deepEqual(candidateVcr, originalRows.find((row) => row.ticker === 'VCR'));
 
   fs.writeFileSync(candidateFile, renderDashboardValidationFixture(candidateDashboard, refreshedChartData));
-  writeJson(newsCandidatesPath, fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
+  writeJson(newsCandidatesPath, fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
   const editorialPayload = structuredClone(candidateDashboard);
   editorialPayload.editionId = '2026-07-10T21:00:00.000Z';
   editorialPayload.editorialReview = {
@@ -793,7 +791,6 @@ function testRefreshedQuoteCannotReusePriorCommentary() {
     reviewedAt: null,
     baseEditionId: candidateDashboard.editionId,
     verifiedClaims: [],
-    newsSearch: fixtureNewsSearchArtifact(dashboard, '2026-07-10T21:00:00.000Z'),
     newsSelection: fixtureNewsSelection(dashboard),
     openingDecision: { action: 'reviewed' }
   };
@@ -1328,6 +1325,74 @@ async function testActualDashboardStartsInBrowser() {
     recoverableData.opening = null;
     fs.writeFileSync(recoverableFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(recoverableData)));
     await assertDashboardStarts(recoverableFile);
+
+    const overlayFile = path.join(recoverableDir, 'dashboard-local-overlay.html');
+    const overlayFixture = createDashboardValidationFixture();
+    fs.writeFileSync(overlayFile, replaceJsonBlock(
+      replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(overlayFixture.dashboard)),
+      'chart-data', JSON.stringify(overlayFixture.chartData)
+    ));
+    const spxFresh = structuredClone(chartSeriesFixture()[0]);
+    spxFresh.quoteRevision = '2026-07-10T21:05:00.000Z';
+    spxFresh.bars[1].high = 105;
+    spxFresh.bars[1].close = 104;
+    const spxOneBar = { ...spxFresh, quoteRevision: '2026-07-10T21:06:00.000Z', bars: [spxFresh.bars[1]] };
+    const vcrFresh = structuredClone(chartSeriesFixture()[1]);
+    vcrFresh.quoteRevision = '2026-07-10T21:07:00.000Z';
+    vcrFresh.bars[1].high = 106;
+    vcrFresh.bars[1].close = 105;
+    let overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
+    const overlayPage = await browser.newPage();
+    try {
+      await overlayPage.route('https://192.168.2.2:2210/api/market-refresh', (route) => route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: { 'access-control-allow-origin': '*', 'access-control-allow-private-network': 'true' },
+        body: JSON.stringify(overlayPayload)
+      }));
+      const indicator = overlayPage.locator('[data-local-refresh-indicator]');
+      const tapeRow = (ticker) => overlayPage.locator(`[data-tape-chart-row="${ticker}"]`).locator('..');
+      const noNewerAtStartup = overlayPage.waitForEvent('console', {
+        predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
+      });
+      await overlayPage.goto(pathToFileURL(overlayFile).href);
+      await noNewerAtStartup;
+      assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'idle');
+      assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), null);
+      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 0);
+
+      overlayPayload = { schemaVersion: 1, generatedAt: spxFresh.quoteRevision, series: [spxFresh] };
+      await overlayPage.reload();
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
+      const spxQuote = await tapeRow('SPX').locator('.quote-last').textContent();
+      const spxNote = await tapeRow('SPX').locator('.tape-signal-copy').textContent();
+      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+      const acceptedCache = await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2'));
+      assert.ok(acceptedCache);
+
+      overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
+      const noNewerPrices = overlayPage.waitForEvent('console', {
+        predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
+      });
+      await overlayPage.reload();
+      await noNewerPrices;
+      assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'cached');
+      assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), acceptedCache);
+      assert.equal(await tapeRow('SPX').locator('.quote-last').textContent(), spxQuote);
+      assert.equal(await tapeRow('SPX').locator('.tape-signal-copy').textContent(), spxNote);
+      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+
+      const vcrQuote = await tapeRow('VCR').locator('.quote-last').textContent();
+      overlayPayload = { schemaVersion: 1, generatedAt: vcrFresh.quoteRevision, series: [vcrFresh, spxOneBar] };
+      await overlayPage.reload();
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
+      assert.notEqual(await tapeRow('VCR').locator('.quote-last').textContent(), vcrQuote);
+      assert.equal(await tapeRow('SPX').locator('.quote-last').textContent(), spxQuote);
+      assert.equal(await tapeRow('SPX').locator('.tape-signal-copy').textContent(), spxNote);
+      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+    } finally {
+      await overlayPage.close();
+    }
 
     const tooltipFile = path.join(recoverableDir, 'dashboard-tooltips.html');
     const tooltipData = readJsonBlock(recoverableHtml, 'dashboard-data');
