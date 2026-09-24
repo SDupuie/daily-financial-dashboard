@@ -35,6 +35,7 @@ Use each repository artifact only for the scope it owns:
 
 - Treat current working files as authoritative when the worktree is dirty. Preserve unrelated user changes.
 - A dashboard data refresh authorizes changes only to staging and canonical generated data through the README workflow.
+- During scheduled and manual dashboard updates, do not create helper scripts or temporary programs, including inline Python, JavaScript, or shell programs in command strings or heredocs. Use existing repository workflow commands, ordinary read-only inspection commands (including simple `jq` queries), and direct file-editing tools. This rule applies throughout the update, including research, editorial work, and verification.
 - Source code, tests, documentation, configuration, policy, visible UI, and repository structure require explicit user authorization.
 - When the user asks a question about a possible change, answer the question only; do not edit files, run update workflows, commit, or publish unless the user explicitly authorizes that action.
 - If an update exposes a source defect or contract gap, stop the update before changing source files, report the blocker, and get explicit approval for that source change.
