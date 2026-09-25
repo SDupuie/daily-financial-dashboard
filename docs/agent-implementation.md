@@ -30,7 +30,7 @@ Work from this order of preference:
 8. Avoid defensive wrappers around readable standard APIs when the failure mode is outside the supported runtime contract.
 9. Avoid framework-like abstractions unless the user explicitly asks for a broader architecture change.
 10. Leave one focused runnable check for non-trivial new logic; skip ceremonial tests for trivial docs or one-line changes.
-11. Focus tests on failures that could corrupt an update, bypass the sole-writer boundary, or take the dashboard offline; use the README for exact commands and verification requirements.
+11. Focus tests on failures that could corrupt an update, bypass the sole-writer boundary, or take the dashboard offline. Use `README.md` for daily publication checks and this file's Source-change and audit verification section for development checks.
 12. Mark deliberate simplifications with a code comment only when there is a known ceiling and upgrade path.
 
 ### Audit Finding Fixes
@@ -64,3 +64,13 @@ Use a single-writer, staged, contract-driven architecture across every dashboard
 - Do not opportunistically resize, restyle, harmonize, modernize, or otherwise improve nearby controls.
 - Treat accessibility, touch-target, consistency, modernization, and best-practice arguments as recommendations to raise with the user, not authorization to alter the UI.
 - After source edits, inspect the diff for unintended visible or unrelated changes.
+
+### Source-change and audit verification
+
+Browser UI checks belong to source-code testing and audits, not routine dashboard data updates or publication. Editing Opening, Market Lens, Outcome, or other editorial copy does not by itself require a browser pass.
+
+- After structural or layout source changes, run `tidy -q -e daily_financial_news.html` and inspect the affected page at relevant widths.
+- After source changes to Market Lens or Outcome rendering, reactions, or routing, check narrow mobile and desktop widths for readability and overflow. Activate pre-close and post-close reaction controls with pointer and keyboard; verify the correct Tape group, ticker, and chart open, focus moves to the chart heading, and repeated activation leaves that chart open.
+- After information-tooltip source changes, run `node scripts/test_dashboard.js --browser`, then check tap, hover, and keyboard activation at narrow mobile, tablet, and desktop widths. Verify that the tooltip remains inside the viewport, paints above neighboring controls, and stays legible.
+- Run `node scripts/validate_dashboard.js test` after script or data-contract changes when publication is not the immediate next step. It runs the focused test scripts, so keep those checks sequential. Run `node scripts/test_dashboard.js --browser` after embedded runtime or startup changes. Run `node scripts/test_market_data.js` when changing local-refresh behavior without the full aggregate suite.
+- Nonvisual data, contract, validation, and refactoring changes need no browser pass when they do not affect the embedded runtime, startup, renderer behavior, or published data shapes that can reach those paths. For malformed published shapes reaching a changed renderer or startup path, follow the browser-startup requirements above and in `docs/agent-review.md`.

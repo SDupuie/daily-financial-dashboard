@@ -19,6 +19,7 @@ const {
   narrativeEditorialComplete,
   reportWindowArrived,
   resetRepeatedEarningsNarrativeForEditorial,
+  resolveEmptyEarningsWeek,
 } = require('./earnings_week_contract');
 const { addDays, displayDatesForRange } = require('./calendar_contract');
 const {
@@ -59,6 +60,7 @@ const {
   refreshTargetRows,
   validateEarningsWeekPayload
 } = require('./earnings_week');
+const { applyEarningsWeek, isEmptyEarningsRecoveryWeek } = require('./run_daily_update');
 const {
   buildEarningsGuidanceEvidenceIndex,
   chooseEarningsFiling,
@@ -243,6 +245,16 @@ function deterministicVerifiedWeekFixture() {
       }]
     }
   };
+}
+
+function publishedCanonicalWeekFixture() {
+  const week = deterministicVerifiedWeekFixture();
+  for (const row of week.rows) delete row.sourceAudit;
+  delete week.secondaryRecoveryCandidates;
+  delete week.narrativeApply;
+  week.summary = { counts: computeEarningsWeekCounts(week.rows) };
+  assert.deepEqual(validateEarningsWeekPayload(week, { mode: 'published' }), []);
+  return week;
 }
 
 function testFinnhubPrimaryAcceptance() {
@@ -518,6 +530,72 @@ function testProviderScheduleRetryAndPreparationFallbacks() {
   assert.equal(unavailable.week.rows.length, 0);
   assert.equal(unavailable.week.availability.status, 'unavailable');
   validateWeekPayload(unavailable.week);
+}
+
+function testEmptyEarningsPublicationRecovery() {
+  const prior = publishedCanonicalWeekFixture();
+  const source = { ...prior, rows: [prior.rows[0]] };
+  const empty = {
+    schemaVersion: EARNINGS_WEEK_SCHEMA_VERSION,
+    generatedAt: source.generatedAt,
+    range: source.range,
+    rows: [],
+    summary: { counts: computeEarningsWeekCounts([]) }
+  };
+  const checkedAt = '2026-01-08T13:00:00.000Z';
+  const resolve = (incoming, previous, options = {}) => resolveEmptyEarningsWeek(incoming, empty, previous, {
+    checkedAt,
+    ...options
+  });
+
+  const carried = resolve(source, prior);
+  assert.equal(carried.availability.status, 'carried_forward');
+  assert.equal(carried.availability.reason, 'empty_earnings_recovery');
+  assert.deepEqual(carried.range, source.range);
+  assert.equal(carried.rows.length, prior.rows.length);
+  assert.equal(carried.generatedAt, checkedAt);
+  assert.deepEqual(validateEarningsWeekPayload(carried, { mode: 'published' }), []);
+  assert.deepEqual(validateEarningsWeekPayload(prior, { mode: 'published' }), [], 'Recovery must not mutate the canonical input.');
+
+  const unavailablePrior = { ...prior, availability: { status: 'unavailable' } };
+  const invalidPrior = structuredClone(prior);
+  invalidPrior.rows[0].symbol = 'bad';
+  const otherRange = { ...prior, range: { from: '2026-01-09', to: '2026-01-15' } };
+  for (const previous of [null, undefined, false, [], {}, { ...prior, rows: [] }, unavailablePrior, invalidPrior, otherRange]) {
+    const result = resolve(source, previous);
+    assert.equal(result.availability.status, 'unavailable');
+    assert.equal(result.availability.reason, 'empty_earnings_recovery');
+    assert.deepEqual(result.range, source.range);
+    assert.deepEqual(result.rows, []);
+    assert.deepEqual(validateEarningsWeekPayload(result, { mode: 'published' }), []);
+  }
+
+  const stalePrior = { ...prior, generatedAt: '2026-01-05T12:00:00.000Z' };
+  const carriedPrior = { ...prior, availability: { status: 'carried_forward', reason: 'earnings_preparation_failed', checkedAt } };
+  for (const previous of [stalePrior, carriedPrior]) {
+    assert.equal(resolve(source, previous).availability.status, 'carried_forward');
+  }
+
+  const emptySource = { ...source, rows: [] };
+  assert.equal(resolve(emptySource, prior), empty, 'A valid empty week remains empty without contradictory row evidence.');
+  const sidecar = { sourceRange: source.range, sourceGeneratedAt: 'older-artifact', rows: [{ symbol: 'VERIFY' }] };
+  assert.equal(resolve(emptySource, prior, { narrativeEvidence: sidecar }).availability.status, 'carried_forward');
+  assert.equal(resolve(emptySource, null, { narrativeEvidence: sidecar }).availability.status, 'unavailable');
+  assert.equal(resolve(emptySource, prior, { narrativeEvidence: { ...sidecar, sourceRange: otherRange.range } }), empty);
+  assert.equal(resolve(emptySource, prior, { narrativeEvidence: { ...sidecar, rows: null } }), empty);
+
+  const filteredSource = deterministicVerifiedWeekFixture();
+  filteredSource.rows[0].marketCap = 1;
+  const sameRangeData = { earnings: { week: structuredClone(prior) } };
+  applyEarningsWeek(sameRangeData, filteredSource, { requireNarrative: false, checkedAt });
+  assert.equal(sameRangeData.earnings.week.rows.length, 1);
+  assert.equal(isEmptyEarningsRecoveryWeek(sameRangeData.earnings.week), true);
+
+  const nextRangeData = { earnings: { week: structuredClone(otherRange) } };
+  applyEarningsWeek(nextRangeData, filteredSource, { requireNarrative: false, checkedAt });
+  assert.deepEqual(nextRangeData.earnings.week.range, filteredSource.range);
+  assert.equal(nextRangeData.earnings.week.availability.status, 'unavailable');
+  assert.equal(isEmptyEarningsRecoveryWeek(nextRangeData.earnings.week), true);
 }
 
 async function testEarningsApiCalendarStopsAfterQuotaResponse() {
@@ -853,8 +931,8 @@ function unknownTimingReactionRow(actualsObservedAt) {
     fiscalQuarterEnding: '',
     fiscalQuarter: null,
     fiscalYear: null,
-    eps: { estimate: 1, actual: 1.1, surprisePercent: 10, result: 'beat', basis: '', note: '' },
-    revenue: { estimate: 1000000000, actual: 1100000000, surprisePercent: 10, result: 'beat', note: '' },
+    eps: { estimate: 1, actual: 1.1, surprisePercent: 10, result: 'beat', basis: '' },
+    revenue: { estimate: 1000000000, actual: 1100000000, surprisePercent: 10, result: 'beat' },
     outcome: { overall: 'beat', guide: '', interpretation: '' },
     reaction: { basis: 'unavailable', percent: null, fromDate: '', fromClose: null, toDate: '', toClose: null, status: 'unavailable', note: '', source: '' },
     sourceStatus: 'partial',
@@ -1442,9 +1520,6 @@ function testApplyEarningsNarrative() {
       },
       reaction: {
         note: 'Guidance drove the bid.'
-      },
-      revenue: {
-        note: 'Revenue +5% YoY.'
       }
     }]
   }, {
@@ -1459,7 +1534,6 @@ function testApplyEarningsNarrative() {
   assert.equal(row.outcome.guidanceDisposition.status, 'verified');
   assert.equal(row.outcome.interpretationDisposition.status, 'verified');
   assert.equal(row.reaction.commentaryDisposition.status, 'verified');
-  assert.equal(row.revenue.note, 'Revenue +5% YoY.');
   assert.deepEqual(output.narrativeApply.applied, [{ symbol: 'NARRATIVE', reportDate: '2026-01-06' }]);
   assert.equal(output.narrativeApply.narrativeArtifact, 'generated/earnings_narrative.json');
   assert.throws(
@@ -2164,8 +2238,8 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
     reportDate: '2026-07-14',
     reportTiming: 'bmo',
     lifecycle: 'scheduled',
-    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted', note: `${symbol} preview` },
-    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted' },
+    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending' },
     outcome: {
       overall: 'pending',
       guide: '',
@@ -2178,7 +2252,6 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
   const next = structuredClone(previous);
   next.rows.push(row('NEW'));
   for (const item of next.rows) {
-    item.eps.note = '';
     item.outcome.interpretation = '';
     delete item.outcome.interpretationDisposition;
   }
@@ -2203,8 +2276,8 @@ function testEarningsNarrativeCarryForwardIsRowScoped() {
     rows: [{
       ...row('CCC'),
       lifecycle: 'released_awaiting_close',
-      eps: { estimate: 1, actual: 1.2, surprisePercent: 20, result: 'beat', basis: 'adjusted', note: '' },
-      revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+      eps: { estimate: 1, actual: 1.2, surprisePercent: 20, result: 'beat', basis: 'adjusted' },
+      revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending' },
       outcome: {
         overall: 'beat',
         guide: '',
@@ -2250,8 +2323,8 @@ function testRepeatedEarningsNarrativeResetsSameFieldOnly() {
     reportDate: '2026-07-14',
     reportTiming: 'bmo',
     lifecycle: 'scheduled',
-    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted', note: '' },
-    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending', note: '' },
+    eps: { estimate: 1, actual: null, surprisePercent: null, result: 'pending', basis: 'adjusted' },
+    revenue: { estimate: 100, actual: null, surprisePercent: null, result: 'pending' },
     outcome: {
       overall: 'pending',
       guide: '',
@@ -2318,6 +2391,7 @@ async function main() {
   testUsListingEligibilityUsesExactDirectorySymbol();
   testPrimaryScheduleVerification();
   testProviderScheduleRetryAndPreparationFallbacks();
+  testEmptyEarningsPublicationRecovery();
   await testEarningsApiCalendarStopsAfterQuotaResponse();
   testAlphaVantageCalendarBackupFlow();
   testSkipEarningsApiDoesNotReadUsageLedger();

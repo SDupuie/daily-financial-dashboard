@@ -246,6 +246,22 @@ function fixtureEarningsWeek() {
   };
 }
 
+const malformedEarningsPublishedCases = [
+  { name: 'absent-week', change: (data) => { delete data.earnings.week; } },
+  { name: 'null-week', change: (data) => { data.earnings.week = null; } },
+  { name: 'wrong-week-type', change: (data) => { data.earnings.week = 'invalid'; } },
+  { name: 'wrong-rows-type', change: (data) => { data.earnings.week.rows = null; } },
+  { name: 'absent-range', change: (data) => { delete data.earnings.week.range; } },
+  { name: 'null-range', change: (data) => { data.earnings.week.range = null; } },
+  { name: 'wrong-range-container', change: (data) => { data.earnings.week.range = []; } },
+  { name: 'wrong-range-primitive', change: (data) => { data.earnings.week.range = 'invalid'; } },
+  { name: 'absent-from', change: (data) => { delete data.earnings.week.range.from; } },
+  { name: 'invalid-from', change: (data) => { data.earnings.week.range.from = 'not-a-date'; } },
+  { name: 'impossible-from', change: (data) => { data.earnings.week.range.from = '2026-02-30'; } },
+  { name: 'invalid-to', change: (data) => { data.earnings.week.range.to = 'not-a-date'; } },
+  { name: 'unsupported-range', change: (data) => { data.earnings.week.range = { from: '2026-07-10', to: '2026-07-17' }; } }
+];
+
 function chartSeriesFixture() {
   const quoteRevision = '2026-07-10T12:00:00.000Z';
   return ['SPX', 'VCR', 'UST10Y'].map((ticker, index) => ({
@@ -828,6 +844,18 @@ function testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell() {
   recoverable.tape.rows = [null, 'malformed', ...recoverable.tape.rows];
   assert.deepEqual(validateDashboardHtml(renderDashboardValidationFixture(recoverable, chartData)).errors, []);
 
+  for (const testCase of malformedEarningsPublishedCases) {
+    const malformed = structuredClone(dashboard);
+    testCase.change(malformed);
+    const html = renderDashboardValidationFixture(malformed, chartData);
+    assert.deepEqual(validateDashboardHtml(html).errors, [], `${testCase.name} must remain publishable.`);
+    assert.match(
+      validateDashboardHtml(html, { validationMode: 'staged' }).errors.join('\n'),
+      /earnings\.week/,
+      `${testCase.name} must fail staged Earnings validation.`
+    );
+  }
+
   const strict = structuredClone(dashboard);
   const strictEventDay = strict.weekAhead.days.find((day) => Array.isArray(day.events) && day.events.length);
   strictEventDay.marketLens.status = 'verified';
@@ -1278,7 +1306,7 @@ async function testActualDashboardStartsInBrowser() {
       await section.locator('[data-week-impact-toggle]').click();
     }
 
-    async function assertDashboardStarts(file, { testTooltips = false, testWeekAheadImpactFilter = false } = {}) {
+    async function assertDashboardStarts(file, { testTooltips = false, testWeekAheadImpactFilter = false, earningsState = '' } = {}) {
       const errors = [];
       const page = await browser.newPage();
       try {
@@ -1305,6 +1333,15 @@ async function testActualDashboardStartsInBrowser() {
         });
         const more = page.locator('[data-news-more-toggle]').first();
         if (await more.count()) await more.click();
+        if (earningsState) {
+          const earnings = page.locator('.section-earnings');
+          assert.equal(await earnings.count(), 1);
+          assert.equal(await page.locator('.section-tape').count() > 0, true);
+          assert.equal(await page.locator('.section-week-ahead').count(), 1);
+          assert.equal(await earnings.locator('.earnings-monitor-empty').count(), earningsState === 'unavailable' ? 1 : 0);
+          assert.equal(await earnings.locator('.earnings-calendar-strip').count(), earningsState === 'calendar' ? 1 : 0);
+          assert.equal(await earnings.locator('[data-earnings-calendar-cue]').count(), earningsState === 'calendar' ? 1 : 0);
+        }
         if (testTooltips) await assertTooltipInteractions(page);
         if (testWeekAheadImpactFilter) await assertWeekAheadImpactFiltering(page);
         assert.deepEqual(errors, []);
@@ -1326,8 +1363,32 @@ async function testActualDashboardStartsInBrowser() {
     fs.writeFileSync(recoverableFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(recoverableData)));
     await assertDashboardStarts(recoverableFile);
 
+    for (const testCase of malformedEarningsPublishedCases) {
+      const malformed = structuredClone(recoverableData);
+      testCase.change(malformed);
+      const html = replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(malformed));
+      const file = path.join(recoverableDir, `dashboard-earnings-${testCase.name}.html`);
+      fs.writeFileSync(file, html);
+      await assertDashboardStarts(file, { earningsState: 'unavailable' });
+    }
+
+    for (const [name, status, expected] of [
+      ['carried-forward', 'carried_forward', 'calendar'],
+      ['unavailable', 'unavailable', 'unavailable']
+    ]) {
+      const changed = structuredClone(recoverableData);
+      changed.earnings.week.availability = { status };
+      const file = path.join(recoverableDir, `dashboard-earnings-${name}.html`);
+      fs.writeFileSync(file, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(changed)));
+      await assertDashboardStarts(file, { earningsState: expected });
+    }
+
     const overlayFile = path.join(recoverableDir, 'dashboard-local-overlay.html');
     const overlayFixture = createDashboardValidationFixture();
+    overlayFixture.dashboard.crypto.stats.find((row) => row.sym === 'F&G').availability = {
+      status: 'carried_forward',
+      lastValidatedAt: '2026-07-09T21:00:00.000Z'
+    };
     fs.writeFileSync(overlayFile, replaceJsonBlock(
       replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(overlayFixture.dashboard)),
       'chart-data', JSON.stringify(overlayFixture.chartData)
@@ -1390,6 +1451,28 @@ async function testActualDashboardStartsInBrowser() {
       assert.equal(await tapeRow('SPX').locator('.quote-last').textContent(), spxQuote);
       assert.equal(await tapeRow('SPX').locator('.tape-signal-copy').textContent(), spxNote);
       assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+
+      const crypto = overlayPage.locator('.section-crypto');
+      const totalBefore = await crypto.locator('.crypto-stat--total').innerText();
+      const altseasonBefore = await crypto.locator('.crypto-stat--altcoin-season').innerText();
+      assert.equal(await crypto.locator('.crypto-stat--sentiment [data-stale-info]').count(), 1);
+      overlayPayload = {
+        schemaVersion: 1,
+        generatedAt: '2026-07-10T21:08:00.000Z',
+        partial: true,
+        series: [],
+        cryptoStats: {
+          fetchedAt: '2026-07-10T21:08:00.000Z',
+          stats: [{ ...overlayFixture.dashboard.crypto.stats.find((row) => row.sym === 'F&G'), price: '63', delta: '+13', chg: '+13', dir: 'up', availability: undefined }],
+          dominance: null
+        }
+      };
+      await overlayPage.reload();
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'partial');
+      assert.equal((await crypto.locator('.crypto-stat--sentiment .stat-scoreline strong').textContent()).trim(), '63');
+      assert.equal(await crypto.locator('.crypto-stat--sentiment [data-stale-info]').count(), 0);
+      assert.equal(await crypto.locator('.crypto-stat--total').innerText(), totalBefore);
+      assert.equal(await crypto.locator('.crypto-stat--altcoin-season').innerText(), altseasonBefore);
     } finally {
       await overlayPage.close();
     }

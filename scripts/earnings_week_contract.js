@@ -156,8 +156,6 @@ function narrativeNeedsEditorialCopy(row, narrative) {
 
 function canonicalNarrativeIsEmpty(row) {
   return [
-    row?.eps?.note,
-    row?.revenue?.note,
     row?.outcome?.guide,
     row?.outcome?.interpretation,
     row?.reaction?.note
@@ -339,12 +337,7 @@ function earningsReactionNarrativeFingerprint(row) {
       fromDate: row?.reaction?.fromDate,
       fromClose: row?.reaction?.fromClose,
       toDate: row?.reaction?.toDate,
-      toClose: row?.reaction?.toClose,
-      sessionDate: row?.reaction?.sessionDate,
-      closeDate: row?.reaction?.closeDate,
-      preClose: row?.reaction?.preClose,
-      postClose: row?.reaction?.postClose,
-      percentChange: row?.reaction?.percentChange
+      toClose: row?.reaction?.toClose
     }
   });
 }
@@ -355,8 +348,6 @@ function earningsNarrativeFingerprint(row) {
 
 function clearEarningsNarrative(row) {
   const output = structuredClone(row);
-  output.eps = { ...output.eps, note: '' };
-  output.revenue = { ...output.revenue, note: '' };
   output.outcome = { ...output.outcome, guide: '', interpretation: '' };
   output.reaction = { ...output.reaction, note: '' };
   for (const field of ['guidanceDisposition', 'interpretationDisposition']) {
@@ -376,8 +367,6 @@ function preserveEarningsNarrativeByField(row, prior) {
   const resultSame = earningsResultNarrativeFingerprint(prior) === earningsResultNarrativeFingerprint(row);
   const reactionSame = earningsReactionNarrativeFingerprint(prior) === earningsReactionNarrativeFingerprint(row);
 
-  output.eps = { ...output.eps, note: resultSame ? String(prior?.eps?.note || '') : '' };
-  output.revenue = { ...output.revenue, note: resultSame ? String(prior?.revenue?.note || '') : '' };
   output.outcome = {
     ...output.outcome,
     guide: resultSame ? String(prior?.outcome?.guide || '') : '',
@@ -409,7 +398,12 @@ function mergeUnchangedEarningsNarrative(previousWeek, nextWeek) {
     .map((row) => [earningsRowKey(row), row]));
   return {
     ...nextWeek,
-    rows: (Array.isArray(nextWeek?.rows) ? nextWeek.rows : []).map((row) => {
+    rows: (Array.isArray(nextWeek?.rows) ? nextWeek.rows : []).map((sourceRow) => {
+      const row = structuredClone(sourceRow);
+      // Old staging artifacts may contain metric notes; only Outcome and
+      // reaction commentary belong in the published narrative contract.
+      delete row.eps?.note;
+      delete row.revenue?.note;
       const prior = previousByKey.get(earningsRowKey(row));
       if (!prior) return clearEarningsNarrative(row);
       // A scheduled -> awaiting_actual transition has no new company facts, so
@@ -434,8 +428,6 @@ function buildEarningsNarrativeSidecar(week, existing = { rows: [] }, { outputPa
     .map((row) => {
       const existingPrior = existingByKey.get(earningsRowKey(row));
       const prior = existingPrior || {
-        eps: { note: row.eps?.note || '' },
-        revenue: { note: row.revenue?.note || '' },
         outcome: {
           guide: row.outcome?.guide || '',
           interpretation: row.outcome?.interpretation || '',
@@ -467,12 +459,6 @@ function buildEarningsNarrativeSidecar(week, existing = { rows: [] }, { outputPa
       return {
         symbol: row.symbol,
         reportDate: row.reportDate,
-        eps: {
-          note: String(nextNarrative.eps?.note || '')
-        },
-        revenue: {
-          note: String(nextNarrative.revenue?.note || '')
-        },
         outcome: {
           guide: String(nextNarrative.outcome?.guide || ''),
           ...(dispositions.guidance ? { guidanceDisposition: dispositions.guidance } : {}),
@@ -520,14 +506,20 @@ function earningsScheduleReviewRows(review, week) {
 
 function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = {}) {
   const checkedAt = new Date(options.checkedAt || Date.now()).toISOString();
+  const reason = options.reason || 'earnings_preparation_failed';
   const canonical = { ...canonicalWeek };
   delete canonical.policy;
   const sameRange = canonicalWeek?.range?.from === targetRange?.from
-    && canonicalWeek?.range?.to === targetRange?.to;
+    && canonicalWeek?.range?.to === targetRange?.to
+    && canonicalWeek?.availability?.status !== 'unavailable'
+    && Array.isArray(canonicalWeek?.rows);
   if (sameRange) {
-    // Same-range fallback preserves the visible slate and advances lifecycle;
-    // cross-range failure publishes an explicit unavailable week instead.
-    const rows = (canonicalWeek.rows || []).map((row) => applyEarningsLifecycle(row, new Date(checkedAt)));
+    // Eligible same-range fallback preserves the visible slate and advances lifecycle.
+    const rows = canonicalWeek.rows.map((row) => {
+      const next = applyEarningsLifecycle(row, new Date(checkedAt));
+      if (row.sourceAudit === undefined) delete next.sourceAudit;
+      return next;
+    });
     const secondaryRecoveryCandidates = canonicalWeek.secondaryRecoveryCandidates || [];
     return {
       mode: 'carried_forward',
@@ -536,7 +528,7 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
         generatedAt: checkedAt,
         availability: {
           status: 'carried_forward',
-          reason: 'earnings_preparation_failed',
+          reason,
           checkedAt
         },
         rows,
@@ -558,7 +550,7 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
       },
       availability: {
         status: 'unavailable',
-        reason: 'earnings_preparation_failed',
+        reason,
         checkedAt
       },
       rows: [],
@@ -568,6 +560,31 @@ function buildEarningsPreparationFallback(canonicalWeek, targetRange, options = 
       }
     }
   };
+}
+
+function resolveEmptyEarningsWeek(sourceWeek, publishedWeek, priorWeek, { checkedAt, narrativeEvidence } = {}) {
+  if (Array.isArray(publishedWeek?.rows) && publishedWeek.rows.length) return publishedWeek;
+  const sourceHasRows = Array.isArray(sourceWeek?.rows) && sourceWeek.rows.length > 0;
+  const sidecarHasRows = narrativeEvidence?.sourceRange?.from === sourceWeek?.range?.from
+    && narrativeEvidence.sourceRange?.to === sourceWeek?.range?.to
+    && Array.isArray(narrativeEvidence.rows)
+    && narrativeEvidence.rows.length > 0;
+  if (!sourceHasRows && !sidecarHasRows) return publishedWeek;
+
+  // Validate the compact canonical shape before reusing a prior slate. The
+  // validator imports this module, so resolve it only after module loading.
+  const { validateEarningsWeekPayload } = require('./earnings_week_validation');
+  const priorUsable = Array.isArray(priorWeek?.rows)
+    && priorWeek.rows.length > 0
+    && validateEarningsWeekPayload(priorWeek, { mode: 'published' }).length === 0;
+  const fallback = buildEarningsPreparationFallback(priorUsable ? priorWeek : null, sourceWeek.range, {
+    checkedAt,
+    reason: 'empty_earnings_recovery'
+  });
+  return fallback.mode === 'carried_forward'
+    && validateEarningsWeekPayload(fallback.week, { mode: 'published' }).length
+    ? buildEarningsPreparationFallback(null, sourceWeek.range, { checkedAt, reason: 'empty_earnings_recovery' }).week
+    : fallback.week;
 }
 
 function numberOrNull(value) {
@@ -1025,6 +1042,7 @@ module.exports = {
   earningsNarrativeDispositions,
   earningsNarrativeFingerprint,
   resetRepeatedEarningsNarrativeForEditorial,
+  resolveEmptyEarningsWeek,
   narrativeEditorialAttempted,
   narrativeEditorialComplete,
   emptyEarningsApiUsage,

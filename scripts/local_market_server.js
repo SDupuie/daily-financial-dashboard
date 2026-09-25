@@ -304,23 +304,38 @@ async function buildMarketRefresh(args) {
       series: [],
       errors: []
     };
-  const crypto = cryptoResult.status === 'fulfilled' ? cryptoResult.value : null;
+  const cryptoSnapshot = cryptoResult.status === 'fulfilled' ? cryptoResult.value : null;
+  const freshDominance = cryptoSnapshot?.dominance?.availability === undefined
+    ? cryptoSnapshot?.dominance
+    : null;
+  // A local overlay replaces only successful provider cards. Failed providers
+  // stay as they are in the browser, and CoinGecko's two outputs move together.
+  const freshStats = (Array.isArray(cryptoSnapshot?.stats) ? cryptoSnapshot.stats : [])
+    .filter((row) => row?.availability === undefined && (row.sym !== 'TOTAL' || freshDominance));
+  const crypto = cryptoSnapshot ? {
+    fetchedAt: cryptoSnapshot.fetchedAt,
+    stats: freshStats,
+    dominance: freshStats.some((row) => row.sym === 'TOTAL') ? freshDominance : null
+  } : null;
   const chartError = chartResult.status === 'fulfilled'
     ? ''
     : chartResult.reason?.message || 'Chart refresh failed.';
-  const cryptoError = cryptoResult.status === 'fulfilled'
-    ? ''
-    : cryptoResult.reason?.message || 'Crypto stat refresh failed.';
+  const cryptoError = cryptoResult.status === 'rejected'
+    ? cryptoResult.reason?.message || 'Crypto stat refresh failed.'
+    : freshStats.length ? '' : 'No Crypto stat provider returned fresh data.';
   const sectionErrors = [];
   if (chartError) sectionErrors.push({ section: 'chart', message: chartError });
-  if (cryptoError) sectionErrors.push({ section: 'cryptoStats', message: cryptoError });
+  for (const failure of cryptoSnapshot?.availability?.failures || []) {
+    sectionErrors.push({ section: 'cryptoStats', provider: failure.provider, message: failure.message });
+  }
+  if (cryptoError && !cryptoSnapshot?.availability?.failures?.length) sectionErrors.push({ section: 'cryptoStats', message: cryptoError });
   const sections = {
     chart: {
       ok: chartResult.status === 'fulfilled',
       error: chartError
     },
     cryptoStats: {
-      ok: cryptoResult.status === 'fulfilled',
+      ok: freshStats.length > 0,
       error: cryptoError
     }
   };

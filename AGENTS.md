@@ -68,7 +68,7 @@ Read only the routed files or README sections needed for the current task:
 
 - Prepare or Apply Handoff: read `README.md` Scheduled and manual execution and the relevant Daily Runbook subsections. Before Apply, also read `docs/editorial.md` Final Pre-Apply Editorial Gate.
 - AI Editorial Work: read `docs/editorial.md` AI Editorial Work contracts and AI Editorial Work checklist, plus only the section contracts in scope. For a full dashboard update, all section contracts are in scope.
-- Validation, commit, or publish: read only the applicable `README.md` Validation and Publish subsections: Required daily checks, Expanded content and layout checks when the change requires them, and Commit and publish for commit or publication work.
+- Validation, commit, or publish: read only the applicable `README.md` Validation and Publish subsections: Required daily checks, Commit and publish, Weekly Git maintenance when eligible, and Completion report. Browser UI checks for source changes and audits are routed to `docs/agent-implementation.md`, not the daily publication workflow.
 - Deterministic source, staging, payload-shape, fallback, or data-contract work: read the relevant `docs/reference.md` subsection for the affected domain.
 - Focused repairs or local-refresh work: read only the applicable `docs/reference.md` Focused Repair Commands or Local Refresh Server subsection. For browser-compatibility work, read `docs/agent-implementation.md` and the `docs/reference.md` Browser Support subsection.
 - Source-code, architecture, refactor, tests, or visible UI changes: read `docs/agent-implementation.md`, plus any relevant `docs/reference.md` section for touched dashboard domains.

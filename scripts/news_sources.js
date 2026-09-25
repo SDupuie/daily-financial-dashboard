@@ -46,7 +46,6 @@ const APPROVED_NEWS_SOURCES = Object.freeze([
 ].map((source) => Object.freeze({ ...source, domains: Object.freeze(source.domains) })));
 
 const ALPHA_VANTAGE_NEWS_PATHS = Object.freeze([
-  { id: 'alpha-financial-markets', provider: 'alpha-vantage', pool: 'generalCandidates', topic: 'financial_markets' },
   { id: 'alpha-blockchain', provider: 'alpha-vantage', pool: 'cryptoCandidates', topic: 'blockchain' }
 ].map((entry) => Object.freeze(entry)));
 
@@ -67,11 +66,9 @@ const DIRECT_NEWS_FEEDS = Object.freeze([
   { id: 'investing-economy', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_14.rss' },
   { id: 'investing-indicators', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_95.rss' },
   { id: 'investing-earnings', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_1062.rss' },
-  { id: 'investing-company', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_356.rss' },
   { id: 'investing-commodities', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.investing.com/rss/news_11.rss' },
   { id: 'investing-crypto', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.investing.com/rss/news_301.rss' },
   { id: 'axios', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://api.axios.com/feed/' },
-  { id: 'kiplinger', provider: 'rss', pool: 'generalCandidates', feedUrl: 'https://www.kiplinger.com/feed/all' },
   { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
   { id: 'decrypt', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://decrypt.co/feed' },
   { id: 'crypto-news', provider: 'rss', pool: 'cryptoCandidates', feedUrl: 'https://crypto.news/feed/' },

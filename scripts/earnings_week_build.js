@@ -1857,12 +1857,9 @@ function buildRows(calendarRows, profiles, options = {}) {
       ...(timingFallback && (!profileRecovery || profileRecovery.calendarAuditKey !== timingFallbackKey) ? [timingFallbackKey] : [])
     ];
     const eps = metricPayload('eps', calendarRow.eps.estimate, calendarRow.eps.actual, {
-      basis: '',
-      note: ''
+      basis: ''
     });
-    const revenue = metricPayload('revenue', calendarRow.revenue.estimate, calendarRow.revenue.actual, {
-      note: ''
-    });
+    const revenue = metricPayload('revenue', calendarRow.revenue.estimate, calendarRow.revenue.actual);
 
     return {
       symbol: calendarRow.symbol,
@@ -2125,12 +2122,9 @@ function buildZacksRows(days, options = {}) {
     .map((epsRow) => {
       const revenueRow = revenueRows.get(`${epsRow.reportDate}:${epsRow.symbol}`);
       const eps = metricPayload('eps', epsRow.estimate, epsRow.actual, {
-        basis: '',
-        note: ''
+        basis: ''
       });
-      const revenue = metricPayload('revenue', revenueRow.estimate, revenueRow.actual, {
-        note: ''
-      });
+      const revenue = metricPayload('revenue', revenueRow.estimate, revenueRow.actual);
       const sourceRow = {
         reportTiming: epsRow.reportTiming,
         eps: { estimate: epsRow.estimate, actual: epsRow.actual },
@@ -2277,12 +2271,9 @@ function buildEarningsApiRows(tasks, companyFetches) {
     const profile = task.sourceAudit.finnhubProfile;
     const calendarAuditKey = recoveryCalendarAuditKey(task);
     const eps = metricPayload('eps', companyRow.eps.estimate, companyRow.eps.actual, {
-      basis: '',
-      note: ''
+      basis: ''
     });
-    const revenue = metricPayload('revenue', companyRow.revenue.estimate, companyRow.revenue.actual, {
-      note: ''
-    });
+    const revenue = metricPayload('revenue', companyRow.revenue.estimate, companyRow.revenue.actual);
     const sourceRow = {
       reportTiming: companyRow.reportTiming,
       eps: companyRow.eps,

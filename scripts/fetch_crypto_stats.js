@@ -191,9 +191,16 @@ function signedUsdCompact(value) {
   return `${prefix}$${formatUsdCompact(Math.abs(value))}`;
 }
 
+function numericReading(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (typeof value !== 'string' || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) return NaN;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : NaN;
+}
+
 function dominanceFromCoinGecko(payload) {
-  const btc = Number(payload?.data?.market_cap_percentage?.btc);
-  const eth = Number(payload?.data?.market_cap_percentage?.eth);
+  const btc = numericReading(payload?.data?.market_cap_percentage?.btc);
+  const eth = numericReading(payload?.data?.market_cap_percentage?.eth);
   if (![btc, eth].every(Number.isFinite) || btc < 0 || eth < 0 || btc + eth > 100) {
     throw new Error('CoinGecko response was missing valid BTC and ETH market-cap dominance data.');
   }
@@ -221,8 +228,8 @@ function classifyAltcoinSeason(score, dialConfigs, fallbackName = '') {
 
   const matched = Array.isArray(dialConfigs)
     ? dialConfigs.find((config) => {
-      const start = Number(config?.start);
-      const end = Number(config?.end);
+      const start = numericReading(config?.start);
+      const end = numericReading(config?.end);
       return Number.isFinite(start) && Number.isFinite(end) && score >= start && score <= end;
     })
     : null;
@@ -251,9 +258,9 @@ function normalizeFearGreed(payload) {
   const rows = Array.isArray(payload?.data) ? payload.data : [];
   const current = rows[0];
   const previous = rows[1];
-  const currentValue = Number(current?.value);
-  const previousValue = Number(previous?.value);
-  if (!Number.isFinite(currentValue)) {
+  const currentValue = numericReading(current?.value);
+  const previousValue = numericReading(previous?.value);
+  if (!Number.isFinite(currentValue) || currentValue < 0 || currentValue > 100) {
     throw new Error('Alternative.me response was missing the current Fear & Greed reading.');
   }
 
@@ -285,10 +292,10 @@ function normalizeFearGreed(payload) {
 }
 
 function normalizeTotalMarketCap(payload) {
-  const totalMarketCapUsd = Number(payload?.data?.total_market_cap?.usd);
-  const changePct = Number(payload?.data?.market_cap_change_percentage_24h_usd);
-  const updatedAt = Number(payload?.data?.updated_at);
-  if (!Number.isFinite(totalMarketCapUsd) || !Number.isFinite(changePct)) {
+  const totalMarketCapUsd = numericReading(payload?.data?.total_market_cap?.usd);
+  const changePct = numericReading(payload?.data?.market_cap_change_percentage_24h_usd);
+  const updatedAt = numericReading(payload?.data?.updated_at);
+  if (!Number.isFinite(totalMarketCapUsd) || totalMarketCapUsd <= 0 || !Number.isFinite(changePct)) {
     throw new Error('CoinGecko response was missing total market cap USD data.');
   }
 
@@ -325,14 +332,15 @@ function normalizeAltcoinSeason(payload, apiUrl) {
 
   const nowPoint = historicalValues.now;
   const yesterdayPoint = historicalValues.yesterday;
-  const currentScore = Number(nowPoint?.altcoinIndex);
-  if (!Number.isFinite(currentScore)) {
+  const currentScore = numericReading(nowPoint?.altcoinIndex);
+  if (!Number.isFinite(currentScore) || currentScore < 0 || currentScore > 100) {
     throw new Error('CoinMarketCap response was missing the current Altcoin Season reading.');
   }
 
   const roundedCurrentScore = Math.round(currentScore);
-  const roundedYesterdayScore = Number.isFinite(Number(yesterdayPoint?.altcoinIndex))
-    ? Math.round(Number(yesterdayPoint.altcoinIndex))
+  const yesterdayScore = numericReading(yesterdayPoint?.altcoinIndex);
+  const roundedYesterdayScore = Number.isFinite(yesterdayScore) && yesterdayScore >= 0 && yesterdayScore <= 100
+    ? Math.round(yesterdayScore)
     : null;
 
   let deltaText = 'n/a';
@@ -367,7 +375,7 @@ function normalizeAltcoinSeason(payload, apiUrl) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const normalized = await fetchCryptoStatsPartial(args);
+  const normalized = await fetchCryptoStats(args);
 
   atomicWriteJson(args.output, normalized);
 
@@ -407,6 +415,59 @@ function dominanceValuesValid(dominance) {
     && Math.abs(values.reduce((sum, value) => sum + value, 0) - 100) <= 0.02;
 }
 
+function cryptoStatRowErrors(row, label) {
+  const errors = [];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return [`${label} must be an object.`];
+  const symbol = row.sym;
+  if (!CRYPTO_STAT_SYMBOLS.includes(symbol)) errors.push(`${label}.sym is unexpected: ${String(symbol || '(blank)')}.`);
+  const rowUnavailable = row.availability?.status === 'unavailable';
+  for (const field of ['name', 'sub', 'price', 'delta', 'chg']) {
+    if (typeof row[field] !== 'string') errors.push(`${label}.${field} must be a string.`);
+  }
+  for (const field of ['name', 'sub', 'price', 'delta']) {
+    if (typeof row[field] === 'string' && !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
+  }
+  if (!rowUnavailable && typeof row.chg === 'string' && !row.chg.trim()) errors.push(`${label}.chg must be populated.`);
+  if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
+  if (!rowUnavailable && ['F&G', 'ALTSEASON'].includes(symbol)) {
+    const score = numericReading(row.price);
+    if (!Number.isFinite(score) || score < 0 || score > 100) errors.push(`${label}.price must be a score from 0 to 100.`);
+  }
+  if (!rowUnavailable && symbol === 'TOTAL') {
+    if (!/^\$?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?[TMB]?$/.test(row.price || '')) errors.push(`${label}.price must be a non-negative market-cap amount.`);
+    if (!/^[+-]?\d+(?:\.\d+)?%$/.test(row.chg || '')) errors.push(`${label}.chg must be a percentage.`);
+  }
+  if (!rowUnavailable) {
+    const directionText = symbol === 'TOTAL' ? row.chg : row.delta;
+    const directionValue = Number.parseFloat(String(directionText || '').replace(/[^0-9+.-]/g, ''));
+    const expectedDirection = Number.isFinite(directionValue)
+      ? directionValue > 0 ? 'up' : directionValue < 0 ? 'down' : 'flat'
+      : 'flat';
+    if (row.dir !== expectedDirection) errors.push(`${label}.dir must match ${symbol === 'TOTAL' ? 'chg' : 'delta'}.`);
+  }
+  if (row.availability !== undefined) {
+    if (!['carried_forward', 'unavailable'].includes(row.availability?.status)) errors.push(`${label}.availability.status must be carried_forward or unavailable.`);
+    if (row.availability?.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
+    if (!isIsoDateTime(row.availability?.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+  }
+  return errors;
+}
+
+function validPriorStat(row, symbol) {
+  return row?.sym === symbol
+    && (row.availability === undefined || row.availability?.status === 'carried_forward')
+    && cryptoStatRowErrors(row, 'Prior Crypto stat').length === 0;
+}
+
+function validPriorDominance(dominance) {
+  return (dominance?.availability === undefined || dominance.availability?.status === 'carried_forward')
+    && (dominance?.availability === undefined || (
+      dominance.availability?.reason === 'source_refresh_failed'
+      && isIsoDateTime(dominance.availability?.checkedAt)
+    ))
+    && dominanceValuesValid(dominance);
+}
+
 function unavailableCryptoDominance(checkedAt, error = null) {
   return {
     availability: {
@@ -436,7 +497,8 @@ function unavailableCryptoStat(symbol, name, checkedAt, error) {
   };
 }
 
-async function fetchCryptoStatsPartial(args, dependencies = {}) {
+async function fetchCryptoStats(options = {}, dependencies = {}) {
+  const args = { timeoutMs: REQUEST_TIMEOUT_MS, lookbackDays: 31, ...options };
   const checkedAt = dependencies.now instanceof Date ? dependencies.now : new Date();
   const altcoinApiUrl = buildAltcoinSeasonApiUrl(args.lookbackDays);
   const tasks = [
@@ -458,9 +520,17 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
   ];
   const canonical = canonicalCryptoState(args.input);
   const priorBySymbol = new Map(canonical.stats.map((row) => [row?.sym, row]));
-  const settled = await Promise.allSettled(tasks.map(async (task) => (
-    dependencies.collectProvider ? dependencies.collectProvider(task) : task.normalize(await task.fetch())
-  )));
+  const settled = await Promise.allSettled(tasks.map(async (task) => {
+    const result = dependencies.collectProvider
+      ? await dependencies.collectProvider(task)
+      : task.normalize(await task.fetch());
+    if (cryptoStatRowErrors(result?.stat, `Fresh ${task.key}`).length || result.stat.sym !== task.sym
+      || result.stat.availability !== undefined
+      || (task.sym === 'TOTAL' && (!dominanceValuesValid(result.dominance) || result.dominance.availability !== undefined))) {
+      throw new Error(`${task.key} returned malformed Crypto stat data.`);
+    }
+    return result;
+  }));
   const stats = [];
   const details = {};
   const failures = [];
@@ -476,7 +546,9 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
     const lastValidatedAt = String(prior?.availability?.lastValidatedAt || canonical.lastValidatedAt).trim();
     // Partial refresh keeps independent cards fresh while marking only the
     // failed provider's prior card as carried-forward or unavailable.
-    const stat = prior
+    const priorEligible = validPriorStat(prior, task.sym)
+      && (task.sym !== 'TOTAL' || validPriorDominance(canonical.dominance));
+    const stat = priorEligible
       ? {
         ...prior,
         availability: {
@@ -493,10 +565,12 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
   const totalResult = settled[tasks.findIndex((task) => task.key === 'totalMarketCap')];
   // CoinGecko owns both TOTAL and dominance; if that request fails, carry both
   // forward together so dominance does not imply a fresher source than TOTAL.
-  let dominance = totalResult?.status === 'fulfilled' && dominanceValuesValid(totalResult.value?.dominance)
+  let dominance = totalResult?.status === 'fulfilled'
     ? totalResult.value.dominance
     : unavailableCryptoDominance(checkedAt, totalResult?.status === 'rejected' ? totalResult.reason : 'dominance unavailable');
-  if (totalResult?.status === 'rejected' && dominanceValuesValid(canonical.dominance)) {
+  if (totalResult?.status === 'rejected'
+    && validPriorStat(priorBySymbol.get('TOTAL'), 'TOTAL')
+    && validPriorDominance(canonical.dominance)) {
     dominance = {
       ...structuredClone(canonical.dominance),
       availability: {
@@ -523,64 +597,34 @@ async function fetchCryptoStatsPartial(args, dependencies = {}) {
   };
 }
 
-async function fetchCryptoStats(options = {}) {
-  const args = {
-    timeoutMs: REQUEST_TIMEOUT_MS,
-    lookbackDays: 31,
-    ...options
-  };
-  const altcoinApiUrl = buildAltcoinSeasonApiUrl(args.lookbackDays);
-  // Stat cards share one staging boundary: reject the entire snapshot if any
-  // provider cannot be normalized instead of mixing fresh and stale observations.
-  const [fearGreedPayload, totalPayload, altcoinPayload] = await Promise.all([
-    fetchJson(FEAR_GREED_URL, args.timeoutMs, {}),
-    fetchJson(COINGECKO_GLOBAL_URL, args.timeoutMs, {}),
-    fetchJson(altcoinApiUrl, args.timeoutMs, {
-      'Origin': 'https://coinmarketcap.com',
-      'Referer': ALTCOIN_SEASON_PAGE_URL
-    })
-  ]);
-
-  const fearGreed = normalizeFearGreed(fearGreedPayload);
-  const totalMarketCap = normalizeTotalMarketCap(totalPayload);
-  const altcoinSeason = normalizeAltcoinSeason(altcoinPayload, altcoinApiUrl);
-
-  const normalized = {
-    fetchedAt: new Date().toISOString(),
-    stats: [
-      fearGreed.stat,
-      altcoinSeason.stat,
-      totalMarketCap.stat
-    ],
-    dominance: totalMarketCap.dominance,
-    fearGreed,
-    altcoinSeason,
-    totalMarketCap
-  };
-  return normalized;
-}
-
 function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reason = 'source_refresh_failed', legacyLastValidatedAt = '') {
   const timestamp = new Date(checkedAt).toISOString();
   const canonicalLastValidatedAt = String(canonicalCrypto?.statsFetchedAt || legacyLastValidatedAt || '').trim();
   // Whole-section fallback is used by preparation orchestration after the
-  // partial fetcher itself cannot run or validate.
-  const stats = Array.isArray(canonicalCrypto?.stats)
-    ? structuredClone(canonicalCrypto.stats).map((row) => row?.availability?.status === 'unavailable'
-      ? row
-      : {
-        ...row,
+  // provider-isolated fetcher itself cannot run or validate.
+  const priorBySymbol = new Map((Array.isArray(canonicalCrypto?.stats) ? canonicalCrypto.stats : [])
+    .map((row) => [row?.sym, row]));
+  const totalEligible = validPriorStat(priorBySymbol.get('TOTAL'), 'TOTAL')
+    && validPriorDominance(canonicalCrypto?.dominance);
+  const names = new Map([['F&G', 'Fear & Greed Index'], ['ALTSEASON', 'Altcoin Season Index'], ['TOTAL', 'Crypto Market Cap']]);
+  const stats = CRYPTO_STAT_SYMBOLS.map((symbol) => {
+    const prior = priorBySymbol.get(symbol);
+    return validPriorStat(prior, symbol) && (symbol !== 'TOTAL' || totalEligible)
+      ? {
+        ...prior,
         availability: {
           status: 'carried_forward',
           reason,
           checkedAt: timestamp,
-          ...(String(row?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim()
-            ? { lastValidatedAt: String(row?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim() }
+          ...(String(prior?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim()
+            ? { lastValidatedAt: String(prior?.availability?.lastValidatedAt || canonicalLastValidatedAt).trim() }
             : {})
         }
-      })
-    : [];
-  const dominance = dominanceValuesValid(canonicalCrypto?.dominance)
+      }
+      : unavailableCryptoStat(symbol, names.get(symbol), checkedAt, reason);
+  });
+  const anyCarried = stats.some((row) => row.availability.status === 'carried_forward');
+  const dominance = totalEligible
     ? {
       ...structuredClone(canonicalCrypto.dominance),
       availability: {
@@ -593,10 +637,10 @@ function buildCryptoStatsFallback(canonicalCrypto, checkedAt = new Date(), reaso
     : unavailableCryptoDominance(timestamp);
   return {
     fetchedAt: timestamp,
-    stats,
+    stats: anyCarried ? stats : [],
     dominance,
     availability: {
-      status: stats.length ? 'carried_forward' : 'unavailable',
+      status: anyCarried ? 'carried_forward' : 'unavailable',
       reason,
       checkedAt: timestamp
     }
@@ -620,42 +664,11 @@ function validateCryptoStatsPayload(payload) {
     if (payload.stats.length !== CRYPTO_STAT_SYMBOLS.length) errors.push(`Crypto stats staging must contain exactly ${CRYPTO_STAT_SYMBOLS.length} rows.`);
     payload.stats.forEach((row, index) => {
       const label = `Crypto stats staging stats[${index}]`;
-      if (!row || typeof row !== 'object' || Array.isArray(row)) {
-        errors.push(`${label} must be an object.`);
-        return;
-      }
-      const symbol = String(row.sym || '');
-      if (!CRYPTO_STAT_SYMBOLS.includes(symbol)) errors.push(`${label}.sym is unexpected: ${symbol || '(blank)'}.`);
-      else if (seen.has(symbol)) errors.push(`Crypto stats staging contains duplicate symbol ${symbol}.`);
-      else seen.add(symbol);
-      const rowUnavailable = row.availability?.status === 'unavailable';
-      for (const field of ['name', 'sub', 'price', 'delta', 'chg']) {
-        if (typeof row[field] !== 'string') errors.push(`${label}.${field} must be a string.`);
-      }
-      for (const field of ['name', 'sub', 'price', 'delta']) {
-        if (typeof row[field] === 'string' && !row[field].trim()) errors.push(`${label}.${field} must be populated.`);
-      }
-      if (!rowUnavailable && typeof row.chg === 'string' && !row.chg.trim()) errors.push(`${label}.chg must be populated.`);
-      if (!['up', 'down', 'flat'].includes(row.dir)) errors.push(`${label}.dir must be up, down, or flat.`);
-      if (!rowUnavailable && ['F&G', 'ALTSEASON'].includes(symbol)) {
-        const score = Number(row.price);
-        if (!Number.isFinite(score) || score < 0 || score > 100) errors.push(`${label}.price must be a score from 0 to 100.`);
-      }
-      if (!rowUnavailable && symbol === 'TOTAL' && ['price', 'delta', 'chg'].some((field) => typeof row[field] !== 'string' || !row[field].trim())) {
-        errors.push(`${label} must contain populated price, delta, and chg values.`);
-      }
-      if (!rowUnavailable) {
-        const directionText = symbol === 'TOTAL' ? row.chg : row.delta;
-        const directionValue = Number.parseFloat(String(directionText || '').replace(/[^0-9+.-]/g, ''));
-        const expectedDirection = Number.isFinite(directionValue)
-          ? directionValue > 0 ? 'up' : directionValue < 0 ? 'down' : 'flat'
-          : 'flat';
-        if (row.dir !== expectedDirection) errors.push(`${label}.dir must match ${symbol === 'TOTAL' ? 'chg' : 'delta'}.`);
-      }
-      if (row.availability !== undefined) {
-        if (!['carried_forward', 'unavailable'].includes(row.availability?.status)) errors.push(`${label}.availability.status must be carried_forward or unavailable.`);
-        if (row.availability?.reason !== 'source_refresh_failed') errors.push(`${label}.availability.reason must be source_refresh_failed.`);
-        if (!isIsoDateTime(row.availability?.checkedAt)) errors.push(`${label}.availability.checkedAt must be an offset-bearing ISO timestamp.`);
+      errors.push(...cryptoStatRowErrors(row, label));
+      const symbol = row?.sym;
+      if (CRYPTO_STAT_SYMBOLS.includes(symbol)) {
+        if (seen.has(symbol)) errors.push(`Crypto stats staging contains duplicate symbol ${symbol}.`);
+        else seen.add(symbol);
       }
     });
     for (const symbol of CRYPTO_STAT_SYMBOLS) {
@@ -710,7 +723,6 @@ module.exports = {
   REQUEST_TIMEOUT_MS,
   buildCryptoStatsFallback,
   fetchCryptoStats,
-  fetchCryptoStatsPartial,
   validateCryptoStatsPayload
 };
 

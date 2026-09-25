@@ -938,6 +938,13 @@ function articleRedirectAllowed(candidateUrl, nextUrl) {
   return nextHostname === candidateHostname;
 }
 
+// Apply acquisition exclusions to both downloaded items and retained prior cards.
+// Keep publisher identities in the catalog for historical provenance.
+function excludedNewsUrl(url, source) {
+  return source?.id === 'kiplinger'
+    || (source?.id === 'reuters' && /^\/(sports|lifestyle|fact-check|latam|live|podcasts|science|sustainability|wider-image|investigations)(\/|$)/i.test(new URL(url).pathname));
+}
+
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
   const source = sourceForUrl(url);
@@ -951,7 +958,7 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     ? item.publishedOn
     : '';
   const title = plainText(item?.title);
-  if (!url || (!source && !tickerSearchSymbol) || (!publishedAt && !sourcePublishedOn) || !title) return null;
+  if (!url || excludedNewsUrl(url, source) || (!source && !tickerSearchSymbol) || (!publishedAt && !sourcePublishedOn) || !title) return null;
   const sourceDomain = publisherHostname(url);
   if (!sourceDomain) return null;
   const publishedOn = sourcePublishedOn || chicagoIsoDate(publishedAt);
@@ -1080,7 +1087,7 @@ function priorCandidate(item, pool, eligibleDates) {
   const tickerSearchSymbols = [...new Set((Array.isArray(item?.tickerSearchSymbols) ? item.tickerSearchSymbols : [])
     .map((ticker) => String(ticker || '').toUpperCase())
     .filter((ticker) => MARKETAUX_TICKERS.has(ticker)))];
-  if (!url || !publisherHostname(url) || (!source && !tickerSearchSymbols.length)
+  if (!url || excludedNewsUrl(url, source) || !publisherHostname(url) || (!source && !tickerSearchSymbols.length)
     || !title || !sourceLabel || !eligibleDates.has(publishedOn)) return null;
   return {
     title,

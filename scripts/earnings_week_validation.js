@@ -244,7 +244,6 @@ function validateMetric(errors, metric, label, options = {}) {
   const expectedResult = metricResult(metric.actual, metric.estimate, options.metric);
   if (metric.result !== expectedResult) errors.push(`${label}.result must be ${expectedResult}.`);
   if (options.requireBasis && typeof metric.basis !== 'string') errors.push(`${label}.basis must be a string.`);
-  if (typeof metric.note !== 'string') errors.push(`${label}.note must be a string.`);
 }
 
 function validateSelectedSources(errors, selected, expected, label, row = null, audit = null) {

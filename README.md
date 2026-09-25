@@ -68,16 +68,6 @@ Publication validation is a final artifact safety check. It blocks malformed HTM
 - For quick iteration or an ordinary non-publish check, run `node scripts/validate_dashboard.js daily_financial_news.html`.
 - Let `./scripts/publish_main.sh` own the full readiness gate before it pushes; do not run the complete suite immediately before publishing.
 
-### Expanded content and layout checks
-
-Run the applicable checks after content, structural, layout, script, or contract changes:
-
-- Avoid market-superlative claims unless directly verified during AI Editorial Work.
-- Run `tidy -q -e daily_financial_news.html` and browser-check the production page after structural or layout changes. After changing Market Lens or Outcome copy, reactions, or routing, check narrow mobile and desktop widths for readability and overflow; activate pre-close and post-close reaction controls with pointer and keyboard; verify the correct Tape group, ticker, and chart open; verify focus moves to the chart heading; and verify repeated activation leaves that chart open.
-- After changing an information tooltip, run `node scripts/test_dashboard.js --browser`, then browser-check tap, hover, and keyboard activation at narrow mobile, tablet, and desktop widths. The tooltip must remain inside the viewport, paint above neighboring controls, and remain legible in each state.
-- Run `node scripts/validate_dashboard.js test` after script or data-contract changes when publication is not the immediate next step. It already runs the focused test scripts, so keep those checks sequential rather than launching parallel dashboard-test runs. Run `node scripts/test_dashboard.js --browser` after embedded runtime/startup changes. Run `node scripts/test_market_data.js` when changing local-refresh behavior without running the full aggregate suite.
-- Nonvisual data, contract, validation, and refactoring changes require no browser pass when they do not affect the embedded runtime, dashboard startup, renderer behavior, or the published data shapes permitted to reach those paths. If a nonvisual change alters a malformed published shape that can reach an affected renderer or startup path, follow the browser-startup requirements in the agent review and implementation policies. For visible changes, exercise only the affected interactions and applicable breakpoints, including every specific tooltip or Week Ahead check listed above when that surface changed.
-
 ### Commit and publish
 
 - Commit directly on `main`.
@@ -89,5 +79,16 @@ Run the applicable checks after content, structural, layout, script, or contract
 - After successful publication, run this step only for the scheduled Friday afternoon edition. Determine eligibility from the scheduled run's start date and edition in `America/Chicago`; retain that decision if publication finishes later. Other editions and manual updates stop after publication.
 - From the repository root, record `du -sk .git`, run ordinary `git gc` with escalated local command execution and default settings, then record `du -sk .git` again. Wait for a numeric exit code before reporting completion. Do not add `--aggressive`, `--prune=now`, or `--force`.
 - Include the maintenance result and space recovered in the run's completion report. If maintenance fails or cannot run, report that separately while preserving the successful publication result; do not repeat Prepare, Apply, commit, or publish to retry maintenance.
+
+### Completion report
+
+After a successful scheduled or manual publication, write a concise narrative report in this order:
+
+1. Open with a bold sentence giving the Chicago date, edition, and publication result, followed by a live dashboard link.
+2. In a short paragraph, report the actual Futures, General, and Crypto story counts and the number of refreshed Tape notes. Mention substantive Opening, Earnings, or Week Ahead changes and any deliberately deferred reaction when relevant.
+3. In a short paragraph, state which Apply, readiness, publication-suite, deployment, and live-page checks actually passed. Give the commit ID, whether `main` is synchronized with `origin/main`, and any pre-existing local changes left untouched.
+4. Add a separate **Verification gap:** paragraph whenever a required check was not performed or remains unresolved. Say exactly what was missed and do not claim checks that were not run. Include Friday Git maintenance and space recovered for an eligible afternoon run, or briefly state why it was inapplicable.
+
+Use these compact paragraphs rather than a checklist of status bullets for a routine success. For a reportable failure, material data limitation, or unmet requirement, adapt the report to the actual outcome and include only completed work and checks. For scheduled runs, honor the scheduler's notification rules: an unchanged or non-actionable skipped run may use only the required quiet heartbeat status, without a narrative report. When notification is warranted and a machine-readable heartbeat status is required, put the user-facing report before that status block.
 
 Normal daily updates stop after publication and any eligible weekly Git maintenance. `docs/reference.md` is not AI Editorial Work guidance. During Prepare Handoff, AI Editorial Work, or Apply Handoff, read only the applicable `docs/reference.md` subsection, and do so only when this runbook explicitly points to it, when debugging a failed run, or when changing code or data contracts.

@@ -448,7 +448,7 @@ async function testCurrentMarketFailuresStayIsolated() {
       dominance: { btc: '55.00%', eth: '10.00%', others: '35.00%' }
     }
   })}</script>`);
-  const cryptoPayload = await cryptoStats.fetchCryptoStatsPartial({
+  const cryptoPayload = await cryptoStats.fetchCryptoStats({
     input: cryptoInput,
     lookbackDays: 31,
     timeoutMs: 1000
@@ -470,6 +470,87 @@ async function testCurrentMarketFailuresStayIsolated() {
   assert.equal(cryptoPayload.stats.find((stat) => stat.sym === 'ALTSEASON').price, '76');
   assert.equal(cryptoPayload.stats.find((stat) => stat.sym === 'TOTAL').price, '$1.10T');
   assert.deepEqual(cryptoPayload.availability.failures.map((failure) => failure.provider), ['fearGreed']);
+}
+
+async function testCryptoProviderTransitions() {
+  const dir = makeTemporaryDirectory('dfd-crypto-transitions-');
+  const input = path.join(dir, 'dashboard.html');
+  const priorStats = [
+    { sym: 'F&G', name: 'Fear & Greed Index', sub: 'Neutral', price: '50', delta: '+1', chg: '+1', dir: 'up' },
+    { sym: 'ALTSEASON', name: 'Altcoin Season Index', sub: 'Neutral', price: '50', delta: '+1', chg: '/100', dir: 'up' },
+    { sym: 'TOTAL', name: 'Crypto Market Cap', sub: 'Expanding', price: '1.00T', delta: '+$0.01T', chg: '+1.00%', dir: 'up' }
+  ];
+  const priorDominance = { btc: '55.00%', eth: '10.00%', others: '35.00%' };
+  const writePrior = (stats = priorStats, dominance = priorDominance) => fs.writeFileSync(input,
+    `<script type="application/json" id="dashboard-data">${JSON.stringify({
+      editionId: '2026-07-10T20:00:00.000Z',
+      crypto: { statsFetchedAt: '2026-07-10T20:00:00.000Z', stats, dominance }
+    })}</script>`);
+  const providers = {
+    fearGreed: { data: [{ value: '0', timestamp: 1783717200 }, { value: '1' }] },
+    altcoinSeason: { data: { historicalValues: { now: { altcoinIndex: '0', timestamp: 1783717200 }, yesterday: { altcoinIndex: '1' } } } },
+    totalMarketCap: { data: { total_market_cap: { usd: '1000000000000' }, market_cap_change_percentage_24h_usd: '0', market_cap_percentage: { btc: '0', eth: '0' }, updated_at: 1783717200 } }
+  };
+  const fetch = (failure = null, replacement = null) => cryptoStats.fetchCryptoStats({ input }, {
+    now: new Date('2026-07-10T21:05:00.000Z'),
+    collectProvider: async (task) => {
+      if (task.key === failure && replacement === null) throw new Error('fixture provider failure');
+      const payload = structuredClone(providers[task.key]);
+      if (task.key === failure) replacement(payload);
+      return task.normalize(payload);
+    }
+  });
+
+  writePrior();
+  const healthy = await fetch();
+  assert.deepEqual(cryptoStats.validateCryptoStatsPayload(healthy), []);
+  assert.equal(healthy.stats.find((row) => row.sym === 'F&G').price, '0');
+  assert.equal(healthy.stats.find((row) => row.sym === 'ALTSEASON').price, '0');
+  assert.deepEqual(healthy.dominance, { btc: '0.00%', eth: '0.00%', others: '100.00%' });
+
+  for (const badValue of [null, '', '  ', {}, true]) {
+    for (const [provider, change] of [
+      ['fearGreed', (payload) => { payload.data[0].value = badValue; }],
+      ['altcoinSeason', (payload) => { payload.data.historicalValues.now.altcoinIndex = badValue; }],
+      ['totalMarketCap', (payload) => { payload.data.total_market_cap.usd = badValue; }]
+    ]) {
+      const result = await fetch(provider, change);
+      assert.deepEqual(cryptoStats.validateCryptoStatsPayload(result), []);
+      assert.deepEqual(result.availability.failures.map((item) => item.provider), [provider]);
+      assert.equal(result.stats.filter((row) => row.availability === undefined).length, 2);
+      if (provider === 'totalMarketCap') {
+        assert.equal(result.stats.find((row) => row.sym === 'TOTAL').availability.status, 'carried_forward');
+        assert.equal(result.dominance.availability.status, 'carried_forward');
+      }
+    }
+  }
+  const badDominance = await fetch('totalMarketCap', (payload) => { payload.data.market_cap_percentage.btc = null; });
+  assert.equal(badDominance.stats.find((row) => row.sym === 'TOTAL').availability.status, 'carried_forward');
+  assert.equal(badDominance.dominance.availability.status, 'carried_forward');
+
+  for (const [label, prior, expected] of [
+    ['fresh', priorStats[0], 'carried_forward'],
+    ['carried', { ...priorStats[0], availability: { status: 'carried_forward', reason: 'source_refresh_failed', checkedAt: '2026-07-10T20:00:00.000Z' } }, 'carried_forward'],
+    ['unavailable', { ...priorStats[0], availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: '2026-07-10T20:00:00.000Z' } }, 'unavailable'],
+    ['malformed', { ...priorStats[0], price: 'bad' }, 'unavailable'],
+    ['out of range', { ...priorStats[0], price: '101' }, 'unavailable'],
+    ['absent', null, 'unavailable']
+  ]) {
+    writePrior([...priorStats.slice(1), ...(prior ? [prior] : [])]);
+    const result = await fetch('fearGreed');
+    assert.deepEqual(cryptoStats.validateCryptoStatsPayload(result), [], label);
+    assert.equal(result.stats.find((row) => row.sym === 'F&G').availability.status, expected, label);
+    assert.equal(result.stats.find((row) => row.sym === 'ALTSEASON').availability, undefined, label);
+  }
+
+  writePrior(priorStats, { availability: { status: 'unavailable', reason: 'source_refresh_failed', checkedAt: '2026-07-10T20:00:00.000Z' } });
+  const uncoupledPrior = await fetch('totalMarketCap');
+  assert.equal(uncoupledPrior.stats.find((row) => row.sym === 'TOTAL').availability.status, 'unavailable');
+  assert.equal(uncoupledPrior.dominance.availability.status, 'unavailable');
+  writePrior(uncoupledPrior.stats, uncoupledPrior.dominance);
+  const repeatedFailure = await fetch('totalMarketCap');
+  assert.equal(repeatedFailure.stats.find((row) => row.sym === 'TOTAL').availability.status, 'unavailable');
+  assert.equal(repeatedFailure.dominance.availability.status, 'unavailable');
 }
 
 function testCompactChartBarsStayTupleEncoded() {
@@ -594,6 +675,45 @@ async function testBuildMarketRefreshNormalizesAndIsolatesFailures() {
     assert.equal(payload.partial, true);
     assert.match(payload.errors.map((error) => error.message).join('\n'), /fixture chart failure/);
     assert.match(payload.errors.map((error) => error.message).join('\n'), /fixture crypto failure/);
+
+    cryptoStats.fetchCryptoStats = async () => ({
+      fetchedAt: '2026-07-10T21:05:00.000Z',
+      stats: [
+        { sym: 'F&G', availability: { status: 'carried_forward' } },
+        { sym: 'ALTSEASON', price: '76' },
+        { sym: 'TOTAL', price: '1.10T' }
+      ],
+      dominance: { btc: '54.00%', eth: '11.00%', others: '35.00%' },
+      availability: { failures: [{ provider: 'fearGreed', message: 'fixture provider failure' }] }
+    });
+    const partialCrypto = await buildMarketRefresh({ input, days: 5, concurrency: 2, sourceTimeoutMs: 1000 });
+    assert.deepEqual(partialCrypto.cryptoStats.stats.map((row) => row.sym), ['ALTSEASON', 'TOTAL']);
+    assert.equal(partialCrypto.cryptoStats.dominance.btc, '54.00%');
+    assert.equal(partialCrypto.sections.cryptoStats.ok, true);
+    assert.equal(partialCrypto.partial, true);
+    assert.deepEqual(partialCrypto.errors.filter((error) => error.provider).map((error) => error.provider), ['fearGreed']);
+
+    cryptoStats.fetchCryptoStats = async () => ({
+      fetchedAt: '2026-07-10T21:05:00.000Z',
+      stats: [{ sym: 'F&G', price: '50' }, { sym: 'ALTSEASON', price: '76' }, { sym: 'TOTAL', availability: { status: 'unavailable' } }],
+      dominance: { availability: { status: 'unavailable' } },
+      availability: { failures: [{ provider: 'totalMarketCap', message: 'fixture CoinGecko failure' }] }
+    });
+    const failedTotal = await buildMarketRefresh({ input, days: 5, concurrency: 2, sourceTimeoutMs: 1000 });
+    assert.deepEqual(failedTotal.cryptoStats.stats.map((row) => row.sym), ['F&G', 'ALTSEASON']);
+    assert.equal(failedTotal.cryptoStats.dominance, null);
+    assert.equal(failedTotal.sections.cryptoStats.ok, true);
+
+    cryptoStats.fetchCryptoStats = async () => ({
+      fetchedAt: '2026-07-10T21:05:00.000Z',
+      stats: ['F&G', 'ALTSEASON', 'TOTAL'].map((sym) => ({ sym, availability: { status: 'unavailable' } })),
+      dominance: { availability: { status: 'unavailable' } },
+      availability: { failures: [{ provider: 'fearGreed', message: 'fixture failure' }] }
+    });
+    const allFailed = await buildMarketRefresh({ input, days: 5, concurrency: 2, sourceTimeoutMs: 1000 });
+    assert.deepEqual(allFailed.cryptoStats.stats, []);
+    assert.equal(allFailed.cryptoStats.dominance, null);
+    assert.equal(allFailed.sections.cryptoStats.ok, false);
   } finally {
     chartData.fetchSeries = originalFetchSeries;
     cryptoStats.fetchCryptoStats = originalFetchCryptoStats;
@@ -609,6 +729,7 @@ async function main() {
     testChartSeriesOwnsDerivedQuoteRows();
     testChartStagingFallbackAndIsolation();
     await testCurrentMarketFailuresStayIsolated();
+    await testCryptoProviderTransitions();
     testCompactChartBarsStayTupleEncoded();
     testAssetAllocationStagingContracts();
     testLocalRefreshReadsOnlyEligibleRows();

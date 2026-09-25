@@ -26,7 +26,6 @@ const {
 } = require('./fetch_asset_allocation');
 const {
   buildEarningsPreparationFallback,
-  applyEarningsLifecycle,
   combinedOutcome,
   computeEarningsWeekCounts,
   earningsHasActual,
@@ -35,6 +34,7 @@ const {
   narrativeEditorialComplete,
   mergeUnchangedEarningsNarrative,
   resetRepeatedEarningsNarrativeForEditorial,
+  resolveEmptyEarningsWeek,
   validEarningsCommentaryDisposition,
   validEarningsGuidanceDisposition,
   earningsRowKey: earningsNarrativeRowKey
@@ -1127,14 +1127,6 @@ function applyCryptoStats(data, payload) {
   else delete data.crypto.availability;
 }
 
-function hasPublishedEarningsRows(week) {
-  return Array.isArray(week?.rows) && week.rows.length > 0;
-}
-
-function rangesMatch(left, right) {
-  return left?.from === right?.from && left?.to === right?.to;
-}
-
 function optionalJson(filePath) {
   try {
     return fs.existsSync(filePath) ? readJson(filePath) : null;
@@ -1143,53 +1135,12 @@ function optionalJson(filePath) {
   }
 }
 
-function emptyEarningsContradicted(sourceWeek, { incomingRows = 0, evidenceRows = false, useSidecarEvidence = false } = {}) {
-  if (incomingRows > 0 || evidenceRows) return true;
-  if (!useSidecarEvidence) return false;
-  const range = sourceWeek?.range;
-  if (!range) return false;
-  const narrative = optionalJson(EARNINGS_NARRATIVE_PATH);
-  return rangesMatch(narrative?.sourceRange, range) && Array.isArray(narrative.rows) && narrative.rows.length > 0;
-}
-
-function carriedForwardEarningsWeek(previousWeek, checkedAt = scheduledNow()) {
-  const asOf = new Date(checkedAt);
-  return {
-    ...structuredClone(previousWeek),
-    generatedAt: asOf.toISOString(),
-    availability: {
-      status: 'carried_forward',
-      reason: 'empty_earnings_recovery',
-      checkedAt: asOf.toISOString()
-    },
-    rows: (Array.isArray(previousWeek?.rows) ? previousWeek.rows : [])
-      .map((row) => applyEarningsLifecycle(row, asOf))
-  };
-}
-
-function recoverEmptyEarningsWeek(data, sourceWeek, previousWeek, options = {}) {
-  const week = data.earnings?.week;
-  if (hasPublishedEarningsRows(week) || !emptyEarningsContradicted(sourceWeek, options)) return false;
-  // If sidecar/review evidence proves the active slate had rows, publishing an
-  // empty monitor would hide a deterministic failure; carry forward last good.
-  if (!hasPublishedEarningsRows(previousWeek)) {
-    throw new Error('Earnings publication produced zero rows despite same-range row evidence, and no previous non-empty canonical week is available to carry forward.');
-  }
-  data.earnings.week = carriedForwardEarningsWeek(previousWeek, options.checkedAt);
-  clearEarningsInternalQueues(data.earnings.week);
-  if (!hasPublishedEarningsRows(data.earnings?.week)) {
-    throw new Error('Earnings empty-row recovery failed because the previous canonical week did not survive publication handoff.');
-  }
-  return true;
-}
-
 function isEmptyEarningsRecoveryWeek(week) {
-  return week?.availability?.status === 'carried_forward'
+  return ['carried_forward', 'unavailable'].includes(week?.availability?.status)
     && week.availability.reason === 'empty_earnings_recovery';
 }
 
-function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previousWeek = data.earnings?.week, checkedAt = scheduledNow(), evidenceRows = false, useSidecarEvidence = false } = {}) {
-  const incomingRows = Array.isArray(earningsWeek?.rows) ? earningsWeek.rows.length : 0;
+function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previousWeek = data.earnings?.week, checkedAt = scheduledNow(), useSidecarEvidence = false } = {}) {
   // Apply may preserve prior narrative only through the Earnings fingerprint
   // contract; deterministic rows and display eligibility still come from input.
   const canonicalEarningsWeek = mergeUnchangedEarningsNarrative(data.earnings?.week, earningsWeek);
@@ -1201,7 +1152,15 @@ function applyEarningsWeek(data, earningsWeek, { requireNarrative = true, previo
     week: canonicalEarningsWeek
   };
   prepareEarningsRowsForPublication(data);
-  recoverEmptyEarningsWeek(data, earningsWeek, { ...previousWeek }, { incomingRows, checkedAt, evidenceRows, useSidecarEvidence });
+  const publishedWeek = data.earnings.week;
+  const resolvedWeek = resolveEmptyEarningsWeek(earningsWeek, publishedWeek, previousWeek, {
+    checkedAt,
+    narrativeEvidence: useSidecarEvidence && !publishedWeek.rows.length ? optionalJson(EARNINGS_NARRATIVE_PATH) : null
+  });
+  if (resolvedWeek !== publishedWeek) {
+    data.earnings.week = resolvedWeek;
+    clearEarningsInternalQueues(resolvedWeek);
+  }
 }
 
 function prepareCandidateNews(data, now = scheduledNow()) {
@@ -1475,8 +1434,6 @@ function earningsNarrativeItem(row) {
   return {
     symbol: row.symbol,
     reportDate: row.reportDate,
-    eps: { note: String(row.eps?.note || '') },
-    revenue: { note: String(row.revenue?.note || '') },
     outcome: {
       guide: String(row.outcome?.guide || ''),
       interpretation: String(row.outcome?.interpretation || ''),
@@ -1539,7 +1496,7 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
     .map((row) => earningsNarrativeItem(editorialRowsByKey.get(earningsNarrativeRowKey(row)) || {
       symbol: row.symbol,
       reportDate: row.reportDate,
-      eps: {}, revenue: {}, outcome: {}, reaction: {}
+      outcome: {}, reaction: {}
     }));
   const outputPath = 'generated/editorial/dashboard-data.json';
   const narrativePayload = {
@@ -2088,7 +2045,7 @@ function applyDashboardDataJson(args) {
   });
   if (finalizedEarnings && publishingDefaultDashboard) {
     if (recoveredEarningsPublication) {
-      process.stderr.write('Earnings narrative synchronization skipped because the dashboard carried forward the previous non-empty week after empty-row recovery.\n');
+      process.stderr.write('Earnings narrative synchronization skipped after empty-row recovery.\n');
       return;
     }
     try {

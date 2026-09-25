@@ -242,10 +242,10 @@ async function testAlphaVantageProviderErrorRedaction() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const apiKey = 'fixture-alpha-key-123';
   const alphaPath = {
-    id: 'alpha-financial-markets',
+    id: 'alpha-blockchain',
     provider: 'alpha-vantage',
     pool: 'generalCandidates',
-    topic: 'financial_markets'
+    topic: 'blockchain'
   };
   const providerMessage = `Alpha Vantage detected ${apiKey}; repeated value ${apiKey}.`;
   const fetchPage = async () => ({ json: async () => ({ Information: providerMessage }) });
@@ -509,6 +509,51 @@ function testCryptoRssSourceManifest() {
   }
 }
 
+async function testNewsAcquisitionExclusions() {
+  const paths = newsAcquisitionPaths().map((entry) => entry.id);
+  for (const removed of ['alpha-financial-markets', 'kiplinger', 'investing-company']) {
+    assert.equal(paths.includes(removed), false);
+  }
+  for (const retained of ['alpha-blockchain', 'reuters-public', 'investing-market',
+    'investing-economy', 'investing-indicators', 'investing-earnings',
+    'investing-commodities', 'investing-crypto']) {
+    assert.equal(paths.includes(retained), true);
+  }
+  const asOf = new Date('2026-07-10T21:00:00.000Z');
+  const excluded = [
+    'https://www.reuters.com/sports/baseball/game-fixture-2026-07-10',
+    'https://www.reuters.com/lifestyle/travel-fixture-2026-07-10',
+    'https://www.kiplinger.com/investing/fixture'
+  ];
+  const retained = [
+    'https://www.reuters.com/business/sports-company-earnings-2026-07-10',
+    'https://www.reuters.com/world/trade-fixture-2026-07-10',
+    'https://www.investing.com/news/economy-fixture'
+  ];
+  const items = [...excluded, ...retained].map((url, index) => ({
+    url, title: `Acquisition fixture ${index}`, publishedAt: asOf.toISOString()
+  }));
+  const fetched = [];
+  const artifact = await collectNewsCandidates({
+    asOf,
+    acquisitionPaths: [{ id: 'fixture-provider', provider: 'rss', pool: 'generalCandidates' }],
+    dashboardData: {
+      stories: items.map((item) => ({ ...item, publishedOn: '2026-07-10', sourceLabel: 'Fixture' })),
+      futuresModule: { stories: [] }, crypto: { notes: [] }
+    },
+    fetchPath: async () => ({ items }),
+    fetchArticle: async (candidate) => {
+      fetched.push(candidate.url);
+      return { excerpt: 'Fixture article context.', publishedAt: asOf };
+    },
+    clock: () => asOf
+  });
+  assert.deepEqual(fetched.sort(), [...retained].sort(), 'Excluded URLs must never reach article retrieval.');
+  assert.deepEqual(artifact.generalCandidates.map((item) => item.url).sort(), [...retained].sort(),
+    'Excluded providers/categories must not return through prior-card carry-forward.');
+  assert.equal(artifact.futuresCandidates.some((item) => excluded.includes(item.url)), false);
+}
+
 async function testDeterministicNewsCandidateAcquisition() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const calls = [];
@@ -551,17 +596,16 @@ async function testDeterministicNewsCandidateAcquisition() {
     fetchPath: async (acquisitionPath) => {
       calls.push(acquisitionPath.id);
       if (acquisitionPath.id === 'axios') throw new Error('fixture provider failure');
-      if (acquisitionPath.id === 'alpha-financial-markets') return { items: [{
-        publishedAt: '2026-07-10T20:00:00.000Z',
-        title: 'CNBC direct duplicate fixture',
-        url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html?utm_source=alpha'
-      }] };
       if (acquisitionPath.id === 'cnbc') return { items: [{
         publishedAt: '2026-07-10T20:00:00.000Z',
         title: 'CNBC direct duplicate fixture',
         url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html'
       }] };
       if (acquisitionPath.id === 'stockfit-market') return { items: [{
+        publishedAt: '2026-07-10T20:00:00.000Z',
+        title: 'CNBC direct duplicate fixture',
+        url: 'https://www.cnbc.com/2026/07/10/direct-fixture.html?utm_source=stockfit'
+      }, {
         publishedAt: '2026-07-10T19:30:00.000Z',
         publishedAtVerified: true,
         title: 'Yahoo hosted fixture',
@@ -586,7 +630,7 @@ async function testDeterministicNewsCandidateAcquisition() {
 
   assert.deepEqual([...calls].sort(), acquisitionPaths.map((entry) => entry.id).sort());
   assert.deepEqual(artifact.attempts.map((attempt) => attempt.id), acquisitionPaths.map((entry) => entry.id));
-  assert.deepEqual(pauses, [1250]);
+  assert.deepEqual(pauses, [], 'The single remaining Alpha Vantage news path needs no between-path pause.');
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'cnbc').length, 1);
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc').provider, 'rss');
@@ -1670,6 +1714,7 @@ async function main() {
   await testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap();
   await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();
+  await testNewsAcquisitionExclusions();
   await testFuturesCandidatesUseDisplayedSessionWindow();
   await testNewsCandidateReviewCapAndProgress();
   testBaselineSanitization();

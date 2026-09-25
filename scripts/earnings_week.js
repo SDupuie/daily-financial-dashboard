@@ -244,18 +244,6 @@ Options:
   return args;
 }
 
-function metricPayload(fields, metric, options = {}) {
-  const estimate = numberOrNull(fields?.estimate);
-  const actual = numberOrNull(fields?.actual);
-  return {
-    estimate,
-    actual,
-    surprisePercent: pctChange(estimate, actual),
-    result: metricResult(actual, estimate, metric),
-    ...options
-  };
-}
-
 function sourceRangeMatches(left, right) {
   return left?.from === right?.from && left?.to === right?.to;
 }
@@ -288,14 +276,6 @@ function validateNarrativePayload(source, narrativePayload, options = {}) {
   }
 }
 
-function applyMetricNote(metric, narrativeMetric) {
-  if (!narrativeMetric || !Object.prototype.hasOwnProperty.call(narrativeMetric, 'note')) return metric;
-  return {
-    ...metric,
-    note: stringValue(narrativeMetric.note)
-  };
-}
-
 function applyEarningsNarrative(source, narrativePayload, options = {}) {
   validateNarrativePayload(source, narrativePayload, options);
   const output = JSON.parse(JSON.stringify(source));
@@ -313,8 +293,6 @@ function applyEarningsNarrative(source, narrativePayload, options = {}) {
     const row = target.row;
     const next = {
       ...row,
-      eps: applyMetricNote(row.eps, item.eps),
-      revenue: applyMetricNote(row.revenue, item.revenue),
       outcome: {
         ...row.outcome,
         guide: stringValue(item.outcome?.guide ?? row.outcome?.guide),
@@ -441,7 +419,7 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === '--help' || arg === '-h') {
-      printHelp();
+      printRefreshHelp();
       process.exit(0);
     }
     throw new Error(`Unknown argument: ${arg}`);
@@ -452,7 +430,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function printHelp() {
+function printRefreshHelp() {
   process.stdout.write(`Usage: node scripts/earnings_week.js refresh [options]
 
 Options:
@@ -493,11 +471,10 @@ function loadEnv(file = path.resolve(root, '.env')) {
   }
 }
 
-function metricPayload(current, incoming, metric, options = {}) {
+function metricPayload(incoming, metric, options = {}) {
   const estimate = numberOrNull(incoming?.estimate);
   const actual = numberOrNull(incoming?.actual);
   return {
-    ...current,
     estimate,
     actual,
     surprisePercent: pctChange(estimate, actual),
@@ -677,14 +654,6 @@ function actualsObservedAtForRefresh(currentRow, providerRow) {
 function clearNarrative(row) {
   const output = {
     ...row,
-    eps: {
-      ...row.eps,
-      note: ''
-    },
-    revenue: {
-      ...row.revenue,
-      note: ''
-    },
     outcome: {
       ...row.outcome,
       guide: '',
@@ -710,14 +679,6 @@ function clearNarrative(row) {
 function preserveNarrative(row, prior) {
   const output = {
     ...row,
-    eps: {
-      ...row.eps,
-      note: prior.eps?.note || ''
-    },
-    revenue: {
-      ...row.revenue,
-      note: prior.revenue?.note || ''
-    },
     outcome: {
       ...row.outcome,
       guide: prior.outcome?.guide || '',
@@ -765,13 +726,10 @@ function finalizeRow(row) {
 
 function applyFinnhubRefresh(row, providerRow) {
   if (!providerRow) return row;
-  const eps = metricPayload(row.eps, providerRow.eps, 'eps', {
-    basis: row.eps?.basis || '',
-    note: row.eps?.note || ''
+  const eps = metricPayload(providerRow.eps, 'eps', {
+    basis: row.eps?.basis || ''
   });
-  const revenue = metricPayload(row.revenue, providerRow.revenue, 'revenue', {
-    note: row.revenue?.note || ''
-  });
+  const revenue = metricPayload(providerRow.revenue, 'revenue');
   return finalizeRow({
     ...row,
     reportTiming: providerRow.reportTiming,
@@ -834,15 +792,7 @@ function applyZacksRefresh(row, providerRow) {
       guide: row.outcome?.guide || '',
       interpretation: row.outcome?.interpretation || ''
     },
-    reaction: row.reaction,
-    eps: {
-      ...providerRow.eps,
-      note: row.eps?.note || ''
-    },
-    revenue: {
-      ...providerRow.revenue,
-      note: row.revenue?.note || ''
-    }
+    reaction: row.reaction
   };
   if (actualsObservedAt) next.actualsObservedAt = actualsObservedAt;
   else delete next.actualsObservedAt;
@@ -875,13 +825,10 @@ function mergeFinnhubConflictCandidates(candidates, providerRow) {
 
 function applyEarningsApiCompanyRefresh(row, providerRow) {
   if (!providerRow) return row;
-  const eps = metricPayload(row.eps, providerRow.eps, 'eps', {
-    basis: row.eps?.basis || '',
-    note: row.eps?.note || ''
+  const eps = metricPayload(providerRow.eps, 'eps', {
+    basis: row.eps?.basis || ''
   });
-  const revenue = metricPayload(row.revenue, providerRow.revenue, 'revenue', {
-    note: row.revenue?.note || ''
-  });
+  const revenue = metricPayload(providerRow.revenue, 'revenue');
   return finalizeRow({
     ...row,
     reportTiming: providerRow.reportTiming,
@@ -1254,10 +1201,6 @@ async function collectRefreshData(source, args, dependencies = {}) {
     yahooFetches: yahooFetches.filter(Boolean),
     rowDiagnosticsByKey: Object.fromEntries([...rowDiagnostics.entries()])
   };
-}
-
-function validateWeek(file) {
-  runValidation(['--input', file]);
 }
 
 function printReport(result, outputPath, compact) {
