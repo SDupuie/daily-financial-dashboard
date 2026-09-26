@@ -12,6 +12,8 @@ After any context compaction or model switch, reread the current root `AGENTS.md
 
 After an interrupted or resumed turn, re-check the current files needed for the next action before relying on prior context. Reread root `AGENTS.md` when the interruption may have changed task scope, workflow state, or applicable instructions.
 
+For dashboard updates, follow [Update continuity and recovery](README.md#update-continuity-and-recovery) when saving progress and before resuming after compaction, interruption, or a model switch. On resume, read that runbook section immediately after this file, before retrieving any other routed documents or recovery data; it defines the ordered reload sequence.
+
 Use the Policy Routing section below to choose any additional files or README sections needed for the current task.
 
 ## Sources of Authority
@@ -67,7 +69,7 @@ Do not directly edit dashboard HTML data as part of a normal refresh. Use the RE
 Read only the routed files or README sections needed for the current task:
 
 - Prepare or Apply Handoff: read `README.md` Scheduled and manual execution and the relevant Daily Runbook subsections. Before Apply, also read `docs/editorial.md` Final Pre-Apply Editorial Gate.
-- AI Editorial Work: read `docs/editorial.md` AI Editorial Work contracts and AI Editorial Work checklist, plus only the section contracts in scope. For a full dashboard update, all section contracts are in scope.
+- AI Editorial Work: read `docs/editorial.md` AI Editorial Work contracts (including its final gate), plus only the section contracts in scope. For a full dashboard update, all section contracts are in scope.
 - Validation, commit, or publish: read only the applicable `README.md` Validation and Publish subsections: Required daily checks, Commit and publish, Weekly Git maintenance when eligible, and Completion report. Browser UI checks for source changes and audits are routed to `docs/agent-implementation.md`, not the daily publication workflow.
 - Deterministic source, staging, payload-shape, fallback, or data-contract work: read the relevant `docs/reference.md` subsection for the affected domain.
 - Focused repairs or local-refresh work: read only the applicable `docs/reference.md` Focused Repair Commands or Local Refresh Server subsection. For browser-compatibility work, read `docs/agent-implementation.md` and the `docs/reference.md` Browser Support subsection.

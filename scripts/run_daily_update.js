@@ -63,7 +63,9 @@ const {
 const { addDays, chicagoDateParts, isIsoDate, isIsoDateTime, scheduledNow } = require('./calendar_contract');
 const {
   buildEditorialReview,
+  buildNewsReviewSummary,
   editorialTextEntries,
+  evaluateNewsReviewEvidence,
   reviewedTapeCommentary,
   unavailableTapeCommentary,
   validateReviewManifest,
@@ -84,6 +86,7 @@ const { priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
 const { scheduledFullMarketClosure } = require('./market_calendar');
 const { atomicWriteJson } = require('./staging_writer');
+const { validateDashboardHtml } = require('./validate_dashboard');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_DASHBOARD = path.join(ROOT, 'daily_financial_news.html');
@@ -305,7 +308,8 @@ function parseArgs(argv) {
     mergeChartDataJson: '',
     syncChartQuotes: false,
     rolloverCalendar: false,
-    scheduled: false
+    scheduled: false,
+    preview: false
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -368,6 +372,10 @@ function parseArgs(argv) {
       args.scheduled = true;
       continue;
     }
+    if (arg === '--preview') {
+      args.preview = true;
+      continue;
+    }
     if (arg === '--rollover-calendar') {
       args.rolloverCalendar = true;
       continue;
@@ -391,6 +399,9 @@ function parseArgs(argv) {
   if (args.scheduled && !(deterministicPreparation || args.applyDashboardDataJson)) {
     throw new Error('--scheduled is valid only with deterministic preparation or final editorial application.');
   }
+  if (args.preview && !args.applyDashboardDataJson) {
+    throw new Error('--preview is valid only with final editorial application.');
+  }
   if (args.rolloverCalendar && !(dailyCommand === 'prepare' && deterministicPreparation && !args.scheduled)) {
     throw new Error('--rollover-calendar is valid only with manual deterministic preparation.');
   }
@@ -404,7 +415,7 @@ function parseArgs(argv) {
 function printHelp() {
   process.stdout.write(`Usage:
   node scripts/run_daily_update.js prepare (--morning | --afternoon) [--scheduled] [options]
-  node scripts/run_daily_update.js apply [--scheduled] [options]
+  node scripts/run_daily_update.js apply [--scheduled] [--preview] [options]
   node scripts/run_daily_update.js (--morning | --afternoon) [options]
   node scripts/run_daily_update.js --prepare-editorial-dir PATH
   node scripts/run_daily_update.js --apply-dashboard-data-json PATH [--scheduled] [options]
@@ -427,6 +438,7 @@ Options:
   --morning                           Run the pre-open deterministic refresh path
   --afternoon                         Run the after-close deterministic refresh path
   --scheduled                         Mark scheduler-driven preparation/finalization; preparation enforces the start window, finalization derives the window from the staged candidate
+  --preview                           Normalize and validate final editorial application without writing any files
   --rollover-calendar                 Manually force the selected edition's calendar rollover during prepare
   --help                              Show this help
 
@@ -919,6 +931,11 @@ async function prepareEditorialWorkspace(args) {
     reviewedAt: null,
     baseEditionId,
     verifiedClaims: [],
+    reviewEvidence: {
+      inventoryGeneratedAt: preparedAt.toISOString(),
+      metadataScanComplete: false,
+      deepReviews: []
+    },
     newsSelection: { futures: [], stories: [], crypto: [] },
     openingDecision: { action: null }
   };
@@ -947,7 +964,7 @@ async function prepareEditorialWorkspace(args) {
   }
   dashboardData.editorialReview = reviewManifest;
   fs.mkdirSync(args.prepareEditorialDir, { recursive: true });
-  for (const staleName of ['editorial-review.json', 'earnings_narrative.json']) {
+  for (const staleName of ['editorial-review.json', 'earnings_narrative.json', 'review-progress.md']) {
     const stalePath = path.join(args.prepareEditorialDir, staleName);
     if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
   }
@@ -1515,6 +1532,10 @@ function applyEditorialEarningsNarrative(dashboardData, candidateDashboardData, 
       })
     : structuredClone(candidateWeek);
   finalWeek = preserveSafePriorEarningsNarrative(finalWeek, previousDashboardData?.earnings?.week);
+  if (Array.isArray(finalWeek?.rows)) {
+    finalWeek.rows = finalWeek.rows.map((row) => normalizeEarningsCommentaryForPublication(row));
+    if (narrativePayload) narrativePayload.rows = finalWeek.rows.map(earningsNarrativeItem);
+  }
   dashboardData.earnings = {
     ...candidateDashboardData.earnings,
     week: finalWeek
@@ -1550,6 +1571,39 @@ function warnPendingEarningsEditorialFields(week) {
   return pending;
 }
 
+function malformedEarningsEditorialFields(candidateWeek, editorialWeek) {
+  const editorialByKey = new Map((Array.isArray(editorialWeek?.rows) ? editorialWeek.rows : [])
+    .map((row) => [earningsNarrativeRowKey(row), row]));
+  return (Array.isArray(candidateWeek?.rows) ? candidateWeek.rows : []).flatMap((candidateRow) => {
+    const editorialRow = editorialByKey.get(earningsNarrativeRowKey(candidateRow));
+    if (!editorialRow) return [];
+    const symbol = String(candidateRow.symbol || candidateRow.company || '').trim() || '(unknown)';
+    const issues = [];
+    const outcome = editorialRow.outcome;
+    const reaction = editorialRow.reaction;
+    if (earningsHasActual(candidateRow) && outcome && typeof outcome === 'object' && !Array.isArray(outcome)) {
+      if (!pendingReviewDisposition(outcome.interpretationDisposition)
+        && (Object.hasOwn(outcome, 'interpretationDisposition') || String(outcome.interpretation || '').trim())
+        && !validEarningsCommentaryDisposition(outcome.interpretationDisposition, outcome.interpretation)) {
+        issues.push(`${symbol} outcome.interpretation has a malformed commentary disposition.`);
+      }
+      if (!pendingReviewDisposition(outcome.guidanceDisposition)
+        && (Object.hasOwn(outcome, 'guidanceDisposition') || String(outcome.guide || '').trim())
+        && !validEarningsGuidanceDisposition(outcome.guidanceDisposition, outcome.guide)) {
+        issues.push(`${symbol} outcome.guidance has a malformed guidance disposition.`);
+      }
+    }
+    if (candidateRow.reaction?.status === 'computed'
+      && reaction && typeof reaction === 'object' && !Array.isArray(reaction)
+      && !pendingReviewDisposition(reaction.commentaryDisposition)
+      && (Object.hasOwn(reaction, 'commentaryDisposition') || String(reaction.note || '').trim())
+      && !validEarningsCommentaryDisposition(reaction.commentaryDisposition, reaction.note)) {
+      issues.push(`${symbol} reaction.note has a malformed commentary disposition.`);
+    }
+    return issues;
+  });
+}
+
 function safeEditorialText(value, fallback) {
   const text = typeof value === 'string' ? value.trim() : '';
   return text ? value : fallback;
@@ -1572,6 +1626,64 @@ function sanitizeOpening(editorial) {
     .filter((item) => item.label && item.body);
   if (editorialCatalysts.length) opening.catalysts = editorialCatalysts;
   return opening;
+}
+
+function editorialStyleAdvisories(data) {
+  const advisories = [];
+  const catalysts = Array.isArray(data?.opening?.catalysts) ? data.opening.catalysts : [];
+  if (catalysts.length !== 4) {
+    advisories.push({ path: 'opening.catalysts', expected: 4, actual: catalysts.length });
+  }
+  const checkLength = (path, value, maximum) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    const actual = [...text].length;
+    if (text && actual > maximum) advisories.push({ path, maximum, actual });
+  };
+  for (const [index, row] of (Array.isArray(data?.earnings?.week?.rows) ? data.earnings.week.rows : []).entries()) {
+    if (earningsHasActual(row)) {
+      checkLength(`earnings.week.rows[${index}].outcome.interpretation`, row?.outcome?.interpretation, 120);
+    }
+    checkLength(`earnings.week.rows[${index}].outcome.guide`, row?.outcome?.guide, 130);
+    checkLength(`earnings.week.rows[${index}].reaction.note`, row?.reaction?.note, 100);
+  }
+  return advisories;
+}
+
+function editorialApplyReport(data, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues) {
+  const earningsRows = Array.isArray(data?.earnings?.week?.rows) ? data.earnings.week.rows : [];
+  const nonblank = (value) => typeof value === 'string' && Boolean(value.trim());
+  return {
+    accepted: {
+      openingCatalysts: Array.isArray(data?.opening?.catalysts) ? data.opening.catalysts.length : 0,
+      news: {
+        futures: Array.isArray(data?.futuresModule?.stories) ? data.futuresModule.stories.length : 0,
+        general: Array.isArray(data?.stories) ? data.stories.length : 0,
+        crypto: Array.isArray(data?.crypto?.notes) ? data.crypto.notes.length : 0
+      },
+      earnings: {
+        interpretations: earningsRows.filter((row) => nonblank(row?.outcome?.interpretation)).length,
+        guidance: earningsRows.filter((row) => nonblank(row?.outcome?.guide)).length,
+        reactions: earningsRows.filter((row) => nonblank(row?.reaction?.note)).length
+      }
+    },
+    fallbacks: structuredClone(reviewManifest.systemFallbacks || []),
+    evidenceIssues: [...(newsEvaluation?.errors || [])],
+    earningsIssues: [...earningsIssues],
+    styleAdvisories: editorialStyleAdvisories(data),
+    pendingEarnings: [...pendingEarnings],
+    newsReview: structuredClone(reviewManifest.newsReview)
+  };
+}
+
+function editorialPreviewExitCode(report) {
+  return Array.isArray(report?.evidenceIssues) && report.evidenceIssues.length > 0 ? 1 : 0;
+}
+
+function runEditorialApply(args) {
+  const report = applyDashboardDataJson(args);
+  process.stdout.write(`${args.preview ? 'Editorial Apply preview' : 'Editorial Apply report'}: ${JSON.stringify(report)}\n`);
+  if (args.preview) process.exitCode = editorialPreviewExitCode(report);
+  return report;
 }
 
 function structurallyUsableStory(item, options = {}) {
@@ -1631,18 +1743,19 @@ function sanitizeStoryList(editorial, options = {}) {
   const maximum = Number.isInteger(options.maximum) && options.maximum >= 0 ? options.maximum : Infinity;
   const selected = [];
   editorial.forEach((item, index) => {
+    const originalIndex = Number.isInteger(options.originalIndices?.[index]) ? options.originalIndices[index] : index;
     if (selected.length >= maximum) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'selection_limit_exceeded' });
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${originalIndex}]`, action: 'omitted', reason: 'selection_limit_exceeded' });
       return;
     }
     const candidate = candidateByUrl ? candidateByUrl.get(canonicalStoryUrl(item?.url)) : null;
     if (candidateByUrl && !candidate) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${originalIndex}]`, action: 'omitted', reason: 'not_in_candidate_inventory' });
       return;
     }
     const story = storyWithCandidateMetadata(item, candidate, options);
     if (!structurallyUsableStory(story, options)) {
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason: 'invalid_editorial_item' });
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${originalIndex}]`, action: 'omitted', reason: 'invalid_editorial_item' });
       return;
     }
     const url = canonicalStoryUrl(story.url);
@@ -1650,7 +1763,7 @@ function sanitizeStoryList(editorial, options = {}) {
     const blockedDuplicate = blockedUrls.has(url);
     if (duplicate || blockedDuplicate) {
       const reason = blockedDuplicate ? options.blockedDuplicateReason || 'duplicate_editorial_item' : 'duplicate_editorial_item';
-      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${index}]`, action: 'omitted', reason });
+      if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${originalIndex}]`, action: 'omitted', reason });
       return;
     }
     seenUrls.add(url);
@@ -1887,7 +2000,10 @@ function normalizeEarningsCommentaryForPublication(row) {
   }
 
   if (reaction && typeof reaction === 'object' && !Array.isArray(reaction)) {
-    if (pendingReviewDisposition(reaction.commentaryDisposition)) {
+    if (reaction.status !== 'computed') {
+      reaction.note = '';
+      delete reaction.commentaryDisposition;
+    } else if (pendingReviewDisposition(reaction.commentaryDisposition)) {
       reaction.note = '';
     } else if (!validEarningsCommentaryDisposition(reaction.commentaryDisposition, reaction.note)) {
       reaction.note = '';
@@ -1918,12 +2034,39 @@ function applyDashboardDataJson(args) {
     throw new Error('editorialReview.marketLensDecisions is no longer supported; edit weekAhead.days[].marketLens instead.');
   }
   if (reviewManifest.baseEditionId !== candidateDashboardData.editionId) {
-    throw new Error('Editorial dashboard-data baseEditionId must match the staged candidate; regenerate the editorial handoff.');
+    throw new Error('Editorial dashboard-data baseEditionId does not match the staged candidate; preserve the saved handoff and follow README Update continuity and recovery to reconcile the current run.');
   }
   if (!isIsoDateTime(editorialDashboardData.editionId)) {
-    throw new Error('Editorial dashboard-data editionId must be the prepared run edition timestamp; regenerate the editorial handoff.');
+    throw new Error('Editorial dashboard-data editionId is not the prepared run timestamp; preserve the saved handoff and follow README Update continuity and recovery to reconcile the current run.');
   }
   const newsSource = readNewsCandidateSource(reviewManifest.preparedAt, args.newsCandidatesPath || NEWS_CANDIDATES_PATH);
+  const newsEvaluation = evaluateNewsReviewEvidence(reviewManifest, newsSource);
+  if (newsEvaluation.errors.length) {
+    process.stderr.write(`News review evidence issues: ${newsEvaluation.errors.join(' ')}\n`);
+  }
+  if (newsEvaluation.globalErrors.length) {
+    for (const [section, path] of [
+      ['futures-news', 'editorialReview.newsSelection.futures'],
+      ['stories', 'editorialReview.newsSelection.stories'],
+      ['crypto', 'editorialReview.newsSelection.crypto']
+    ]) {
+      reviewManifest.systemFallbacks.push({ section, path, action: 'omitted', reason: 'invalid_review_evidence' });
+    }
+  } else {
+    const sections = { futures: 'futures-news', stories: 'stories', crypto: 'crypto' };
+    for (const rejection of newsEvaluation.rejectedSelections) {
+      reviewManifest.systemFallbacks.push({
+        section: sections[rejection.key],
+        path: `editorialReview.newsSelection.${rejection.key}[${rejection.index}]`,
+        action: 'omitted',
+        reason: rejection.reason
+      });
+    }
+  }
+  const reviewedSelectionManifest = {
+    ...reviewManifest,
+    newsSelection: newsEvaluation.trustedSelection
+  };
   const dashboardData = structuredClone(candidateDashboardData);
   // The prepared edition timestamp owns editorial freshness and story windows;
   // wall-clock apply time may drift outside the original handoff window.
@@ -1946,8 +2089,9 @@ function applyDashboardDataJson(args) {
   dashboardData.opening = sanitizeOpening(editorialDashboardData.opening);
   dashboardData.futuresModule = {
     ...dashboardData.futuresModule,
-    stories: sanitizeStoryList(newsSelection(reviewManifest, 'futures'), {
+    stories: sanitizeStoryList(newsSelection(reviewedSelectionManifest, 'futures'), {
       futures: true,
+      originalIndices: newsEvaluation.trustedSelectionIndices.futures,
       maximum: NEWS_COVERAGE_POLICIES.futuresStories.maximum,
       requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
@@ -1957,7 +2101,8 @@ function applyDashboardDataJson(args) {
       futuresWindow
     })
   };
-  dashboardData.stories = sanitizeStoryList(newsSelection(reviewManifest, 'stories'), {
+  dashboardData.stories = sanitizeStoryList(newsSelection(reviewedSelectionManifest, 'stories'), {
+    originalIndices: newsEvaluation.trustedSelectionIndices.stories,
     maximum: NEWS_COVERAGE_POLICIES.stories.maximum,
     requireSourceLabel: true,
     systemFallbacks: reviewManifest.systemFallbacks,
@@ -1969,7 +2114,8 @@ function applyDashboardDataJson(args) {
   });
   dashboardData.crypto = {
     ...dashboardData.crypto,
-    notes: sanitizeStoryList(newsSelection(reviewManifest, 'crypto'), {
+    notes: sanitizeStoryList(newsSelection(reviewedSelectionManifest, 'crypto'), {
+      originalIndices: newsEvaluation.trustedSelectionIndices.crypto,
       maximum: NEWS_COVERAGE_POLICIES.cryptoNotes.maximum,
       requireSourceLabel: true,
       systemFallbacks: reviewManifest.systemFallbacks,
@@ -1981,6 +2127,11 @@ function applyDashboardDataJson(args) {
     })
   };
   applyNewsCoverageState(dashboardData, { now: editorialNow });
+  reviewManifest.newsReview = buildNewsReviewSummary(newsEvaluation, newsSource, {
+    futures: dashboardData.futuresModule.stories,
+    general: dashboardData.stories,
+    crypto: dashboardData.crypto.notes
+  });
   const candidateTapeLabel = String(candidateDashboardData.tape?.label || '');
   const editorialTapeLabel = String(editorialDashboardData.tape?.label || '');
   const candidateTapeContextIndex = candidateTapeLabel.indexOf(' · ');
@@ -2015,13 +2166,17 @@ function applyDashboardDataJson(args) {
       if (!candidateWeekAheadDates.has(date)) reviewManifest.systemFallbacks.push({ section: 'market-lens', path: `weekAhead.days.${date}`, action: 'omitted', reason: 'stale_editorial_item' });
     }
   }
+  const earningsIssues = malformedEarningsEditorialFields(
+    candidateDashboardData.earnings?.week,
+    editorialDashboardData.earnings?.week
+  );
   const finalizedEarnings = applyEditorialEarningsNarrative(
     dashboardData,
     candidateDashboardData,
     editorialDashboardData,
     previousDashboardData
   );
-  if (finalizedEarnings?.week) warnPendingEarningsEditorialFields(finalizedEarnings.week);
+  const pendingEarnings = finalizedEarnings?.week ? warnPendingEarningsEditorialFields(finalizedEarnings.week) : [];
   dashboardData.weekAhead = applyWeekAheadEditorial(candidateDashboardData.weekAhead, editorialDashboardData.weekAhead, {
     systemFallbacks: reviewManifest.systemFallbacks
   });
@@ -2040,13 +2195,27 @@ function applyDashboardDataJson(args) {
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData, { stampEdition: false });
   const publishingDefaultDashboard = path.resolve(args.dashboard) === DEFAULT_DASHBOARD;
   const recoveredEarningsPublication = isEmptyEarningsRecoveryWeek(finalizedEarnings?.week);
+  const report = editorialApplyReport(dashboardData, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues);
+  if (report.earningsIssues.length) {
+    process.stderr.write(`Earnings editorial issues: ${report.earningsIssues.join(' ')}\n`);
+  }
+  if (report.styleAdvisories.length) {
+    process.stderr.write(`Editorial style advisories: ${report.styleAdvisories.map((item) => item.path).join(', ')}\n`);
+  }
+  if (args.preview) {
+    const previewErrors = validateDashboardHtml(nextHtml, { validationMode: 'published' }).errors;
+    if (previewErrors.length) {
+      throw new Error(`Editorial preview failed render-safety validation: ${previewErrors.join(' ')}`);
+    }
+    return report;
+  }
   commitDashboardCandidate(args, nextHtml, {
     validationStdio: args.validationStdio || 'inherit'
   });
   if (finalizedEarnings && publishingDefaultDashboard) {
     if (recoveredEarningsPublication) {
       process.stderr.write('Earnings narrative synchronization skipped after empty-row recovery.\n');
-      return;
+      return report;
     }
     try {
       if (finalizedEarnings.narrativePayload) atomicWriteJson(EARNINGS_NARRATIVE_PATH, finalizedEarnings.narrativePayload);
@@ -2054,6 +2223,7 @@ function applyDashboardDataJson(args) {
       process.stderr.write(`Dashboard was committed, but Earnings narrative synchronization failed and will retry later: ${error.message}\n`);
     }
   }
+  return report;
 }
 
 function assertValidChartStagingPayload(payload, expectedRows, label, { requireSeries = false } = {}) {
@@ -2257,7 +2427,7 @@ async function main() {
   }
 
   if (args.applyDashboardDataJson) {
-    applyDashboardDataJson(args);
+    runEditorialApply(args);
     return;
   }
 
@@ -2496,10 +2666,12 @@ module.exports = {
   calendarRolloverRange,
   applyDashboardDataJson,
   applyEditorialEarningsNarrative,
+  editorialStyleAdvisories,
   applyChartDataJson,
   chartSeriesRevisionErrors,
   manualCalendarRolloverRange,
   mergeChartDataJson,
+  malformedEarningsEditorialFields,
   mergedChartAvailability,
   applyCryptoQuoteRows,
   applyCryptoStats,
@@ -2531,6 +2703,7 @@ module.exports = {
   weekAheadPreparationCommandArgs,
   runCommand,
   runWithSectionFallback,
+  runEditorialApply,
   reportPreparationStatus,
   stampDashboardEdition,
   stageDashboardCandidate,

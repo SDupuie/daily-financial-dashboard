@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const fs = require('fs');
+const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const net = require('net');
@@ -39,9 +40,8 @@ const MARKETAUX_URL = 'https://api.marketaux.com/v1/news/all';
 const REUTERS_NEWS_SITEMAP_INDEX_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml';
 const REUTERS_NEWS_SITEMAP_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
-const ARTICLE_EXCERPT_LIMIT = 5000;
+const ARTICLE_EXCERPT_LIMIT = 1000;
 const ARTICLE_CONCURRENCY = 8;
-const ARTICLE_REVIEW_CANDIDATE_LIMIT = 250;
 const REUTERS_SITEMAP_CONCURRENCY = 8;
 const REUTERS_SITEMAP_MAX_SLICES = 100;
 const REUTERS_SITEMAP_BODY_LIMIT = 2_000_000;
@@ -50,6 +50,7 @@ const NEWS_HTTP_MAX_HEADER_SIZE = 65536;
 const NEWS_HTTP_MAX_REDIRECTS = 5;
 const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
 const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
+const IMPERSONATED_NEWS_DOMAINS = ['apnews.com', 'axios.com', 'investing.com', 'crowdfundinsider.com'];
 const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, marketaux: 1, stockfit: 1 });
 const MARKETAUX_TICKERS = new Set(MARKETAUX_TICKER_NEWS_PATHS.map((pathEntry) => pathEntry.ticker));
 // Five free-tier pages provide up to 15 candidates per ticker while bounding
@@ -186,31 +187,7 @@ function sameOriginRedirect(nextUrl, currentUrl) {
   return nextUrl.origin === currentUrl.origin;
 }
 
-function decodeResponseBody(buffer, encoding, maxDecodedBytes) {
-  const normalized = String(encoding || '').toLowerCase().split(',')[0].trim();
-  if (!normalized || normalized === 'identity') {
-    if (buffer.length > maxDecodedBytes) {
-      return Promise.reject(new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`));
-    }
-    return Promise.resolve(buffer);
-  }
-  const options = { maxOutputLength: maxDecodedBytes };
-  if (normalized === 'gzip' || normalized === 'x-gzip') {
-    return new Promise((resolve, reject) => zlib.gunzip(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
-  }
-  if (normalized === 'deflate') {
-    return new Promise((resolve, reject) => zlib.inflate(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
-  }
-  if (normalized === 'br' && typeof zlib.brotliDecompress === 'function') {
-    return new Promise((resolve, reject) => zlib.brotliDecompress(buffer, options, (error, result) => (error ? reject(error) : resolve(result))));
-  }
-  if (buffer.length > maxDecodedBytes) {
-    return Promise.reject(new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`));
-  }
-  return Promise.resolve(buffer);
-}
-
-function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, maxDecodedBytes, allowRedirect }, redirectCount) {
+function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, maxDecodedBytes, allowRedirect, stopWhen }, redirectCount) {
   const currentUrl = new URL(String(url));
   const client = currentUrl.protocol === 'https:' ? https : currentUrl.protocol === 'http:' ? http : null;
   if (!client) throw new Error(`Unsupported protocol ${currentUrl.protocol}`);
@@ -230,6 +207,7 @@ function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, 
       settled = true;
       if (timer) clearTimeout(timer);
       reject(newsHttpError(error));
+      req?.destroy();
     };
     const succeed = (response) => {
       if (settled) return;
@@ -247,7 +225,8 @@ function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, 
           deadline,
           maxBodyBytes,
           maxDecodedBytes,
-          allowRedirect
+          allowRedirect,
+          stopWhen
         }, redirectCount + 1);
       } catch (error) {
         fail(error);
@@ -272,71 +251,97 @@ function requestNewsResponse(url, { timeoutMs, headers, deadline, maxBodyBytes, 
       }, (res) => {
         const status = Number(res.statusCode || 0);
         const location = res.headers.location;
+        res.on('error', fail);
         if ([301, 302, 303, 307, 308].includes(status) && location) {
-          res.on('error', fail);
-          res.on('aborted', () => fail(new Error('Redirect response ended before completion')));
-          res.resume();
-          res.on('end', () => {
-            try {
-              if (redirectCount >= NEWS_HTTP_MAX_REDIRECTS) {
-                fail(new Error(`Too many redirects after ${NEWS_HTTP_MAX_REDIRECTS}`));
-                return;
-              }
-              const nextUrl = new URL(location, currentUrl);
-              if (nextUrl.username || nextUrl.password || !allowRedirect(nextUrl, currentUrl)) {
-                fail(new Error('Redirect target is outside the request policy.'));
-                return;
-              }
-              const nextHeaders = { ...requestHeaders };
-              if (nextUrl.origin !== currentUrl.origin) {
-                for (const key of Object.keys(nextHeaders)) {
-                  if (key.toLowerCase() === 'authorization') delete nextHeaders[key];
-                }
-              }
-              follow(nextUrl, nextHeaders);
-            } catch (error) {
-              fail(error);
+          try {
+            if (redirectCount >= NEWS_HTTP_MAX_REDIRECTS) {
+              fail(new Error(`Too many redirects after ${NEWS_HTTP_MAX_REDIRECTS}`));
+              return;
             }
-          });
+            const nextUrl = new URL(location, currentUrl);
+            if (nextUrl.username || nextUrl.password || !allowRedirect(nextUrl, currentUrl)) {
+              fail(new Error('Redirect target is outside the request policy.'));
+              return;
+            }
+            const nextHeaders = { ...requestHeaders };
+            if (nextUrl.origin !== currentUrl.origin) {
+              for (const key of Object.keys(nextHeaders)) {
+                if (key.toLowerCase() === 'authorization') delete nextHeaders[key];
+              }
+            }
+            follow(nextUrl, nextHeaders);
+            res.destroy();
+          } catch (error) {
+            fail(error);
+          }
+          return;
+        }
+
+        if (status < 200 || status >= 300) {
+          fail(new Error(`HTTP ${status}`));
+          res.destroy();
           return;
         }
 
         const chunks = [];
         let receivedBytes = 0;
+        let decodedBytes = 0;
+        let nextInspection = 65536;
+        const encoding = String(res.headers['content-encoding'] || '').toLowerCase().split(',')[0].trim();
+        const decoder = encoding === 'gzip' || encoding === 'x-gzip' ? zlib.createGunzip()
+          : encoding === 'deflate' ? zlib.createInflate()
+            : encoding === 'br' && typeof zlib.createBrotliDecompress === 'function' ? zlib.createBrotliDecompress()
+              : null;
+        const decodedStream = decoder || res;
+        const finish = () => {
+          if (settled) return;
+          const decoded = Buffer.concat(chunks, decodedBytes);
+          succeed({
+            ok: true,
+            status,
+            url: currentUrl.toString(),
+            headers: responseHeaders(res.headers),
+            async text() { return decoded.toString('utf8'); },
+            async json() { return JSON.parse(decoded.toString('utf8')); }
+          });
+        };
         res.on('data', (chunk) => {
           receivedBytes += chunk.length;
           if (receivedBytes > maxBodyBytes) {
-            const error = new Error(`HTTP response body exceeded ${maxBodyBytes} compressed bytes`);
-            fail(error);
-            res.destroy(error);
+            fail(new Error(`HTTP response body exceeded ${maxBodyBytes} compressed bytes`));
+            res.destroy();
+          }
+        });
+        res.on('aborted', () => fail(new Error('Response ended before completion')));
+        if (decoder) decodedStream.on('error', fail);
+        decodedStream.on('data', (chunk) => {
+          if (settled) return;
+          const remaining = maxDecodedBytes - decodedBytes;
+          if (chunk.length > remaining && !stopWhen) {
+            fail(new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`));
+            res.destroy();
             return;
           }
-          chunks.push(chunk);
-        });
-        res.on('error', fail);
-        res.on('aborted', () => fail(new Error('Response ended before completion')));
-        res.on('end', async () => {
+          const accepted = chunk.subarray(0, remaining);
+          chunks.push(accepted);
+          decodedBytes += accepted.length;
           try {
-            const compressed = Buffer.concat(chunks);
-            const decoded = await decodeResponseBody(compressed, res.headers['content-encoding'], maxDecodedBytes);
-            const response = {
-              ok: status >= 200 && status < 300,
-              status,
-              url: currentUrl.toString(),
-              headers: responseHeaders(res.headers),
-              async text() {
-                return decoded.toString('utf8');
-              },
-              async json() {
-                return JSON.parse(decoded.toString('utf8'));
+            if (stopWhen && (decodedBytes >= nextInspection || chunk.length > remaining)) {
+              if (chunk.length > remaining || stopWhen(Buffer.concat(chunks, decodedBytes).toString('utf8'))) {
+                finish();
+                res.destroy();
+                decoder?.destroy();
+                return;
               }
-            };
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            succeed(response);
+              nextInspection = decodedBytes + 65536;
+            }
           } catch (error) {
             fail(error);
+            res.destroy();
           }
         });
+        decodedStream.on('end', finish);
+        if (decoder) res.pipe(decoder);
       });
       req.on('error', fail);
       req.end();
@@ -351,7 +356,8 @@ async function fetchResponse(url, {
   headers = {},
   maxBodyBytes = NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES,
   maxDecodedBytes = NEWS_HTTP_MAX_DECODED_BODY_BYTES,
-  allowRedirect = sameOriginRedirect
+  allowRedirect = sameOriginRedirect,
+  stopWhen = null
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error('Request timeout must be a positive number');
@@ -362,14 +368,24 @@ async function fetchResponse(url, {
   if (typeof allowRedirect !== 'function') {
     throw new Error('HTTP redirect policy must be a function');
   }
-  return requestNewsResponse(url, {
+  if (stopWhen !== null && typeof stopWhen !== 'function') {
+    throw new Error('HTTP early-stop policy must be a function');
+  }
+  const options = {
     timeoutMs,
     headers,
     deadline: Date.now() + timeoutMs,
     maxBodyBytes,
     maxDecodedBytes,
-    allowRedirect
-  }, 0);
+    allowRedirect,
+    stopWhen
+  };
+  try {
+    return await requestNewsResponse(url, options, 0);
+  } catch (error) {
+    if (error.message !== 'HTTP 403' || !impersonatedNewsHost(url)) throw error;
+    return fetchImpersonatedNewsResponse(url, options);
+  }
 }
 
 async function fetchAlphaVantage(acquisitionPath, { eligibleDates, timeoutMs, env = process.env, fetchPage = fetchResponse }) {
@@ -941,8 +957,11 @@ function articleRedirectAllowed(candidateUrl, nextUrl) {
 // Apply acquisition exclusions to both downloaded items and retained prior cards.
 // Keep publisher identities in the catalog for historical provenance.
 function excludedNewsUrl(url, source) {
+  const pathname = new URL(url).pathname;
   return source?.id === 'kiplinger'
-    || (source?.id === 'reuters' && /^\/(sports|lifestyle|fact-check|latam|live|podcasts|science|sustainability|wider-image|investigations)(\/|$)/i.test(new URL(url).pathname));
+    || (source?.id === 'reuters' && /^\/(sports|lifestyle|fact-check|latam|live|podcasts|science|sustainability|wider-image|investigations)(\/|$)/i.test(pathname))
+    || (source?.id === 'yahoo-finance' && /^\/(?:quote|research\/reports)(?:\/|$)/i.test(pathname))
+    || (source?.id === 'coingecko' && /^\/en\/(?:coins|stocks)(?:\/|$)/i.test(pathname));
 }
 
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
@@ -1027,6 +1046,40 @@ function firstValidDate(values) {
   return null;
 }
 
+function extractArticleExcerpt(html) {
+  const structuredBody = String(html).match(/["']articleBody["']\s*:\s*("(?:\\.|[^"\\])*")/i);
+  if (structuredBody) {
+    try {
+      const text = plainText(JSON.parse(structuredBody[1]));
+      if (text.length >= 40) return text.slice(0, ARTICLE_EXCERPT_LIMIT);
+    } catch (_error) {
+      // Fall back to visible article paragraphs when structured data is malformed.
+    }
+  }
+
+  const heading = /<h1\b[^>]*>[\s\S]*?<\/h1>/i.exec(html);
+  if (!heading) return '';
+  const beforeHeading = html.slice(0, heading.index);
+  const enclosing = (tag) => {
+    const opened = [...beforeHeading.matchAll(new RegExp(`<${tag}\\b[^>]*>`, 'gi'))].at(-1)?.index ?? -1;
+    const closed = [...beforeHeading.matchAll(new RegExp(`<\\/${tag}\\s*>`, 'gi'))].at(-1)?.index ?? -1;
+    return opened > closed;
+  };
+  const tag = enclosing('article') ? 'article' : enclosing('main') ? 'main' : '';
+  const start = heading.index + heading[0].length;
+  const close = tag ? html.toLowerCase().indexOf(`</${tag}>`, start) : -1;
+  const region = html.slice(start, close < 0 ? undefined : close)
+    .replace(/<(script|style|template|nav|aside|header|footer)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<(script|style|template|nav|aside|header|footer)\b[^>]*>[\s\S]*$/i, ' ');
+  const body = region.match(/<(div|section)\b(?=[^>]*(?:class|id|data-module)=["'][^"']*(?:article[-_]?body|story[-_]?body)[^"']*["'])[^>]*>([\s\S]*?)<\/\1\s*>/i);
+  const bodyText = plainText(body?.[2]);
+  if (bodyText.length >= 40) return bodyText.slice(0, ARTICLE_EXCERPT_LIMIT);
+  const paragraphs = [...region.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((match) => plainText(match[1]))
+    .filter((value) => value.length >= 40);
+  return paragraphs.join(' ').slice(0, ARTICLE_EXCERPT_LIMIT);
+}
+
 function extractArticleMetadata(html) {
   const jsonDates = [...String(html).matchAll(/["']datePublished["']\s*:\s*["']([^"']+)["']/gi)].map((match) => match[1]);
   const timeDates = [...String(html).matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)].map((match) => match[1]);
@@ -1036,22 +1089,141 @@ function extractArticleMetadata(html) {
     ...jsonDates,
     ...timeDates
   ]);
-  const paragraphs = [...String(html).matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
-    .map((match) => plainText(match[1]))
-    .filter((value) => value.length >= 40);
-  const excerpt = paragraphs.join(' ').slice(0, ARTICLE_EXCERPT_LIMIT);
   return {
     pageTitle: metaContent(html, 'og:title') || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),
     description: metaContent(html, 'description') || metaContent(html, 'og:description'),
-    excerpt,
+    excerpt: extractArticleExcerpt(html),
     publishedAt
   };
 }
 
+function impersonatedNewsHost(url) {
+  const hostname = publisherHostname(url);
+  return IMPERSONATED_NEWS_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+function requestImpersonatedNewsResponse(url, { deadline, timeoutMs, headers, maxBodyBytes, maxDecodedBytes, stopWhen }) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new Error(`Request timed out after ${timeoutMs}ms`);
+  const python = path.join(__dirname, '.news-http-env', 'bin', 'python');
+  const helper = path.join(__dirname, 'fetch_news_http.py');
+
+  return new Promise((resolve, reject) => {
+    const accept = Object.entries(headers).find(([name]) => name.toLowerCase() === 'accept')?.[1] || '*/*';
+    const child = spawn(python, [helper, url, String(remainingMs), String(maxBodyBytes), String(maxDecodedBytes), accept, stopWhen ? '1' : '0'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: process.env.LANG || 'C' }
+    });
+    let settled = false;
+    let metadata = null;
+    let metadataBytes = Buffer.alloc(0);
+    let stderr = '';
+    let decodedBytes = 0;
+    let nextInspection = 65536;
+    const chunks = [];
+    const timer = setTimeout(() => fail(new Error(`Request timed out after ${timeoutMs}ms`)), remainingMs);
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      reject(newsHttpError(error));
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill();
+      const body = Buffer.concat(chunks, decodedBytes);
+      resolve({
+        ok: metadata.status >= 200 && metadata.status < 300,
+        status: metadata.status,
+        url,
+        headers: responseHeaders(metadata.headers),
+        async text() { return body.toString('utf8'); },
+        async json() { return JSON.parse(body.toString('utf8')); }
+      });
+    };
+
+    child.on('error', (error) => fail(error.code === 'ENOENT'
+      ? new Error('News HTTP retry is not installed. Run npm run install:news-client.')
+      : error));
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-1024); });
+    child.stdout.on('data', (buffer) => {
+      if (settled) return;
+      try {
+        let body = buffer;
+        if (!metadata) {
+          const newline = buffer.indexOf(10);
+          const part = newline < 0 ? buffer : buffer.subarray(0, newline);
+          metadataBytes = Buffer.concat([metadataBytes, part]);
+          if (metadataBytes.length > NEWS_HTTP_MAX_HEADER_SIZE) throw new Error('HTTP response headers exceeded 65536 bytes');
+          if (newline < 0) return;
+          metadata = JSON.parse(metadataBytes.toString('utf8'));
+          if (!Number.isInteger(metadata.status) || metadata.status < 100 || metadata.status > 599
+            || !metadata.headers || typeof metadata.headers !== 'object') {
+            throw new Error('Invalid News HTTP response metadata');
+          }
+          body = buffer.subarray(newline + 1);
+        }
+        if (!body.length || metadata.status < 200 || metadata.status >= 300) return;
+        const remaining = maxDecodedBytes - decodedBytes;
+        if (body.length > remaining && !stopWhen) {
+          throw new Error(`HTTP response body exceeded ${maxDecodedBytes} decoded bytes`);
+        }
+        const accepted = body.subarray(0, remaining);
+        chunks.push(accepted);
+        decodedBytes += accepted.length;
+        if (stopWhen && (decodedBytes >= nextInspection || body.length > remaining)) {
+          if (decodedBytes >= maxDecodedBytes || stopWhen(Buffer.concat(chunks, decodedBytes).toString('utf8'))) {
+            finish();
+            return;
+          }
+          nextInspection = decodedBytes + 65536;
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        fail(new Error(`News HTTP retry failed${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
+      } else if (!metadata) {
+        fail(new Error('News HTTP retry returned no response metadata'));
+      } else {
+        finish();
+      }
+    });
+  });
+}
+
+async function fetchImpersonatedNewsResponse(url, options) {
+  let currentUrl = String(url);
+  for (let redirects = 0; redirects <= NEWS_HTTP_MAX_REDIRECTS; redirects += 1) {
+    const response = await requestImpersonatedNewsResponse(currentUrl, options);
+    const location = response.headers.get('location');
+    if ([301, 302, 303, 307, 308].includes(response.status) && location) {
+      if (redirects === NEWS_HTTP_MAX_REDIRECTS) throw new Error(`Too many redirects after ${NEWS_HTTP_MAX_REDIRECTS}`);
+      const nextUrl = new URL(location, currentUrl);
+      if (nextUrl.username || nextUrl.password || !options.allowRedirect(nextUrl, new URL(currentUrl))) {
+        throw new Error('Redirect target is outside the request policy.');
+      }
+      currentUrl = nextUrl.toString();
+      continue;
+    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response;
+  }
+  throw new Error(`Too many redirects after ${NEWS_HTTP_MAX_REDIRECTS}`);
+}
+
 async function fetchArticlePage(candidate, { timeoutMs }) {
+  const stopWhen = (html) => extractArticleExcerpt(html).length >= ARTICLE_EXCERPT_LIMIT;
   const response = await fetchResponse(candidate.url, {
     timeoutMs,
     maxDecodedBytes: ARTICLE_BYTE_LIMIT,
+    stopWhen,
     allowRedirect: (nextUrl) => articleRedirectAllowed(candidate.url, nextUrl),
     headers: {
       Accept: 'text/html,application/xhtml+xml',
@@ -1062,7 +1234,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
   if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
     throw new Error(`Unsupported content type ${contentType || 'unknown'}`);
   }
-  const html = (await response.text()).slice(0, ARTICLE_BYTE_LIMIT);
+  const html = await response.text();
   return { ...extractArticleMetadata(html), finalUrl: canonicalStoryUrl(response.url || candidate.url) || candidate.url };
 }
 
@@ -1188,7 +1360,11 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       const publishedOn = chicagoIsoDate(hostedPage.publishedAt);
       candidate.pagePublishedAt = hostedPage.publishedAt.toISOString();
       candidate.pagePublishedOn = publishedOn;
-      candidate.pageDateFresh = eligibleDates.has(publishedOn);
+      // An already verified provider timestamp remains authoritative; page review
+      // still supplies article text even if the page exposes a different date.
+      if (candidate.publishedAtVerified !== true) {
+        candidate.pageDateFresh = eligibleDates.has(publishedOn);
+      }
       if (candidate.pageDateFresh) {
         candidate.publishedAt = candidate.pagePublishedAt;
         candidate.publishedOn = publishedOn;
@@ -1239,11 +1415,9 @@ async function collectNewsCandidates({
   const downloadedByIndex = Array.from({ length: acquisitionPaths.length }, () => []);
   const normalizedDownloaded = [];
   const articleReview = {
-    candidateLimit: ARTICLE_REVIEW_CANDIDATE_LIMIT,
     eligibleDownloadedCount: 0,
     reviewCandidateCount: 0,
     reviewedCount: 0,
-    skippedCount: 0,
     concurrency: ARTICLE_CONCURRENCY,
     status: 'not_started'
   };
@@ -1334,18 +1508,15 @@ async function collectNewsCandidates({
   }));
 
   const reviewCandidates = deduplicateCandidates(downloadedCandidates()).sort(candidateOrder);
-  const unverifiedReviewCandidates = reviewCandidates.filter((candidate) => candidate.publishedAtVerified !== true);
   normalizedDownloaded.push(...reviewCandidates);
-  const cappedReviewCandidates = unverifiedReviewCandidates.slice(0, ARTICLE_REVIEW_CANDIDATE_LIMIT);
   articleReview.eligibleDownloadedCount = reviewCandidates.length;
-  articleReview.reviewCandidateCount = cappedReviewCandidates.length;
-  articleReview.skippedCount = Math.max(0, unverifiedReviewCandidates.length - cappedReviewCandidates.length);
+  articleReview.reviewCandidateCount = reviewCandidates.length;
   articleReview.status = 'reviewing';
   reportProgress();
 
-  // Article review enriches provenance and timestamps; search/provider candidates
-  // remain the inventory even when the review cap leaves some pages unchecked.
-  await mapConcurrent(cappedReviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
+  // Attempt article context for every downloaded candidate without gating on
+  // timestamp verification; unavailable pages remain in the inventory.
+  await mapConcurrent(reviewCandidates, ARTICLE_CONCURRENCY, (candidate) => reviewArticle(candidate, {
     eligibleDates: candidate.pool === 'generalCandidates' ? generalAcquisitionDates : eligibleDates,
     fetchArticle,
     articleTimeoutMs
@@ -1353,7 +1524,7 @@ async function collectNewsCandidates({
     onSuccess: () => {
       articleReview.reviewedCount += 1;
       if (articleReview.reviewedCount % ARTICLE_CONCURRENCY === 0
-        || articleReview.reviewedCount === cappedReviewCandidates.length) {
+        || articleReview.reviewedCount === reviewCandidates.length) {
         reportProgress('reviewing');
       }
     }
@@ -1388,7 +1559,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  ARTICLE_REVIEW_CANDIDATE_LIMIT,
   alphaTimeFrom,
   articleRedirectAllowed,
   collectNewsCandidates,

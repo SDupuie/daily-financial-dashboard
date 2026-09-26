@@ -1661,6 +1661,43 @@ function testEarningsNarrativeCompletenessIsDeferredToEditorialFinalization() {
     true,
     'A release-time no-guidance conclusion must be explicitly evidenced before finalization.'
   );
+  const reviewedNoGuidance = {
+    status: 'not_provided',
+    evidenceSource: 'official_company',
+    evidenceUrl: 'https://example.com/earnings-release'
+  };
+  for (const [name, disposition, guide, complete] of [
+    ['reviewed official document', reviewedNoGuidance, '', true],
+    ['absent', undefined, '', false],
+    ['null', null, '', false],
+    ['primitive', 'not_provided', '', false],
+    ['array', [], '', false],
+    ['status only', { status: 'not_provided' }, '', false],
+    ['nonofficial source', { ...reviewedNoGuidance, evidenceSource: 'reporting' }, '', false],
+    ['missing URL', { ...reviewedNoGuidance, evidenceUrl: '' }, '', false],
+    ['non-HTTPS URL', { ...reviewedNoGuidance, evidenceUrl: 'http://example.com/release' }, '', false],
+    ['contradictory copy', reviewedNoGuidance, 'Quarterly outlook increased.', false],
+    ['unresolved', { status: 'pending_review' }, '', false],
+    ['unavailable', { status: 'unverified', reason: 'Release inaccessible', attemptedAt: source.generatedAt }, '', false]
+  ]) {
+    const narrative = {
+      symbol: releasedAwaitingClose.symbol,
+      reportDate: releasedAwaitingClose.reportDate,
+      outcome: {
+        interpretation: 'Revenue conversion and costs are the key post-release issues.',
+        interpretationDisposition: { status: 'verified' },
+        guide,
+        guidanceDisposition: disposition
+      },
+      reaction: {}
+    };
+    assert.equal(narrativeEditorialComplete(releasedAwaitingClose, narrative), complete, name);
+    const sidecar = buildEarningsNarrativeSidecar({
+      ...source,
+      rows: [{ ...releasedAwaitingClose, outcome: { ...releasedAwaitingClose.outcome, ...narrative.outcome } }]
+    });
+    assert.equal(sidecar.missingRows.length, complete ? 0 : 1, `${name}: sidecar completeness agrees`);
+  }
 }
 
 function testUnavailableNarrativeDispositionsRequireAuditFields() {

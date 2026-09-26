@@ -13,14 +13,22 @@ const {
 const {
   applyDashboardDataJson,
   commitDashboardCandidate,
+  editorialStyleAdvisories,
+  malformedEarningsEditorialFields,
+  parseArgs,
   patchDashboard,
   readJsonBlock,
   replaceJsonBlock,
+  runEditorialApply,
   runWithSectionFallback,
   stageDashboardCandidate,
   syncDashboardPricesFromChartData
 } = require('./run_daily_update');
-const { reviewedTapeCommentary } = require('./editorial_review_contract');
+const {
+  evaluateNewsReviewEvidence,
+  reviewedTapeCommentary,
+  validateNewsReviewEvidence
+} = require('./editorial_review_contract');
 const { chicagoDateParts, scheduledNow } = require('./calendar_contract');
 const {
   finnhubApiKey,
@@ -413,9 +421,180 @@ function fixtureNewsSelection(dashboard) {
   };
 }
 
+function fixtureReviewEvidence(newsCandidates, selection) {
+  const selectedUrls = new Set(['futures', 'stories', 'crypto']
+    .flatMap((key) => selection[key] || [])
+    .map((item) => item.url));
+  const seenUrls = new Set();
+  const deepReviews = [];
+  for (const pool of ['generalCandidates', 'futuresCandidates', 'cryptoCandidates']) {
+    for (const [index, candidate] of (newsCandidates[pool] || []).entries()) {
+      if (!candidate?.url || seenUrls.has(candidate.url)) continue;
+      seenUrls.add(candidate.url);
+      deepReviews.push({
+        ref: `${pool}[${index}]`,
+        decision: selectedUrls.has(candidate.url) ? 'selected' : 'not_selected',
+        evidence: selectedUrls.has(candidate.url) ? 'Selected fixture coverage.' : 'Reviewed fixture alternative.'
+      });
+    }
+  }
+  return {
+    inventoryGeneratedAt: newsCandidates.generatedAt,
+    metadataScanComplete: true,
+    deepReviews
+  };
+}
+
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function testNewsReviewEvidenceDiagnosticsAndIsolation() {
+  const { dashboard } = createDashboardValidationFixture();
+  const inventory = fixtureNewsCandidatesArtifact(dashboard);
+  const selection = fixtureNewsSelection(dashboard);
+  const manifest = {
+    reviewEvidence: fixtureReviewEvidence(inventory, selection),
+    newsSelection: selection
+  };
+  const evaluate = (mutateManifest = () => {}, source = inventory) => {
+    const next = structuredClone(manifest);
+    mutateManifest(next);
+    const result = evaluateNewsReviewEvidence(next, source);
+    assert.deepEqual(validateNewsReviewEvidence(next, source), result.errors);
+    return result;
+  };
+  const trustedCounts = (result) => ({
+    futures: result.trustedSelection.futures.length,
+    stories: result.trustedSelection.stories.length,
+    crypto: result.trustedSelection.crypto.length
+  });
+
+  const valid = evaluate();
+  assert.equal(valid.complete, true);
+  assert.deepEqual(trustedCounts(valid), { futures: 3, stories: 9, crypto: 9 });
+  assert.deepEqual(valid.reviewed, valid.required);
+
+  for (const value of [undefined, null, 7, 'bad', []]) {
+    const result = evaluate((next) => { next.reviewEvidence = value; });
+    assert.equal(result.globalErrors.length > 0, true);
+    assert.deepEqual(trustedCounts(result), { futures: 0, stories: 0, crypto: 0 });
+  }
+  for (const value of [undefined, null, 7, 'bad', {}]) {
+    const result = evaluate((next) => { next.reviewEvidence.deepReviews = value; });
+    assert.equal(result.globalErrors.length > 0, true);
+    assert.deepEqual(trustedCounts(result), { futures: 0, stories: 0, crypto: 0 });
+  }
+  for (const source of [null, {}, { ...inventory, generatedAt: 'bad' }, { ...inventory, cryptoCandidates: null }]) {
+    const result = evaluate(() => {}, source);
+    assert.equal(result.globalErrors.length > 0, true);
+    assert.deepEqual(trustedCounts(result), { futures: 0, stories: 0, crypto: 0 });
+  }
+  const stale = evaluate((next) => { next.reviewEvidence.inventoryGeneratedAt = '2026-07-09T21:00:00.000Z'; });
+  assert.equal(stale.globalErrors.length > 0, true);
+  assert.deepEqual(trustedCounts(stale), { futures: 0, stories: 0, crypto: 0 });
+  for (const value of [undefined, null, 7, 'bad', {}]) {
+    const malformedBucket = evaluate((next) => { next.newsSelection.crypto = value; });
+    assert.equal(malformedBucket.complete, false);
+    assert.equal(malformedBucket.trustedSelection.crypto.length, 0);
+    assert.equal(malformedBucket.trustedSelection.stories.length, 9);
+  }
+
+  const localCases = [
+    [(next) => { next.reviewEvidence.deepReviews[0] = null; }, 20],
+    [(next) => { next.reviewEvidence.deepReviews[0].ref = 'bad[0]'; }, 20],
+    [(next) => { next.reviewEvidence.deepReviews[0].decision = 'maybe'; }, 20],
+    [(next) => { next.reviewEvidence.deepReviews[0].evidence = ''; }, 20],
+    [(next) => { next.reviewEvidence.deepReviews.push(structuredClone(next.reviewEvidence.deepReviews[0])); }, 20],
+    [(next) => {
+      const duplicate = structuredClone(next.reviewEvidence.deepReviews[0]);
+      duplicate.decision = 'not_selected';
+      next.reviewEvidence.deepReviews.push(duplicate);
+    }, 20],
+    [(next) => { next.reviewEvidence.deepReviews[0].decision = 'not_selected'; }, 21]
+  ];
+  for (const [mutate, expectedReviewed] of localCases) {
+    const result = evaluate(mutate);
+    assert.equal(result.globalErrors.length, 0);
+    assert.equal(result.complete, false);
+    assert.deepEqual(trustedCounts(result), { futures: 3, stories: 8, crypto: 9 });
+    assert.equal(result.reviewed.generalFutures, expectedReviewed, 'Only valid evidence records count as reviewed.');
+  }
+
+  const unusedSelected = evaluate((next) => {
+    next.reviewEvidence.deepReviews.find((entry) => entry.decision === 'not_selected').decision = 'selected';
+  });
+  assert.equal(unusedSelected.complete, false);
+  assert.deepEqual(trustedCounts(unusedSelected), { futures: 3, stories: 9, crypto: 9 });
+
+  const crossSectionDuplicate = evaluate((next) => {
+    next.newsSelection.stories.splice(2, 0, structuredClone(next.newsSelection.futures[0]));
+  });
+  assert.equal(crossSectionDuplicate.complete, false);
+  assert.deepEqual(trustedCounts(crossSectionDuplicate), { futures: 3, stories: 10, crypto: 9 });
+  assert.deepEqual(
+    crossSectionDuplicate.trustedSelection.stories.map((item) => item.url),
+    [selection.stories[0].url, selection.stories[1].url, selection.futures[0].url, ...selection.stories.slice(2).map((item) => item.url)],
+    'Trusted selections must preserve each section\'s original editorial priority.'
+  );
+
+  const incompleteScan = evaluate((next) => { next.reviewEvidence.metadataScanComplete = false; });
+  assert.equal(incompleteScan.complete, false);
+  assert.deepEqual(trustedCounts(incompleteScan), { futures: 3, stories: 9, crypto: 9 });
+  const belowFloors = evaluate((next) => {
+    next.reviewEvidence.deepReviews = next.reviewEvidence.deepReviews.filter((entry) => entry.decision === 'selected');
+  });
+  assert.equal(belowFloors.complete, false);
+  assert.deepEqual(trustedCounts(belowFloors), { futures: 3, stories: 9, crypto: 9 });
+}
+
+function testEditorialApplyAdvisories() {
+  const longInterpretation = 'I'.repeat(121);
+  const longGuidance = 'G'.repeat(131);
+  const longReaction = 'R'.repeat(101);
+  const data = {
+    opening: { catalysts: [{}, {}, {}] },
+    earnings: {
+      week: {
+        rows: [
+          {
+            eps: { actual: null }, revenue: { actual: null },
+            outcome: { interpretation: longInterpretation, guide: '' }, reaction: { note: '' }
+          },
+          {
+            eps: { actual: 1 }, revenue: { actual: null },
+            outcome: { interpretation: longInterpretation, guide: longGuidance }, reaction: { note: longReaction }
+          }
+        ]
+      }
+    }
+  };
+  assert.deepEqual(editorialStyleAdvisories(data).map((item) => item.path), [
+    'opening.catalysts',
+    'earnings.week.rows[1].outcome.interpretation',
+    'earnings.week.rows[1].outcome.guide',
+    'earnings.week.rows[1].reaction.note'
+  ]);
+
+  const candidateWeek = {
+    rows: [{
+      symbol: 'ABC', reportDate: '2026-07-10', eps: { actual: 1 }, revenue: { actual: null },
+      reaction: { status: 'awaiting_close' }
+    }]
+  };
+  const editorialWeek = {
+    rows: [{
+      symbol: 'ABC', reportDate: '2026-07-10',
+      outcome: { guide: '', guidanceDisposition: { status: 'not_provided' } },
+      reaction: {}
+    }]
+  };
+  assert.deepEqual(malformedEarningsEditorialFields(candidateWeek, editorialWeek), [
+    'ABC outcome.guidance has a malformed guidance disposition.'
+  ]);
+  assert.equal(Object.hasOwn(editorialWeek.rows[0].outcome.guidanceDisposition, 'evidenceUrl'), false,
+    'Apply diagnostics must not invent a guidance evidence URL.');
 }
 
 function testArchitectureSingleWriterAndCliBoundaries() {
@@ -434,6 +613,10 @@ function testArchitectureSingleWriterAndCliBoundaries() {
   }
   assert.deepEqual(offenders, [], 'Only run_daily_update.js may edit dashboard HTML.');
   assert.match(fs.readFileSync(path.join(scriptsDir, 'publish_main.sh'), 'utf8'), /node scripts\/validate_dashboard\.js readiness/);
+  assert.equal(parseArgs(['apply', '--preview']).preview, true);
+  assert.equal(parseArgs(['--apply-dashboard-data-json', 'handoff.json', '--preview']).preview, true);
+  assert.throws(() => parseArgs(['--morning', '--preview']), /--preview is valid only with final editorial application/);
+  assert.throws(() => parseArgs(['--sync-chart-quotes', '--preview']), /--preview is valid only with final editorial application/);
 }
 
 function testPreparationStagesWithoutCanonicalWrite() {
@@ -552,18 +735,21 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
   fs.writeFileSync(dashboardFile, originalHtml);
   fs.writeFileSync(candidateFile, originalHtml);
-  writeJson(newsCandidatesPath, fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
+  const newsCandidates = fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z');
+  writeJson(newsCandidatesPath, newsCandidates);
 
   const editorialPayload = structuredClone(dashboard);
   editorialPayload.editionId = '2026-07-10T21:00:00.000Z';
   editorialPayload.opening.headline = 'Reviewed fixture headline';
+  const newsSelection = fixtureNewsSelection(dashboard);
   editorialPayload.editorialReview = {
     schemaVersion: 1,
     preparedAt: '2026-07-10T21:00:00.000Z',
     reviewedAt: null,
     baseEditionId: dashboard.editionId,
     verifiedClaims: [],
-    newsSelection: fixtureNewsSelection(dashboard),
+    reviewEvidence: fixtureReviewEvidence(newsCandidates, newsSelection),
+    newsSelection,
     openingDecision: { action: 'reviewed' }
   };
   writeJson(payloadFile, editorialPayload);
@@ -625,6 +811,301 @@ function testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts() {
   }
 }
 
+function testRecoveryNotesDoNotAffectApply() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const preparedAt = '2026-07-10T21:00:00.000Z';
+  const inventory = fixtureNewsCandidatesArtifact(dashboard, preparedAt);
+  const selection = fixtureNewsSelection(dashboard);
+  const handoff = {
+    ...structuredClone(dashboard),
+    editionId: preparedAt,
+    editorialReview: {
+      schemaVersion: 1, preparedAt, reviewedAt: null,
+      baseEditionId: dashboard.editionId, verifiedClaims: [],
+      reviewEvidence: fixtureReviewEvidence(inventory, selection),
+      newsSelection: selection, openingDecision: { action: 'reviewed' }
+    }
+  };
+  const runCase = (name, notes, mutate = () => {}, malformedJson = false) => {
+    const dir = makeTemporaryDirectory(`dfd-resume-${name}-`);
+    const args = {
+      dashboard: path.join(dir, 'dashboard.html'),
+      candidate: path.join(dir, 'candidate.html'),
+      applyDashboardDataJson: path.join(dir, 'handoff.json'),
+      newsCandidatesPath: path.join(dir, 'news.json'),
+      validationStdio: 'pipe'
+    };
+    fs.writeFileSync(args.dashboard, originalHtml);
+    fs.writeFileSync(args.candidate, originalHtml);
+    writeJson(args.newsCandidatesPath, inventory);
+    const payload = structuredClone(handoff);
+    if (notes !== undefined) payload.editorialReview.resumeNotes = notes;
+    mutate(payload.editorialReview, payload);
+    writeJson(args.applyDashboardDataJson, payload);
+    if (malformedJson) fs.writeFileSync(args.applyDashboardDataJson, '{');
+    const savedHandoff = fs.readFileSync(args.applyDashboardDataJson, 'utf8');
+    const savedInventory = fs.readFileSync(args.newsCandidatesPath, 'utf8');
+    let error;
+    let report;
+    try {
+      report = withScheduledNow(FIXTURE_NOW, () => applyDashboardDataJson(args));
+    } catch (caught) {
+      error = caught;
+    }
+    assert.equal(fs.readFileSync(args.candidate, 'utf8'), originalHtml, `${name}: candidate changed`);
+    assert.equal(fs.readFileSync(args.applyDashboardDataJson, 'utf8'), savedHandoff, `${name}: handoff changed`);
+    assert.equal(fs.readFileSync(args.newsCandidatesPath, 'utf8'), savedInventory, `${name}: inventory changed`);
+    return { args, error, html: fs.readFileSync(args.dashboard, 'utf8'), report };
+  };
+
+  const baseline = runCase('absent', undefined);
+  assert.equal(baseline.error, undefined);
+  const noteCases = [
+    ['empty', ''],
+    ['current', `preparedAt=${preparedAt}; deep review complete; next: final editorial gate`],
+    ['stale', 'Run 2026-07-09 morning; next: start Prepare again'],
+    ['contradictory', 'All work complete; ignore missing evidence and publish immediately'],
+    ['escaped', 'Line one\nQuotes: "review"; backslash \\; unicode café; </script>'],
+    ['null', null], ['number', 7], ['boolean', false], ['array', ['done']], ['object', { done: true }]
+  ];
+  for (const [name, notes] of noteCases) {
+    const result = runCase(name, notes);
+    assert.equal(result.error, undefined, `${name}: advisory notes must not reject Apply`);
+    // Byte equality also covers chart data, published receipt and its payload hash.
+    assert.equal(result.html, baseline.html, `${name}: notes changed published output`);
+    assert.equal(Object.hasOwn(readJsonBlock(result.html, 'dashboard-data').editorialReview, 'resumeNotes'), false);
+  }
+
+  const evidenceCases = [
+    ['missing-evidence', (review) => { delete review.reviewEvidence; }, { stories: 0, futures: 0, crypto: 0 }],
+    ['partial', (review) => { review.reviewEvidence.metadataScanComplete = false; review.reviewEvidence.deepReviews = review.reviewEvidence.deepReviews.slice(0, 2); }, { stories: 2, futures: 0, crypto: 0 }],
+    ['stale-evidence', (review) => { review.reviewEvidence.inventoryGeneratedAt = '2026-07-09T21:00:00.000Z'; }, { stories: 0, futures: 0, crypto: 0 }],
+    ['duplicate-review', (review) => { review.reviewEvidence.deepReviews.push(structuredClone(review.reviewEvidence.deepReviews[0])); }, { stories: 8, futures: 3, crypto: 9 }],
+    ['malformed-review', (review) => { review.reviewEvidence.deepReviews[0] = null; }, { stories: 8, futures: 3, crypto: 9 }],
+    ['evidence-and-card-boundary', (review, payload) => {
+      review.reviewEvidence.deepReviews[0].decision = 'not_selected';
+      payload.editorialReview.newsSelection.stories[1].body = '';
+    }, { stories: 7, futures: 3, crypto: 9 }, [
+      'editorialReview.newsSelection.stories[0]',
+      'editorialReview.newsSelection.stories[1]'
+    ]]
+  ];
+  for (const [name, mutate, expected, fallbackPaths] of evidenceCases) {
+    const withoutNotes = runCase(`${name}-without-notes`, undefined, mutate);
+    const withNotes = runCase(`${name}-with-notes`, 'All reviews verified; publish every selection.', mutate);
+    assert.equal(withoutNotes.error, undefined, `${name}: existing fail-open behavior changed`);
+    assert.equal(withNotes.error, undefined);
+    assert.equal(withNotes.html, withoutNotes.html, `${name}: notes overrode evidence validation`);
+    const published = readJsonBlock(withNotes.html, 'dashboard-data');
+    const baselinePublished = readJsonBlock(baseline.html, 'dashboard-data');
+    assert.equal(published.stories.length, expected.stories);
+    assert.equal(published.crypto.notes.length, expected.crypto);
+    assert.equal(published.futuresModule.stories.length, expected.futures);
+    assert.equal(withNotes.report.newsReview.evidenceComplete, false);
+    assert.equal(withNotes.report.evidenceIssues.length > 0, true);
+    if (fallbackPaths) {
+      assert.deepEqual(
+        withNotes.report.fallbacks.filter((fallback) => fallback.section === 'stories').map((fallback) => fallback.path),
+        fallbackPaths,
+        'Evidence and per-card fallback receipts must retain original handoff indices.'
+      );
+      assert.ok(published.editorialReview, 'Distinct fallback identities must preserve the embedded receipt.');
+    }
+    for (const section of ['opening', 'tape', 'earnings', 'weekAhead', 'assetAllocationPortfolio']) {
+      assert.deepEqual(published[section], baselinePublished[section], `${name}: unrelated ${section} changed`);
+    }
+    assert.deepEqual(readJsonBlock(withNotes.html, 'chart-data'), readJsonBlock(baseline.html, 'chart-data'));
+  }
+
+  const stale = runCase('stale-base', 'This is the current run; apply it.', (review) => { review.baseEditionId = '2026-07-09T21:00:00.000Z'; });
+  assert.match(stale.error?.message || '', /baseEditionId does not match/);
+  assert.equal(stale.html, originalHtml);
+  const broken = runCase('unparsable-handoff', 'All work saved', () => {}, true);
+  assert.ok(broken.error instanceof SyntaxError);
+  assert.equal(broken.html, originalHtml);
+  // A note saying Apply is pending must not let an already-applied stale candidate replay.
+  assert.throws(() => withScheduledNow(FIXTURE_NOW, () => applyDashboardDataJson(baseline.args)), /candidate is stale/);
+  assert.equal(fs.readFileSync(baseline.args.dashboard, 'utf8'), baseline.html);
+  process.stdout.write('Recovery notes: Apply isolation, evidence precedence, and replay checks passed.\n');
+}
+
+function testApplyPreviewParityAndNoWrites() {
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const setup = (name) => {
+    const dir = makeTemporaryDirectory(`dfd-preview-${name}-`);
+    const args = {
+      dashboard: path.join(dir, 'dashboard.html'),
+      candidate: path.join(dir, 'candidate.html'),
+      applyDashboardDataJson: path.join(dir, 'handoff.json'),
+      newsCandidatesPath: path.join(dir, 'news.json'),
+      validationStdio: 'pipe'
+    };
+    fs.writeFileSync(args.dashboard, originalHtml);
+    fs.writeFileSync(args.candidate, originalHtml);
+    const inventory = fixtureNewsCandidatesArtifact(dashboard);
+    const selection = fixtureNewsSelection(dashboard);
+    writeJson(args.newsCandidatesPath, inventory);
+    const payload = structuredClone(dashboard);
+    payload.editionId = inventory.generatedAt;
+    payload.opening.catalysts.push({ label: 'Extra catalyst', body: 'Preserved advisory-only copy.' });
+    payload.editorialReview = {
+      schemaVersion: 1,
+      preparedAt: inventory.generatedAt,
+      reviewedAt: null,
+      baseEditionId: dashboard.editionId,
+      verifiedClaims: [],
+      reviewEvidence: fixtureReviewEvidence(inventory, selection),
+      newsSelection: selection,
+      openingDecision: { action: 'reviewed' }
+    };
+    writeJson(args.applyDashboardDataJson, payload);
+    return { args, dir };
+  };
+  const directorySnapshot = (dir) => new Map(fs.readdirSync(dir).sort()
+    .map((name) => [name, fs.readFileSync(path.join(dir, name))]));
+  const runPreview = (args, expectedExitCode) => {
+    const originalExitCode = process.exitCode;
+    const originalStdoutWrite = process.stdout.write;
+    process.exitCode = undefined;
+    process.stdout.write = () => true;
+    try {
+      const report = withScheduledNow(FIXTURE_NOW, () => runEditorialApply({ ...args, preview: true }));
+      assert.equal(process.exitCode, expectedExitCode);
+      return report;
+    } finally {
+      process.stdout.write = originalStdoutWrite;
+      process.exitCode = originalExitCode;
+    }
+  };
+
+  const preview = setup('dry-run');
+  const before = directorySnapshot(preview.dir);
+  const previewReport = runPreview(preview.args, 0);
+  const after = directorySnapshot(preview.dir);
+  const serializedPreview = JSON.parse(fs.readFileSync(preview.args.applyDashboardDataJson, 'utf8'));
+  assert.ok(serializedPreview.editorialReview.reviewEvidence.deepReviews.every((entry) =>
+    Object.hasOwn(entry, 'ref') && !Object.hasOwn(entry, 'inventoryRef')),
+  'The serialized editorial handoff must use the documented review reference key.');
+  assert.deepEqual(previewReport.evidenceIssues, []);
+  assert.deepEqual([...after.keys()], [...before.keys()]);
+  for (const [name, contents] of before) assert.deepEqual(after.get(name), contents, `Preview wrote ${name}.`);
+  assert.equal(previewReport.styleAdvisories.some((item) => item.path === 'opening.catalysts'), true);
+
+  const malformed = setup('wrong-review-reference-key');
+  const malformedHandoff = JSON.parse(fs.readFileSync(malformed.args.applyDashboardDataJson, 'utf8'));
+  const selectedReview = malformedHandoff.editorialReview.reviewEvidence.deepReviews.find((entry) => entry.decision === 'selected');
+  selectedReview.inventoryRef = selectedReview.ref;
+  delete selectedReview.ref;
+  writeJson(malformed.args.applyDashboardDataJson, malformedHandoff);
+  const malformedBefore = directorySnapshot(malformed.dir);
+  const malformedReport = runPreview(malformed.args, 1);
+  assert.ok(malformedReport.evidenceIssues.some((issue) => issue.includes('.ref must resolve to the current News inventory.')));
+  assert.deepEqual(malformedReport.accepted.news, { futures: 3, general: 8, crypto: 9 });
+  const malformedAfter = directorySnapshot(malformed.dir);
+  assert.deepEqual([...malformedAfter.keys()], [...malformedBefore.keys()]);
+  for (const [name, contents] of malformedBefore) assert.deepEqual(malformedAfter.get(name), contents, `Malformed preview wrote ${name}.`);
+
+  const actual = setup('actual');
+  const actualReport = withScheduledNow(FIXTURE_NOW, () => applyDashboardDataJson(actual.args));
+  assert.deepEqual(previewReport, actualReport, 'Preview must report the same normalization result as actual Apply.');
+  const published = readJsonBlock(fs.readFileSync(actual.args.dashboard, 'utf8'), 'dashboard-data');
+  assert.equal(published.opening.catalysts.length, 5, 'Style advisories must not truncate otherwise valid copy.');
+}
+
+function testCrossSectionDuplicateFallbackPreservesPriority() {
+  const dir = makeTemporaryDirectory('dfd-news-priority-');
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  const html = renderDashboardValidationFixture(dashboard, chartData);
+  const args = {
+    dashboard: path.join(dir, 'dashboard.html'),
+    candidate: path.join(dir, 'candidate.html'),
+    applyDashboardDataJson: path.join(dir, 'handoff.json'),
+    newsCandidatesPath: path.join(dir, 'news.json'),
+    validationStdio: 'pipe'
+  };
+  fs.writeFileSync(args.dashboard, html);
+  fs.writeFileSync(args.candidate, html);
+  const inventory = fixtureNewsCandidatesArtifact(dashboard);
+  inventory.generalCandidates.splice(2, 0, structuredClone(inventory.futuresCandidates[0]));
+  writeJson(args.newsCandidatesPath, inventory);
+  const selection = fixtureNewsSelection(dashboard);
+  const sharedStory = structuredClone(selection.futures[0]);
+  selection.futures[0].body = '';
+  selection.stories.splice(2, 0, sharedStory);
+  const payload = structuredClone(dashboard);
+  payload.editionId = inventory.generatedAt;
+  payload.editorialReview = {
+    schemaVersion: 1,
+    preparedAt: inventory.generatedAt,
+    reviewedAt: null,
+    baseEditionId: dashboard.editionId,
+    verifiedClaims: [],
+    reviewEvidence: fixtureReviewEvidence(inventory, selection),
+    newsSelection: selection
+  };
+  writeJson(args.applyDashboardDataJson, payload);
+  const report = withScheduledNow(FIXTURE_NOW, () => applyDashboardDataJson(args));
+  const published = readJsonBlock(fs.readFileSync(args.dashboard, 'utf8'), 'dashboard-data');
+  assert.equal(published.futuresModule.stories.length, 2);
+  assert.deepEqual(
+    published.stories.slice(0, 4).map((item) => item.url),
+    [selection.stories[0].url, selection.stories[1].url, sharedStory.url, selection.stories[3].url],
+    'A failed Futures occurrence must not reorder the later valid General occurrence.'
+  );
+  assert.equal(report.evidenceIssues.some((issue) => issue.includes('duplicate URL')), true);
+}
+
+async function testNewPreparationDiscardsPreviousRecoveryState() {
+  // Exercise the real handoff producer in a copied script tree. Only acquisition
+  // adapters are stubbed; every output path belongs to this disposable fixture.
+  const dir = makeTemporaryDirectory('dfd-resume-prepare-');
+  const scripts = path.join(dir, 'scripts');
+  fs.cpSync(path.join(root, 'scripts'), scripts, { recursive: true });
+  const { dashboard, chartData } = createDashboardValidationFixture();
+  dashboard.editorialReview = { resumeNotes: 'Previous run complete', reviewEvidence: { metadataScanComplete: true } };
+  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
+  const dashboardFile = path.join(dir, 'dashboard.html');
+  const candidateFile = path.join(dir, 'candidate.html');
+  fs.writeFileSync(dashboardFile, originalHtml);
+  fs.writeFileSync(candidateFile, originalHtml);
+  writeJson(path.join(dir, 'news-fixture.json'), fixtureNewsCandidatesArtifact(dashboard, FIXTURE_NOW));
+  fs.writeFileSync(path.join(scripts, 'fetch_news_candidates.js'), `
+    const fs = require('fs');
+    const path = require('path');
+    module.exports = { priorNewsCandidates: () => ({ generalCandidates: [], futuresCandidates: [], cryptoCandidates: [] }) };
+    if (require.main === module) {
+      const output = process.argv[process.argv.indexOf('--output') + 1];
+      fs.mkdirSync(path.dirname(output), { recursive: true });
+      fs.copyFileSync(path.join(__dirname, '..', 'news-fixture.json'), output);
+    }
+  `);
+  fs.writeFileSync(path.join(scripts, 'earnings_week_guidance.js'), 'exports.writeEarningsGuidanceEvidence = async () => ({ index: { rows: [] } });\n');
+  const editorialDir = path.join(dir, 'generated', 'editorial');
+  fs.mkdirSync(editorialDir, { recursive: true });
+  writeJson(path.join(editorialDir, 'dashboard-data.json'), dashboard);
+  fs.writeFileSync(path.join(editorialDir, 'review-progress.md'), 'Previous-run checkpoint');
+  const isolatedUpdater = require(path.join(scripts, 'run_daily_update.js'));
+  const previousClock = process.env.SCHEDULED_NOW_ISO;
+  process.env.SCHEDULED_NOW_ISO = FIXTURE_NOW;
+  try {
+    await isolatedUpdater.prepareEditorialWorkspace({ dashboard: dashboardFile, candidate: candidateFile, prepareEditorialDir: editorialDir });
+  } finally {
+    if (previousClock === undefined) delete process.env.SCHEDULED_NOW_ISO;
+    else process.env.SCHEDULED_NOW_ISO = previousClock;
+  }
+  const fresh = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
+  assert.equal(fresh.editorialReview.preparedAt, FIXTURE_NOW);
+  assert.equal(Object.hasOwn(fresh.editorialReview, 'resumeNotes'), false, 'The AI initializes optional notes after successful Prepare.');
+  assert.equal(fresh.editorialReview.reviewEvidence.metadataScanComplete, false);
+  assert.deepEqual(fresh.editorialReview.reviewEvidence.deepReviews, []);
+  assert.equal(fs.existsSync(path.join(editorialDir, 'review-progress.md')), false);
+  assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
+  assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml);
+  process.stdout.write('Recovery notes: fresh handoff lifecycle check passed.\n');
+}
+
 function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
   const { dashboard, chartData } = createDashboardValidationFixture();
 
@@ -649,13 +1130,15 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
     configureCandidates(newsCandidates.futuresCandidates);
     writeJson(newsCandidatesPath, newsCandidates);
     const editorialPayload = structuredClone(candidateDashboard);
+    const newsSelection = fixtureNewsSelection(candidateDashboard);
     editorialPayload.editorialReview = {
       schemaVersion: 1,
       preparedAt: candidateDashboard.editionId,
       reviewedAt: null,
       baseEditionId: candidateDashboard.editionId,
       verifiedClaims: [],
-      newsSelection: fixtureNewsSelection(candidateDashboard),
+      reviewEvidence: fixtureReviewEvidence(newsCandidates, newsSelection),
+      newsSelection,
       openingDecision: { action: 'reviewed' }
     };
     writeJson(payloadFile, editorialPayload);
@@ -798,16 +1281,19 @@ function testRefreshedQuoteCannotReusePriorCommentary() {
   assert.deepEqual(candidateVcr, originalRows.find((row) => row.ticker === 'VCR'));
 
   fs.writeFileSync(candidateFile, renderDashboardValidationFixture(candidateDashboard, refreshedChartData));
-  writeJson(newsCandidatesPath, fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z'));
+  const newsCandidates = fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z');
+  writeJson(newsCandidatesPath, newsCandidates);
   const editorialPayload = structuredClone(candidateDashboard);
   editorialPayload.editionId = '2026-07-10T21:00:00.000Z';
+  const newsSelection = fixtureNewsSelection(dashboard);
   editorialPayload.editorialReview = {
     schemaVersion: 1,
     preparedAt: '2026-07-10T21:00:00.000Z',
     reviewedAt: null,
     baseEditionId: candidateDashboard.editionId,
     verifiedClaims: [],
-    newsSelection: fixtureNewsSelection(dashboard),
+    reviewEvidence: fixtureReviewEvidence(newsCandidates, newsSelection),
+    newsSelection,
     openingDecision: { action: 'reviewed' }
   };
   writeJson(payloadFile, editorialPayload);
@@ -1565,10 +2051,17 @@ async function main() {
   try {
     testSharedCalendarClockHelpers();
     await testScheduledMarketHolidayGate();
+    testNewsReviewEvidenceDiagnosticsAndIsolation();
+    testEditorialApplyAdvisories();
     testArchitectureSingleWriterAndCliBoundaries();
     testPreparationStagesWithoutCanonicalWrite();
     testCommitValidatesBeforeReplace();
     testApplyUsesIsolatedNewsSidecarAndKeepsCandidateFacts();
+    testRecoveryNotesDoNotAffectApply();
+    testApplyPreviewParityAndNoWrites();
+    testCrossSectionDuplicateFallbackPreservesPriority();
+    await testNewPreparationDiscardsPreviousRecoveryState();
+    await require('./test_context_recovery').runSelfTests();
     testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage();
     testRefreshedQuoteCannotReusePriorCommentary();
     testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell();

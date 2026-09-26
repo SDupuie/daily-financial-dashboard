@@ -2,7 +2,8 @@
   "name": "daily-financial-dashboard",
   "private": true,
   "scripts": {
-    "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium"
+    "install:browsers": "PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium",
+    "install:news-client": "python3 -m venv scripts/.news-http-env && PIP_NO_CACHE_DIR=1 scripts/.news-http-env/bin/python -m pip install --only-binary=:all: curl_cffi==0.16.3"
   },
   "dependencies": {
     "acorn": "8.18.0",

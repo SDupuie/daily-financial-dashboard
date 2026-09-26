@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 
 const EDITORIAL_REVIEW_SCHEMA_VERSION = 1;
+const NEWS_REVIEW_TARGETS = Object.freeze({ generalFutures: 60, crypto: 30 });
+const NEWS_REVIEW_DECISIONS = new Set(['selected', 'not_selected']);
+const NEWS_CANDIDATE_REF_PATTERN = /^(generalCandidates|futuresCandidates|cryptoCandidates)\[(0|[1-9]\d*)\]$/;
 const EDITORIAL_SECTION_NAMES = Object.freeze([
   'opening',
   'futures-news',
@@ -138,6 +141,239 @@ function superlativeClaims(data) {
   });
 }
 
+function candidateFromReviewRef(newsSource, ref) {
+  const match = NEWS_CANDIDATE_REF_PATTERN.exec(String(ref || ''));
+  if (!match) return null;
+  const [, pool, indexText] = match;
+  const candidates = newsSource?.[pool];
+  const index = Number(indexText);
+  if (!Array.isArray(candidates) || index >= candidates.length) return null;
+  const candidate = candidates[index];
+  return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? { pool, index, candidate }
+    : null;
+}
+
+function uniqueCandidateCount(newsSource, pools) {
+  return new Set(pools.flatMap((pool) => (Array.isArray(newsSource?.[pool]) ? newsSource[pool] : []))
+    .map((candidate) => String(candidate?.url || '').trim())
+    .filter(Boolean)).size;
+}
+
+function evaluateNewsReviewEvidence(manifest, newsSource) {
+  const errors = [];
+  const globalErrors = [];
+  const trustedSelection = { futures: [], stories: [], crypto: [] };
+  const trustedSelectionIndices = { futures: [], stories: [], crypto: [] };
+  const evidence = manifest?.reviewEvidence;
+  if (!newsSource || typeof newsSource !== 'object' || Array.isArray(newsSource)
+    || !isIsoTimestamp(newsSource.generatedAt)
+    || ['generalCandidates', 'futuresCandidates', 'cryptoCandidates'].some((pool) => !Array.isArray(newsSource[pool]))) {
+    globalErrors.push('the current News inventory is missing, stale, or malformed.');
+  }
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
+    globalErrors.push('editorial review reviewEvidence must be an object.');
+  }
+  if (globalErrors.length) {
+    return {
+      complete: false,
+      errors: [...globalErrors],
+      globalErrors,
+      rejectedSelections: [],
+      reviewed: { generalFutures: 0, crypto: 0 },
+      required: { generalFutures: 0, crypto: 0 },
+      trustedSelection,
+      trustedSelectionIndices
+    };
+  }
+  if (evidence.inventoryGeneratedAt !== newsSource.generatedAt) {
+    globalErrors.push('editorial review reviewEvidence.inventoryGeneratedAt must match the current News inventory.');
+  }
+  if (evidence.metadataScanComplete !== true) {
+    errors.push('editorial review reviewEvidence.metadataScanComplete must be true after the complete metadata scan.');
+  }
+  const entries = evidence.deepReviews;
+  if (!Array.isArray(entries)) {
+    globalErrors.push('editorial review reviewEvidence.deepReviews must be an array.');
+    return {
+      complete: false,
+      errors: [...globalErrors, ...errors],
+      globalErrors,
+      rejectedSelections: [],
+      reviewed: { generalFutures: 0, crypto: 0 },
+      required: { generalFutures: 0, crypto: 0 },
+      trustedSelection,
+      trustedSelectionIndices
+    };
+  }
+  if (globalErrors.length) {
+    return {
+      complete: false,
+      errors: [...globalErrors, ...errors],
+      globalErrors,
+      rejectedSelections: [],
+      reviewed: { generalFutures: 0, crypto: 0 },
+      required: { generalFutures: 0, crypto: 0 },
+      trustedSelection,
+      trustedSelectionIndices
+    };
+  }
+  const reviewsByUrl = new Map();
+  for (const [index, entry] of entries.entries()) {
+    const path = `editorial review reviewEvidence.deepReviews[${index}]`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      errors.push(`${path} must be an object.`);
+      continue;
+    }
+    const resolved = candidateFromReviewRef(newsSource, entry.ref);
+    if (!resolved) {
+      errors.push(`${path}.ref must resolve to the current News inventory.`);
+      continue;
+    }
+    const url = String(resolved.candidate.url || '').trim();
+    if (!url) {
+      errors.push(`${path}.ref resolves to a candidate without a URL.`);
+      continue;
+    }
+    const firstGeneralIndex = (newsSource.generalCandidates || []).findIndex((candidate) => candidate?.url === url);
+    if (resolved.pool === 'futuresCandidates' && firstGeneralIndex >= 0) {
+      errors.push(`${path}.ref must use generalCandidates[${firstGeneralIndex}], the URL's first reference in scan order.`);
+    }
+    const review = {
+      entry,
+      path,
+      pool: resolved.pool,
+      valid: true
+    };
+    if (resolved.pool === 'futuresCandidates' && firstGeneralIndex >= 0) review.valid = false;
+    if (!NEWS_REVIEW_DECISIONS.has(entry.decision)) {
+      errors.push(`${path}.decision must be selected or not_selected.`);
+      review.valid = false;
+    }
+    if (typeof entry.evidence !== 'string' || !entry.evidence.trim()) {
+      errors.push(`${path}.evidence must briefly record the review decision.`);
+      review.valid = false;
+    }
+    if (!reviewsByUrl.has(url)) reviewsByUrl.set(url, []);
+    reviewsByUrl.get(url).push(review);
+  }
+  const reviewedByUrl = new Map();
+  for (const [url, reviews] of reviewsByUrl) {
+    if (reviews.length > 1) {
+      errors.push(`${reviews.at(-1).path}.ref duplicates candidate URL ${url}; duplicate review evidence invalidates that URL.`);
+      continue;
+    }
+    if (reviews[0].valid) reviewedByUrl.set(url, reviews[0]);
+  }
+  const generalFuturesReviewed = [...reviewedByUrl.entries()]
+    .filter(([, review]) => review.pool !== 'cryptoCandidates').length;
+  const cryptoReviewed = [...reviewedByUrl.entries()]
+    .filter(([, review]) => review.pool === 'cryptoCandidates').length;
+  const generalFuturesRequired = Math.min(
+    NEWS_REVIEW_TARGETS.generalFutures,
+    uniqueCandidateCount(newsSource, ['generalCandidates', 'futuresCandidates'])
+  );
+  const cryptoRequired = Math.min(NEWS_REVIEW_TARGETS.crypto, uniqueCandidateCount(newsSource, ['cryptoCandidates']));
+  if (generalFuturesReviewed < generalFuturesRequired) {
+    errors.push(`editorial review must contain at least ${generalFuturesRequired} unique General/Futures deep reviews; found ${generalFuturesReviewed}.`);
+  }
+  if (cryptoReviewed < cryptoRequired) {
+    errors.push(`editorial review must contain at least ${cryptoRequired} unique Crypto deep reviews; found ${cryptoReviewed}.`);
+  }
+  const selection = manifest?.newsSelection;
+  const occurrencesByUrl = new Map();
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)) {
+    errors.push('editorial review newsSelection must be an object.');
+  }
+  for (const key of ['futures', 'stories', 'crypto']) {
+    if (!Array.isArray(selection?.[key])) {
+      errors.push(`editorial review newsSelection.${key} must be an array.`);
+    }
+    const items = Array.isArray(selection?.[key]) ? selection[key] : [];
+    for (const [index, item] of items.entries()) {
+      const url = String(item?.url || '').trim();
+      if (!url) {
+        errors.push(`editorial review newsSelection.${key}[${index}] must contain a URL linked to review evidence.`);
+        trustedSelection[key].push(item);
+        trustedSelectionIndices[key].push(index);
+        continue;
+      }
+      if (!occurrencesByUrl.has(url)) occurrencesByUrl.set(url, []);
+      occurrencesByUrl.get(url).push({ key, index, item });
+    }
+  }
+  const rejectedSelections = [];
+  for (const [url, occurrences] of occurrencesByUrl) {
+    if (occurrences.length > 1) {
+      errors.push(`News selections must not contain duplicate URL ${url} within or across sections.`);
+    }
+    const review = reviewedByUrl.get(url);
+    if (review?.entry?.decision !== 'selected') {
+      errors.push(`selected News URL ${url} must have a selected reviewEvidence.deepReviews entry.`);
+      for (const occurrence of occurrences) rejectedSelections.push({ ...occurrence, url, reason: 'invalid_review_evidence' });
+      continue;
+    }
+    for (const occurrence of occurrences) {
+      trustedSelection[occurrence.key].push(occurrence.item);
+      trustedSelectionIndices[occurrence.key].push(occurrence.index);
+    }
+  }
+  for (const key of ['futures', 'stories', 'crypto']) {
+    const ordered = trustedSelection[key].map((item, index) => ({ item, index: trustedSelectionIndices[key][index] }))
+      .sort((left, right) => left.index - right.index);
+    trustedSelection[key] = ordered.map(({ item }) => item);
+    trustedSelectionIndices[key] = ordered.map(({ index }) => index);
+  }
+  for (const [url, review] of reviewedByUrl) {
+    if (review.entry.decision === 'selected' && !occurrencesByUrl.has(url)) {
+      errors.push(`reviewEvidence.deepReviews marks ${review.entry.ref} selected, but its URL is not selected for publication.`);
+    }
+  }
+  return {
+    complete: errors.length === 0,
+    errors,
+    globalErrors,
+    rejectedSelections,
+    reviewed: { generalFutures: generalFuturesReviewed, crypto: cryptoReviewed },
+    required: { generalFutures: generalFuturesRequired, crypto: cryptoRequired },
+    trustedSelection,
+    trustedSelectionIndices
+  };
+}
+
+function validateNewsReviewEvidence(manifest, newsSource) {
+  return evaluateNewsReviewEvidence(manifest, newsSource).errors;
+}
+
+function buildNewsReviewSummary(evaluation, newsSource, selections) {
+  const priorUrls = new Set(['generalCandidates', 'futuresCandidates', 'cryptoCandidates']
+    .flatMap((pool) => (Array.isArray(newsSource?.[pool]) ? newsSource[pool] : []))
+    .filter((candidate) => candidate?.priorCard === true)
+    .map((candidate) => String(candidate.url || '').trim())
+    .filter(Boolean));
+  const summarize = (items) => {
+    const urls = (Array.isArray(items) ? items : []).map((item) => String(item?.url || '').trim()).filter(Boolean);
+    const retained = urls.filter((url) => priorUrls.has(url)).length;
+    return { selected: urls.length, retained, new: urls.length - retained };
+  };
+  const sections = {
+    futures: summarize(selections?.futures),
+    general: summarize(selections?.general),
+    crypto: summarize(selections?.crypto)
+  };
+  const total = Object.values(sections).reduce((sum, section) => ({
+    selected: sum.selected + section.selected,
+    retained: sum.retained + section.retained,
+    new: sum.new + section.new
+  }), { selected: 0, retained: 0, new: 0 });
+  return {
+    evidenceComplete: evaluation?.complete === true,
+    reviewed: { ...(evaluation?.reviewed || { generalFutures: 0, crypto: 0 }) },
+    required: { ...(evaluation?.required || { generalFutures: 0, crypto: 0 }) },
+    selections: { ...total, sections }
+  };
+}
+
 function validateReviewManifest(manifest, data, { requireEmbedded = false, expectedBaseEditionId = '', chartData = null } = {}) {
   const errors = [];
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
@@ -268,6 +504,7 @@ function buildEditorialReview(data, manifest, chartData) {
     reviewedBaseEditionId: manifest.baseEditionId || null,
     reviewedEditionId: data.editionId,
     verifiedClaims: (manifest.verifiedClaims || []).map(({ text, evidenceUrl }) => ({ text, evidenceUrl })),
+    ...(manifest.newsReview ? { newsReview: manifest.newsReview } : {}),
     ...((manifest.systemFallbacks || []).length ? {
       systemFallbacks: manifest.systemFallbacks.map(({ section, path, action, reason }) => ({ section, path, action, reason }))
     } : {}),
@@ -282,12 +519,15 @@ module.exports = {
   EDITORIAL_REVIEW_SCHEMA_VERSION,
   TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
+  buildNewsReviewSummary,
+  evaluateNewsReviewEvidence,
   editorialPayloadHash,
   editorialTextEntries,
   reviewedTapeCommentary,
   stableJson,
   superlativeClaims,
   unavailableTapeCommentary,
+  validateNewsReviewEvidence,
   validateTapeCommentaryDisposition,
   validateReviewManifest
 };

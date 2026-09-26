@@ -23,7 +23,6 @@ const {
   validateNewsCoverageState
 } = require('./news_contract');
 const {
-  ARTICLE_REVIEW_CANDIDATE_LIMIT,
   articleRedirectAllowed,
   collectNewsCandidates,
   extractArticleMetadata,
@@ -249,6 +248,7 @@ async function testAlphaVantageProviderErrorRedaction() {
   };
   const providerMessage = `Alpha Vantage detected ${apiKey}; repeated value ${apiKey}.`;
   const fetchPage = async () => ({ json: async () => ({ Information: providerMessage }) });
+  const articleCalls = [];
   const artifact = await collectNewsCandidates({
     asOf,
     acquisitionPaths: [
@@ -268,14 +268,17 @@ async function testAlphaVantageProviderErrorRedaction() {
         publishedAtVerified: true
       }] };
     },
-    fetchArticle: async () => {
-      throw new Error('Provider-verified AP candidates must bypass article review.');
+    fetchArticle: async (candidate) => {
+      articleCalls.push(candidate.url);
+      throw new Error('Fixture article page unavailable.');
     }
   });
   const alphaError = artifact.attempts.find((attempt) => attempt.id === alphaPath.id).error;
   assert.equal(alphaError, 'Alpha Vantage detected [redacted]; repeated value [redacted].');
   assert.equal(alphaError.includes(apiKey), false, 'Persisted Alpha Vantage diagnostics must not contain the configured API key.');
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.sourceId === 'ap'), true, 'An Alpha Vantage error must not discard unrelated provider candidates.');
+  assert.deepEqual(articleCalls, ['https://apnews.com/article/alpha-error-isolation-fixture']);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'ap').article.accessible, false);
 
   await assert.rejects(
     () => fetchAcquisitionPath(alphaPath, {
@@ -728,15 +731,15 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
     'Article review must not invent precision for a date-only provider candidate.');
 }
 
-async function testNewsCandidateReviewCapAndProgress() {
+async function testAllNewsCandidatesReceiveArticleReviewAndProgress() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
   const reviewed = [];
   const progressArtifacts = [];
-  const itemCount = ARTICLE_REVIEW_CANDIDATE_LIMIT + 10;
+  const itemCount = 260;
   const items = Array.from({ length: itemCount }, (_unused, index) => ({
     publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
-    title: `Cap fixture ${String(index).padStart(3, '0')}`,
-    url: `https://www.cnbc.com/2026/07/10/cap-fixture-${String(index).padStart(3, '0')}.html`
+    title: `Review fixture ${String(index).padStart(3, '0')}`,
+    url: `https://www.cnbc.com/2026/07/10/review-fixture-${String(index).padStart(3, '0')}.html`
   }));
   const artifact = await collectNewsCandidates({
     asOf,
@@ -757,16 +760,12 @@ async function testNewsCandidateReviewCapAndProgress() {
     onProgress: (progressArtifact) => progressArtifacts.push(progressArtifact)
   });
 
-  assert.equal(reviewed.length, ARTICLE_REVIEW_CANDIDATE_LIMIT);
+  assert.equal(reviewed.length, itemCount);
   assert.equal(artifact.articleReview.eligibleDownloadedCount, itemCount);
-  assert.equal(artifact.articleReview.reviewCandidateCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
-  assert.equal(artifact.articleReview.reviewedCount, ARTICLE_REVIEW_CANDIDATE_LIMIT);
-  assert.equal(artifact.articleReview.skippedCount, 10);
-  assert.equal(artifact.generalCandidates.length, itemCount, 'Page-enrichment limits must not truncate the editorial inventory.');
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 000'), true);
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Cap fixture 259'), true);
-  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Cap fixture 000').article, undefined);
-  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Cap fixture 259').article.accessible, true);
+  assert.equal(artifact.articleReview.reviewCandidateCount, itemCount);
+  assert.equal(artifact.articleReview.reviewedCount, itemCount);
+  assert.equal(artifact.generalCandidates.length, itemCount);
+  assert.ok(artifact.generalCandidates.every((candidate) => candidate.article?.excerpt === 'Fixture article content.'));
   assert.ok(
     progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'acquiring'
       && progressArtifact.generalCandidates.length === 0),
@@ -791,12 +790,12 @@ function testArticleMetadataExtraction() {
       "datePublished":"2026-07-10T12:30:00-04:00",
       "provider":{"@type":"Organization","name":"Reuters","url":"https://www.reuters.com/"}
     }</script>
-    <p>${longParagraph}</p>`);
+    <h1>Fixture &amp; Markets</h1><p>${longParagraph}</p>`);
   assert.equal(metadata.pageTitle, 'Fixture & Markets');
   assert.equal(metadata.description, 'A useful fixture description.');
   assert.equal(metadata.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
   assert.match(metadata.excerpt, /mechanical page extractor/);
-  assert.equal(metadata.excerpt.length, 5000);
+  assert.equal(metadata.excerpt.length, 1000);
   assert.equal(Object.hasOwn(metadata, 'text'), false);
   assert.equal(Object.hasOwn(metadata, 'providerName'), false);
   assert.equal(Object.hasOwn(metadata, 'providerUrl'), false);
@@ -1361,6 +1360,7 @@ async function testNewsTransportFailureIsolation() {
   });
   try {
     const asOf = new Date('2026-07-10T21:00:00.000Z');
+    const articleCalls = [];
     const artifact = await collectNewsCandidates({
       asOf,
       acquisitionPaths: [
@@ -1369,12 +1369,15 @@ async function testNewsTransportFailureIsolation() {
       ],
       searchTimeoutMs: 1000,
       clock: () => asOf,
-      fetchArticle: async () => {
-        throw new Error('Provider-verified AP candidates must bypass article review.');
+      fetchArticle: async (candidate) => {
+        articleCalls.push(candidate.url);
+        throw new Error('Fixture article page unavailable.');
       }
     });
     assert.equal(artifact.generalCandidates.length, 1);
     assert.equal(artifact.generalCandidates[0].title, 'Isolation fixture');
+    assert.deepEqual(articleCalls, ['https://apnews.com/article/isolation-fixture-123']);
+    assert.equal(artifact.generalCandidates[0].article.accessible, false);
     assert.match(artifact.attempts.find((attempt) => attempt.id === 'bad-ap').error, /Invalid URL/);
     assert.equal(artifact.attempts.find((attempt) => attempt.id === 'good-ap').error, null);
   } finally {
@@ -1419,9 +1422,9 @@ async function testApPublicAcquisitionUsesOneSitemapFetch() {
   }
 }
 
-async function testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap() {
+async function testVerifiedCandidatesReceiveContextWithoutChangingProvenance() {
   const asOf = new Date('2026-07-10T21:00:00.000Z');
-  const verifiedItems = Array.from({ length: ARTICLE_REVIEW_CANDIDATE_LIMIT + 10 }, (_unused, index) => ({
+  const verifiedItems = Array.from({ length: 260 }, (_unused, index) => ({
     publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
     title: `Verified Reuters fixture ${String(index).padStart(3, '0')}`,
     url: `https://www.reuters.com/markets/us/verified-reuters-fixture-${String(index).padStart(3, '0')}-2026-07-10/`,
@@ -1444,26 +1447,37 @@ async function testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap() {
     clock: () => asOf,
     fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'reuters-public' ? verifiedItems : [cryptoItem] }),
     fetchArticle: async (candidate) => {
-      assert.equal(candidate.sourceId, 'coindesk', 'Verified Reuters candidates must not spend article-review slots.');
       reviewed.push(candidate.title);
+      if (candidate.title === 'Verified Reuters fixture 001') throw new Error('Fixture page unavailable.');
       return {
         finalUrl: candidate.url,
         pageTitle: candidate.title,
         description: 'Fixture description.',
         excerpt: 'Fixture article content.',
-        publishedAt: new Date(candidate.publishedAt)
+        publishedAt: candidate.title === 'Verified Reuters fixture 000'
+          ? new Date('2026-07-08T12:00:00.000Z')
+          : new Date(candidate.publishedAt)
       };
     }
   });
 
-  assert.deepEqual(reviewed, [cryptoItem.title]);
+  assert.equal(reviewed.length, verifiedItems.length + 1);
+  assert.ok(reviewed.includes(cryptoItem.title));
   assert.equal(artifact.articleReview.eligibleDownloadedCount, verifiedItems.length + 1);
-  assert.equal(artifact.articleReview.reviewCandidateCount, 1);
+  assert.equal(artifact.articleReview.reviewCandidateCount, verifiedItems.length + 1);
+  assert.equal(artifact.articleReview.reviewedCount, verifiedItems.length + 1);
   assert.equal(artifact.generalCandidates.length, verifiedItems.length);
   assert.equal(artifact.futuresCandidates.length, verifiedItems.length);
-  assert.equal(artifact.cryptoCandidates.length, 1, 'A large Reuters result must not crowd out the independent Crypto pool.');
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 000'), true);
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Verified Reuters fixture 259'), true);
+  assert.equal(artifact.cryptoCandidates.length, 1);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 000').publishedAt,
+    verifiedItems[0].publishedAt, 'A conflicting page date must not replace a verified sitemap timestamp.');
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 000').article.excerpt,
+    'Fixture article content.');
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 001').article.accessible,
+    false, 'A failed page must not remove its candidate.');
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 259').article.excerpt,
+    'Fixture article content.');
+  assert.equal(artifact.cryptoCandidates[0].article.excerpt, 'Fixture article content.');
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.sourceLabel === 'Reuters'));
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.dateSource === 'provider_published'));
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.publishedAtVerified === true));
@@ -1711,12 +1725,12 @@ async function main() {
   await testNewsFetchResponseTransport();
   await testNewsTransportFailureIsolation();
   await testApPublicAcquisitionUsesOneSitemapFetch();
-  await testVerifiedCandidatesBypassReviewLimitWithoutInventoryCap();
+  await testVerifiedCandidatesReceiveContextWithoutChangingProvenance();
   await testUpdatedOnlyFeedsDoNotCreatePublishedCandidates();
   await testDeterministicNewsCandidateAcquisition();
   await testNewsAcquisitionExclusions();
   await testFuturesCandidatesUseDisplayedSessionWindow();
-  await testNewsCandidateReviewCapAndProgress();
+  await testAllNewsCandidatesReceiveArticleReviewAndProgress();
   testBaselineSanitization();
   testManualBaselineTransition();
   testScheduledBaselineTransition();

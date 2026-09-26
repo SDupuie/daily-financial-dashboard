@@ -146,8 +146,8 @@ function narrativeNeedsEditorialCopy(row, narrative) {
   const dispositions = earningsNarrativeDispositions(row, narrative);
   if (dispositions.interpretation?.status !== 'verified' || !String(narrative?.outcome?.interpretation || '').trim()) return true;
   if (row?.outcome?.overall !== 'pending') {
-    const guidanceComplete = dispositions.guidance?.status === 'not_provided'
-      || (dispositions.guidance?.status === 'verified' && String(narrative?.outcome?.guide || '').trim());
+    const guidanceComplete = ['verified', 'not_provided'].includes(dispositions.guidance?.status)
+      && validEarningsGuidanceDisposition(dispositions.guidance, narrative?.outcome?.guide);
     if (!guidanceComplete) return true;
   }
   return row?.lifecycle === 'close_available'
@@ -195,8 +195,8 @@ function narrativeEditorialComplete(row, narrative) {
   if (row?.outcome?.overall !== 'pending') {
     const guide = String(narrative?.outcome?.guide || '').trim();
     const guidanceDisposition = narrative?.outcome?.guidanceDisposition;
-    const guidanceComplete = (guidanceDisposition?.status === 'verified' && guide)
-      || guidanceDisposition?.status === 'not_provided';
+    const guidanceComplete = ['verified', 'not_provided'].includes(guidanceDisposition?.status)
+      && validEarningsGuidanceDisposition(guidanceDisposition, guide);
     if (!guidanceComplete) return false;
   }
 

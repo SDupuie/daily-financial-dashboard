@@ -4,3 +4,4 @@ node_modules/
 generated/
 mockups/
 .codex/
+scripts/.news-http-env/
