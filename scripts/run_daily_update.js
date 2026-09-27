@@ -82,7 +82,7 @@ const {
   sharedFuturesSessionDate,
   storyIdentity
 } = require('./news_contract');
-const { priorNewsCandidates } = require('./fetch_news_candidates');
+const { candidateForHandoff, priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
 const { scheduledFullMarketClosure } = require('./market_calendar');
 const { atomicWriteJson } = require('./staging_writer');
@@ -830,11 +830,12 @@ function emptyNewsCandidateArtifact(asOf, error, dashboardData = null) {
       acceptedCount: 0,
       error: String(error?.message || error || 'News worker failed.')
     }],
-    generalCandidates: prior.generalCandidates,
+    generalCandidates: prior.generalCandidates.map(candidateForHandoff),
     futuresCandidates: futuresPrior.generalCandidates
       .filter((candidate) => futuresDates.has(candidate.publishedOn)
-        && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow))),
-    cryptoCandidates: prior.cryptoCandidates
+        && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow)))
+      .map(candidateForHandoff),
+    cryptoCandidates: prior.cryptoCandidates.map(candidateForHandoff)
   };
 }
 
@@ -1722,7 +1723,9 @@ function storyWithCandidateMetadata(item, candidate, options = {}) {
     url: source?.url,
     publishedOn: source?.publishedOn,
     sourceLabel: storySourceLabel(item, candidate),
-    ...(isIsoDateTime(source?.publishedAt) ? { publishedAt: source.publishedAt } : {}),
+    ...(source?.publishedAtVerified === true && isIsoDateTime(source.publishedAt)
+      ? { publishedAt: source.publishedAt }
+      : {}),
     ...(Array.isArray(source?.tickerSearchSymbols) && source.tickerSearchSymbols.length
       ? { tickerSearchSymbols: [...source.tickerSearchSymbols] }
       : {})

@@ -1074,7 +1074,7 @@ async function testNewPreparationDiscardsPreviousRecoveryState() {
   fs.writeFileSync(path.join(scripts, 'fetch_news_candidates.js'), `
     const fs = require('fs');
     const path = require('path');
-    module.exports = { priorNewsCandidates: () => ({ generalCandidates: [], futuresCandidates: [], cryptoCandidates: [] }) };
+    module.exports = require(${JSON.stringify(path.join(root, 'scripts/fetch_news_candidates.js'))});
     if (require.main === module) {
       const output = process.argv[process.argv.indexOf('--output') + 1];
       fs.mkdirSync(path.dirname(output), { recursive: true });
@@ -1104,6 +1104,43 @@ async function testNewPreparationDiscardsPreviousRecoveryState() {
   assert.equal(fs.readFileSync(dashboardFile, 'utf8'), originalHtml);
   assert.equal(fs.readFileSync(candidateFile, 'utf8'), originalHtml);
   process.stdout.write('Recovery notes: fresh handoff lifecycle check passed.\n');
+
+  // Fail the acquisition worker before staging any data, using the real prior-card
+  // normalizer and handoff sanitizer imported above by the isolated updater.
+  fs.unlinkSync(path.join(dir, 'news-fixture.json'));
+  dashboard.stories[0].publishedAt = '2026-07-10T18:30:00.000Z';
+  dashboard.stories[1].publishedAt = null;
+  dashboard.stories[2].publishedAt = 'invalid';
+  dashboard.stories[3].publishedOn = '2026-07-01';
+  dashboard.crypto.notes[0].publishedAt = '2026-07-10T18:30:00.000Z';
+  for (const knownWindow of [true, false]) {
+    if (!knownWindow) dashboard.futuresModule.futures = [];
+    const fallbackHtml = renderDashboardValidationFixture(dashboard, chartData);
+    fs.writeFileSync(dashboardFile, fallbackHtml);
+    fs.writeFileSync(candidateFile, fallbackHtml);
+    const inventoryPath = path.join(dir, 'generated/news_candidates.json');
+    fs.unlinkSync(inventoryPath);
+    process.env.SCHEDULED_NOW_ISO = FIXTURE_NOW;
+    try {
+      await isolatedUpdater.prepareEditorialWorkspace({ dashboard: dashboardFile, candidate: candidateFile, prepareEditorialDir: editorialDir });
+    } finally {
+      if (previousClock === undefined) delete process.env.SCHEDULED_NOW_ISO;
+      else process.env.SCHEDULED_NOW_ISO = previousClock;
+    }
+    const fallback = JSON.parse(fs.readFileSync(inventoryPath, 'utf8'));
+    assert.equal(fallback.attempts[0].id, 'news-worker');
+    assert.ok(fallback.attempts[0].error);
+    assert.equal(fallback.generalCandidates.length, 11, 'Only the stale prior story is omitted.');
+    assert.equal(fallback.cryptoCandidates.length, 9, 'Independent Crypto cards survive worker failure.');
+    assert.equal(fallback.futuresCandidates.length, knownWindow ? 0 : 11,
+      'Unverified prior cards require date-only fallback eligibility for Futures.');
+    for (const pool of ['generalCandidates', 'futuresCandidates', 'cryptoCandidates']) {
+      assert.ok(fallback[pool].every((candidate) => !Object.hasOwn(candidate, 'publishedAt')),
+        `${pool} must omit unverified prior-card precision after worker failure.`);
+    }
+    assert.equal(fs.readFileSync(dashboardFile, 'utf8'), fallbackHtml);
+    assert.equal(fs.readFileSync(candidateFile, 'utf8'), fallbackHtml);
+  }
 }
 
 function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
@@ -1112,6 +1149,7 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
   const applyCase = (name, {
     configureDashboard = () => {},
     configureCandidates = () => {},
+    configureNewsCandidates = () => {},
     expectedFutures
   }) => {
     const dir = makeTemporaryDirectory(`dfd-futures-publication-${name}-`);
@@ -1128,6 +1166,7 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
 
     const newsCandidates = fixtureNewsCandidatesArtifact(candidateDashboard, candidateDashboard.editionId);
     configureCandidates(newsCandidates.futuresCandidates);
+    configureNewsCandidates(newsCandidates);
     writeJson(newsCandidatesPath, newsCandidates);
     const editorialPayload = structuredClone(candidateDashboard);
     const newsSelection = fixtureNewsSelection(candidateDashboard);
@@ -1203,6 +1242,21 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
     expectedFutures: 3
   });
   assert.equal(unknownWindow.futuresModule.stories.some((item) => 'publishedAt' in item), false);
+
+  const unverifiedGeneral = applyCase('unverified-general-precision-omitted', {
+    configureNewsCandidates: (newsCandidates) => {
+      newsCandidates.generalCandidates[0].publishedAt = '2026-07-10T18:30:00.000Z';
+      newsCandidates.generalCandidates[0].publishedAtVerified = true;
+      newsCandidates.generalCandidates[1].publishedAt = '2026-07-10T18:31:00.000Z';
+      newsCandidates.generalCandidates[1].publishedAtVerified = true;
+      delete newsCandidates.generalCandidates[0].publishedAtVerified;
+    },
+    expectedFutures: 3
+  });
+  assert.equal('publishedAt' in unverifiedGeneral.stories[0], false,
+    'Apply must not publish an unverified exact timestamp for a General story.');
+  assert.equal('publishedAt' in unverifiedGeneral.stories[1], true,
+    'An unrelated verified General story must retain its exact timestamp.');
 
   applyCase('known-session-date-only', {
     configureCandidates: (candidates) => {

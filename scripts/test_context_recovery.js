@@ -91,11 +91,14 @@ function setupFixture(root, scenario) {
   const inventory = { generatedAt: preparedAt, generalCandidates: [
     { url: 'https://example.test/funding', title: 'National funding report', source: 'Wire',
       article: { excerpt: 'The national funding report repeats previously reviewed figures.' } },
+    { url: 'https://example.test/school-board', title: 'Small-town school board meeting', source: 'Local Ledger',
+      article: { excerpt: 'A small town held a school board meeting with no national market implication.' } },
     { url: 'https://example.test/zoning', title: 'Single-town zoning permit report', source: 'Local Ledger',
-      article: { excerpt: 'A single town issued a zoning permit; the report gives no national market implication.' } },
+      article: { excerpt: 'A single town issued a zoning permit; the report gives no national market implication.' } }
+  ], futuresCandidates: [
     { url: 'https://example.test/employment', title: 'National employment report', source: 'Wire',
       article: { excerpt: 'National employment figures remain pending deep review.' } }
-  ], futuresCandidates: [], cryptoCandidates: [] };
+  ], cryptoCandidates: [] };
   fs.mkdirSync(path.join(root, 'generated/editorial'), { recursive: true });
   put(INVENTORY, inventory);
   const handoff = {
@@ -123,9 +126,9 @@ function setupFixture(root, scenario) {
     runDate: '2026-07-10', edition: 'afternoon', mode: 'scheduled', preparedAt,
     prepare: scenario === 'interruption' ? { state: 'preparing', sessionId: 'recovery-42' }
       : { exitCode: 0, stdout: 'Preparation status: candidate ready\nEditorial workspace prepared fixture' },
-    metadata: 'All three General candidates inspected; Futures and Crypto empty.',
-    savedEvidence: 'generalCandidates[0] reviewed and saved',
-    nextAction: 'Deep-review generalCandidates[1], then continue to generalCandidates[2].'
+    metadata: 'All General and Futures candidates inspected; Crypto empty.',
+    shortlists: { generalFutures: ['generalCandidates[0]', 'generalCandidates[2]', 'futuresCandidates[0]'], crypto: [] },
+    savedEvidence: 'generalCandidates[0] reviewed and saved'
   });
   put('working-tree.txt', 'Dirty generated/editorial/dashboard-data.json contains saved user work. Preserve it and the News inventory.\n');
   put('command-state.json', { sessionId: 'recovery-42', terminalResult: {
@@ -138,7 +141,7 @@ function setupFixture(root, scenario) {
     protectedHashes[relative] = sha256(fixturePath(root, relative));
   }
   put('expectation.json', {
-    nextRef: 'generalCandidates[1]', evidenceToken: 'zoning', nextRefAfter: 'generalCandidates[2]',
+    evidenceToken: 'zoning',
     runDate: '2026-07-10', requiredSession: scenario === 'interruption' ? 'recovery-42' : null,
     protectedHashes
   });
@@ -150,6 +153,7 @@ function verifyFixture(root) {
   const initial = readJson(root, 'initial-handoff.json');
   const final = readJson(root, HANDOFF);
   const inventory = readJson(root, INVENTORY);
+  const saved = readJson(root, 'saved-command-results.json');
   const events = fs.readFileSync(fixturePath(root, 'audit.jsonl'), 'utf8')
     .trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
   assert(events.length, 'missing audit events');
@@ -206,10 +210,32 @@ function verifyFixture(root) {
   const beforeReviews = initial.editorialReview.reviewEvidence.deepReviews;
   const afterReviews = final.editorialReview.reviewEvidence.deepReviews;
   assert(Array.isArray(beforeReviews) && Array.isArray(afterReviews), 'deepReviews must be arrays');
+  const shortlists = saved.shortlists;
+  assert(Array.isArray(shortlists?.generalFutures) && Array.isArray(shortlists?.crypto),
+    'saved command results must retain both frozen shortlists');
+  const shortlistRefs = [...shortlists.generalFutures, ...shortlists.crypto];
+  assert(shortlistRefs.every((ref) => typeof ref === 'string'), 'shortlist references must be strings');
+  assert.equal(new Set(shortlistRefs).size, shortlistRefs.length, 'shortlist references must be unique');
+  const inventoryRefs = new Set(['generalCandidates', 'futuresCandidates', 'cryptoCandidates'].flatMap((key) =>
+    (inventory[key] || []).map((_, index) => `${key}[${index}]`)));
+  assert(shortlistRefs.every((ref) => inventoryRefs.has(ref)), 'shortlist must contain inventory candidates');
+  const shortlistSet = new Set(shortlistRefs);
+  const reviewedRefs = new Set();
+  for (const review of beforeReviews) {
+    assert(shortlistSet.has(review.ref), `saved review ${review.ref} is outside the frozen shortlist`);
+    assert(['selected', 'not_selected'].includes(review.decision), `saved review ${review.ref} has an invalid decision`);
+    assert(typeof review.evidence === 'string' && review.evidence.trim().length >= 30,
+      `saved review ${review.ref} lacks valid evidence`);
+    assert(!reviewedRefs.has(review.ref), `duplicate saved review ${review.ref}`);
+    reviewedRefs.add(review.ref);
+  }
+  const nextRef = shortlistRefs.find((ref) => !reviewedRefs.has(ref));
+  assert(nextRef, 'frozen shortlist has no unfinished candidate to review');
   assert.equal(afterReviews.length, beforeReviews.length + 1, 'append exactly one deep review');
   assert.deepEqual(afterReviews.slice(0, -1), beforeReviews, 'previous deep reviews changed');
   const added = afterReviews.at(-1);
-  assert.equal(added.ref, expected.nextRef, 'wrong next candidate reference');
+  assert(shortlistSet.has(added.ref), `review ${added.ref} is outside the frozen shortlist`);
+  assert.equal(added.ref, nextRef, 'review the first unfinished candidate in the frozen shortlist');
   assert.equal(added.decision, 'not_selected', 'wrong review decision');
   assert.equal(typeof added.evidence, 'string', 'review evidence missing');
   assert(added.evidence.trim().length >= 30, 'review evidence too short');
@@ -220,8 +246,27 @@ function verifyFixture(root) {
 
   const notes = final.editorialReview.resumeNotes;
   assert.equal(typeof notes, 'string', 'resume notes missing');
-  for (const token of [expected.runDate, 'afternoon', 'scheduled', preparedAt, expected.nextRefAfter]) {
+  for (const token of [expected.runDate, 'afternoon', 'scheduled', preparedAt]) {
     assert(notes.toLowerCase().includes(String(token).toLowerCase()), `resume notes omit ${token}`);
+  }
+  assert(!/\bnext(?:\s+(?:action|candidate|review|article))?\s*[:=]?\s*(?:(?:deep[- ]?review|review)\s+)?(?:general|futures|crypto)Candidates\[\d+\]/i.test(notes),
+    'Pass 2 notes must not store a next-candidate pointer');
+  assert(/\bshortlists?\b/i.test(notes), 'resume notes omit shortlist labels');
+  const generalLabel = /general\s*(?:\/|&|\band\b)\s*futures\b/i.exec(notes);
+  assert(generalLabel, 'resume notes omit the labeled General/Futures shortlist');
+  const cryptoMatch = /\bcrypto\b/i.exec(notes.slice(generalLabel.index + generalLabel[0].length));
+  assert(cryptoMatch, 'resume notes omit the labeled Crypto shortlist');
+  const cryptoIndex = generalLabel.index + generalLabel[0].length + cryptoMatch.index;
+  const generalText = notes.slice(generalLabel.index + generalLabel[0].length, cryptoIndex);
+  const cryptoText = notes.slice(cryptoIndex + cryptoMatch[0].length);
+  const refsIn = (text) => [...text.matchAll(/\b(?:general|futures|crypto)Candidates\[\d+\]/g)].map((match) => match[0]);
+  assert.deepEqual(refsIn(generalText), shortlists.generalFutures,
+    'resume notes must retain the complete General/Futures shortlist in order');
+  assert.deepEqual(refsIn(cryptoText), shortlists.crypto,
+    'resume notes must retain the complete Crypto shortlist, including when empty');
+  if (shortlists.crypto.length === 0) {
+    assert(/\b(?:empty|none|no candidates?)\b|\[\s*\]|\(\s*\)/i.test(cryptoText),
+      'empty Crypto shortlist must be marked empty');
   }
   const normalized = structuredClone(final);
   if (Object.hasOwn(initial.editorialReview, 'resumeNotes')) {
@@ -231,7 +276,7 @@ function verifyFixture(root) {
   }
   normalized.editorialReview.reviewEvidence.deepReviews = beforeReviews;
   assert.deepEqual(normalized, initial, 'handoff fields other than notes and appended review changed');
-  return { checkedEvents: events.length, nextRef: expected.nextRef };
+  return { checkedEvents: events.length, reviewedRef: nextRef };
 }
 
 function runSelfTests() {
@@ -244,8 +289,8 @@ function runSelfTests() {
     const initial = readJson(root, 'initial-handoff.json');
     const preparedAt = initial.editorialReview.preparedAt;
     const final = structuredClone(initial);
-    final.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}; next generalCandidates[2]`;
-    final.editorialReview.reviewEvidence.deepReviews.push({ ref: 'generalCandidates[1]',
+    final.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nGeneral/Futures shortlist:\n- generalCandidates[0]\n- generalCandidates[2]\n- futuresCandidates[0]\nCrypto shortlist: (empty)`;
+    final.editorialReview.reviewEvidence.deepReviews.push({ ref: 'generalCandidates[2]',
       decision: 'not_selected', evidence: 'The single-town zoning permit has no national market implication.' });
     put(HANDOFF, final);
     const validEvents = ['AGENTS.md', 'README.md', 'docs/editorial.md', HANDOFF, INVENTORY,
@@ -254,6 +299,13 @@ function runSelfTests() {
     const trace = (events) => put('audit.jsonl', `${events.map(JSON.stringify).join('\n')}\n`);
     trace(validEvents);
     verifyFixture(root);
+    const alternateNotes = structuredClone(final);
+    alternateNotes.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nShortlists: General/Futures [generalCandidates[0], generalCandidates[2], futuresCandidates[0]]; Crypto []`;
+    put(HANDOFF, alternateNotes);
+    trace([...validEvents.slice(0, -1), { action: 'save', payload: alternateNotes }]);
+    verifyFixture(root);
+    put(HANDOFF, final);
+    trace(validEvents);
     const rejects = (events, message) => {
       trace(events);
       assert.throws(() => verifyFixture(root), message);
@@ -283,8 +335,13 @@ function runSelfTests() {
     badFinal((copy) => { copy.editorialReview.newsSelection.stories = ['changed']; }, /handoff fields/);
     badFinal((copy) => { copy.opening.text = 'Overwritten saved copy'; }, /handoff fields/);
     badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[0].evidence = 'changed'; }, /previous deep reviews/);
-    badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[1].ref = 'generalCandidates[0]'; }, /wrong next candidate|duplicate/);
-    badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[1].ref = 'generalCandidates[2]'; }, /wrong next candidate/);
+    badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[1].ref = 'generalCandidates[0]'; }, /first unfinished candidate|duplicate/);
+    badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[1].ref = 'generalCandidates[1]'; }, /outside the frozen shortlist/);
+    badFinal((copy) => { copy.editorialReview.reviewEvidence.deepReviews[1].ref = 'futuresCandidates[0]'; }, /first unfinished candidate/);
+    badFinal((copy) => { copy.editorialReview.resumeNotes += '; next action: review futuresCandidates[0]'; }, /next-candidate pointer/);
+    badFinal((copy) => { copy.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nCrypto shortlist: (empty)`; }, /General\/Futures shortlist/);
+    badFinal((copy) => { copy.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nGeneral/Futures shortlist: generalCandidates[0], generalCandidates[2]\nCrypto shortlist: (empty)`; }, /complete General\/Futures shortlist/);
+    badFinal((copy) => { copy.editorialReview.resumeNotes = `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nGeneral/Futures shortlist: generalCandidates[0], generalCandidates[2], futuresCandidates[0]\nCrypto shortlist:`; }, /marked empty/);
     badFinal((copy) => { copy.editorialReview.reviewEvidence.inventoryGeneratedAt = 'stale'; }, /final evidence identity/);
     put(HANDOFF, final);
     trace(validEvents);
@@ -311,8 +368,8 @@ function runSelfTests() {
       const caseInitial = readJson(caseRoot, 'initial-handoff.json');
       const caseFinal = structuredClone(caseInitial);
       caseFinal.editorialReview.resumeNotes =
-        `2026-07-10 afternoon scheduled preparedAt ${preparedAt}; next generalCandidates[2]`;
-      caseFinal.editorialReview.reviewEvidence.deepReviews.push({ ref: 'generalCandidates[1]',
+        `2026-07-10 afternoon scheduled preparedAt ${preparedAt}\nGeneral/Futures shortlist: generalCandidates[0], generalCandidates[2], futuresCandidates[0]\nCrypto shortlist: empty`;
+      caseFinal.editorialReview.reviewEvidence.deepReviews.push({ ref: 'generalCandidates[2]',
         decision: 'not_selected', evidence: 'The local zoning permit lacks any national market implication.' });
       fs.writeFileSync(path.join(caseRoot, HANDOFF), `${JSON.stringify(caseFinal)}\n`);
       fs.writeFileSync(path.join(caseRoot, 'audit.jsonl'), `${[

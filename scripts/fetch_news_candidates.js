@@ -37,6 +37,7 @@ const DEFAULT_OUTPUT = path.join(ROOT, 'generated', 'news_candidates.json');
 const ALPHA_VANTAGE_URL = 'https://www.alphavantage.co/query';
 const STOCKFIT_URL = 'https://api.stockfit.io/v1/api/lookup/news/market';
 const MARKETAUX_URL = 'https://api.marketaux.com/v1/news/all';
+const MARKETSCREENER_NEWS_URL = 'https://www.marketscreener.com/news/';
 const REUTERS_NEWS_SITEMAP_INDEX_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml';
 const REUTERS_NEWS_SITEMAP_URL = 'https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml';
 const ARTICLE_BYTE_LIMIT = 1_000_000;
@@ -45,13 +46,15 @@ const ARTICLE_CONCURRENCY = 8;
 const REUTERS_SITEMAP_CONCURRENCY = 8;
 const REUTERS_SITEMAP_MAX_SLICES = 100;
 const REUTERS_SITEMAP_BODY_LIMIT = 2_000_000;
+const MARKETSCREENER_LISTING_BODY_LIMIT = 3_000_000;
+const MARKETSCREENER_MAX_PAGES = 20;
 const ALPHA_VANTAGE_PACING_MS = 1250;
 const NEWS_HTTP_MAX_HEADER_SIZE = 65536;
 const NEWS_HTTP_MAX_REDIRECTS = 5;
 const NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES = 8_000_000;
 const NEWS_HTTP_MAX_DECODED_BODY_BYTES = 8_000_000;
-const IMPERSONATED_NEWS_DOMAINS = ['apnews.com', 'axios.com', 'investing.com', 'crowdfundinsider.com'];
-const PROVENANCE_PRIORITY = Object.freeze({ 'reuters-public': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, marketaux: 1, stockfit: 1 });
+const IMPERSONATED_NEWS_DOMAINS = ['apnews.com', 'axios.com', 'investing.com', 'crowdfundinsider.com', 'marketscreener.com'];
+const PROVENANCE_PRIORITY = Object.freeze({ 'marketscreener-reuters': 5, 'ap-public': 4, rss: 3, 'alpha-vantage': 2, marketaux: 1, stockfit: 1 });
 const MARKETAUX_TICKERS = new Set(MARKETAUX_TICKER_NEWS_PATHS.map((pathEntry) => pathEntry.ticker));
 // Five free-tier pages provide up to 15 candidates per ticker while bounding
 // all three configured ticker paths to 15 Marketaux requests per update.
@@ -542,7 +545,7 @@ async function fetchAcquisitionPath(acquisitionPath, options) {
   if (acquisitionPath.provider === 'marketaux') return fetchMarketaux(acquisitionPath, options);
   if (acquisitionPath.provider === 'rss') return fetchRss(acquisitionPath, options);
   if (acquisitionPath.provider === 'ap-public') return fetchApPublic(acquisitionPath, options);
-  if (acquisitionPath.provider === 'reuters-public') return fetchReutersPublic(acquisitionPath, options);
+  if (acquisitionPath.provider === 'marketscreener-reuters') return fetchMarketScreenerReuters(acquisitionPath, options);
   throw new Error(`Unsupported News provider ${acquisitionPath.provider}.`);
 }
 
@@ -754,6 +757,53 @@ function parseApNewsSitemap(xml) {
     && item.publishedAt);
 }
 
+function marketScreenerArticleUrl(value) {
+  try {
+    const url = new URL(decodeHtml(value), MARKETSCREENER_NEWS_URL);
+    if (url.protocol !== 'https:'
+      || url.hostname !== 'www.marketscreener.com'
+      || !/^\/news\/[^/]+/i.test(url.pathname)) return '';
+    return canonicalStoryUrl(url.toString());
+  } catch (_error) {
+    return '';
+  }
+}
+
+function parseMarketScreenerReutersListings(html) {
+  if (typeof html !== 'string' || !/<html\b/i.test(html) || !/<\/html>\s*$/i.test(html)) {
+    throw new Error('MarketScreener News response is not a complete HTML document.');
+  }
+  const openingCount = [...html.matchAll(/<tr\b[^>]*>/gi)].length;
+  const closingCount = [...html.matchAll(/<\/tr\s*>/gi)].length;
+  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi)].map((match) => match[1]);
+  if (!rows.length || rows.length !== openingCount || rows.length !== closingCount) {
+    throw new Error('MarketScreener News response contains malformed or no listing rows.');
+  }
+  const dates = [];
+  const items = [];
+  for (const row of rows) {
+    const dateText = decodeHtml(row.match(/data-utc-date=["']([^"']+)["']/i)?.[1]);
+    if (!isIsoDateTime(dateText)) continue;
+    const publishedAt = parseNewsTimestamp(dateText);
+    if (!publishedAt) continue;
+    dates.push(publishedAt);
+    if (!/title=["']Reuters["']/i.test(row)) continue;
+    const article = row.match(/<a\b[^>]*href=["']([^"']*\/news\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    const url = marketScreenerArticleUrl(article?.[1]);
+    const title = plainText(article?.[2]);
+    if (!url || !title) continue;
+    items.push({
+      title,
+      url,
+      publishedAt: publishedAt.toISOString(),
+      publishedAtVerified: true,
+      providerSourceName: 'Reuters'
+    });
+  }
+  if (!dates.length) throw new Error('MarketScreener News response contains no dated listing rows.');
+  return { items, dates };
+}
+
 function reutersSitemapPageUrl(value) {
   try {
     const sourceUrl = new URL(decodeHtml(value));
@@ -836,22 +886,13 @@ function parseReutersNewsSitemap(xml) {
     const title = xmlValue(block, 'news:title');
     const publicationName = xmlValue(block, 'news:name');
     const language = xmlValue(block, 'news:language');
-    const sitemapPublishedAt = xmlValue(block, 'news:publication_date');
-    if (!isIsoDateTime(sitemapPublishedAt)) return null;
-    const parsedSitemapPublishedAt = parseNewsTimestamp(sitemapPublishedAt);
-    if (!parsedSitemapPublishedAt) return null;
     const publishedOn = reutersArticlePublishedOn(url);
-    const sitemapDateMatchesUrl = parsedSitemapPublishedAt
-      && chicagoIsoDate(parsedSitemapPublishedAt) === publishedOn;
     return {
       title,
       url,
       publishedOn,
-      ...(sitemapDateMatchesUrl ? { publishedAt: parsedSitemapPublishedAt.toISOString() } : {}),
       language,
-      publicationName,
-      providerSourceName: 'Reuters',
-      ...(sitemapDateMatchesUrl ? { publishedAtVerified: true } : {})
+      publicationName
     };
   }).filter((entry) => entry?.url
     && entry.title
@@ -864,15 +905,12 @@ function parseReutersNewsSitemap(xml) {
   return entries;
 }
 
-async function fetchReutersPublic(acquisitionPath, { timeoutMs, fetchPage = fetchResponse } = {}) {
-  if (acquisitionPath?.feedUrl !== REUTERS_NEWS_SITEMAP_INDEX_URL) {
-    throw new Error('Reuters News sitemap acquisition requires its fixed public index URL.');
-  }
+async function fetchReutersSitemapLookup({ timeoutMs, fetchPage = fetchResponse } = {}) {
   const headers = {
     Accept: 'application/xml,text/xml;q=0.9,*/*;q=0.5',
     'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
   };
-  const indexResponse = await fetchPage(acquisitionPath.feedUrl, {
+  const indexResponse = await fetchPage(REUTERS_NEWS_SITEMAP_INDEX_URL, {
     timeoutMs,
     headers,
     maxBodyBytes: REUTERS_SITEMAP_BODY_LIMIT,
@@ -902,10 +940,85 @@ async function fetchReutersPublic(acquisitionPath, { timeoutMs, fetchPage = fetc
   });
   const pageErrors = pages.map((page, index) => page.error ? { url: pageUrls[index], error: page.error } : null).filter(Boolean);
   return {
-    items: pages.flatMap((page) => page.entries),
+    entries: pages.flatMap((page) => page.entries),
     pageCount: pageUrls.length,
     failedPageCount: pageErrors.length,
     ...(pageErrors.length ? { error: `Reuters News sitemap partial: ${pageErrors.length} of ${pageUrls.length} slices failed.` } : {})
+  };
+}
+
+async function fetchMarketScreenerReuters(acquisitionPath, { eligibleDates, timeoutMs, fetchPage = fetchResponse } = {}) {
+  if (acquisitionPath?.feedUrl !== MARKETSCREENER_NEWS_URL) {
+    throw new Error('MarketScreener Reuters acquisition requires its fixed News listing URL.');
+  }
+  const earliestEligibleDate = [...eligibleDates].sort()[0];
+  if (!isIsoDate(earliestEligibleDate)) {
+    throw new Error('MarketScreener Reuters acquisition requires at least one eligible date.');
+  }
+  const headers = {
+    Accept: 'text/html,application/xhtml+xml',
+    'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
+  };
+  const lookupPromise = fetchReutersSitemapLookup({ timeoutMs, fetchPage })
+    .catch((error) => ({ entries: [], error: `Reuters sitemap lookup unavailable: ${String(error?.message || error)}` }));
+  const seen = new Set();
+  const listingItems = [];
+  let listingError = '';
+  for (let page = 1; page <= MARKETSCREENER_MAX_PAGES; page += 1) {
+    const pageUrl = new URL(MARKETSCREENER_NEWS_URL);
+    pageUrl.searchParams.set('p', String(page));
+    const expectedUrl = pageUrl.toString();
+    try {
+      const response = await fetchPage(expectedUrl, {
+        timeoutMs,
+        headers,
+        maxBodyBytes: MARKETSCREENER_LISTING_BODY_LIMIT,
+        maxDecodedBytes: MARKETSCREENER_LISTING_BODY_LIMIT,
+        allowRedirect: (nextUrl) => nextUrl.toString() === expectedUrl
+      });
+      if (response.url && new URL(response.url).toString() !== expectedUrl) {
+        throw new Error('MarketScreener News page redirected outside its fixed listing endpoint.');
+      }
+      const parsed = parseMarketScreenerReutersListings(await response.text());
+      for (const item of parsed.items) {
+        if (seen.has(item.url)) continue;
+        seen.add(item.url);
+        listingItems.push(item);
+      }
+      if (parsed.dates.some((date) => chicagoIsoDate(date) < earliestEligibleDate)) break;
+    } catch (error) {
+      listingError = `MarketScreener News listing partial at page ${page}: ${String(error?.message || error)}`;
+      if (!listingItems.length) throw error;
+      break;
+    }
+  }
+
+  const lookup = await lookupPromise;
+  const lookupByHeadlineAndDate = new Map();
+  for (const entry of lookup.entries) {
+    const normalizedTitle = normalizeStoryTitle(entry.title);
+    if (!normalizedTitle) continue;
+    const key = `${entry.publishedOn}\n${normalizedTitle}`;
+    if (!lookupByHeadlineAndDate.has(key)) lookupByHeadlineAndDate.set(key, new Set());
+    lookupByHeadlineAndDate.get(key).add(entry.url);
+  }
+  const items = listingItems.map((item) => {
+    const publishedDate = item.publishedAt.slice(0, 10);
+    const normalizedTitle = normalizeStoryTitle(item.title);
+    const matches = normalizedTitle
+      ? [...(lookupByHeadlineAndDate.get(`${publishedDate}\n${normalizedTitle}`) || [])]
+      : [];
+    const articleFetchUrl = item.url;
+    return {
+      ...item,
+      url: matches.length === 1 ? matches[0] : articleFetchUrl,
+      articleFetchUrl
+    };
+  });
+  const errors = [listingError, lookup.error].filter(Boolean);
+  return {
+    items,
+    ...(errors.length ? { error: errors.join('; ') } : {})
   };
 }
 
@@ -966,41 +1079,38 @@ function excludedNewsUrl(url, source) {
 
 function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
-  const source = sourceForUrl(url);
+  const marketScreenerReuters = acquisitionPath?.provider === 'marketscreener-reuters';
+  const source = marketScreenerReuters
+    ? APPROVED_NEWS_SOURCES.find((entry) => entry.id === 'reuters')
+    : sourceForUrl(url);
   const tickerSearchSymbol = marketauxTickerForPath(acquisitionPath);
   // Normalize before the Chicago-date freshness check; malformed structured
   // provider timestamps must be rejected instead of rolling into an eligible day.
   const publishedAt = parseNewsTimestamp(item?.publishedAt);
-  const sourcePublishedOn = acquisitionPath?.provider === 'reuters-public'
-    && source?.id === 'reuters'
-    && isIsoDate(item?.publishedOn)
-    ? item.publishedOn
-    : '';
   const title = plainText(item?.title);
-  if (!url || excludedNewsUrl(url, source) || (!source && !tickerSearchSymbol) || (!publishedAt && !sourcePublishedOn) || !title) return null;
+  const articleFetchUrl = marketScreenerReuters ? marketScreenerArticleUrl(item?.articleFetchUrl) : '';
+  if (!url || excludedNewsUrl(url, source) || (!source && !tickerSearchSymbol) || !publishedAt || !title
+    || (marketScreenerReuters && !articleFetchUrl)) return null;
   const sourceDomain = publisherHostname(url);
   if (!sourceDomain) return null;
-  const publishedOn = sourcePublishedOn || chicagoIsoDate(publishedAt);
+  const publishedOn = chicagoIsoDate(publishedAt);
   if (!eligibleDates.has(publishedOn)) return null;
   const pool = acquisitionPath.pool === 'cryptoCandidates'
     || highConfidenceCryptoTitle(title)
     ? 'cryptoCandidates'
     : acquisitionPath.pool;
-  return {
+  const candidate = {
     title,
     url,
     publishedOn,
     ...(publishedAt ? { publishedAt: publishedAt.toISOString() } : {}),
-    dateSource: source?.id === 'yahoo-finance'
-      ? 'hosted_syndication'
-      : source?.id === 'reuters' && sourcePublishedOn && !publishedAt
-        ? 'url_published_date'
-        : 'provider_published',
+    dateSource: source?.id === 'yahoo-finance' ? 'hosted_syndication' : 'provider_published',
     ...(publishedAt && item.publishedAtVerified === true && source?.id !== 'yahoo-finance'
       ? { publishedAtVerified: true }
       : {}),
     sourceId: source?.id || `marketaux:${sourceDomain}`,
     sourceLabel: source?.displayName || sourceDomain,
+    articleAccess: source?.articleAccess || 'unknown',
     sourceDomain,
     provider: acquisitionPath.provider,
     ...(plainText(item.summary) ? { providerSummary: plainText(item.summary) } : {}),
@@ -1017,6 +1127,13 @@ function normalizeProviderCandidate(item, acquisitionPath, eligibleDates) {
     pool,
     searchPathIds: [acquisitionPath.id]
   };
+  if (articleFetchUrl) {
+    Object.defineProperty(candidate, 'articleFetchUrl', {
+      value: articleFetchUrl,
+      configurable: true
+    });
+  }
+  return candidate;
 }
 
 function metaContent(html, key) {
@@ -1050,7 +1167,7 @@ function extractArticleExcerpt(html) {
   const structuredBody = String(html).match(/["']articleBody["']\s*:\s*("(?:\\.|[^"\\])*")/i);
   if (structuredBody) {
     try {
-      const text = plainText(JSON.parse(structuredBody[1]));
+      const text = plainText(JSON.parse(structuredBody[1].replace(/[\u0000-\u001f]/g, ' ')));
       if (text.length >= 40) return text.slice(0, ARTICLE_EXCERPT_LIMIT);
     } catch (_error) {
       // Fall back to visible article paragraphs when structured data is malformed.
@@ -1082,17 +1199,16 @@ function extractArticleExcerpt(html) {
 
 function extractArticleMetadata(html) {
   const jsonDates = [...String(html).matchAll(/["']datePublished["']\s*:\s*["']([^"']+)["']/gi)].map((match) => match[1]);
-  const timeDates = [...String(html).matchAll(/<time[^>]+datetime=["']([^"']+)["']/gi)].map((match) => match[1]);
   const publishedAt = firstValidDate([
     metaContent(html, 'article:published_time'),
     metaContent(html, 'datePublished'),
-    ...jsonDates,
-    ...timeDates
+    ...jsonDates
   ]);
   return {
     pageTitle: metaContent(html, 'og:title') || plainText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),
     description: metaContent(html, 'description') || metaContent(html, 'og:description'),
     excerpt: extractArticleExcerpt(html),
+    section: metaContent(html, 'article:section'),
     publishedAt
   };
 }
@@ -1219,12 +1335,16 @@ async function fetchImpersonatedNewsResponse(url, options) {
 }
 
 async function fetchArticlePage(candidate, { timeoutMs }) {
-  const stopWhen = (html) => extractArticleExcerpt(html).length >= ARTICLE_EXCERPT_LIMIT;
-  const response = await fetchResponse(candidate.url, {
+  const requestUrl = candidate.articleFetchUrl || candidate.url;
+  const stopWhen = (html) => {
+    const metadata = extractArticleMetadata(html);
+    return metadata.excerpt.length >= ARTICLE_EXCERPT_LIMIT && Boolean(metadata.publishedAt);
+  };
+  const response = await fetchResponse(requestUrl, {
     timeoutMs,
     maxDecodedBytes: ARTICLE_BYTE_LIMIT,
     stopWhen,
-    allowRedirect: (nextUrl) => articleRedirectAllowed(candidate.url, nextUrl),
+    allowRedirect: (nextUrl) => articleRedirectAllowed(requestUrl, nextUrl),
     headers: {
       Accept: 'text/html,application/xhtml+xml',
       'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
@@ -1235,7 +1355,12 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
     throw new Error(`Unsupported content type ${contentType || 'unknown'}`);
   }
   const html = await response.text();
-  return { ...extractArticleMetadata(html), finalUrl: canonicalStoryUrl(response.url || candidate.url) || candidate.url };
+  return {
+    ...extractArticleMetadata(html),
+    finalUrl: candidate.articleFetchUrl
+      ? candidate.url
+      : canonicalStoryUrl(response.url || candidate.url) || candidate.url
+  };
 }
 
 function readDashboardData(input) {
@@ -1248,13 +1373,8 @@ function priorCandidate(item, pool, eligibleDates) {
   const url = canonicalStoryUrl(item?.url);
   const source = sourceForUrl(url);
   const title = String(item?.title || '').trim();
-  const publishedOn = source?.id === 'reuters'
-    ? reutersArticlePublishedOn(url)
-    : String(item?.publishedOn || '');
-  const publishedAt = isIsoDateTime(item?.publishedAt)
-    && (source?.id !== 'reuters' || chicagoIsoDate(new Date(item.publishedAt)) === publishedOn)
-    ? item.publishedAt
-    : '';
+  const publishedOn = String(item?.publishedOn || '');
+  const publishedAt = isIsoDateTime(item?.publishedAt) ? item.publishedAt : '';
   const sourceLabel = String(item?.sourceLabel || '').trim();
   const tickerSearchSymbols = [...new Set((Array.isArray(item?.tickerSearchSymbols) ? item.tickerSearchSymbols : [])
     .map((ticker) => String(ticker || '').toUpperCase())
@@ -1266,6 +1386,7 @@ function priorCandidate(item, pool, eligibleDates) {
     url,
     publishedOn,
     sourceLabel,
+    articleAccess: source?.articleAccess || 'unknown',
     ...(publishedAt ? { publishedAt } : {}),
     dateSource: 'prior_validated_card',
     origin: 'prior_card',
@@ -1298,7 +1419,7 @@ function candidateProvenancePriority(candidate) {
 function combineCandidate(preferred, other) {
   const searchPathIds = [...new Set([...(preferred.searchPathIds || []), ...(other.searchPathIds || [])])];
   const tickerSearchSymbols = [...new Set([...(preferred.tickerSearchSymbols || []), ...(other.tickerSearchSymbols || [])])];
-  return {
+  const combined = {
     ...other,
     ...preferred,
     ...(preferred.pool === 'cryptoCandidates' || other.pool === 'cryptoCandidates' ? { pool: 'cryptoCandidates' } : {}),
@@ -1307,6 +1428,14 @@ function combineCandidate(preferred, other) {
     ...(tickerSearchSymbols.length ? { tickerSearchSymbols } : {}),
     searchPathIds
   };
+  const articleFetchUrl = preferred.articleFetchUrl || other.articleFetchUrl;
+  if (articleFetchUrl) {
+    Object.defineProperty(combined, 'articleFetchUrl', {
+      value: articleFetchUrl,
+      configurable: true
+    });
+  }
+  return combined;
 }
 
 function deduplicateCandidates(candidates) {
@@ -1332,6 +1461,14 @@ function candidateOrder(left, right) {
     || left.url.localeCompare(right.url);
 }
 
+function candidateForHandoff(candidate) {
+  const output = { ...candidate };
+  delete output.pagePublishedAt;
+  delete output.pageDateFresh;
+  if (output.publishedAtVerified !== true) delete output.publishedAt;
+  return output;
+}
+
 function articlePathUrl(value) {
   try {
     const url = new URL(value);
@@ -1347,7 +1484,8 @@ function articleRecord(page) {
     finalUrl: page.finalUrl || '',
     pageTitle: page.pageTitle || '',
     description: page.description || '',
-    excerpt: page.excerpt || ''
+    excerpt: page.excerpt || '',
+    ...(page.section ? { section: page.section } : {})
   };
 }
 
@@ -1359,7 +1497,6 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
     if (hostedPage.publishedAt) {
       const publishedOn = chicagoIsoDate(hostedPage.publishedAt);
       candidate.pagePublishedAt = hostedPage.publishedAt.toISOString();
-      candidate.pagePublishedOn = publishedOn;
       // An already verified provider timestamp remains authoritative; page review
       // still supplies article text even if the page exposes a different date.
       if (candidate.publishedAtVerified !== true) {
@@ -1379,6 +1516,8 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
     }
   } catch (error) {
     candidate.article = { accessible: false, error: String(error?.message || error) };
+  } finally {
+    delete candidate.articleFetchUrl;
   }
 }
 
@@ -1432,7 +1571,8 @@ async function collectNewsCandidates({
       ...prior.generalCandidates,
       ...prior.cryptoCandidates,
       ...futuresPrior.generalCandidates
-    ]);
+    ]).filter((candidate) => candidate.sourceId !== 'ap'
+      || String(candidate.article?.section || '').trim().toLowerCase() !== 'sports');
     return {
       schemaVersion: 2,
       generatedAt: asOf.toISOString(),
@@ -1443,15 +1583,18 @@ async function collectNewsCandidates({
       articleReview: { ...articleReview, status },
       generalCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates' && eligibleDates.has(candidate.publishedOn))
-        .sort(candidateOrder),
+        .sort(candidateOrder)
+        .map(candidateForHandoff),
       futuresCandidates: candidates
         .filter((candidate) => candidate.pool === 'generalCandidates'
           && futuresDates.has(candidate.publishedOn)
           && (!futuresWindow || candidateInFuturesPublicationWindow(candidate, futuresWindow)))
-        .sort(candidateOrder),
+        .sort(candidateOrder)
+        .map(candidateForHandoff),
       cryptoCandidates: candidates
         .filter((candidate) => candidate.pool === 'cryptoCandidates')
         .sort(candidateOrder)
+        .map(candidateForHandoff)
     };
   };
   const reportProgress = (status = articleReview.status) => {
@@ -1561,16 +1704,19 @@ if (require.main === module) {
 module.exports = {
   alphaTimeFrom,
   articleRedirectAllowed,
+  candidateForHandoff,
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
-  fetchMarketaux,
   fetchArticlePage,
-  fetchReutersPublic,
+  fetchMarketScreenerReuters,
+  fetchMarketaux,
   fetchResponse,
+  fetchReutersSitemapLookup,
   normalizeProviderCandidate,
   parseApNewsSitemap,
   parseArgs,
+  parseMarketScreenerReutersListings,
   parseNewsFeed,
   parseNewsTimestamp,
   parseReutersNewsSitemap,

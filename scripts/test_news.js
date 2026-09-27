@@ -27,10 +27,12 @@ const {
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
-  fetchReutersPublic,
+  fetchMarketScreenerReuters,
+  fetchReutersSitemapLookup,
   fetchResponse,
   normalizeProviderCandidate,
   parseApNewsSitemap,
+  parseMarketScreenerReutersListings,
   parseNewsFeed,
   parseNewsTimestamp,
   parseReutersNewsSitemap,
@@ -477,12 +479,14 @@ function testCryptoRssSourceManifest() {
     id: 'crypto-news',
     displayName: 'Crypto.news',
     domains: ['crypto.news'],
+    articleAccess: 'open',
     feedUrl: 'https://crypto.news/feed/',
     articleUrl: 'https://crypto.news/fixture-story/'
   }, {
     id: 'crypto-slate',
     displayName: 'CryptoSlate',
     domains: ['cryptoslate.com'],
+    articleAccess: 'mixed',
     feedUrl: 'https://cryptoslate.com/feed/',
     articleUrl: 'https://cryptoslate.com/fixture-story/'
   }];
@@ -491,7 +495,8 @@ function testCryptoRssSourceManifest() {
     assert.deepEqual(sources.get(fixture.id), {
       id: fixture.id,
       displayName: fixture.displayName,
-      domains: fixture.domains
+      domains: fixture.domains,
+      articleAccess: fixture.articleAccess
     });
     const acquisitionPath = feeds.get(fixture.id);
     assert.deepEqual(acquisitionPath, {
@@ -517,7 +522,7 @@ async function testNewsAcquisitionExclusions() {
   for (const removed of ['alpha-financial-markets', 'kiplinger', 'investing-company']) {
     assert.equal(paths.includes(removed), false);
   }
-  for (const retained of ['alpha-blockchain', 'reuters-public', 'investing-market',
+  for (const retained of ['alpha-blockchain', 'marketscreener-reuters', 'investing-market',
     'investing-economy', 'investing-indicators', 'investing-earnings',
     'investing-commodities', 'investing-crypto']) {
     assert.equal(paths.includes(retained), true);
@@ -571,13 +576,13 @@ async function testDeterministicNewsCandidateAcquisition() {
       tag: 'Prior',
       body: 'Previously reviewed market copy.'
     }, {
-      title: 'Stale misdated prior Reuters card',
+      title: 'Prior Reuters card with syndication date',
       url: 'https://www.reuters.com/markets/us/stale-prior-fixture-2026-07-08',
       publishedOn: '2026-07-10',
       publishedAt: '2026-07-10T18:30:00.000Z',
       sourceLabel: 'Reuters',
       tag: 'Prior',
-      body: 'This card must not re-enter through stale stored provenance.'
+      body: 'The stored publication date remains authoritative across runs.'
     }, {
       title: 'Fresh prior Reuters card',
       url: 'https://www.reuters.com/markets/us/fresh-prior-fixture-2026-07-10',
@@ -585,7 +590,7 @@ async function testDeterministicNewsCandidateAcquisition() {
       publishedAt: '2026-07-11T08:30:00.000Z',
       sourceLabel: 'Reuters',
       tag: 'Prior',
-      body: 'This card remains fresh by its URL date without conflicting precision.'
+      body: 'This card remains fresh by its stored publication date.'
     }],
     futuresModule: { stories: [] },
     crypto: { notes: [] }
@@ -637,10 +642,16 @@ async function testDeterministicNewsCandidateAcquisition() {
   assert.equal(artifact.attempts.find((attempt) => attempt.id === 'axios').error, 'fixture provider failure');
   assert.equal(artifact.generalCandidates.filter((candidate) => candidate.sourceId === 'cnbc').length, 1);
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'cnbc').provider, 'rss');
-  assert.equal(artifact.generalCandidates.find((candidate) => candidate.sourceId === 'yahoo-finance').publishedAtVerified, undefined);
+  const yahooCandidate = artifact.generalCandidates.find((candidate) => candidate.sourceId === 'yahoo-finance');
+  assert.equal(yahooCandidate.publishedAtVerified, undefined);
+  assert.equal(Object.hasOwn(yahooCandidate, 'publishedAt'), false,
+    'Yahoo hosted syndication precision must not enter the AI handoff as original publication time.');
   assert.equal(artifact.generalCandidates.some((candidate) => candidate.priorCard), true);
-  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Stale misdated prior Reuters card'), false);
-  assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Fresh prior Reuters card').publishedAt, undefined);
+  assert.equal(artifact.generalCandidates.some((candidate) => candidate.title === 'Prior Reuters card with syndication date'), true);
+  assert.equal(Object.hasOwn(
+    artifact.generalCandidates.find((candidate) => candidate.title === 'Fresh prior Reuters card'),
+    'publishedAt'
+  ), false, 'A prior card must not promote stored precision back to verified handoff metadata.');
   assert.equal(artifact.cryptoCandidates.find((candidate) => candidate.sourceId === 'coindesk').sourceLabel, 'CoinDesk');
 }
 
@@ -700,19 +711,23 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
   });
   assert.deepEqual(fallbackArtifact.futuresCandidates.map((candidate) => candidate.title), ['Saturday market fixture']);
 
-  const dateOnlyArtifact = await collectNewsCandidates({
+  const marketScreenerArtifact = await collectNewsCandidates({
     asOf,
     dashboardData: { ...dashboardData, futuresModule: { sectionTitle: 'Session Futures', futures: [], stories: [] } },
-    acquisitionPaths: [{ id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' }],
+    acquisitionPaths: [{ id: 'marketscreener-reuters', provider: 'marketscreener-reuters', pool: 'generalCandidates' }],
     clock: () => asOf,
     fetchPath: async () => ({ items: [{
-      publishedOn: '2026-07-18',
-      title: 'Fresh date-only Reuters fixture',
-      url: 'https://www.reuters.com/markets/us/fresh-date-only-fixture-2026-07-18/'
+      publishedAt: '2026-07-18T15:00:00.000Z',
+      publishedAtVerified: true,
+      title: 'Fresh MarketScreener Reuters fixture',
+      url: 'https://www.reuters.com/markets/us/fresh-marketscreener-fixture-2026-07-18/',
+      articleFetchUrl: 'https://www.marketscreener.com/news/fresh-marketscreener-fixture-ce1'
     }, {
-      publishedOn: '2026-07-17',
-      title: 'Stale date-only Reuters fixture',
-      url: 'https://www.reuters.com/markets/us/stale-date-only-fixture-2026-07-17/'
+      publishedAt: '2026-07-17T15:00:00.000Z',
+      publishedAtVerified: true,
+      title: 'Stale MarketScreener Reuters fixture',
+      url: 'https://www.reuters.com/markets/us/stale-marketscreener-fixture-2026-07-17/',
+      articleFetchUrl: 'https://www.marketscreener.com/news/stale-marketscreener-fixture-ce2'
     }] }),
     fetchArticle: async (candidate) => ({
       finalUrl: candidate.url,
@@ -723,12 +738,11 @@ async function testFuturesCandidatesUseDisplayedSessionWindow() {
     })
   });
   assert.deepEqual(
-    dateOnlyArtifact.futuresCandidates.map((candidate) => candidate.title),
-    ['Fresh date-only Reuters fixture'],
-    'Without a derived session window, acquisition must retain normal date freshness for date-only candidates.'
+    marketScreenerArtifact.futuresCandidates.map((candidate) => candidate.title),
+    ['Fresh MarketScreener Reuters fixture'],
+    'Without a derived session window, acquisition must retain normally fresh MarketScreener Reuters candidates.'
   );
-  assert.equal(dateOnlyArtifact.futuresCandidates[0].publishedAt, undefined,
-    'Article review must not invent precision for a date-only provider candidate.');
+  assert.equal(marketScreenerArtifact.futuresCandidates[0].publishedAt, '2026-07-18T15:00:00.000Z');
 }
 
 async function testAllNewsCandidatesReceiveArticleReviewAndProgress() {
@@ -803,14 +817,20 @@ function testArticleMetadataExtraction() {
 
   const decryptMetadata = extractArticleMetadata(`<!doctype html>
     <meta property="article:published_time" content="2026-07-23T10:24:09">
-    <script type="application/ld+json">{"datePublished":"2026-07-23T10:24:09"}</script>
-    <time dateTime="2026-07-23T10:24:09Z">Jul 23, 2026</time>
+    <script type="application/ld+json">{"datePublished":"2026-07-23T11:25:10Z"}</script>
     <p>This fixture paragraph contains enough article text to be retained by the mechanical page extractor.</p>`);
   assert.equal(
     decryptMetadata.publishedAt.toISOString(),
-    '2026-07-23T10:24:09.000Z',
+    '2026-07-23T11:25:10.000Z',
     'Offset-bearing page metadata must win over ambiguous datePublished values.'
   );
+
+  const unlabeledTime = extractArticleMetadata(`<!doctype html>
+    <meta property="article:modified_time" content="2026-07-23T20:24:09Z">
+    <script type="application/ld+json">{"dateModified":"2026-07-23T20:24:09Z"}</script>
+    <time datetime="2026-07-23T20:24:09Z">Updated Jul 23, 2026</time>`);
+  assert.equal(unlabeledTime.publishedAt, null,
+    'Modified and generic time elements must not verify an original publication timestamp.');
 }
 
 function testNewsTimestampParsing() {
@@ -952,6 +972,23 @@ function reutersNewsSitemap(entries) {
   return `<?xml version="1.0"?><urlset xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">${entries.join('')}</urlset>`;
 }
 
+function marketScreenerReutersRow({
+  title = 'Reuters fixture headline',
+  url = '/news/reuters-fixture-headline-ce1',
+  publishedAt = '2026-07-10T18:30:00+00:00',
+  source = 'Reuters'
+} = {}) {
+  return `<tr>
+    <td>${publishedAt === null ? '' : `<span data-utc-date="${publishedAt}">2:30pm</span>`}</td>
+    <td><a href="${url}"><b>${title}</b></a></td>
+    <td><span title="${source}">RE</span></td>
+  </tr>`;
+}
+
+function marketScreenerReutersPage(rows) {
+  return `<!doctype html><html><body><table>${rows.join('')}</table></body></html>`;
+}
+
 function testReutersNewsSitemapParsing() {
   const index = `<?xml version="1.0"?><sitemapindex>
     <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
@@ -1009,59 +1046,50 @@ function testReutersNewsSitemapParsing() {
     reutersNewsSitemapEntry({ url: 'https://www.reuters.com/default/legacy-fixture-2024-11-11/', title: 'مثال موروث' }),
     reutersNewsSitemapEntry({ url: 'https://evil.example/reuters-fixture', title: 'External fixture' }),
     reutersNewsSitemapEntry({ url: 'https://www.reuters.com/markets/us/undated-fixture/', title: 'Undated fixture' }),
-    reutersNewsSitemapEntry({ publishedAt: 'not-a-date', title: 'Malformed date fixture' }),
-    reutersNewsSitemapEntry({ publishedAt: '2026-07-10T18:30:00', title: 'Timezone-free date fixture' }),
     reutersNewsSitemapEntry({ publicationName: 'Not Reuters', title: 'Wrong publication fixture' })
   ]));
   assert.deepEqual(entries, [{
     title: 'Reuters fixture headline',
     url: 'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10',
     publishedOn: '2026-07-10',
-    publishedAt: '2026-07-10T18:30:00.000Z',
     language: 'en',
-    publicationName: 'Reuters',
-    providerSourceName: 'Reuters',
-    publishedAtVerified: true
+    publicationName: 'Reuters'
   }, {
     title: 'Reuters modified-date fixture',
     url: 'https://www.reuters.com/markets/us/reuters-modified-date-fixture-2026-07-09',
     publishedOn: '2026-07-09',
     language: 'en',
-    publicationName: 'Reuters',
-    providerSourceName: 'Reuters'
-  }], 'Malformed, external, and non-English entries must be isolated without discarding the valid Reuters entry.');
+    publicationName: 'Reuters'
+  }], 'External, undated, and non-English entries must be isolated without discarding valid Reuters lookup entries.');
 
-  const matchingCandidate = normalizeProviderCandidate(entries[0], {
-    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
+  const listing = parseMarketScreenerReutersListings(marketScreenerReutersPage([
+    marketScreenerReutersRow(),
+    marketScreenerReutersRow({ title: 'Offsetless fixture', publishedAt: '2026-07-10T18:30:00' }),
+    marketScreenerReutersRow({ title: 'Malformed fixture', publishedAt: 'not-a-date' }),
+    marketScreenerReutersRow({ title: 'Missing fixture', publishedAt: null })
+  ]));
+  assert.deepEqual(listing.items.map((item) => item.title), ['Reuters fixture headline'],
+    'Only rows with explicit ISO timestamp zones may become verified Reuters candidates.');
+  assert.equal(listing.dates.length, 1);
+  const matchingCandidate = normalizeProviderCandidate({
+    ...listing.items[0],
+    url: entries[0].url,
+    articleFetchUrl: listing.items[0].url
+  }, {
+    id: 'marketscreener-reuters', provider: 'marketscreener-reuters', pool: 'generalCandidates'
   }, new Set(['2026-07-10']));
   assert.equal(matchingCandidate.publishedAtVerified, true);
   assert.equal(matchingCandidate.dateSource, 'provider_published');
+  assert.equal(matchingCandidate.sourceLabel, 'Reuters');
+  assert.equal(JSON.stringify(matchingCandidate).includes('articleFetchUrl'), false);
 
-  const modifiedCandidate = normalizeProviderCandidate(entries[1], {
-    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
-  }, new Set(['2026-07-09']));
-  assert.equal(modifiedCandidate.publishedOn, '2026-07-09');
-  assert.equal(modifiedCandidate.publishedAt, undefined);
-  assert.equal(modifiedCandidate.publishedAtVerified, undefined);
-  assert.equal(modifiedCandidate.dateSource, 'url_published_date');
-  assert.equal(normalizeProviderCandidate({ ...entries[1], publishedAtVerified: true }, {
-    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
-  }, new Set(['2026-07-09'])).publishedAtVerified, undefined,
-  'A date-only candidate must not retain verified status without an exact timestamp.');
-  assert.equal(candidateInFuturesPublicationWindow(modifiedCandidate, {
-    start: new Date('2026-07-09T00:00:00.000Z'),
-    end: new Date('2026-07-11T00:00:00.000Z')
-  }), false, 'A conflicting Reuters sitemap timestamp must not qualify for an exact Futures window.');
-  assert.equal(normalizeProviderCandidate(entries[1], {
-    id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates'
-  }, new Set(['2026-07-10'])), null, 'A fresh sitemap modification must not make a stale Reuters URL date eligible.');
   assert.equal(normalizeProviderCandidate({
     title: 'Non-Reuters date-only fixture',
     url: 'https://www.cnbc.com/2026/07/10/date-only-fixture.html',
     publishedOn: '2026-07-10'
   }, {
     id: 'cnbc', provider: 'rss', pool: 'generalCandidates'
-  }, new Set(['2026-07-10'])), null, 'Date-only freshness must remain restricted to the Reuters URL contract.');
+  }, new Set(['2026-07-10'])), null, 'A provider candidate without a publication timestamp must be rejected.');
   for (const malformed of [
     undefined,
     null,
@@ -1113,20 +1141,27 @@ async function testSharedCryptoPoolPromotion() {
     assert.equal(normalizeProviderCandidate({ ...baseItem, title }, generalPath, eligibleDates).pool, 'generalCandidates');
   }
 
-  const reutersPath = { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' };
-  const [reutersCryptoTitle] = parseReutersNewsSitemap(reutersNewsSitemap([
+  const reutersPath = { id: 'marketscreener-reuters', provider: 'marketscreener-reuters', pool: 'generalCandidates' };
+  const [reutersLookup] = parseReutersNewsSitemap(reutersNewsSitemap([
     reutersNewsSitemapEntry({
       title: 'Bitcoin market structure shifts',
       url: 'https://www.reuters.com/technology/bitcoin-market-structure-2026-07-10/'
     })
   ]));
+  const reutersCryptoTitle = {
+    title: reutersLookup.title,
+    url: reutersLookup.url,
+    articleFetchUrl: 'https://www.marketscreener.com/news/bitcoin-market-structure-shifts-ce1',
+    publishedAt: '2026-07-10T18:30:00.000Z',
+    publishedAtVerified: true
+  };
   const artifact = await collectNewsCandidates({
     asOf: new Date('2026-07-10T19:00:00.000Z'),
     dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
     acquisitionPaths: [generalPath, reutersPath],
     clock: () => new Date('2026-07-10T19:00:00.000Z'),
     fetchPath: async (acquisitionPath) => ({
-      items: acquisitionPath.id === 'reuters-public' ? [reutersCryptoTitle] : [{
+      items: acquisitionPath.id === 'marketscreener-reuters' ? [reutersCryptoTitle] : [{
         ...baseItem,
         title: 'Bitcoin adoption expands',
         url: 'https://apnews.com/article/bitcoin-routing-fixture'
@@ -1149,19 +1184,13 @@ async function testSharedCryptoPoolPromotion() {
 }
 
 async function testReutersNewsSitemapFetchIsolation() {
-  const pathConfig = {
-    id: 'reuters-public',
-    provider: 'reuters-public',
-    pool: 'generalCandidates',
-    feedUrl: 'https://www.reuters.com/arc/outboundfeeds/news-sitemap-index/?outputType=xml'
-  };
   const requests = [];
   const index = `<?xml version="1.0"?><sitemapindex>
     <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
     <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=100</loc></sitemap>
     <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=200</loc></sitemap>
   </sitemapindex>`;
-  const result = await fetchAcquisitionPath(pathConfig, {
+  const result = await fetchReutersSitemapLookup({
     timeoutMs: 1000,
     fetchPage: async (url, requestOptions) => {
       requests.push(String(url));
@@ -1178,14 +1207,193 @@ async function testReutersNewsSitemapFetchIsolation() {
   assert.equal(result.pageCount, 3);
   assert.equal(result.failedPageCount, 2);
   assert.match(result.error, /2 of 3 slices failed/);
-  assert.equal(result.items.length, 1, 'One unavailable slice must not discard entries from valid Reuters slices.');
-  assert.equal(result.items[0].publishedAtVerified, true);
+  assert.equal(result.entries.length, 1, 'One unavailable slice must not discard entries from valid Reuters slices.');
   assert.ok(requests.filter((url) => !url.includes('news-sitemap-index')).every((url) => new URL(url).searchParams.get('size') === '100'));
+}
+
+async function testMarketScreenerReutersAcquisition() {
+  const acquisitionPath = {
+    id: 'marketscreener-reuters',
+    provider: 'marketscreener-reuters',
+    pool: 'generalCandidates',
+    feedUrl: 'https://www.marketscreener.com/news/'
+  };
+  const sitemapIndex = `<?xml version="1.0"?><sitemapindex>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
+  </sitemapindex>`;
+  const sitemap = reutersNewsSitemap([
+    reutersNewsSitemapEntry({
+      title: 'Unique mapping fixture',
+      url: 'https://www.reuters.com/markets/us/unique-mapping-fixture-2026-07-11/'
+    }),
+    reutersNewsSitemapEntry({
+      title: 'Ambiguous mapping fixture',
+      url: 'https://www.reuters.com/markets/us/ambiguous-mapping-fixture-a-2026-07-11/'
+    }),
+    reutersNewsSitemapEntry({
+      title: 'Ambiguous mapping fixture',
+      url: 'https://www.reuters.com/markets/us/ambiguous-mapping-fixture-b-2026-07-11/'
+    })
+  ]);
+  const firstPage = marketScreenerReutersPage([
+    marketScreenerReutersRow({
+      title: 'Unique mapping fixture',
+      url: '/news/unique-mapping-fixture-ce1',
+      publishedAt: '2026-07-11T14:00:00Z'
+    }),
+    marketScreenerReutersRow({
+      title: 'Unique mapping fixture duplicate',
+      url: '/news/unique-mapping-fixture-ce1',
+      publishedAt: '2026-07-11T14:00:00Z'
+    }),
+    marketScreenerReutersRow({
+      title: 'Ambiguous mapping fixture',
+      url: '/news/ambiguous-mapping-fixture-ce2',
+      publishedAt: '2026-07-11T15:00:00Z'
+    }),
+    marketScreenerReutersRow({
+      title: 'Missing mapping fixture',
+      url: '/news/missing-mapping-fixture-ce3',
+      publishedAt: '2026-07-11T16:00:00Z'
+    })
+  ]);
+  const secondPage = marketScreenerReutersPage([
+    marketScreenerReutersRow({
+      title: 'Unique mapping fixture duplicate page',
+      url: '/news/unique-mapping-fixture-ce1',
+      publishedAt: '2026-07-11T14:00:00Z'
+    }),
+    marketScreenerReutersRow({
+      title: 'Cutoff fixture',
+      url: '/news/cutoff-fixture-ce4',
+      publishedAt: '2026-07-09T14:00:00Z',
+      source: 'Other'
+    })
+  ]);
+  const listingRequests = [];
+  const fetchPage = async (url) => {
+    const requestUrl = new URL(url);
+    if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
+    if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+    listingRequests.push(requestUrl.searchParams.get('p'));
+    if (requestUrl.searchParams.get('p') === '1') return { text: async () => firstPage };
+    if (requestUrl.searchParams.get('p') === '2') return { text: async () => secondPage };
+    throw new Error('Pagination continued beyond the stale cutoff fixture.');
+  };
+  const result = await fetchMarketScreenerReuters(acquisitionPath, {
+    eligibleDates: new Set(['2026-07-10', '2026-07-11']),
+    timeoutMs: 1000,
+    fetchPage
+  });
+  assert.deepEqual(listingRequests, ['1', '2'], 'A stale listing row must stop pagination after its page.');
+  assert.equal(result.items.length, 3, 'Repeated MarketScreener listing URLs must be deduplicated across pages.');
+  const byTitle = new Map(result.items.map((item) => [item.title, item]));
+  assert.equal(byTitle.get('Unique mapping fixture').url,
+    'https://www.reuters.com/markets/us/unique-mapping-fixture-2026-07-11');
+  assert.equal(byTitle.get('Unique mapping fixture').articleFetchUrl,
+    'https://www.marketscreener.com/news/unique-mapping-fixture-ce1');
+  assert.equal(byTitle.get('Ambiguous mapping fixture').url,
+    'https://www.marketscreener.com/news/ambiguous-mapping-fixture-ce2',
+    'An ambiguous Reuters headline/date lookup must retain the MarketScreener listing URL.');
+  assert.equal(byTitle.get('Missing mapping fixture').url,
+    'https://www.marketscreener.com/news/missing-mapping-fixture-ce3',
+    'A missing Reuters lookup must retain the MarketScreener listing URL.');
+
+  const unavailableLookup = await fetchMarketScreenerReuters(acquisitionPath, {
+    eligibleDates: new Set(['2026-07-10']),
+    timeoutMs: 1000,
+    fetchPage: async (url) => {
+      const requestUrl = new URL(url);
+      if (requestUrl.pathname.includes('news-sitemap-index')) throw new Error('lookup fixture unavailable');
+      return { text: async () => marketScreenerReutersPage([
+        marketScreenerReutersRow({ title: 'Lookup unavailable fixture' }),
+        marketScreenerReutersRow({ publishedAt: '2026-07-09T12:00:00Z', source: 'Other' })
+      ]) };
+    }
+  });
+  assert.equal(unavailableLookup.items[0].url,
+    'https://www.marketscreener.com/news/reuters-fixture-headline-ce1');
+  assert.match(unavailableLookup.error, /Reuters sitemap lookup unavailable: lookup fixture unavailable/);
+
   await assert.rejects(
-    () => fetchReutersPublic({ ...pathConfig, feedUrl: 'https://evil.example/news.xml' }, { timeoutMs: 1000 }),
-    /fixed public index URL/,
-    'Reuters acquisition must not accept a computed or substituted index target.'
+    () => fetchMarketScreenerReuters(acquisitionPath, {
+      eligibleDates: new Set(['2026-07-10']),
+      timeoutMs: 1000,
+      fetchPage: async (url) => {
+        const requestUrl = new URL(url);
+        if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
+        if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+        return { text: async () => '<html><body>rejected first page</body></html>' };
+      }
+    }),
+    /malformed or no listing rows/,
+    'A rejected first listing page must reject acquisition when there are no preserved items.'
   );
+
+  const partialListing = await fetchMarketScreenerReuters(acquisitionPath, {
+    eligibleDates: new Set(['2026-07-10']),
+    timeoutMs: 1000,
+    fetchPage: async (url) => {
+      const requestUrl = new URL(url);
+      if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
+      if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+      if (requestUrl.searchParams.get('p') === '1') {
+        return { text: async () => marketScreenerReutersPage([
+          marketScreenerReutersRow({ title: 'Preserved first page fixture', publishedAt: '2026-07-11T12:00:00Z' })
+        ]) };
+      }
+      throw new Error('later page fixture unavailable');
+    }
+  });
+  assert.deepEqual(partialListing.items.map((item) => item.title), ['Preserved first page fixture']);
+  assert.match(partialListing.error, /listing partial at page 2: later page fixture unavailable/);
+}
+
+async function testMarketScreenerArticleFetchUrlLifecycle() {
+  const acquisitionPath = {
+    id: 'marketscreener-reuters',
+    provider: 'marketscreener-reuters',
+    pool: 'generalCandidates',
+    feedUrl: 'https://www.marketscreener.com/news/'
+  };
+  const sitemapIndex = `<?xml version="1.0"?><sitemapindex>
+    <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
+  </sitemapindex>`;
+  const sitemap = reutersNewsSitemap([reutersNewsSitemapEntry({ title: 'Hidden fetch URL fixture' })]);
+  const fetchPage = async (url) => {
+    const requestUrl = new URL(url);
+    if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
+    if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+    return { text: async () => marketScreenerReutersPage([
+      marketScreenerReutersRow({ title: 'Hidden fetch URL fixture' }),
+      marketScreenerReutersRow({ publishedAt: '2026-07-09T12:00:00Z', source: 'Other' })
+    ]) };
+  };
+  let reviewedFetchUrl = '';
+  const artifact = await collectNewsCandidates({
+    asOf: new Date('2026-07-10T21:00:00.000Z'),
+    dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
+    acquisitionPaths: [acquisitionPath],
+    clock: () => new Date('2026-07-10T21:00:00.000Z'),
+    fetchPath: (pathConfig, options) => fetchMarketScreenerReuters(pathConfig, { ...options, fetchPage }),
+    fetchArticle: async (candidate) => {
+      reviewedFetchUrl = candidate.articleFetchUrl;
+      assert.equal(Object.keys(candidate).includes('articleFetchUrl'), false,
+        'The alternate fetch URL must remain hidden while article enrichment can still use it.');
+      return {
+        finalUrl: candidate.url,
+        pageTitle: candidate.title,
+        description: 'Fixture description.',
+        excerpt: 'Fixture article content.',
+        publishedAt: new Date(candidate.publishedAt)
+      };
+    }
+  });
+  assert.equal(reviewedFetchUrl, 'https://www.marketscreener.com/news/reuters-fixture-headline-ce1');
+  assert.equal(artifact.generalCandidates[0].url,
+    'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10');
+  assert.equal(JSON.stringify(artifact).includes('articleFetchUrl'), false,
+    'The internal MarketScreener fetch URL must not be serialized into the handoff artifact.');
 }
 
 function testArticleRedirectPolicy() {
@@ -1428,6 +1636,7 @@ async function testVerifiedCandidatesReceiveContextWithoutChangingProvenance() {
     publishedAt: new Date(Date.parse('2026-07-10T12:00:00.000Z') + index * 1000).toISOString(),
     title: `Verified Reuters fixture ${String(index).padStart(3, '0')}`,
     url: `https://www.reuters.com/markets/us/verified-reuters-fixture-${String(index).padStart(3, '0')}-2026-07-10/`,
+    articleFetchUrl: `https://www.marketscreener.com/news/verified-reuters-fixture-${String(index).padStart(3, '0')}-ce1`,
     publishedAtVerified: true
   }));
   const cryptoItem = {
@@ -1441,11 +1650,11 @@ async function testVerifiedCandidatesReceiveContextWithoutChangingProvenance() {
     asOf,
     dashboardData: { stories: [], futuresModule: { stories: [] }, crypto: { notes: [] } },
     acquisitionPaths: [
-      { id: 'reuters-public', provider: 'reuters-public', pool: 'generalCandidates' },
+      { id: 'marketscreener-reuters', provider: 'marketscreener-reuters', pool: 'generalCandidates' },
       { id: 'coindesk', provider: 'rss', pool: 'cryptoCandidates' }
     ],
     clock: () => asOf,
-    fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'reuters-public' ? verifiedItems : [cryptoItem] }),
+    fetchPath: async (acquisitionPath) => ({ items: acquisitionPath.id === 'marketscreener-reuters' ? verifiedItems : [cryptoItem] }),
     fetchArticle: async (candidate) => {
       reviewed.push(candidate.title);
       if (candidate.title === 'Verified Reuters fixture 001') throw new Error('Fixture page unavailable.');
@@ -1470,7 +1679,7 @@ async function testVerifiedCandidatesReceiveContextWithoutChangingProvenance() {
   assert.equal(artifact.futuresCandidates.length, verifiedItems.length);
   assert.equal(artifact.cryptoCandidates.length, 1);
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 000').publishedAt,
-    verifiedItems[0].publishedAt, 'A conflicting page date must not replace a verified sitemap timestamp.');
+    verifiedItems[0].publishedAt, 'A conflicting page date must not replace the verified MarketScreener listing timestamp.');
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 000').article.excerpt,
     'Fixture article content.');
   assert.equal(artifact.generalCandidates.find((candidate) => candidate.title === 'Verified Reuters fixture 001').article.accessible,
@@ -1721,6 +1930,8 @@ async function main() {
   testReutersNewsSitemapParsing();
   await testSharedCryptoPoolPromotion();
   await testReutersNewsSitemapFetchIsolation();
+  await testMarketScreenerReutersAcquisition();
+  await testMarketScreenerArticleFetchUrlLifecycle();
   testArticleRedirectPolicy();
   await testNewsFetchResponseTransport();
   await testNewsTransportFailureIsolation();

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 MAX_HEADER_BYTES = 65_536
 MAX_BODY_BYTES = 8_000_000
-ALLOWED_DOMAINS = ("apnews.com", "axios.com", "investing.com", "crowdfundinsider.com")
+ALLOWED_DOMAINS = ("apnews.com", "axios.com", "investing.com", "crowdfundinsider.com", "marketscreener.com")
 
 
 def main():
