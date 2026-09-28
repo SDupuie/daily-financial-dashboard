@@ -877,10 +877,13 @@ function testRecoveryNotesDoNotAffectApply() {
     assert.equal(Object.hasOwn(readJsonBlock(result.html, 'dashboard-data').editorialReview, 'resumeNotes'), false);
   }
 
-  for (const context of [null, 'bad', [], [{ ticker: 'WRONG' }]]) {
-    const result = runCase('tape-context', undefined, (review) => { review.tapeContext = context; });
+  for (const context of [null, 'bad', [], { quoteStatus: 'refreshed', marketType: 'unknown' }]) {
+    const result = runCase('tape-comparison-context', undefined, (_review, payload) => {
+      payload.tape.rows[0].comparisonContext = context;
+    });
     assert.equal(result.error, undefined);
-    assert.equal(result.html, baseline.html, 'Advisory Tape context must not change published output.');
+    assert.equal(result.html, baseline.html, 'Handoff-only Tape comparison context must not change published output.');
+    assert.ok(readJsonBlock(result.html, 'dashboard-data').tape.rows.every((row) => !Object.hasOwn(row, 'comparisonContext')));
   }
 
   const evidenceCases = [
@@ -1103,8 +1106,9 @@ async function testNewPreparationDiscardsPreviousRecoveryState() {
   }
   const fresh = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
   assert.equal(fresh.editorialReview.preparedAt, FIXTURE_NOW);
-  assert.deepEqual(fresh.editorialReview.tapeContext.map((row) => row.ticker), fresh.tape.rows.map((row) => row.ticker));
-  assert.ok(fresh.editorialReview.tapeContext.every((row) => row.previousBarDate === '2026-07-09' && row.latestBarDate === '2026-07-10'));
+  assert.equal(Object.hasOwn(fresh.editorialReview, 'tapeContext'), false);
+  assert.ok(fresh.tape.rows.every((row) => row.comparisonContext.previousBarDate === '2026-07-09'
+    && row.comparisonContext.latestBarDate === '2026-07-10'));
   assert.equal(Object.hasOwn(fresh.editorialReview, 'resumeNotes'), false, 'The AI initializes optional notes after successful Prepare.');
   assert.equal(fresh.editorialReview.reviewEvidence.metadataScanComplete, false);
   assert.deepEqual(fresh.editorialReview.reviewEvidence.deepReviews, []);

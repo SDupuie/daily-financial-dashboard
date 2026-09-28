@@ -7,8 +7,8 @@ const path = require('path');
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
 const {
+  attachTapeComparisonContext,
   buildChartDataFallback,
-  buildTapeContext,
   buildUnavailableChartData,
   compactChartPayload,
   fetchFuture,
@@ -333,7 +333,7 @@ function dashboardHtmlForRows(rows, chartData = null) {
   }))}</script>`;
 }
 
-function testTapeContext() {
+function testTapeComparisonContext() {
   const sources = [
     ['BTC', 'BTC-USD', 'yahoo_chart', 'continuous_market'],
     ['IBIT', 'IBIT', 'yahoo_chart', 'exchange_session'],
@@ -349,27 +349,31 @@ function testTapeContext() {
   const rows = series.map(({ ticker, sourceSymbol }) => ({ ticker, sourceSymbol, group: 'Crypto' }));
   const payload = { series };
   const snapshot = JSON.stringify(payload);
-  const context = buildTapeContext(rows, payload);
-  assert.deepEqual(context.map((item) => item.marketType), sources.map((item) => item[3]));
-  assert.deepEqual(context.map((item) => item.ticker), rows.map((item) => item.ticker));
-  assert.ok(context.every((item) => item.previousBarDate === '2026-07-09' && item.latestBarDate === '2026-07-10'));
-  assert.deepEqual(buildTapeContext(rows, compactChartPayload(payload)), context);
+  const enrichedRows = attachTapeComparisonContext(rows, payload);
+  const contexts = enrichedRows.map((row) => row.comparisonContext);
+  assert.deepEqual(Object.keys(contexts[0]), [
+    'quoteStatus', 'marketType', 'previousBarDate', 'latestBarDate', 'timeZone'
+  ]);
+  assert.deepEqual(contexts.map((item) => item.marketType), sources.map((item) => item[3]));
+  assert.deepEqual(enrichedRows.map(({ comparisonContext, ...row }) => row), rows);
+  assert.ok(contexts.every((item) => item.previousBarDate === '2026-07-09' && item.latestBarDate === '2026-07-10'));
+  assert.deepEqual(attachTapeComparisonContext(rows, compactChartPayload(payload)), enrichedRows);
   assert.equal(JSON.stringify(payload), snapshot);
   for (const bars of [null, [], [series[0].bars[0]], [null, null], [{ time: 'bad' }, { time: '2026-07-10' }]]) {
-    const result = buildTapeContext(rows, { series: [{ ...series[0], bars }, ...series.slice(1)] });
-    assert.equal(result[0].quoteStatus, 'unavailable');
-    assert.deepEqual(result.slice(1), context.slice(1), 'One bad comparison cannot affect other rows.');
+    const result = attachTapeComparisonContext(rows, { series: [{ ...series[0], bars }, ...series.slice(1)] });
+    assert.equal(result[0].comparisonContext.quoteStatus, 'unavailable');
+    assert.deepEqual(result.slice(1), enrichedRows.slice(1), 'One bad comparison cannot affect other rows.');
   }
-  assert.equal(buildTapeContext(rows, { series: [{ ...series[0], sourceSymbol: 'WRONG' }] })[0].quoteStatus, 'unavailable');
+  assert.equal(attachTapeComparisonContext(rows, { series: [{ ...series[0], sourceSymbol: 'WRONG' }] })[0].comparisonContext.quoteStatus, 'unavailable');
   for (const missing of [undefined, null, {}, { series: null }, { series: 'bad' }, { availability: { status: 'unavailable' }, series: [] }]) {
-    assert.ok(buildTapeContext(rows, missing).every((item) => item.quoteStatus === 'unavailable'));
+    assert.ok(attachTapeComparisonContext(rows, missing).every((row) => row.comparisonContext.quoteStatus === 'unavailable'));
   }
   const carried = { series: [{ ...series[0], availability: { status: 'carried_forward' } }, ...series.slice(1)] };
-  assert.equal(buildTapeContext(rows, carried)[0].quoteStatus, 'carried_forward');
-  assert.deepEqual(buildTapeContext(rows, carried).slice(1), context.slice(1));
-  assert.deepEqual(buildTapeContext([], payload), []);
+  assert.equal(attachTapeComparisonContext(rows, carried)[0].comparisonContext.quoteStatus, 'carried_forward');
+  assert.deepEqual(attachTapeComparisonContext(rows, carried).slice(1), enrichedRows.slice(1));
+  assert.deepEqual(attachTapeComparisonContext([], payload), []);
   const weekend = { series: [{ ...series[0], bars: [{ time: '2026-09-25' }, { time: '2026-09-28' }] }] };
-  assert.equal(buildTapeContext(rows.slice(0, 1), weekend)[0].previousBarDate, '2026-09-25');
+  assert.equal(attachTapeComparisonContext(rows.slice(0, 1), weekend)[0].comparisonContext.previousBarDate, '2026-09-25');
 }
 
 function testChartSeriesOwnsDerivedQuoteRows() {
@@ -767,7 +771,7 @@ async function main() {
     await testPremarketFuturesUsesOneExplicitContract();
     testPriorFuturesContractIdentity();
     testChartSeriesOwnsDerivedQuoteRows();
-    testTapeContext();
+    testTapeComparisonContext();
     testChartStagingFallbackAndIsolation();
     await testCurrentMarketFailuresStayIsolated();
     await testCryptoProviderTransitions();

@@ -1966,7 +1966,7 @@ function cryptoQuoteRowFromSeries(item) {
   };
 }
 
-function buildTapeContext(rows, chartData) {
+function attachTapeComparisonContext(rows, chartData) {
   // Handoff-only context uses the same bar dates as quote derivation. A daily
   // bar date is not an observation timestamp or proof of a completed session.
   const seriesByTicker = new Map((Array.isArray(chartData?.series) ? chartData.series : [])
@@ -1987,16 +1987,16 @@ function buildTapeContext(rows, chartData) {
         ? 'continuous_market' : 'exchange_session';
     }
     return {
-      ticker: row?.ticker,
-      sourceSymbol: row?.sourceSymbol,
-      quoteRevision: item?.quoteRevision || null,
-      quoteStatus: !usable ? 'unavailable'
-        : item.availability?.status === 'carried_forward' || chartData?.availability?.status === 'carried_forward'
-          ? 'carried_forward' : 'refreshed',
-      marketType: usable ? marketType : 'unknown',
-      previousBarDate: usable ? previous.time : null,
-      latestBarDate: usable ? latest.time : null,
-      timeZone: usable ? item.exchangeTimezoneName || null : null
+      ...row,
+      comparisonContext: {
+        quoteStatus: !usable ? 'unavailable'
+          : item.availability?.status === 'carried_forward' || chartData?.availability?.status === 'carried_forward'
+            ? 'carried_forward' : 'refreshed',
+        marketType: usable ? marketType : 'unknown',
+        previousBarDate: usable ? previous.time : null,
+        latestBarDate: usable ? latest.time : null,
+        timeZone: usable ? item.exchangeTimezoneName || null : null
+      }
     };
   });
 }
@@ -2456,7 +2456,7 @@ module.exports = {
   CHART_ROW_CONCURRENCY,
     easternCashOpen: futuresModule.easternCashOpen,
   deriveQuoteRowsFromSeries,
-  buildTapeContext,
+  attachTapeComparisonContext,
   cryptoQuoteRowFromSeries,
   compactChartPayload,
   eodhdMoveUrl,

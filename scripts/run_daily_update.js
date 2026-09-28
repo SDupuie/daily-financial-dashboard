@@ -7,8 +7,8 @@ const { isDeepStrictEqual } = require('util');
 const { singleScriptBlockById } = require('./dashboard_script_blocks');
 const {
   acceptedFreshChartTickers,
+  attachTapeComparisonContext,
   buildChartDataFallback,
-  buildTapeContext,
   buildUnavailableChartData,
   buildUnavailableFuturesPayload,
   compactChartPayload,
@@ -942,7 +942,10 @@ async function prepareEditorialWorkspace(args) {
     openingDecision: { action: null }
   };
   dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
-  reviewManifest.tapeContext = buildTapeContext(dashboardData.tape?.rows, readJsonBlock(html, 'chart-data'));
+  dashboardData.tape.rows = attachTapeComparisonContext(
+    dashboardData.tape.rows,
+    readJsonBlock(html, 'chart-data')
+  );
   delete dashboardData.storiesCoverage;
   if (dashboardData.crypto) delete dashboardData.crypto.notesCoverage;
   if (dashboardData.futuresModule) delete dashboardData.futuresModule.storiesCoverage;
@@ -1003,6 +1006,9 @@ function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, rev
   const stampedData = structuredClone(stampEdition ? stampDashboardEdition(dashboardData) : dashboardData);
   if (selectEarningsRows) prepareEarningsRowsForPublication(stampedData);
   stripPublishedEarningsStagingState(stampedData);
+  for (const row of Array.isArray(stampedData.tape?.rows) ? stampedData.tape.rows : []) {
+    if (row && typeof row === 'object') delete row.comparisonContext;
+  }
   delete stampedData.editorialReview;
   if (reviewManifest) {
     try {
@@ -2139,14 +2145,14 @@ function applyDashboardDataJson(args) {
   });
   const candidateTapeLabel = String(candidateDashboardData.tape?.label || '');
   const editorialTapeLabel = String(editorialDashboardData.tape?.label || '');
-  const candidateTapeContextIndex = candidateTapeLabel.indexOf(' · ');
-  const editorialTapeContextIndex = editorialTapeLabel.indexOf(' · ');
-  const tapeContext = editorialTapeContextIndex >= 0
-    ? editorialTapeLabel.slice(editorialTapeContextIndex)
-    : candidateTapeContextIndex >= 0 ? candidateTapeLabel.slice(candidateTapeContextIndex) : '';
+  const candidateTapeSeparatorIndex = candidateTapeLabel.indexOf(' · ');
+  const editorialTapeSeparatorIndex = editorialTapeLabel.indexOf(' · ');
+  const tapeLabelSuffix = editorialTapeSeparatorIndex >= 0
+    ? editorialTapeLabel.slice(editorialTapeSeparatorIndex)
+    : candidateTapeSeparatorIndex >= 0 ? candidateTapeLabel.slice(candidateTapeSeparatorIndex) : '';
   dashboardData.tape = {
     ...dashboardData.tape,
-    label: `${candidateTapeContextIndex >= 0 ? candidateTapeLabel.slice(0, candidateTapeContextIndex) : candidateTapeLabel}${tapeContext}`,
+    label: `${candidateTapeSeparatorIndex >= 0 ? candidateTapeLabel.slice(0, candidateTapeSeparatorIndex) : candidateTapeLabel}${tapeLabelSuffix}`,
     rows: sanitizeTapeRows(
       candidateDashboardData.tape?.rows,
       editorialDashboardData.tape?.rows,
