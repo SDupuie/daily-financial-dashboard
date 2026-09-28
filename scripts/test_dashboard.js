@@ -877,6 +877,12 @@ function testRecoveryNotesDoNotAffectApply() {
     assert.equal(Object.hasOwn(readJsonBlock(result.html, 'dashboard-data').editorialReview, 'resumeNotes'), false);
   }
 
+  for (const context of [null, 'bad', [], [{ ticker: 'WRONG' }]]) {
+    const result = runCase('tape-context', undefined, (review) => { review.tapeContext = context; });
+    assert.equal(result.error, undefined);
+    assert.equal(result.html, baseline.html, 'Advisory Tape context must not change published output.');
+  }
+
   const evidenceCases = [
     ['missing-evidence', (review) => { delete review.reviewEvidence; }, { stories: 0, futures: 0, crypto: 0 }],
     ['partial', (review) => { review.reviewEvidence.metadataScanComplete = false; review.reviewEvidence.deepReviews = review.reviewEvidence.deepReviews.slice(0, 2); }, { stories: 2, futures: 0, crypto: 0 }],
@@ -1097,6 +1103,8 @@ async function testNewPreparationDiscardsPreviousRecoveryState() {
   }
   const fresh = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
   assert.equal(fresh.editorialReview.preparedAt, FIXTURE_NOW);
+  assert.deepEqual(fresh.editorialReview.tapeContext.map((row) => row.ticker), fresh.tape.rows.map((row) => row.ticker));
+  assert.ok(fresh.editorialReview.tapeContext.every((row) => row.previousBarDate === '2026-07-09' && row.latestBarDate === '2026-07-10'));
   assert.equal(Object.hasOwn(fresh.editorialReview, 'resumeNotes'), false, 'The AI initializes optional notes after successful Prepare.');
   assert.equal(fresh.editorialReview.reviewEvidence.metadataScanComplete, false);
   assert.deepEqual(fresh.editorialReview.reviewEvidence.deepReviews, []);

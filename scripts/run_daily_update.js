@@ -8,6 +8,7 @@ const { singleScriptBlockById } = require('./dashboard_script_blocks');
 const {
   acceptedFreshChartTickers,
   buildChartDataFallback,
+  buildTapeContext,
   buildUnavailableChartData,
   buildUnavailableFuturesPayload,
   compactChartPayload,
@@ -941,6 +942,7 @@ async function prepareEditorialWorkspace(args) {
     openingDecision: { action: null }
   };
   dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
+  reviewManifest.tapeContext = buildTapeContext(dashboardData.tape?.rows, readJsonBlock(html, 'chart-data'));
   delete dashboardData.storiesCoverage;
   if (dashboardData.crypto) delete dashboardData.crypto.notesCoverage;
   if (dashboardData.futuresModule) delete dashboardData.futuresModule.storiesCoverage;

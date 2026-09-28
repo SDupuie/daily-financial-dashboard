@@ -1966,6 +1966,41 @@ function cryptoQuoteRowFromSeries(item) {
   };
 }
 
+function buildTapeContext(rows, chartData) {
+  // Handoff-only context uses the same bar dates as quote derivation. A daily
+  // bar date is not an observation timestamp or proof of a completed session.
+  const seriesByTicker = new Map((Array.isArray(chartData?.series) ? chartData.series : [])
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => [item.ticker, item]));
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const item = seriesByTicker.get(row?.ticker);
+    const bars = Array.isArray(item?.bars) ? item.bars : [];
+    const previous = objectBar(bars.at(-2));
+    const latest = objectBar(bars.at(-1));
+    const usable = item?.sourceSymbol === row?.sourceSymbol
+      && isIsoDate(previous.time) && isIsoDate(latest.time) && previous.time < latest.time;
+    let marketType = 'unknown';
+    if (item?.sourceKey === 'treasury_yield_curve' || item?.sourceKey === 'eodhd_eod') {
+      marketType = 'daily_observation';
+    } else if (item?.sourceKey === 'yahoo_chart') {
+      marketType = /^[A-Z0-9]+-USD$/.test(item.sourceSymbol)
+        ? 'continuous_market' : 'exchange_session';
+    }
+    return {
+      ticker: row?.ticker,
+      sourceSymbol: row?.sourceSymbol,
+      quoteRevision: item?.quoteRevision || null,
+      quoteStatus: !usable ? 'unavailable'
+        : item.availability?.status === 'carried_forward' || chartData?.availability?.status === 'carried_forward'
+          ? 'carried_forward' : 'refreshed',
+      marketType: usable ? marketType : 'unknown',
+      previousBarDate: usable ? previous.time : null,
+      latestBarDate: usable ? latest.time : null,
+      timeZone: usable ? item.exchangeTimezoneName || null : null
+    };
+  });
+}
+
 function deriveQuoteRowsFromSeries(series) {
   // Keep every downstream price view reproducible from the canonical series payload rather than
   // letting derived quote rows drift into a separately maintained market-data store.
@@ -2421,6 +2456,7 @@ module.exports = {
   CHART_ROW_CONCURRENCY,
     easternCashOpen: futuresModule.easternCashOpen,
   deriveQuoteRowsFromSeries,
+  buildTapeContext,
   cryptoQuoteRowFromSeries,
   compactChartPayload,
   eodhdMoveUrl,

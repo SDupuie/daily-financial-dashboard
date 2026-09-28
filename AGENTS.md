@@ -84,7 +84,7 @@ Read only the routed files or README sections needed for the current task:
 - Do not recreate allocation calculations, derive tactical weights from raw model inputs, or expose calculation details in HTML, JSON, scripts, README, or mockups.
 - Use only the sanitized exported result when portfolio-level values are required.
 - If sanitized result data is unavailable, show instrument-level data without fabricating tactical weights.
-- Tape commentary explains market drivers; it does not restate quote values or contain citation language.
+- Tape commentary follows the Tape contract and Shared copy and tone rules in `docs/editorial.md`.
 - Do not include future dividend events in current MTD totals or returns.
 - Prefer reputable free-to-read or less paywalled articles when equivalent coverage exists, without sacrificing source quality, timeliness, or originality.
 - Keep removed or filtered dashboard items out of prominent visible summaries.
