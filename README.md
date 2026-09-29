@@ -79,7 +79,7 @@ For the editorial contract's mechanical review, run `node scripts/run_daily_upda
 ### Core guarantees
 
 - **Prepare Handoff:** validates deterministic staging, resolves each failed section to validated carried-forward data or an explicit unavailable state, and writes the handoff/candidate while leaving the canonical dashboard unchanged.
-- **AI Editorial Work:** writes only to `generated/editorial/dashboard-data.json`; its structured review evidence is the sole News-review record defined by the [News inventory contract](docs/editorial.md#news-inventory-contract). Refreshed quotes need reviewed commentary, while failed quote downloads retain their prior validated quote and commentary together.
+- **AI Editorial Work:** writes only to `generated/editorial/dashboard-data.json`; its structured review evidence is the sole News-review record defined by the [News inventory contract](docs/editorial.md#news-inventory-contract).
 - **Apply Handoff:** merges editorial work without revalidating or replacing deterministic candidate data, runs one top-level render-safety check, and atomically updates the local canonical dashboard; `publish_main.sh` publishes only after commit.
 
 ## Validation and Publish
@@ -109,7 +109,7 @@ Publication validation is a final artifact safety check. It blocks malformed HTM
 After a successful scheduled or manual publication, write a concise narrative report in this order:
 
 1. Open with a bold sentence giving the Chicago date, edition, and publication result, followed by a live dashboard link.
-2. In a short paragraph, report the actual Futures, General, and Crypto story counts, mechanically generated News deep-review and retained/new selection counts, and the number of refreshed Tape notes. Mention substantive Opening, Earnings, or Week Ahead changes and any deliberately deferred reaction when relevant.
+2. In a short paragraph, report the actual Futures, General, and Crypto story counts and mechanically generated News deep-review and retained/new selection counts. Mention substantive Opening, Earnings, or Week Ahead changes and any deliberately deferred reaction when relevant.
 3. In a short paragraph, state which Apply, readiness, publication-suite, deployment, and live-page checks actually passed. Give the commit ID, whether `main` is synchronized with `origin/main`, and any pre-existing local changes left untouched.
 4. Add a separate **Verification gap:** paragraph whenever a required check was not performed or remains unresolved. Say exactly what was missed and do not claim checks that were not run. Include Friday Git maintenance and space recovered for an eligible afternoon run, or briefly state why it was inapplicable.
 

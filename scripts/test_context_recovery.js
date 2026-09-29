@@ -103,7 +103,6 @@ function setupFixture(root, scenario) {
   put(INVENTORY, inventory);
   const handoff = {
     opening: { text: 'Preserve saved Opening copy.' },
-    tape: { text: 'Preserve saved Tape copy.' },
     editorialReview: {
       preparedAt,
       newsSelection: { stories: [], futures: [], crypto: [] },

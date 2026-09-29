@@ -261,7 +261,7 @@ function isPartialRefresh(errors, sections) {
 }
 
 function shouldRefreshChartRow(row) {
-  // Full-curve comparison context and quota-limited MOVE data belong to the scheduled update.
+  // Full-curve aggregation and quota-limited MOVE data belong to the scheduled update.
   return String(row?.sourceSymbol || '') !== 'TREASURY:CURVE'
     && String(row?.ticker || '').toUpperCase() !== 'MOVE';
 }
@@ -272,11 +272,17 @@ function localRefreshChartRows(input) {
 
 async function fetchChartPayload(args, startDate, endDate) {
   const rows = localRefreshChartRows(args.input);
+  const embedded = readEmbeddedChartData(args.input)?.series;
+  const priorSeries = new Map((Array.isArray(embedded) ? embedded : [])
+    .filter((series) => series && typeof series === 'object')
+    .map((series) => [series.ticker, series]));
   const treasuryMonthCache = new Map();
   const errors = [];
   const results = await mapConcurrent(rows, args.concurrency, async (row) => {
     try {
-      const series = await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache);
+      const series = await chartData.fetchSeries(row, sourceArgs(args), startDate, endDate, treasuryMonthCache, {
+        priorSeries: priorSeries.get(row.ticker)
+      });
       return { ...series, quoteRevision: endDate.toISOString() };
     } catch (error) {
       errors.push({ section: row.section || 'chart', ticker: row.ticker, message: error.message });

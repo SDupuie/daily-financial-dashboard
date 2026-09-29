@@ -6,8 +6,6 @@ const { spawnSync } = require('child_process');
 const { isDeepStrictEqual } = require('util');
 const { singleScriptBlockById } = require('./dashboard_script_blocks');
 const {
-  acceptedFreshChartTickers,
-  attachTapeComparisonContext,
   buildChartDataFallback,
   buildUnavailableChartData,
   buildUnavailableFuturesPayload,
@@ -67,10 +65,7 @@ const {
   buildNewsReviewSummary,
   editorialTextEntries,
   evaluateNewsReviewEvidence,
-  reviewedTapeCommentary,
-  unavailableTapeCommentary,
-  validateReviewManifest,
-  validateTapeCommentaryDisposition
+  validateReviewManifest
 } = require('./editorial_review_contract');
 const {
   NEWS_COVERAGE_POLICIES,
@@ -281,14 +276,6 @@ function applyEditionMetadata(data, windowMode, now = scheduledNow()) {
   if (!metadata.sectionLabel) return data;
   data.masthead = { ...data.masthead, edition: metadata.edition, date: metadata.date.replace(', ', ' · ') };
   data.futuresModule = { ...data.futuresModule, sectionLabel: metadata.sectionLabel, sectionTitle: metadata.sectionTitle };
-  const currentTapeLabel = String(data.tape?.label || '');
-  const driverIndex = currentTapeLabel.indexOf(' · ');
-  const drivers = driverIndex >= 0 ? currentTapeLabel.slice(driverIndex) : '';
-  const sessionDate = data.futuresModule?.futures?.find((row) => /^\d{4}-\d{2}-\d{2}$/.test(String(row?.raw?.sessionDate || '')))?.raw?.sessionDate;
-  const sessionWeekday = sessionDate
-    ? new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long' }).format(new Date(`${sessionDate}T12:00:00Z`))
-    : metadata.date.split(',')[0];
-  data.tape = { ...data.tape, label: `${sessionWeekday} ${metadata.sectionLabel}${drivers}` };
   delete data.lede;
   delete data.renesas;
   return data;
@@ -671,26 +658,6 @@ function assertCandidateMatchesCanonical(args, candidateData) {
   return canonicalData;
 }
 
-function prepareTapeCommentaryForEditorial(tape, previousTape) {
-  const previousByTicker = new Map((Array.isArray(previousTape?.rows) ? previousTape.rows : [])
-    .map((row) => [String(row?.ticker || '').trim().toUpperCase(), row]));
-  return {
-    ...tape,
-    rows: (Array.isArray(tape?.rows) ? tape.rows : []).map((row) => {
-      const previous = previousByTicker.get(String(row?.ticker || '').trim().toUpperCase());
-      if (previous?.noteDisposition?.quoteRevision === row?.noteDisposition?.quoteRevision) return row;
-      return {
-        ...row,
-        note: '',
-        noteDisposition: {
-          status: 'pending_review',
-          quoteRevision: row.noteDisposition.quoteRevision
-        }
-      };
-    })
-  };
-}
-
 function verifiedNarrativeDisposition(current, text = '') {
   return current?.status === 'verified' && Boolean(String(text || '').trim());
 }
@@ -941,11 +908,6 @@ async function prepareEditorialWorkspace(args) {
     newsSelection: { futures: [], stories: [], crypto: [] },
     openingDecision: { action: null }
   };
-  dashboardData.tape = prepareTapeCommentaryForEditorial(dashboardData.tape, previousDashboardData.tape);
-  dashboardData.tape.rows = attachTapeComparisonContext(
-    dashboardData.tape.rows,
-    readJsonBlock(html, 'chart-data')
-  );
   delete dashboardData.storiesCoverage;
   if (dashboardData.crypto) delete dashboardData.crypto.notesCoverage;
   if (dashboardData.futuresModule) delete dashboardData.futuresModule.storiesCoverage;
@@ -1006,9 +968,6 @@ function patchDashboardDataBlock(html, dashboardData, reviewManifest = null, rev
   const stampedData = structuredClone(stampEdition ? stampDashboardEdition(dashboardData) : dashboardData);
   if (selectEarningsRows) prepareEarningsRowsForPublication(stampedData);
   stripPublishedEarningsStagingState(stampedData);
-  for (const row of Array.isArray(stampedData.tape?.rows) ? stampedData.tape.rows : []) {
-    if (row && typeof row === 'object') delete row.comparisonContext;
-  }
   delete stampedData.editorialReview;
   if (reviewManifest) {
     try {
@@ -1083,65 +1042,7 @@ function stageDashboardCandidate(args, nextHtml) {
 }
 
 function applyTapeQuoteRows(data, quoteRows) {
-  const byTicker = new Map(
-    (Array.isArray(quoteRows) ? quoteRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row])
-  );
-  data.tape.rows = data.tape.rows.map((row) => {
-    if (String(row?.group || '').trim() === 'Crypto') return row;
-    const next = byTicker.get(String(row?.ticker || '').toUpperCase());
-    if (!next) return row;
-    return {
-      ...row,
-      last: next.last,
-      delta: next.delta,
-      pct: next.pct,
-      dir: next.dir,
-      asOf: next.asOf
-    };
-  });
-}
-
-function applyCryptoQuoteRows(data, quoteRows) {
-  const byTicker = new Map(
-    (Array.isArray(quoteRows) ? quoteRows : []).map((row) => [String(row?.sym || row?.ticker || '').toUpperCase(), row])
-  );
-  data.tape.rows = data.tape.rows.map((row) => {
-    if (String(row?.group || '').trim() !== 'Crypto') return row;
-    const next = byTicker.get(String(row?.ticker || '').toUpperCase());
-    if (!next) return row;
-    return {
-      ...row,
-      last: next.price,
-      delta: next.delta,
-      pct: next.chg,
-      dir: next.dir,
-      asOf: next.asOf
-    };
-  });
-}
-
-function resetTapeCommentary(data, quoteRevisionByTicker, { tickers = null, systemFallbacks = null } = {}) {
-  const targetedTickers = tickers === null
-    ? null
-    : new Set([...tickers].map((ticker) => String(ticker || '').trim().toUpperCase()).filter(Boolean));
-  let resetCount = 0;
-  data.tape.rows = data.tape.rows.map((row) => {
-    const ticker = String(row?.ticker || '').trim().toUpperCase();
-    if (targetedTickers && !targetedTickers.has(ticker)) return row;
-    const quoteRevision = quoteRevisionByTicker.get(ticker);
-    if (!quoteRevision) throw new Error(`Chart series ${ticker} is missing the canonical quoteRevision required to reset Tape commentary.`);
-    resetCount += 1;
-    if (Array.isArray(systemFallbacks)) {
-      systemFallbacks.push({
-        section: 'tape-commentary',
-        path: `tape.rows.${ticker}.note`,
-        action: 'unavailable_disposition',
-        reason: 'editorial_commentary_unavailable'
-      });
-    }
-    return unavailableTapeCommentary(row, quoteRevision);
-  });
-  return resetCount;
+  data.tape.rows = structuredClone(Array.isArray(quoteRows) ? quoteRows : []);
 }
 
 function applyCryptoStats(data, payload) {
@@ -1286,12 +1187,7 @@ function applyWeekAhead(data, weekAheadPayload) {
   data.weekAhead = mergeWeekAheadPayload(data.weekAhead, weekAheadPayload);
 }
 
-function syncDashboardPricesFromChartData(data, chartData, {
-  now = scheduledNow(),
-  resetCommentary = false,
-  commentaryTickers = null,
-  systemFallbacks = null
-} = {}) {
+function syncDashboardPricesFromChartData(data, chartData, { now = scheduledNow() } = {}) {
   // dashboard-data keeps the visible tape fields, but those values are projections from chart-data.series,
   // not an independent editable truth during scheduled or manual maintenance flows.
   if (chartData?.availability?.status === 'unavailable') {
@@ -1305,28 +1201,16 @@ function syncDashboardPricesFromChartData(data, chartData, {
       normalizeWeekAheadReactionButtons(data, chartData);
       data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead);
     }
-    return { commentaryResetCount: 0 };
+    return;
   }
   if (data.tape) delete data.tape.availability;
   const derivedQuoteRows = deriveQuoteRowsFromSeries(Array.isArray(chartData?.series) ? chartData.series : []);
-  applyTapeQuoteRows(data, derivedQuoteRows.tape);
-  applyCryptoQuoteRows(data, derivedQuoteRows.crypto);
-  let commentaryResetCount = 0;
-  if (resetCommentary) {
-    const quoteRevisionByTicker = new Map(
-      (Array.isArray(chartData?.series) ? chartData.series : []).map((series) => [
-        String(series?.ticker || '').trim().toUpperCase(),
-        series?.quoteRevision
-      ])
-    );
-    commentaryResetCount = resetTapeCommentary(data, quoteRevisionByTicker, { tickers: commentaryTickers, systemFallbacks });
-  }
+  applyTapeQuoteRows(data, derivedQuoteRows);
   if (data.weekAhead) {
     data.weekAhead = applyWeekAheadLifecycle(data.weekAhead, chartData, { now });
     normalizeWeekAheadReactionButtons(data, chartData);
     data.weekAhead = finalizeWeekAheadOutcomes(data.weekAhead);
   }
-  return { commentaryResetCount };
 }
 
 function mergedChartAvailability(existingChartData, incomingChartData, series) {
@@ -1391,10 +1275,7 @@ function patchDashboard(args) {
 
   chartData = roundChartPayload(args.chartDataPayload || args.chartDataFallbackPayload || readJson(path.join(GENERATED_DIR, 'chart_data.json')));
   // chart-data.series is the canonical price history; dashboard tape prices are derived from it.
-  syncDashboardPricesFromChartData(dashboardData, chartData, {
-    resetCommentary: true,
-    commentaryTickers: acceptedFreshChartTickers(chartData)
-  });
+  syncDashboardPricesFromChartData(dashboardData, chartData);
   nextHtml = replaceJsonBlock(nextHtml, 'chart-data', JSON.stringify(compactChartPayload(chartData)));
 
   const futuresPayload = args.futuresPayload || args.futuresFallbackPayload || readJson(path.join(GENERATED_DIR, 'futures_module.json'));
@@ -1856,44 +1737,6 @@ function readNewsCandidateSource(preparedAt, inputPath = NEWS_CANDIDATES_PATH) {
   return artifact;
 }
 
-function sanitizeTapeRows(candidateRows, editorialRows, previousRows, systemFallbacks = null, now = scheduledNow(), attemptThreshold = '') {
-  const editorialByTicker = new Map((Array.isArray(editorialRows) ? editorialRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
-  const previousByTicker = new Map((Array.isArray(previousRows) ? previousRows : []).map((row) => [String(row?.ticker || '').toUpperCase(), row]));
-  const reviewedAt = new Date(now).toISOString();
-  return (Array.isArray(candidateRows) ? candidateRows : []).map((row) => {
-    const ticker = String(row?.ticker || '').toUpperCase();
-    const editorial = editorialByTicker.get(ticker);
-    const previous = previousByTicker.get(ticker);
-    const note = safeEditorialText(editorial?.note, row.note);
-    const text = String(note || '').trim();
-    const candidateDispositionValid = validateTapeCommentaryDisposition(row).length === 0;
-    // Commentary is bound to the accepted quote revision; refreshed or invalid
-    // rows need new review instead of silently reusing prior copy.
-    const quoteRevision = candidateDispositionValid
-      ? row.noteDisposition.quoteRevision
-      : previous?.noteDisposition?.quoteRevision || reviewedAt;
-    const quoteWasRefreshed = !previous
-      || !candidateDispositionValid
-      || quoteRevision !== previous?.noteDisposition?.quoteRevision;
-
-    if (!quoteWasRefreshed && candidateDispositionValid) return structuredClone(row);
-
-    if (editorial && text) {
-      return reviewedTapeCommentary(row, text, quoteRevision, reviewedAt);
-    }
-
-    if (Array.isArray(systemFallbacks)) {
-      systemFallbacks.push({
-        section: 'tape-commentary',
-        path: `tape.rows.${ticker}.note`,
-        action: 'unavailable_disposition',
-        reason: 'editorial_commentary_unavailable'
-      });
-    }
-    return unavailableTapeCommentary(row, quoteRevision);
-  });
-}
-
 function clearEarningsInternalQueues(week) {
   // Published Earnings keeps compact display state only. Recovery queues,
   // provider fetch diagnostics, and narrative-apply receipts remain staging data.
@@ -2143,25 +1986,7 @@ function applyDashboardDataJson(args) {
     general: dashboardData.stories,
     crypto: dashboardData.crypto.notes
   });
-  const candidateTapeLabel = String(candidateDashboardData.tape?.label || '');
-  const editorialTapeLabel = String(editorialDashboardData.tape?.label || '');
-  const candidateTapeSeparatorIndex = candidateTapeLabel.indexOf(' · ');
-  const editorialTapeSeparatorIndex = editorialTapeLabel.indexOf(' · ');
-  const tapeLabelSuffix = editorialTapeSeparatorIndex >= 0
-    ? editorialTapeLabel.slice(editorialTapeSeparatorIndex)
-    : candidateTapeSeparatorIndex >= 0 ? candidateTapeLabel.slice(candidateTapeSeparatorIndex) : '';
-  dashboardData.tape = {
-    ...dashboardData.tape,
-    label: `${candidateTapeSeparatorIndex >= 0 ? candidateTapeLabel.slice(0, candidateTapeSeparatorIndex) : candidateTapeLabel}${tapeLabelSuffix}`,
-    rows: sanitizeTapeRows(
-      candidateDashboardData.tape?.rows,
-      editorialDashboardData.tape?.rows,
-      previousDashboardData.tape?.rows,
-      reviewManifest.systemFallbacks,
-      editorialNow,
-      reviewManifest.preparedAt
-    )
-  };
+  dashboardData.tape = structuredClone(candidateDashboardData.tape);
   dashboardData.footer = {
     ...dashboardData.footer,
     compiled: String(candidateDashboardData.footer?.compiled || '')
@@ -2256,7 +2081,6 @@ function chartSeriesRevisionContent(series) {
   const content = roundChartPayload({ series: [series] }).series[0];
   delete content.quoteRevision;
   delete content.availability;
-  delete content.note;
   return content;
 }
 
@@ -2291,10 +2115,7 @@ function applyChartDataJson(args) {
     process.stderr.write(`Chart focused apply input was unusable; carrying validated chart data: ${error.message}\n`);
     chartData = buildChartDataFallback(currentChartData, scheduledNow());
   }
-  syncDashboardPricesFromChartData(dashboardData, chartData, {
-    resetCommentary: true,
-    commentaryTickers: acceptedFreshChartTickers(chartData)
-  });
+  syncDashboardPricesFromChartData(dashboardData, chartData);
   prepareCandidateNews(dashboardData);
   const embeddedChartData = compactChartPayload(chartData);
   let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
@@ -2353,10 +2174,7 @@ function mergeChartDataJson(args) {
     incomingChartData = buildChartDataFallback(existingChartData, scheduledNow());
     chartData = incomingChartData;
   }
-  syncDashboardPricesFromChartData(dashboardData, chartData, {
-    resetCommentary: true,
-    commentaryTickers: acceptedFreshChartTickers(incomingChartData)
-  });
+  syncDashboardPricesFromChartData(dashboardData, chartData);
   prepareCandidateNews(dashboardData);
   const embeddedChartData = compactChartPayload(chartData);
   let nextHtml = replaceJsonBlock(html, 'chart-data', JSON.stringify(embeddedChartData));
@@ -2684,7 +2502,6 @@ module.exports = {
   mergeChartDataJson,
   malformedEarningsEditorialFields,
   mergedChartAvailability,
-  applyCryptoQuoteRows,
   applyCryptoStats,
   applyEarningsWeek,
   applyFuturesModule,

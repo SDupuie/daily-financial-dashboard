@@ -652,16 +652,11 @@
     .tape-row .stale-info:hover .stale-info-tooltip,
     .tape-row .stale-info:focus-within .stale-info-tooltip,
     .tape-row .stale-info.is-open .stale-info-tooltip { transform: translate(0, 0); }
-    .tape-ticker-line {
-      display: grid;
-      grid-template-columns: 48px minmax(0, 1fr);
-      align-items: center;
-      gap: 6px;
-      max-width: 100%;
-      margin-top: 3px;
-    }
-    .tape-ticker-line .entity-sub { margin-top: 0; }
-    .tape-ticker { display: flex; gap: 4px; align-items: center; }
+    .tape-row .instrument { gap: 3px; align-content: center; }
+    .tape-name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; line-height: 1.1; }
+    .tape-name-line .tape-ticker { margin-top: 0; font-size: 12px; white-space: nowrap; }
+    .tape-observation-line { display: flex; align-items: flex-start; margin-top: 0; line-height: 1; }
+    .tape-date-mobile { display: none; }
     .tape-value {
       min-width: 0;
       font-family: "SFMono-Regular", Consolas, monospace;
@@ -2498,8 +2493,8 @@
       .tape-quote-header, .tape-row > .tape-value { display: none; }
       .tape-mobile-quote { display: grid; gap: 3px; text-align: right; font-family: "SFMono-Regular", Consolas, monospace; }
       .tape-mobile-quote .metric-pair { justify-content: end; }
-      .tape-asof-button { white-space: normal; }
-      .tape-row .tape-asof .stale-info-tooltip { left: -54px; }
+      .tape-date-desktop { display: none; }
+      .tape-date-mobile { display: inline; }
     }
     @media (max-width: 1050px) {
       .futures-module {
@@ -7711,10 +7706,12 @@
         const quote = series.quote;
         const timed = !isIsoDate(quote.observedAt);
         const date = new Date(timed ? quote.observedAt : `${quote.observedAt}T12:00:00Z`);
-        const label = new Intl.DateTimeFormat('en-US', {
-          month: 'short', day: 'numeric', ...(timed ? { hour: 'numeric', minute: '2-digit' } : {}),
-          timeZone: timed ? 'America/Chicago' : 'UTC'
-        }).format(date);
+        const timeZone = timed ? 'America/Chicago' : 'UTC';
+        const day = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone }).format(date);
+        const shortDay = new Intl.DateTimeFormat('en-US', { month: 'numeric', day: 'numeric', timeZone }).format(date);
+        const time = timed ? new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago', timeZoneName: 'short' }).format(date) : '';
+        const label = day + (timed ? ', ' + time : '');
+        const compactLabel = shortDay + (timed ? ' ' + time : '');
         let window = quote.behavior === 'crypto_utc'
           ? 'Open, high, and low cover the UTC calendar day beginning at midnight UTC. Change is measured from the previous UTC daily close.'
           : quote.behavior === 'futures'
@@ -7730,7 +7727,7 @@
         window += timed ? ' Quote time is displayed in Central Time.' : ' The source observation is available at date precision only.';
         if (tapeSeriesIsStale(series)) window += ' The latest refresh is unavailable or this observation is stale; the last valid quote is shown.';
         const id = `tape-asof-${String(row.ticker).toLowerCase()}`;
-        return `<span class="stale-info tape-asof" data-stale-info><button class="tape-asof-button" type="button" aria-label="${esc(`${row.name}: As of ${label}${timed ? ' CT' : ''}. Quote window details`)}" aria-describedby="${id}" aria-expanded="false" data-stale-button>As of ${esc(label)}${timed ? ' CT' : ''}</button><span class="stale-info-tooltip" id="${id}" role="tooltip">${esc(window)}</span></span>`;
+        return `<span class="stale-info tape-asof" data-stale-info><button class="tape-asof-button" type="button" aria-label="${esc(`${row.name}: As of ${label}. Quote window details`)}" aria-describedby="${id}" aria-expanded="false" data-stale-button><span class="tape-date-desktop">As of ${esc(label)}</span><span class="tape-date-mobile">${esc(compactLabel)}</span></button><span class="stale-info-tooltip" id="${id}" role="tooltip">${esc(window)}</span></span>`;
       }
       function chartInfoDataLabel(series) {
         if (isYieldCurveSeries(series)) return 'Yield curve snapshot';
@@ -8704,7 +8701,7 @@
         return `
           <div class="quote-row tape-row ${rowTone}${hasChart ? '' : ' is-disabled'}" aria-selected="${selected}">
             <button class="tape-row-hitbox" type="button" data-tape-group="${esc(groupKey)}" data-tape-chart-row="${esc(ticker)}" data-tape-chart-button aria-label="${esc(`${row.name} chart and quote`)}" aria-pressed="${selected}"${hasChart ? '' : ' disabled'}></button>
-            <span class="instrument"><strong class="entity-name entity-name-lg">${esc(row.name)}</strong><span class="tape-ticker-line"><span class="tape-ticker entity-sub entity-sub-mono">${esc(row.ticker)}</span>${tapeAsOfInfo(series, row)}</span></span>
+            <span class="instrument"><span class="tape-name-line"><strong class="entity-name entity-name-lg">${esc(row.name)}</strong><span class="tape-ticker entity-sub entity-sub-mono">${esc(row.ticker)}</span></span><span class="tape-observation-line">${tapeAsOfInfo(series, row)}</span></span>
             ${['last', 'previous', 'delta', 'pct', 'open', 'high', 'low'].map((field) => `<span class="tape-value tape-${field}${field === 'delta' || field === 'pct' ? ` ${rowTone}` : ''}" data-quote-field="${field}">${esc(row[field])}</span>`).join('')}
             <span class="tape-mobile-quote" aria-label="${esc(row.name)} quote">
               <span class="quote-last metric-primary">${esc(row.last)}</span>

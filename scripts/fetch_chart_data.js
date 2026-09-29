@@ -26,6 +26,16 @@ const CHART_ROW_CONCURRENCY = 4;
 const DEFAULT_YAHOO_RATE_LIMIT_RETRIES = 1;
 const DEFAULT_YAHOO_RATE_LIMIT_DELAY_MS = 3000;
 const DEFAULT_FUTURES_DELAY_MS = 750;
+const QUOTE_BEHAVIORS = new Set(['session', 'futures', 'crypto_utc', 'daily_observation']);
+const CASH_INDEX_TICKERS = new Set(['SPX', 'NDX', 'DJI', 'RUT', 'VIX']);
+const COMMODITY_FUTURES = new Map([
+  ['GC=F', { root: 'GC', exchange: 'CMX', months: 'GJMQVZ', candidateCount: 3 }],
+  ['SI=F', { root: 'SI', exchange: 'CMX', months: 'HKNUZ', candidateCount: 3 }],
+  ['HG=F', { root: 'HG', exchange: 'CMX', months: 'FGHJKMNQUVXZ', candidateCount: 4 }],
+  ['CL=F', { root: 'CL', exchange: 'NYM', months: 'FGHJKMNQUVXZ', candidateCount: 4 }],
+  ['BZ=F', { root: 'BZ', exchange: 'NYM', months: 'FGHJKMNQUVXZ', candidateCount: 4 }],
+  ['NG=F', { root: 'NG', exchange: 'NYM', months: 'FGHJKMNQUVXZ', candidateCount: 4 }]
+]);
 const REQUIRED_YIELD_CURVE_COMPARISONS = [
   { label: '1M ago', minDays: 20, maxDays: 45 },
   { label: '6M ago', minDays: 150, maxDays: 215 }
@@ -1069,33 +1079,14 @@ function readTapeRows(input) {
   return rows.map((row, index) => ({
     index,
     section: 'tape',
-    quoteShape: 'tape',
-    group: String(row?.group || '').trim(),
     name: String(row?.name || '').trim(),
     ticker: String(row?.ticker || '').trim().toUpperCase(),
     sourceSymbol: String(row?.sourceSymbol || '').trim()
-  })).filter((row) => row.ticker && row.sourceSymbol && row.group !== 'Crypto');
-}
-
-function readCryptoRows(input) {
-  const data = readDashboardData(input);
-  const rows = Array.isArray(data.tape?.rows) ? data.tape.rows : [];
-  return rows.map((row, index) => {
-    const ticker = String(row?.ticker || '').trim().toUpperCase();
-    return {
-      index,
-      section: 'crypto',
-      quoteShape: 'crypto',
-      group: String(row?.group || '').trim(),
-      name: String(row?.name || ticker).trim(),
-      ticker,
-      sourceSymbol: String(row?.sourceSymbol || '').trim()
-    };
-  }).filter((row) => row.ticker && row.sourceSymbol && row.group === 'Crypto');
+  })).filter((row) => row.ticker && row.sourceSymbol);
 }
 
 function readChartableRows(input) {
-  return [...readTapeRows(input), ...readCryptoRows(input)];
+  return readTapeRows(input);
 }
 
 function readEmbeddedChartPayload(input) {
@@ -1281,13 +1272,23 @@ function compactChartBar(rawBar) {
 }
 
 function roundChartPayload(payload) {
-  const { quoteRows: _quoteRows, ...rest } = payload || {};
   return {
-    ...rest,
+    ...payload,
     series: (Array.isArray(payload?.series) ? payload.series : []).map((series) => {
-      const { note: _note, ...seriesFields } = series || {};
+      const seriesFields = series || {};
+      const quote = seriesFields.quote && typeof seriesFields.quote === 'object' && !Array.isArray(seriesFields.quote)
+        ? {
+            ...seriesFields.quote,
+            last: fourDecimalNumber(seriesFields.quote.last),
+            previous: seriesFields.quote.previous === null ? null : fourDecimalNumber(seriesFields.quote.previous),
+            ...(seriesFields.quote.open === undefined ? {} : { open: fourDecimalNumber(seriesFields.quote.open) }),
+            ...(seriesFields.quote.high === undefined ? {} : { high: fourDecimalNumber(seriesFields.quote.high) }),
+            ...(seriesFields.quote.low === undefined ? {} : { low: fourDecimalNumber(seriesFields.quote.low) })
+          }
+        : seriesFields.quote;
       return {
         ...seriesFields,
+        ...(quote === undefined ? {} : { quote }),
         bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
           const bar = objectBar(rawBar);
           return {
@@ -1359,18 +1360,29 @@ function carriedForwardChartSeries(prior, checkedAt) {
   };
 }
 
-function acceptedFreshChartTickers(payload) {
-  if (payload?.availability?.status === 'carried_forward') return [];
-  return (Array.isArray(payload?.series) ? payload.series : [])
-    .filter((series) => !['carried_forward', 'unavailable'].includes(series?.availability?.status))
-    .map((series) => String(series?.ticker || '').trim().toUpperCase())
-    .filter(Boolean);
-}
-
 function isChartQuoteRevision(value) {
   return typeof value === 'string'
     && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
     && !Number.isNaN(Date.parse(value));
+}
+
+function isQuoteObservedAt(value) {
+  return isIsoDate(value) || isChartQuoteRevision(value);
+}
+
+function quoteObservationDate(quote, series) {
+  if (isIsoDate(quote?.observedAt)) return quote.observedAt;
+  const seconds = Date.parse(String(quote?.observedAt || '')) / 1000;
+  if (!Number.isFinite(seconds)) return '';
+  if (quote.behavior === 'crypto_utc') return isoDateFromEpochSeconds(seconds);
+  return isoDateFromEpochSecondsInTimeZone(seconds, series.exchangeTimezoneName || 'UTC');
+}
+
+function nextIsoDate(value) {
+  if (!isIsoDate(value)) return '';
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return isoDateFromDate(date);
 }
 
 function validateChartPayloadMetadata(payload, { label = 'Chart staging' } = {}) {
@@ -1521,16 +1533,16 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
     if (item.priceOnly !== false) errors.push(`${label}.priceOnly must be false for Yahoo chart series.`);
   }
   if (typeof item.noVolume !== 'boolean') errors.push(`${label}.noVolume must be boolean.`);
+  if (CASH_INDEX_TICKERS.has(ticker) && item.noVolume !== true) {
+    errors.push(`${label}.noVolume must be true for cash-index and VIX series.`);
+  }
   if (item.dailyChangeReference !== undefined) {
-    errors.push(`${label}.dailyChangeReference is not supported; daily change is derived from the two latest bars.`);
+    errors.push(`${label}.dailyChangeReference is not supported; derive daily change from quote.last and quote.previous.`);
   }
   if (item.sourceSymbol === 'TREASURY:CURVE') {
     const curvePoints = Array.isArray(item.curvePoints) ? item.curvePoints : [];
     validateYieldCurvePointSet(errors, label, 'curvePoints', curvePoints);
     validateYieldCurveComparisons(errors, label, item, curvePoints);
-    const curveSpread = item.curveSpread && typeof item.curveSpread === 'object' ? item.curveSpread : {};
-    if (curveSpread.label !== '2s10s') errors.push(`${label}.curveSpread.label must be 2s10s.`);
-    if (asFiniteNumber(curveSpread.valueBp) === null) errors.push(`${label}.curveSpread.valueBp must be numeric.`);
   }
   if (!Array.isArray(item.bars) || item.bars.length < 2) {
     errors.push(`${label}.bars must contain at least two daily bars.`);
@@ -1565,6 +1577,61 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
   const hasVolume = item.bars.some((bar) => bar.volume !== undefined);
   if (typeof item.noVolume === 'boolean' && item.noVolume !== !hasVolume) {
     errors.push(`${label}.noVolume must be ${!hasVolume} to match its ${options.volumeDescription || 'chart'} volume bars.`);
+  }
+  const quote = item.quote;
+  if (!quote || typeof quote !== 'object' || Array.isArray(quote)) {
+    errors.push(`${label}.quote must be an object.`);
+  } else {
+    const expectedBehavior = quoteBehavior(item);
+    if (!QUOTE_BEHAVIORS.has(quote.behavior)) errors.push(`${label}.quote.behavior is invalid.`);
+    else if (quote.behavior !== expectedBehavior) errors.push(`${label}.quote.behavior must be ${expectedBehavior}.`);
+    if (!isQuoteObservedAt(quote.observedAt)) errors.push(`${label}.quote.observedAt must be an ISO date or offset-bearing ISO timestamp.`);
+    if (asStoredChartNumber(quote.last) === null) errors.push(`${label}.quote.last must be a finite JSON number.`);
+    if (quote.previous !== null && asStoredChartNumber(quote.previous) === null) {
+      errors.push(`${label}.quote.previous must be a finite JSON number or null.`);
+    }
+    const ohlKeys = ['open', 'high', 'low'];
+    if (quote.behavior === 'daily_observation') {
+      if (!isIsoDate(quote.observedAt)) errors.push(`${label}.quote.observedAt must be an ISO date for daily observations.`);
+      for (const key of ohlKeys) {
+        if (quote[key] !== undefined) errors.push(`${label}.quote.${key} is not supported for daily observations.`);
+      }
+      if (quote.contractSymbol !== undefined) errors.push(`${label}.quote.contractSymbol is only supported for futures.`);
+    } else {
+      for (const key of ohlKeys) {
+        if (asStoredChartNumber(quote[key]) === null) errors.push(`${label}.quote.${key} must be a finite JSON number.`);
+      }
+      if ([quote.open, quote.high, quote.low, quote.last].every((value) => asStoredChartNumber(value) !== null)
+        && (quote.high < Math.max(quote.open, quote.low, quote.last)
+          || quote.low > Math.min(quote.open, quote.high, quote.last))) {
+        errors.push(`${label}.quote has incoherent OHL/last values.`);
+      }
+      for (const key of ['last', 'previous', ...ohlKeys]) {
+        if (quote[key] !== null && asStoredChartNumber(quote[key]) !== null && quote[key] <= 0) {
+          errors.push(`${label}.quote.${key} must be positive.`);
+        }
+      }
+      if (quote.behavior === 'futures') {
+        if ((quote.previous !== null || quote.contractSymbol !== undefined)
+          && !isExplicitCommodityContract(item.sourceSymbol, quote.contractSymbol)) {
+          errors.push(`${label}.quote.contractSymbol must identify a supported explicit futures contract.`);
+        }
+      } else if (quote.contractSymbol !== undefined) {
+        errors.push(`${label}.quote.contractSymbol is only supported for futures.`);
+      }
+    }
+    const observationDate = quoteObservationDate(quote, item);
+    const latestBarDate = item.bars.at(-1)?.time;
+    const observationMatchesLatest = quote.behavior === 'futures'
+      ? latestBarDate === observationDate || latestBarDate === nextIsoDate(observationDate)
+      : latestBarDate === observationDate;
+    if (observationDate && isIsoDate(latestBarDate) && !observationMatchesLatest) {
+      errors.push(`${label}.quote.observedAt must identify the latest chart bar date.`);
+    }
+    if (quote.behavior === 'daily_observation' && item.sourceSymbol !== 'TREASURY:CURVE'
+      && asStoredChartNumber(quote.last) !== null && quote.last !== item.bars.at(-1)?.close) {
+      errors.push(`${label}.quote.last must match the latest daily observation close.`);
+    }
   }
   return { errors, warnings, series: item };
 }
@@ -1702,9 +1769,45 @@ function isUsableOhlc(open, high, low, close) {
   return !(close > 0 && [open, high, low].some((value) => value <= 0));
 }
 
+function quoteBehavior(row) {
+  if (String(row?.sourceSymbol || '').startsWith('TREASURY:') || String(row?.ticker || '').toUpperCase() === 'MOVE') {
+    return 'daily_observation';
+  }
+  if (COMMODITY_FUTURES.has(String(row?.sourceSymbol || ''))) return 'futures';
+  if (/^[A-Z0-9]+-USD$/.test(String(row?.sourceSymbol || ''))) return 'crypto_utc';
+  return 'session';
+}
+
+function commodityContractCandidates(sourceSymbol, runAt = new Date()) {
+  const spec = COMMODITY_FUTURES.get(String(sourceSymbol || ''));
+  if (!spec) return [];
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', year: 'numeric', month: 'numeric'
+  }).formatToParts(runAt);
+  const year = Number(parts.find((part) => part.type === 'year')?.value);
+  const month = Number(parts.find((part) => part.type === 'month')?.value);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return [];
+  const monthCodes = [...spec.months].map((code) => ({ code, month: 'FGHJKMNQUVXZ'.indexOf(code) + 1 }));
+  const currentIndex = monthCodes.findIndex((candidate) => candidate.month >= month);
+  const normalizedIndex = currentIndex < 0 ? 0 : currentIndex;
+  const currentYear = currentIndex < 0 ? year + 1 : year;
+  const symbol = (candidate, contractYear) => `${spec.root}${candidate.code}${String(contractYear).slice(-2)}.${spec.exchange}`;
+  return Array.from({ length: spec.candidateCount }, (_value, offset) => {
+    const index = (normalizedIndex + offset) % monthCodes.length;
+    const contractYear = currentYear + Math.floor((normalizedIndex + offset) / monthCodes.length);
+    return symbol(monthCodes[index], contractYear);
+  });
+}
+
+function isExplicitCommodityContract(sourceSymbol, contractSymbol) {
+  const spec = COMMODITY_FUTURES.get(String(sourceSymbol || ''));
+  return Boolean(spec && new RegExp(`^${spec.root}[${spec.months}]\\d{2}\\.${spec.exchange}$`).test(String(contractSymbol || '')));
+}
+
 function supportsFinnhubQuote(row) {
-  // Finnhub quote fallback is only for plain U.S. symbols; pseudo-sources, futures, Treasury, and crypto stay on their native fetch paths.
-  return row?.section !== 'crypto' && /^[A-Z][A-Z0-9.]*$/.test(String(row?.sourceSymbol || ''));
+  // Eligibility follows the provider symbol, so U.S.-listed crypto exposures
+  // such as IBIT, ETHA, and MSTR can repair a malformed Yahoo latest candle.
+  return /^[A-Z][A-Z0-9.]*$/.test(String(row?.sourceSymbol || ''));
 }
 
 function finnhubQuoteToken() {
@@ -1722,14 +1825,24 @@ function finnhubQuoteBarFromPayload(payload) {
   const high = asFiniteNumber(payload?.h);
   const low = asFiniteNumber(payload?.l);
   const close = asFiniteNumber(payload?.c);
+  const previous = asFiniteNumber(payload?.pc);
   const timestamp = asFiniteNumber(payload?.t);
-  if (!timestamp || !isUsableOhlc(open, high, low, close)) return null;
+  if (!timestamp || previous === null || !isUsableOhlc(open, high, low, close)) return null;
   return {
     time: isoDateFromEpochSeconds(timestamp),
     open,
     high,
     low,
     close,
+    quote: {
+      behavior: 'session',
+      observedAt: new Date(timestamp * 1000).toISOString(),
+      last: close,
+      previous,
+      open,
+      high,
+      low
+    },
     latestQuoteSource: 'Finnhub Quote API'
   };
 }
@@ -1755,8 +1868,9 @@ function mergeFinnhubQuoteBar(series, quoteBar, volumeByDate = null) {
   if (!latest || quoteBar.time < latest.time) return series;
 
   // Finnhub quote repairs OHLC only; keep Yahoo's same-date volume when Yahoo supplied it in the raw payload.
-  const yahooVolume = volumeByDate?.get?.(quoteBar.time);
-  const existingVolume = quoteBar.time === latest.time ? latest.volume : yahooVolume;
+  const yahooVolume = series.noVolume ? undefined : volumeByDate?.get?.(quoteBar.time);
+  const existingVolume = series.noVolume ? undefined
+    : quoteBar.time === latest.time ? latest.volume : yahooVolume;
   const mergedQuoteBar = existingVolume === undefined ? quoteBar : { ...quoteBar, volume: existingVolume };
   if (quoteBar.time === latest.time) {
     bars[lastIndex] = mergedQuoteBar;
@@ -1770,6 +1884,7 @@ function mergeFinnhubQuoteBar(series, quoteBar, volumeByDate = null) {
       ? 'Yahoo Finance Chart API + Finnhub Quote API'
       : series.source,
     latestQuoteSource: 'Finnhub Quote API',
+    quote: quoteBar.quote,
     bars: uniqueBars(bars)
   };
 }
@@ -1894,126 +2009,49 @@ function treasuryCurveSpreadBpFromEntry(entry) {
   return twoYear === null || tenYear === null ? null : (tenYear - twoYear) * 100;
 }
 
-function treasuryCurveSpreadMetric(latestEntry, previousEntry, comparisonLabel) {
-  const valueBp = treasuryCurveSpreadBpFromEntry(latestEntry);
-  if (valueBp === null) return null;
-  const previousValueBp = treasuryCurveSpreadBpFromEntry(previousEntry);
-  return {
-    label: '2s10s',
-    valueBp,
-    previousValueBp,
-    deltaBp: previousValueBp === null ? null : valueBp - previousValueBp,
-    comparison: comparisonLabel
-  };
-}
-
 function quoteRowFromSeries(item) {
-  const bars = item.bars || [];
-  const latest = bars[bars.length - 1];
-  const previous = bars[bars.length - 2];
-  if (!latest || !previous) {
-    throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
+  const quote = item?.quote;
+  if (!quote || typeof quote !== 'object' || !QUOTE_BEHAVIORS.has(quote.behavior)
+    || asStoredChartNumber(quote.last) === null) {
+    throw new Error(`${item?.ticker || 'Chart series'} quote metadata is unavailable`);
   }
-  const previousClose = previous.close;
-  const delta = latest.close - previousClose;
-  const pct = previousClose ? (delta / previousClose) * 100 : 0;
+  const unavailable = '—';
+  const hasPrevious = asStoredChartNumber(quote.previous) !== null;
+  const delta = hasPrevious ? quote.last - quote.previous : null;
+  const pct = hasPrevious && quote.previous ? (delta / quote.previous) * 100 : null;
   const isYield = item.unit === 'percent_yield';
-  if (item.sourceSymbol === 'TREASURY:CURVE' && item.curveSpread?.label && Number.isFinite(item.curveSpread.valueBp)) {
-    const deltaBp = item.curveSpread.deltaBp;
-    return {
-      name: item.name,
-      ticker: item.ticker,
-      last: `${item.curveSpread.label} ${signedBasisPoints(item.curveSpread.valueBp)}`,
-      delta: Number.isFinite(deltaBp) ? signedBasisPoints(deltaBp) : 'n/a',
-      pct: item.curveSpread.comparison || '1D',
-      dir: Number.isFinite(deltaBp) ? direction(deltaBp) : 'flat',
-      sourceSymbol: item.sourceSymbol,
-      asOf: latest.time
-    };
-  }
+  const isCurve = item.sourceSymbol === 'TREASURY:CURVE';
+  const isCrypto = quote.behavior === 'crypto_utc';
+  const noOhl = quote.behavior === 'daily_observation';
+  const formatPrice = (value) => isCrypto ? formatCryptoPrice(value) : numberFormat(value, 2);
+  const formattedDelta = delta === null ? unavailable
+    : isCrypto ? formatCryptoDelta(delta, quote.last)
+      : isYield ? signedBasisPoints(isCurve ? delta : delta * 100)
+        : signedNumber(delta);
   return {
     name: item.name,
     ticker: item.ticker,
-    last: isYield ? `${numberFormat(latest.close, 2)}%` : numberFormat(latest.close, 2),
-    delta: signedNumber(delta),
-    pct: signedPct(pct),
-    dir: direction(pct),
+    last: isCurve ? signedBasisPoints(quote.last)
+      : isYield ? `${numberFormat(quote.last, 2)}%` : formatPrice(quote.last),
+    previous: !hasPrevious ? unavailable
+      : isCurve ? signedBasisPoints(quote.previous)
+        : isYield ? `${numberFormat(quote.previous, 2)}%` : formatPrice(quote.previous),
+    delta: formattedDelta,
+    pct: isYield || pct === null ? unavailable : signedPct(pct),
+    open: noOhl ? unavailable : formatPrice(quote.open),
+    high: noOhl ? unavailable : formatPrice(quote.high),
+    low: noOhl ? unavailable : formatPrice(quote.low),
+    dir: direction(isYield ? (isCurve ? delta : delta === null ? null : delta * 100) : pct),
     sourceSymbol: item.sourceSymbol,
-    asOf: latest.time
+    asOf: quote.observedAt,
+    quoteRevision: item.quoteRevision
   };
-}
-
-function cryptoQuoteRowFromSeries(item) {
-  const bars = item.bars || [];
-  const latest = bars[bars.length - 1];
-  const previous = bars[bars.length - 2];
-  if (!latest || !previous) {
-    throw new Error(`${item.ticker} response did not include enough bars for quote fields`);
-  }
-
-  const delta = latest.close - previous.close;
-  const pct = previous.close ? (delta / previous.close) * 100 : 0;
-  return {
-    sym: item.ticker,
-    ticker: item.ticker,
-    name: item.name,
-    sub: item.ticker,
-    price: formatCryptoPrice(latest.close),
-    delta: formatCryptoDelta(delta, latest.close),
-    chg: signedPct(pct),
-    dir: direction(pct),
-    asOf: latest.time
-  };
-}
-
-function attachTapeComparisonContext(rows, chartData) {
-  // Handoff-only context uses the same bar dates as quote derivation. A daily
-  // bar date is not an observation timestamp or proof of a completed session.
-  const seriesByTicker = new Map((Array.isArray(chartData?.series) ? chartData.series : [])
-    .filter((item) => item && typeof item === 'object')
-    .map((item) => [item.ticker, item]));
-  return (Array.isArray(rows) ? rows : []).map((row) => {
-    const item = seriesByTicker.get(row?.ticker);
-    const bars = Array.isArray(item?.bars) ? item.bars : [];
-    const previous = objectBar(bars.at(-2));
-    const latest = objectBar(bars.at(-1));
-    const usable = item?.sourceSymbol === row?.sourceSymbol
-      && isIsoDate(previous.time) && isIsoDate(latest.time) && previous.time < latest.time;
-    let marketType = 'unknown';
-    if (item?.sourceKey === 'treasury_yield_curve' || item?.sourceKey === 'eodhd_eod') {
-      marketType = 'daily_observation';
-    } else if (item?.sourceKey === 'yahoo_chart') {
-      marketType = /^[A-Z0-9]+-USD$/.test(item.sourceSymbol)
-        ? 'continuous_market' : 'exchange_session';
-    }
-    return {
-      ...row,
-      comparisonContext: {
-        quoteStatus: !usable ? 'unavailable'
-          : item.availability?.status === 'carried_forward' || chartData?.availability?.status === 'carried_forward'
-            ? 'carried_forward' : 'refreshed',
-        marketType: usable ? marketType : 'unknown',
-        previousBarDate: usable ? previous.time : null,
-        latestBarDate: usable ? latest.time : null,
-        timeZone: usable ? item.exchangeTimezoneName || null : null
-      }
-    };
-  });
 }
 
 function deriveQuoteRowsFromSeries(series) {
   // Keep every downstream price view reproducible from the canonical series payload rather than
   // letting derived quote rows drift into a separately maintained market-data store.
-  const tape = [];
-  const crypto = [];
-  for (const item of Array.isArray(series) ? series : []) {
-    if (item?.section === 'crypto') {
-      crypto.push(cryptoQuoteRowFromSeries(item));
-      continue;
-    }
-    tape.push(quoteRowFromSeries(item));
-  }
-  return { tape, crypto };
+  return (Array.isArray(series) ? series : []).map(quoteRowFromSeries);
 }
 
 async function fetchYahooSeries(row, args, startDate, endDate, dependencies = {}) {
@@ -2027,7 +2065,54 @@ async function fetchYahooSeries(row, args, startDate, endDate, dependencies = {}
         {},
         dependencies
       );
-      const series = parseYahooSeries(row, payload, host);
+      let series;
+      if (COMMODITY_FUTURES.has(row.sourceSymbol)) {
+        const candidates = commodityContractCandidates(row.sourceSymbol, endDate);
+        const priorContract = String(dependencies.priorSeries?.quote?.contractSymbol || '');
+        if (isExplicitCommodityContract(row.sourceSymbol, priorContract) && !candidates.includes(priorContract)) {
+          candidates.push(priorContract);
+        }
+        const contractPayloads = new Map();
+        const contractSeries = new Map();
+        for (const symbol of candidates) {
+          if (args.delayMs) await (dependencies.sleep || sleep)(args.delayMs);
+          try {
+            const contractPayload = await fetchYahooJsonWithRetry(
+              yahooChartUrl(host, symbol, startDate, endDate), args, {}, dependencies
+            );
+            const meta = contractPayload?.chart?.result?.[0]?.meta;
+            if (meta?.symbol !== symbol || meta?.instrumentType !== 'FUTURE') {
+              throw new Error('response did not identify the requested explicit contract');
+            }
+            const candidate = parseYahooSeries(row, contractPayload, host, { contractSymbol: symbol });
+            // Validate before freshness/selection so a malformed preferred contract
+            // cannot suppress a usable alternative. The caller owns the final revision.
+            const validation = validateChartSeriesContract({ ...candidate, quoteRevision: endDate.toISOString() }, row);
+            if (validation.errors.length) throw new Error(validation.errors.join(' '));
+            contractPayloads.set(symbol, contractPayload);
+            contractSeries.set(symbol, candidate);
+          } catch (error) {
+            errors.push(`${host}/${symbol}: ${error.message}`);
+          }
+        }
+        const freshestDate = [...contractPayloads.values()]
+          .map((candidatePayload) => dailyYahooMatchBars(candidatePayload).at(-1)?.time || '')
+          .sort().at(-1) || '';
+        const eligiblePayloads = new Map([...contractPayloads].filter(([_symbol, candidatePayload]) => (
+          dailyYahooMatchBars(candidatePayload).at(-1)?.time === freshestDate
+        )));
+        const matched = resolveCommodityContract(payload, eligiblePayloads);
+        const selectionOrder = [...new Set([
+          matched,
+          priorContract,
+          ...candidates
+        ].filter(Boolean))];
+        const selected = contractSeries.get(selectionOrder.find((symbol) => eligiblePayloads.has(symbol)));
+        if (!selected) throw new Error(`${row.sourceSymbol} explicit contract quote data was unavailable`);
+        series = parseYahooSeries(row, payload, host, { quote: selected.quote });
+      } else {
+        series = parseYahooSeries(row, payload, host);
+      }
       const quoteBar = shouldUseFinnhubQuoteFallback(series, payload, { endDate })
         ? await fetchFinnhubQuoteBar(row, args)
         : null;
@@ -2074,6 +2159,12 @@ function parseEodhdMoveSeries(row, payload, startDate, endDate) {
     noVolume: true,
     currency: 'USD',
     exchangeTimezoneName: 'America/New_York',
+    quote: {
+      behavior: 'daily_observation',
+      observedAt: normalizedBars.at(-1).time,
+      last: normalizedBars.at(-1).close,
+      previous: normalizedBars.at(-2).close
+    },
     bars: normalizedBars
   };
 }
@@ -2101,7 +2192,74 @@ function yahooVolumeByDate(payload) {
   }).filter(Boolean));
 }
 
-function parseYahooSeries(row, payload, host) {
+function yahooQuoteFromResult(row, result, bars, { contractSymbol = '' } = {}) {
+  const behavior = quoteBehavior(row);
+  const quoteTime = asFiniteNumber(result?.meta?.regularMarketTime);
+  const metadataLast = asFiniteNumber(result?.meta?.regularMarketPrice);
+  const observedDate = quoteTime && metadataLast !== null
+    ? behavior === 'crypto_utc'
+      ? isoDateFromEpochSeconds(quoteTime)
+      : isoDateFromEpochSecondsInTimeZone(quoteTime, result?.meta?.exchangeTimezoneName || 'UTC')
+    : '';
+  const latestBarIndex = bars.length - 1;
+  const futuresMetadataMatches = behavior === 'futures'
+    && (bars[latestBarIndex]?.time === observedDate || bars[latestBarIndex]?.time === nextIsoDate(observedDate));
+  const exactObservedIndex = behavior === 'futures'
+    ? futuresMetadataMatches ? latestBarIndex : -1
+    : bars.findLastIndex((bar) => bar.time === observedDate);
+  // A provider quote timestamp is used only with the daily candle containing
+  // that quote. Otherwise the latest completed daily candle is the observation;
+  // this never invents a fetch-time or midnight timestamp for its close.
+  const observedBarIndex = exactObservedIndex >= 0 ? exactObservedIndex : latestBarIndex;
+  const observedBar = bars[observedBarIndex];
+  const previousBar = observedBarIndex > 0 ? bars[observedBarIndex - 1] : null;
+  if (!observedBar) throw new Error(`${row.sourceSymbol} response did not include an OHLC bar for its quote observation`);
+  const previous = asStoredChartNumber(previousBar?.close);
+  if (previous === null) throw new Error(`${row.sourceSymbol} response did not include a prior comparison close`);
+  const useMetadata = exactObservedIndex >= 0;
+  return {
+    behavior,
+    observedAt: useMetadata ? new Date(quoteTime * 1000).toISOString() : observedBar.time,
+    last: useMetadata ? metadataLast : observedBar.close,
+    previous,
+    open: observedBar.open,
+    high: observedBar.high,
+    low: observedBar.low,
+    ...(contractSymbol ? { contractSymbol } : {})
+  };
+}
+
+function dailyYahooMatchBars(payload) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  return timestamps.map((timestamp, index) => {
+    const open = asFiniteNumber(quote.open?.[index]);
+    const high = asFiniteNumber(quote.high?.[index]);
+    const low = asFiniteNumber(quote.low?.[index]);
+    const close = asFiniteNumber(quote.close?.[index]);
+    return Number.isFinite(Number(timestamp)) && isUsableOhlc(open, high, low, close)
+      ? { time: isoDateFromEpochSeconds(Number(timestamp)), open, high, low, close }
+      : null;
+  }).filter(Boolean);
+}
+
+function sameDailyYahooBar(left, right) {
+  return left?.time === right?.time && ['open', 'high', 'low', 'close']
+    .every((field) => Math.abs(left[field] - right[field]) <= 1e-9);
+}
+
+function resolveCommodityContract(aliasPayload, contractPayloads) {
+  const aliasBars = dailyYahooMatchBars(aliasPayload).slice(-3);
+  if (aliasBars.length < 2) return '';
+  const matches = [...contractPayloads].filter(([_symbol, payload]) => {
+    const barsByDate = new Map(dailyYahooMatchBars(payload).map((bar) => [bar.time, bar]));
+    return aliasBars.every((bar) => barsByDate.has(bar.time) && sameDailyYahooBar(bar, barsByDate.get(bar.time)));
+  });
+  return matches.length === 1 ? matches[0][0] : '';
+}
+
+function parseYahooSeries(row, payload, host, options = {}) {
   const result = payload?.chart?.result?.[0];
   const chartError = payload?.chart?.error;
   if (!result) {
@@ -2111,7 +2269,8 @@ function parseYahooSeries(row, payload, host) {
   const timestamps = Array.isArray(result.timestamp) ? result.timestamp : [];
   const quote = result.indicators?.quote?.[0] || {};
   const volumes = Array.isArray(quote.volume) ? quote.volume : [];
-  const hasRealVolume = volumes.some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
+  const suppressVolume = CASH_INDEX_TICKERS.has(String(row?.ticker || '').toUpperCase());
+  const hasRealVolume = !suppressVolume && volumes.some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
   const points = timestamps.map((timestamp, index) => {
     const close = asFiniteNumber(quote.close?.[index]);
     if (!Number.isFinite(timestamp) || close === null) return null;
@@ -2143,7 +2302,7 @@ function parseYahooSeries(row, payload, host) {
     throw new Error(`${row.sourceSymbol} response did not include usable daily OHLC bars`);
   }
 
-  return {
+  const series = {
     ...seriesBase(row),
     source: 'Yahoo Finance Chart API',
     sourceKey: 'yahoo_chart',
@@ -2155,6 +2314,8 @@ function parseYahooSeries(row, payload, host) {
     exchangeTimezoneName: result.meta?.exchangeTimezoneName || null,
     bars: uniqueBars(bars)
   };
+  series.quote = options.quote || yahooQuoteFromResult(row, result, series.bars, options);
+  return series;
 }
 
 async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthCache) {
@@ -2212,6 +2373,16 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
     noVolume: true,
     unit: 'percent_yield',
     exchangeTimezoneName: null,
+    quote: {
+      behavior: 'daily_observation',
+      observedAt: bars.at(-1).time,
+      last: row.sourceSymbol === 'TREASURY:CURVE'
+        ? treasuryCurveSpreadBpFromEntry(latestCurveEntry)
+        : bars.at(-1).close,
+      previous: row.sourceSymbol === 'TREASURY:CURVE'
+        ? treasuryCurveSpreadBpFromEntry(previousDailyCurveEntry)
+        : bars.at(-2)?.close ?? null
+    },
     bars: uniqueBars(bars)
   };
   if (curve.length) {
@@ -2222,7 +2393,6 @@ async function fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthC
       date: comparison.entry.time,
       points: treasuryCurvePointsFromEntry(comparison.entry)
     }));
-    series.curveSpread = treasuryCurveSpreadMetric(latestCurveEntry, previousDailyCurveEntry, '1D');
   }
   return series;
 }
@@ -2291,22 +2461,17 @@ function seriesBase(row) {
   };
 }
 
-async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache) {
+async function fetchSeries(row, args, startDate, endDate, treasuryMonthCache, dependencies = {}) {
   if (row.sourceSymbol.startsWith('TREASURY:')) {
     return fetchTreasurySeries(row, args, startDate, endDate, treasuryMonthCache);
   }
   if (String(row?.ticker || '').toUpperCase() === 'MOVE') {
     return fetchEodhdMoveSeries(row, args, startDate, endDate);
   }
-  return fetchYahooSeries(row, args, startDate, endDate);
+  return fetchYahooSeries(row, args, startDate, endDate, dependencies);
 }
 
 function chartOutput({ args, series, failures, generatedAt, quoteRevision, startDate, endDate }) {
-  const chartSeries = series.map((item) => {
-    // Chart data is the market-data payload only; editorial notes stay in dashboard-data.
-    const { note: _note, ...chartItem } = item || {};
-    return chartItem;
-  });
   return {
     schemaVersion: 1,
     generatedAt,
@@ -2323,7 +2488,7 @@ function chartOutput({ args, series, failures, generatedAt, quoteRevision, start
         failures
       }
     } : {}),
-    series: chartSeries
+    series
   };
 }
 
@@ -2340,8 +2505,7 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
   if (!inputRows.length) throw new Error('No chartable rows matched the requested --ticker values.');
   const executionTime = dependencies.now instanceof Date ? dependencies.now : new Date();
   const endDate = args.asOf || executionTime;
-  // generatedAt is the requested chart cutoff; quoteRevision is execution time
-  // so same-cutoff reruns can still force fresh editorial review.
+  // generatedAt is the requested chart cutoff; quoteRevision identifies this fetch.
   const generatedAt = endDate.toISOString();
   const quoteRevision = executionTime.toISOString();
   const startDate = new Date(endDate.getTime() - args.days * 24 * 60 * 60 * 1000);
@@ -2385,7 +2549,14 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const row = inputRows[index];
     const tickerKey = String(row.ticker || '').toUpperCase();
     try {
-      const item = await (dependencies.fetchSeries || fetchSeries)(row, args, startDate, endDate, treasuryMonthCache);
+      const item = await (dependencies.fetchSeries || fetchSeries)(
+        row,
+        args,
+        startDate,
+        endDate,
+        treasuryMonthCache,
+        { priorSeries: canonicalByTicker.get(tickerKey) }
+      );
       const prior = tickerKey === 'MOVE' ? moveHistoryByTicker.get(tickerKey) : canonicalByTicker.get(tickerKey);
       const refreshedSeries = {
         ...mergeMoveHistory(item, prior, row, startDate, endDate),
@@ -2449,15 +2620,13 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
 module.exports = {
   DEFAULT_DAYS,
   REQUEST_TIMEOUT_MS,
-  acceptedFreshChartTickers,
   buildChartDataFallback,
   buildUnavailableChartData,
   buildUnavailableFuturesPayload: futuresModule.buildUnavailableFuturesPayload,
   CHART_ROW_CONCURRENCY,
     easternCashOpen: futuresModule.easternCashOpen,
   deriveQuoteRowsFromSeries,
-  attachTapeComparisonContext,
-  cryptoQuoteRowFromSeries,
+  commodityContractCandidates,
   compactChartPayload,
   eodhdMoveUrl,
   assertFinnhubQuoteRepairFreshness,
@@ -2480,6 +2649,7 @@ module.exports = {
     parseFuture: futuresModule.parseFuture,
     premarketCutoff: futuresModule.premarketCutoff,
   priorFuturesContracts: futuresModule.priorFuturesContracts,
+  resolveCommodityContract,
   resolveFuturesContract: futuresModule.resolveFuturesContract,
     scheduledNow: futuresModule.scheduledNow,
   runFutures: futuresModule.run,
@@ -2490,9 +2660,9 @@ module.exports = {
   validateChartStagingPayload,
   readChartableRows,
   readEmbeddedChartPayload,
-  readCryptoRows,
   readTapeRows,
   shouldUseFinnhubQuoteFallback,
+  supportsFinnhubQuote,
   retryAfterDelayMs,
   sleep,
   validateFuturesPayload: futuresModule.validateFuturesPayload

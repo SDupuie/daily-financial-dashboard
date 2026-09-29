@@ -7,14 +7,12 @@ const NEWS_CANDIDATE_REF_PATTERN = /^(generalCandidates|futuresCandidates|crypto
 const EDITORIAL_SECTION_NAMES = Object.freeze([
   'opening',
   'futures-news',
-  'tape-commentary',
   'stories',
   'crypto',
   'earnings',
   'market-lens'
 ]);
 const SUPERLATIVE_PATTERN = /\b(?:record(?:\s+(?:closes?|highs?|lows?|sales?))?|all[- ]time|fresh highs?|new highs?)\b/gi;
-const TAPE_COMMENTARY_UNAVAILABLE_NOTE = '';
 
 function isIsoTimestamp(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return false;
@@ -38,64 +36,6 @@ function editorialPayloadHash(data, chartData) {
   return crypto.createHash('sha256').update(stableJson({ dashboardData, chartData: embeddedChartData })).digest('hex');
 }
 
-function unavailableTapeCommentary(row, quoteRevision) {
-  if (!isIsoTimestamp(quoteRevision)) throw new Error('Tape commentary quoteRevision must be an offset-bearing ISO timestamp.');
-  return {
-    ...row,
-    note: TAPE_COMMENTARY_UNAVAILABLE_NOTE,
-    noteDisposition: {
-      status: 'commentary_unavailable',
-      quoteRevision
-    }
-  };
-}
-
-function reviewedTapeCommentary(row, note, quoteRevision, reviewedAt) {
-  if (!isIsoTimestamp(quoteRevision)) throw new Error('Tape commentary quoteRevision must be an offset-bearing ISO timestamp.');
-  if (!isIsoTimestamp(reviewedAt)) throw new Error('Tape commentary reviewedAt must be an offset-bearing ISO timestamp.');
-  return {
-    ...row,
-    note: String(note || '').trim(),
-    noteDisposition: {
-      status: 'reviewed',
-      quoteRevision,
-      reviewedAt
-    }
-  };
-}
-
-function validateTapeCommentaryDisposition(row) {
-  const errors = [];
-  const disposition = row?.noteDisposition;
-  if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)) {
-    return ['noteDisposition must bind commentary to the accepted quote revision.'];
-  }
-  if (!isIsoTimestamp(disposition.quoteRevision)) {
-    errors.push('noteDisposition.quoteRevision must be an offset-bearing ISO timestamp.');
-  }
-  if (disposition.status === 'reviewed') {
-    if (!isIsoTimestamp(disposition.reviewedAt)) {
-      errors.push('reviewed Tape commentary must include an offset-bearing reviewedAt timestamp.');
-    }
-    if (!String(row?.note || '').trim()) {
-      errors.push('reviewed Tape commentary must include commentary text.');
-    }
-    if (Object.prototype.hasOwnProperty.call(disposition, 'attemptedAt') || Object.prototype.hasOwnProperty.call(disposition, 'reason')) {
-      errors.push('reviewed Tape commentary cannot retain unavailable-disposition fields.');
-    }
-  } else if (disposition.status === 'commentary_unavailable') {
-    if (String(row?.note || '').trim()) {
-      errors.push('unavailable Tape commentary must leave note blank.');
-    }
-    if (Object.prototype.hasOwnProperty.call(disposition, 'reviewedAt')) {
-      errors.push('unavailable Tape commentary cannot retain reviewedAt.');
-    }
-  } else {
-    errors.push('noteDisposition.status must be reviewed or commentary_unavailable.');
-  }
-  return errors;
-}
-
 function editorialTextEntries(data) {
   const entries = [];
   const add = (path, value) => {
@@ -104,8 +44,6 @@ function editorialTextEntries(data) {
   add('opening.headline', data?.opening?.headline);
   add('opening.deck', data?.opening?.deck);
   (data?.opening?.catalysts || []).forEach((item, index) => add(`opening.catalysts[${index}].body`, item?.body));
-  add('tape.label', data?.tape?.label);
-  (data?.tape?.rows || []).forEach((item, index) => add(`tape.rows[${index}].note`, item?.note));
   (data?.futuresModule?.stories || []).forEach((item, index) => {
     add(`futuresModule.stories[${index}].title`, item?.title);
     add(`futuresModule.stories[${index}].body`, item?.body);
@@ -423,7 +361,7 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
     for (const [index, fallback] of systemFallbacks.entries()) {
       if (!EDITORIAL_SECTION_NAMES.includes(fallback?.section)) errors.push(`editorial review systemFallbacks[${index}].section is invalid.`);
       if (typeof fallback?.path !== 'string' || !fallback.path.trim()) errors.push(`editorial review systemFallbacks[${index}].path must be populated.`);
-      if (!['retained_candidate', 'omitted', 'setup_default', 'commentary_unavailable', 'unavailable_disposition'].includes(fallback?.action)) errors.push(`editorial review systemFallbacks[${index}].action is invalid.`);
+      if (!['retained_candidate', 'omitted', 'setup_default', 'commentary_unavailable'].includes(fallback?.action)) errors.push(`editorial review systemFallbacks[${index}].action is invalid.`);
       if (typeof fallback?.reason !== 'string' || !fallback.reason.trim()) errors.push(`editorial review systemFallbacks[${index}].reason must be populated.`);
       const identity = `${fallback?.section || ''}:${fallback?.path || ''}:${fallback?.action || ''}`;
       if (identities.has(identity)) errors.push(`editorial review systemFallbacks contains duplicate disposition ${identity}.`);
@@ -450,20 +388,6 @@ function validateReviewManifest(manifest, data, { requireEmbedded = false, expec
 
   // Embedded receipt validation is diagnostic/test-only; readiness does not require receipts.
   if (requireEmbedded) {
-    const unavailableFallbacksByPath = new Map(
-      (systemFallbacks || [])
-        .filter((fallback) => fallback?.section === 'tape-commentary' && fallback?.action === 'unavailable_disposition')
-        .map((fallback) => [fallback.path, fallback])
-    );
-    const unavailableRowsByPath = new Map();
-    for (const row of data?.tape?.rows || []) {
-      if (row?.noteDisposition?.status !== 'commentary_unavailable') continue;
-      const path = `tape.rows.${String(row?.ticker || '').trim().toUpperCase()}.note`;
-      unavailableRowsByPath.set(path, row);
-    }
-    for (const path of unavailableFallbacksByPath.keys()) {
-      if (!unavailableRowsByPath.has(path)) errors.push(`editorial review records an unavailable Tape commentary disposition for ${path}, but the row is not commentary_unavailable.`);
-    }
     const unavailableMarketLensFallbacksByPath = new Map(
       (systemFallbacks || [])
         .filter((fallback) => fallback?.section === 'market-lens' && fallback?.action === 'commentary_unavailable')
@@ -517,17 +441,13 @@ function buildEditorialReview(data, manifest, chartData) {
 
 module.exports = {
   EDITORIAL_REVIEW_SCHEMA_VERSION,
-  TAPE_COMMENTARY_UNAVAILABLE_NOTE,
   buildEditorialReview,
   buildNewsReviewSummary,
   evaluateNewsReviewEvidence,
   editorialPayloadHash,
   editorialTextEntries,
-  reviewedTapeCommentary,
   stableJson,
   superlativeClaims,
-  unavailableTapeCommentary,
   validateNewsReviewEvidence,
-  validateTapeCommentaryDisposition,
   validateReviewManifest
 };

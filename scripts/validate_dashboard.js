@@ -12,7 +12,6 @@ const {
   singleScriptBlockById
 } = require('./dashboard_script_blocks');
 const { validateEarningsWeekPayload } = require('./earnings_week_validation');
-const { validateTapeCommentaryDisposition } = require('./editorial_review_contract');
 const { futuresStoryPublicationWindow } = require('./news_contract');
 const {
   deriveQuoteRowsFromSeries,
@@ -27,6 +26,10 @@ const defaultDashboard = path.resolve(root, 'daily_financial_news.html');
 const defaultChartData = path.resolve(root, 'generated', 'chart_data.json');
 const DASHBOARD_VALIDATION_MODES = new Set(['staged', 'published']);
 const LOCAL_MARKET_REFRESH_URL = 'https://192.168.2.2:2210/api/market-refresh';
+const TAPE_ROW_FIELDS = Object.freeze([
+  'name', 'ticker', 'last', 'previous', 'delta', 'pct', 'open', 'high', 'low',
+  'dir', 'sourceSymbol', 'asOf', 'quoteRevision'
+]);
 
 function walkJavaScriptAst(node, ancestors, visitor) {
   if (!node || typeof node !== 'object' || typeof node.type !== 'string') return;
@@ -466,18 +469,15 @@ function validateChartAvailabilityCorrespondence(errors, payload, seriesByTicker
 
 function quoteRowsByTicker(derivedRows) {
   const byTicker = new Map();
-  for (const row of derivedRows.tape || []) {
-    byTicker.set(String(row?.ticker || '').toUpperCase(), { section: 'tape', row });
-  }
-  for (const row of derivedRows.crypto || []) {
-    byTicker.set(String(row?.ticker || row?.sym || '').toUpperCase(), { section: 'crypto', row });
+  for (const row of Array.isArray(derivedRows) ? derivedRows : []) {
+    byTicker.set(String(row?.ticker || '').toUpperCase(), row);
   }
   return byTicker;
 }
 
 function validateDerivedDashboardQuoteRows(errors, chartableRows, series, prefix) {
   // This proves visible price fields are reproducible from chart-data.series;
-  // editorial tape notes remain owned by dashboard-data.tape.rows.
+  // dashboard-data.tape.rows is only the deterministic display projection.
   if (!Array.isArray(chartableRows) || !chartableRows.length) return;
   let derivedRows;
   try {
@@ -490,35 +490,34 @@ function validateDerivedDashboardQuoteRows(errors, chartableRows, series, prefix
   for (const [index, rowRaw] of chartableRows.entries()) {
     const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
     const ticker = String(row?.ticker || '').toUpperCase();
-    const section = String(row?.section || 'tape');
     const label = ticker || `dashboard tape.rows[${index}]`;
     const derived = byTicker.get(ticker);
     if (!derived) {
       errors.push(`${label} is missing derived quote fields from ${prefix || 'chart-data.'}series.`);
       continue;
     }
-    if (derived.section !== section) {
-      errors.push(`${label} must derive from a ${section} chart series.`);
-      continue;
-    }
-    const fieldsToMatch = section === 'crypto'
-      ? [['last', 'price'], ['delta', 'delta'], ['pct', 'chg'], ['dir', 'dir'], ['asOf', 'asOf']]
-      : [['last', 'last'], ['delta', 'delta'], ['pct', 'pct'], ['dir', 'dir'], ['asOf', 'asOf']];
-    for (const [dashboardField, derivedField] of fieldsToMatch) {
-      if (String(row[dashboardField] ?? '') !== String(derived.row[derivedField] ?? '')) {
-        errors.push(`${label}.${dashboardField} must match the latest ${prefix || 'chart-data.'}series-derived value "${derived.row[derivedField]}".`);
+    for (const field of TAPE_ROW_FIELDS) {
+      if (String(row[field] ?? '') !== String(derived[field] ?? '')) {
+        errors.push(`${label}.${field} must match the ${prefix || 'chart-data.'}series-derived value "${derived[field]}".`);
       }
     }
   }
 }
 
-function validateDashboardTapeCommentary(errors, data) {
-  for (const [index, rowRaw] of (Array.isArray(data?.tape?.rows) ? data.tape.rows : []).entries()) {
-    const row = rowRaw && typeof rowRaw === 'object' ? rowRaw : {};
-    const ticker = String(row?.ticker || '').toUpperCase();
-    const label = ticker || `tape.rows[${index}]`;
-    for (const error of validateTapeCommentaryDisposition(row)) {
-      errors.push(`${label}.${error}`);
+function validateDashboardTapeRows(errors, data) {
+  const expectedFields = new Set(TAPE_ROW_FIELDS);
+  for (const [index, row] of (Array.isArray(data?.tape?.rows) ? data.tape.rows : []).entries()) {
+    const label = `tape.rows[${index}]`;
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      errors.push(`${label} must be an object.`);
+      continue;
+    }
+    for (const field of TAPE_ROW_FIELDS) {
+      if (!Object.hasOwn(row, field)) errors.push(`${label}.${field} is required.`);
+      else if (typeof row[field] !== 'string') errors.push(`${label}.${field} must be a string.`);
+    }
+    for (const field of Object.keys(row)) {
+      if (!expectedFields.has(field)) errors.push(`${label}.${field} is not supported.`);
     }
   }
 }
@@ -706,18 +705,10 @@ function parseChartDataArgs(argv) {
 }
 
 function chartableRowsFromDashboardData(data) {
-  // The Tape and chart data contract in docs/reference.md makes tape.rows the only chartable ticker source; section decides derived quote shape.
-  const tapeRows = Array.isArray(data.tape?.rows)
-    ? data.tape.rows
-      .filter((row) => String(row?.group ?? '') !== 'Crypto')
-      .map((row) => ({ ...row, section: 'tape', ticker: row?.ticker }))
+  // Every chart series projects to the single deterministic Tape row contract.
+  return Array.isArray(data.tape?.rows)
+    ? data.tape.rows.map((row) => ({ ...row, section: 'tape', ticker: row?.ticker }))
     : [];
-  const cryptoTickerRows = Array.isArray(data.tape?.rows)
-    ? data.tape.rows
-      .filter((row) => String(row?.group ?? '') === 'Crypto' && row?.sourceSymbol)
-      .map((row) => ({ ...row, section: 'crypto', ticker: row?.ticker }))
-    : [];
-  return [...tapeRows, ...cryptoTickerRows];
 }
 
 function chartableRowsFromDashboardHtml(dashboardHtml) {
@@ -982,8 +973,7 @@ if (!dashboardScript) {
       validateEmbeddedWeekAheadContract(errors, data);
       validateEmbeddedEarningsWeekContract(errors, data);
       validateEmbeddedNewsMetadataContract(errors, data, options);
-      validateDashboardTapeCommentary(errors, data);
-
+      validateDashboardTapeRows(errors, data);
       const { expectedByTicker, expectedSectionByTicker } = chartExpectationsFromRows(errors, chartableRows);
       if (chartData) {
         validateChartPayload(errors, chartData, {

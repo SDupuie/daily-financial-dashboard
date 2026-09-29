@@ -5,7 +5,6 @@ const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const {
-  acceptedFreshChartTickers,
   compactChartPayload,
   quoteRowFromSeries,
   roundChartPayload
@@ -21,12 +20,10 @@ const {
   replaceJsonBlock,
   runEditorialApply,
   runWithSectionFallback,
-  stageDashboardCandidate,
-  syncDashboardPricesFromChartData
+  stageDashboardCandidate
 } = require('./run_daily_update');
 const {
   evaluateNewsReviewEvidence,
-  reviewedTapeCommentary,
   validateNewsReviewEvidence
 } = require('./editorial_review_contract');
 const { chicagoDateParts, scheduledNow } = require('./calendar_contract');
@@ -270,23 +267,54 @@ const malformedEarningsPublishedCases = [
   { name: 'unsupported-range', change: (data) => { data.earnings.week.range = { from: '2026-07-10', to: '2026-07-17' }; } }
 ];
 
+const malformedTapeQuotePublishedCases = [
+  { name: 'absent', change: (series) => { delete series.quote; } },
+  { name: 'null', change: (series) => { series.quote = null; } },
+  { name: 'wrong-primitive', change: (series) => { series.quote = 'invalid'; } },
+  { name: 'wrong-container', change: (series) => { series.quote = []; } },
+  { name: 'malformed-member', change: (series) => { series.quote.observedAt = 'not-a-date'; } }
+];
+
 function chartSeriesFixture() {
   const quoteRevision = '2026-07-10T12:00:00.000Z';
-  return ['SPX', 'VCR', 'UST10Y'].map((ticker, index) => ({
-    ticker,
-    name: `Fixture ${ticker}`,
-    section: 'tape',
-    sourceSymbol: ticker,
-    quoteRevision,
-    source: 'Yahoo Finance Chart API',
-    dataKind: 'ohlc',
-    priceOnly: false,
-    noVolume: false,
-    bars: [
-      { time: '2026-07-09', open: 100 + index, high: 101 + index, low: 99 + index, close: 100 + index, volume: 1000 },
-      { time: '2026-07-10', open: 100 + index, high: 102 + index, low: 99 + index, close: 101 + index, volume: 1100 }
-    ]
-  }));
+  return ['SPX', 'VCR', 'UST10Y'].map((ticker, index) => {
+    const dailyObservation = ticker === 'UST10Y';
+    const latest = 101 + index;
+    const previous = 100 + index;
+    return {
+      ticker,
+      name: `Fixture ${ticker}`,
+      section: 'tape',
+      sourceSymbol: dailyObservation ? 'TREASURY:10Y' : ticker,
+      quoteRevision,
+      source: dailyObservation ? 'U.S. Treasury Fiscal Data API' : 'Yahoo Finance Chart API',
+      dataKind: dailyObservation ? 'close' : 'ohlc',
+      priceOnly: dailyObservation,
+      noVolume: dailyObservation || ticker === 'SPX',
+      ...(dailyObservation ? { unit: 'percent_yield' } : {}),
+      quote: {
+        behavior: dailyObservation ? 'daily_observation' : 'session',
+        observedAt: dailyObservation ? '2026-07-10' : '2026-07-10T20:00:00.000Z',
+        last: latest,
+        previous,
+        ...(dailyObservation ? {} : { open: previous, high: latest + 1, low: previous - 1 })
+      },
+      bars: [
+        dailyObservation
+          ? { time: '2026-07-09', open: previous, high: previous, low: previous, close: previous }
+          : {
+            time: '2026-07-09', open: previous, high: previous + 1, low: previous - 1, close: previous,
+            ...(ticker === 'VCR' ? { volume: 1000 } : {})
+          },
+        dailyObservation
+          ? { time: '2026-07-10', open: latest, high: latest, low: latest, close: latest }
+          : {
+            time: '2026-07-10', open: previous, high: latest + 1, low: previous - 1, close: latest,
+            ...(ticker === 'VCR' ? { volume: 1100 } : {})
+          }
+      ]
+    };
+  });
 }
 
 function createDashboardValidationFixture() {
@@ -318,12 +346,7 @@ function createDashboardValidationFixture() {
       masthead: { edition: 'Afternoon Edition', date: 'Friday, July 10, 2026' },
       tape: {
         label: 'Friday After The Bell - Fixture drivers',
-        rows: quotes.map((quote) => reviewedTapeCommentary(
-          { ...quote, group: quote.ticker === 'VCR' ? 'Sectors' : quote.ticker === 'UST10Y' ? 'Rates & Credit' : 'Equities' },
-          'Fixture positioning remains constructive as breadth improves and investors assess earnings, rates, growth, and liquidity conditions.',
-          quoteRevision,
-          '2026-07-10T12:30:00.000Z'
-        ))
+        rows: quotes
       },
       stories,
       crypto: {
@@ -377,6 +400,44 @@ async function refreshLocalMarketData() {
   if (typeof fetch !== 'function') return;
   for (const url of LOCAL_MARKET_REFRESH_URLS) await fetch(url, { cache: 'no-store' });
 }</script>`;
+}
+
+function testTapeQuoteContract() {
+  const expectedRowKeys = [
+    'asOf', 'delta', 'dir', 'high', 'last', 'low', 'name', 'open', 'pct',
+    'previous', 'quoteRevision', 'sourceSymbol', 'ticker'
+  ];
+  const { dashboard } = createDashboardValidationFixture();
+  for (const row of dashboard.tape.rows) {
+    assert.deepEqual(Object.keys(row).sort(), expectedRowKeys);
+    assert.equal(Object.hasOwn(row, 'note'), false);
+    assert.equal(Object.hasOwn(row, 'noteDisposition'), false);
+    assert.equal(Object.hasOwn(row, 'commentary'), false);
+  }
+
+  const canonicalHtml = fs.readFileSync(path.join(root, 'daily_financial_news.html'), 'utf8');
+  const canonicalDashboard = readJsonBlock(canonicalHtml, 'dashboard-data');
+  const canonicalChartData = readJsonBlock(canonicalHtml, 'chart-data');
+  const tapeByTicker = new Map(canonicalDashboard.tape.rows.map((row) => [row.ticker, row]));
+  assert.equal(tapeByTicker.has('GC'), true);
+  assert.equal(tapeByTicker.has('SI'), true);
+  assert.equal(tapeByTicker.has('XAU'), false);
+  assert.equal(tapeByTicker.has('XAG'), false);
+  assert.equal(tapeByTicker.get('USYC')?.name, '2Y–10Y Yield Curve');
+
+  const seriesByTicker = new Map(canonicalChartData.series.map((series) => [series.ticker, series]));
+  for (const ticker of ['SPX', 'NDX', 'DJI', 'RUT', 'VIX']) {
+    const series = seriesByTicker.get(ticker);
+    assert.equal(series?.noVolume, true, `${ticker} cash-index charts must suppress volume.`);
+    assert.equal(series.bars.every((bar) => bar[5] === null), true,
+      `${ticker} cash-index bars must not publish proxy volume.`);
+  }
+  for (const ticker of ['UST3M', 'UST2Y', 'UST10Y', 'UST30Y', 'USYC', 'MOVE']) {
+    const quote = seriesByTicker.get(ticker)?.quote;
+    assert.equal(quote?.behavior, 'daily_observation');
+    assert.match(quote.observedAt, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(['open', 'high', 'low'].some((field) => Object.hasOwn(quote, field)), false);
+  }
 }
 
 function fixtureNewsCandidatePools(dashboard) {
@@ -877,15 +938,6 @@ function testRecoveryNotesDoNotAffectApply() {
     assert.equal(Object.hasOwn(readJsonBlock(result.html, 'dashboard-data').editorialReview, 'resumeNotes'), false);
   }
 
-  for (const context of [null, 'bad', [], { quoteStatus: 'refreshed', marketType: 'unknown' }]) {
-    const result = runCase('tape-comparison-context', undefined, (_review, payload) => {
-      payload.tape.rows[0].comparisonContext = context;
-    });
-    assert.equal(result.error, undefined);
-    assert.equal(result.html, baseline.html, 'Handoff-only Tape comparison context must not change published output.');
-    assert.ok(readJsonBlock(result.html, 'dashboard-data').tape.rows.every((row) => !Object.hasOwn(row, 'comparisonContext')));
-  }
-
   const evidenceCases = [
     ['missing-evidence', (review) => { delete review.reviewEvidence; }, { stories: 0, futures: 0, crypto: 0 }],
     ['partial', (review) => { review.reviewEvidence.metadataScanComplete = false; review.reviewEvidence.deepReviews = review.reviewEvidence.deepReviews.slice(0, 2); }, { stories: 2, futures: 0, crypto: 0 }],
@@ -1107,8 +1159,7 @@ async function testNewPreparationDiscardsPreviousRecoveryState() {
   const fresh = JSON.parse(fs.readFileSync(path.join(editorialDir, 'dashboard-data.json'), 'utf8'));
   assert.equal(fresh.editorialReview.preparedAt, FIXTURE_NOW);
   assert.equal(Object.hasOwn(fresh.editorialReview, 'tapeContext'), false);
-  assert.ok(fresh.tape.rows.every((row) => row.comparisonContext.previousBarDate === '2026-07-09'
-    && row.comparisonContext.latestBarDate === '2026-07-10'));
+  assert.ok(fresh.tape.rows.every((row) => !Object.hasOwn(row, 'comparisonContext')));
   assert.equal(Object.hasOwn(fresh.editorialReview, 'resumeNotes'), false, 'The AI initializes optional notes after successful Prepare.');
   assert.equal(fresh.editorialReview.reviewEvidence.metadataScanComplete, false);
   assert.deepEqual(fresh.editorialReview.reviewEvidence.deepReviews, []);
@@ -1295,96 +1346,6 @@ function testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage() {
   });
 }
 
-function testRefreshedQuoteCannotReusePriorCommentary() {
-  const dir = makeTemporaryDirectory('dfd-refreshed-quote-commentary-');
-  const dashboardFile = path.join(dir, 'dashboard.html');
-  const candidateFile = path.join(dir, 'dashboard-candidate.html');
-  const payloadFile = path.join(dir, 'dashboard-data.json');
-  const newsCandidatesPath = path.join(dir, 'news_candidates.json');
-  const { dashboard, chartData } = createDashboardValidationFixture();
-  const originalRows = structuredClone(dashboard.tape.rows);
-  const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
-  fs.writeFileSync(dashboardFile, originalHtml);
-
-  const refreshedRevision = '2026-07-10T21:05:00.000Z';
-  const refreshedChartData = roundChartPayload(chartData);
-  refreshedChartData.generatedAt = refreshedRevision;
-  for (const series of refreshedChartData.series) {
-    if (series.ticker === 'VCR') {
-      series.availability = {
-        status: 'carried_forward',
-        reason: 'source_refresh_failed',
-        checkedAt: refreshedRevision
-      };
-      continue;
-    }
-    series.quoteRevision = refreshedRevision;
-  }
-  const refreshedSpx = refreshedChartData.series.find((series) => series.ticker === 'SPX');
-  refreshedSpx.bars.at(-1).high = 105;
-  refreshedSpx.bars.at(-1).close = 104;
-  refreshedChartData.availability = {
-    status: 'partial',
-    reason: 'source_refresh_failed',
-    checkedAt: refreshedRevision,
-    failures: [{ ticker: 'VCR', message: 'fixture source failure' }]
-  };
-
-  const candidateDashboard = structuredClone(dashboard);
-  syncDashboardPricesFromChartData(candidateDashboard, refreshedChartData, {
-    now: new Date(refreshedRevision),
-    resetCommentary: true,
-    commentaryTickers: acceptedFreshChartTickers(refreshedChartData)
-  });
-  const candidateSpx = candidateDashboard.tape.rows.find((row) => row.ticker === 'SPX');
-  const candidateVcr = candidateDashboard.tape.rows.find((row) => row.ticker === 'VCR');
-  assert.equal(candidateSpx.last, '104.00');
-  assert.equal(candidateSpx.note, '');
-  assert.deepEqual(candidateSpx.noteDisposition, {
-    status: 'commentary_unavailable',
-    quoteRevision: refreshedRevision
-  });
-  assert.deepEqual(candidateVcr, originalRows.find((row) => row.ticker === 'VCR'));
-
-  fs.writeFileSync(candidateFile, renderDashboardValidationFixture(candidateDashboard, refreshedChartData));
-  const newsCandidates = fixtureNewsCandidatesArtifact(dashboard, '2026-07-10T21:00:00.000Z');
-  writeJson(newsCandidatesPath, newsCandidates);
-  const editorialPayload = structuredClone(candidateDashboard);
-  editorialPayload.editionId = '2026-07-10T21:00:00.000Z';
-  const newsSelection = fixtureNewsSelection(dashboard);
-  editorialPayload.editorialReview = {
-    schemaVersion: 1,
-    preparedAt: '2026-07-10T21:00:00.000Z',
-    reviewedAt: null,
-    baseEditionId: candidateDashboard.editionId,
-    verifiedClaims: [],
-    reviewEvidence: fixtureReviewEvidence(newsCandidates, newsSelection),
-    newsSelection,
-    openingDecision: { action: 'reviewed' }
-  };
-  writeJson(payloadFile, editorialPayload);
-
-  withScheduledNow('2026-07-10T21:06:00.000Z', () => applyDashboardDataJson({
-    dashboard: dashboardFile,
-    candidate: candidateFile,
-    applyDashboardDataJson: payloadFile,
-    newsCandidatesPath,
-    validationStdio: 'pipe'
-  }));
-  const published = readJsonBlock(fs.readFileSync(dashboardFile, 'utf8'), 'dashboard-data');
-  const publishedSpx = published.tape.rows.find((row) => row.ticker === 'SPX');
-  assert.equal(publishedSpx.note, '');
-  assert.notEqual(publishedSpx.note, originalRows.find((row) => row.ticker === 'SPX').note);
-  assert.deepEqual(publishedSpx.noteDisposition, {
-    status: 'commentary_unavailable',
-    quoteRevision: refreshedRevision
-  });
-  assert.deepEqual(
-    published.tape.rows.find((row) => row.ticker === 'VCR'),
-    originalRows.find((row) => row.ticker === 'VCR')
-  );
-}
-
 function testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const validHtml = renderDashboardValidationFixture(dashboard, chartData);
@@ -1395,6 +1356,19 @@ function testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell() {
   recoverable.weekAhead = null;
   recoverable.tape.rows = [null, 'malformed', ...recoverable.tape.rows];
   assert.deepEqual(validateDashboardHtml(renderDashboardValidationFixture(recoverable, chartData)).errors, []);
+
+  for (const testCase of malformedTapeQuotePublishedCases) {
+    const malformedChartData = structuredClone(chartData);
+    testCase.change(malformedChartData.series.find((series) => series.ticker === 'SPX'));
+    const html = renderDashboardValidationFixture(dashboard, malformedChartData);
+    assert.deepEqual(validateDashboardHtml(html, { validationMode: 'published' }).errors, [],
+      `${testCase.name} Tape quote metadata must remain publishable for fail-open rendering.`);
+    assert.equal(
+      validateDashboardHtml(html, { validationMode: 'staged' }).errors.some((error) => error.includes('quote')),
+      true,
+      `${testCase.name} Tape quote metadata must fail staged validation.`
+    );
+  }
 
   for (const testCase of malformedEarningsPublishedCases) {
     const malformed = structuredClone(dashboard);
@@ -1766,6 +1740,8 @@ async function testActualDashboardStartsInBrowser() {
         };
       }, wrapperSelector);
 
+      await button.dispatchEvent('pointerdown', { bubbles: true, pointerType: 'touch' });
+      await button.dispatchEvent('pointerup', { bubbles: true, pointerType: 'touch' });
       await button.click();
       assert.equal(await isOpen(), true);
       assert.equal(await button.getAttribute('aria-expanded'), 'true');
@@ -1809,11 +1785,126 @@ async function testActualDashboardStartsInBrowser() {
       ]) {
         await page.setViewportSize(viewport);
         await assertTooltipInteraction(page, '[data-local-refresh-indicator]', '[data-local-refresh-toggle]');
-        await assertTooltipInteraction(page, '[data-stale-info]', '[data-stale-button]');
+        await assertTooltipInteraction(page, '[data-stale-info]', '[data-tape-group-panel]:not([hidden]) [data-stale-button]');
         await assertTooltipInteraction(page, '[data-dividend-info]', '[data-dividend-button]');
-        await page.locator('[data-tape-chart-button]:not([disabled])').first().click();
+        await page.locator('[data-tape-group-panel]:not([hidden]) [data-tape-chart-button]:not([disabled])').first().click();
         await page.locator('[data-chart-info-button]').first().waitFor();
         await assertTooltipInteraction(page, '[data-chart-info]', '[data-chart-info-button]');
+      }
+    }
+
+    async function assertTapePresentation(page) {
+      const screenshotDir = path.join(root, 'generated');
+      fs.mkdirSync(screenshotDir, { recursive: true });
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.locator('[data-tape-group-button]').filter({ hasText: 'Equities' }).click();
+      const panel = page.locator('[data-tape-group-panel]:not([hidden])');
+      const header = panel.locator('.tape-quote-header');
+      assert.deepEqual((await header.locator(':scope > span').allTextContents()).map((text) => text.trim()), [
+        'Instrument', 'Last', 'Previous', 'Change', 'Change %', 'Open', 'High', 'Low'
+      ]);
+      const row = panel.locator('.tape-row').first();
+      const fields = ['last', 'previous', 'delta', 'pct', 'open', 'high', 'low'];
+      assert.equal(await row.locator('.tape-asof-button').count(), 1,
+        'The embedded source timestamp must remain visible when the local-refresh request returns no data.');
+      assert.match((await row.locator('.tape-asof-button').innerText()).trim(), /^As of /);
+      const typography = await row.evaluate((element) => {
+        const name = element.querySelector('.tape-name-line');
+        const observation = element.querySelector('.tape-observation-line');
+        return {
+          nameSize: getComputedStyle(name.querySelector('.entity-name')).fontSize,
+          tickerSize: getComputedStyle(name.querySelector('.tape-ticker')).fontSize,
+          gap: observation.getBoundingClientRect().top - name.getBoundingClientRect().bottom
+        };
+      });
+      assert.deepEqual(typography, { nameSize: '16px', tickerSize: '12px', gap: 3 });
+      const alignment = await page.evaluate(({ panelSelector, fields: fieldNames }) => {
+        const activePanel = document.querySelector(panelSelector);
+        const headerCells = [...activePanel.querySelectorAll('.tape-quote-header > span')].slice(1);
+        const firstRow = activePanel.querySelector('.tape-row');
+        return fieldNames.map((field, index) => {
+          const heading = headerCells[index].getBoundingClientRect();
+          const value = firstRow.querySelector(`.tape-${field}`).getBoundingClientRect();
+          return {
+            headingCenter: heading.left + heading.width / 2,
+            valueCenter: value.left + value.width / 2,
+            visible: getComputedStyle(firstRow.querySelector(`.tape-${field}`)).display !== 'none'
+          };
+        });
+      }, { panelSelector: '[data-tape-group-panel]:not([hidden])', fields });
+      for (const item of alignment) {
+        assert.equal(item.visible, true);
+        assert.equal(Math.abs(item.headingCenter - item.valueCenter) < 2, true, JSON.stringify(item));
+      }
+      await page.locator('.section-tape').screenshot({ path: path.join(screenshotDir, 'tape-desktop.png') });
+
+      const chartButton = row.locator('[data-tape-chart-button]');
+      assert.equal(await chartButton.getAttribute('data-tape-chart-row'), 'SPX');
+      await chartButton.click();
+      const chartTitle = panel.locator('.tape-chart-title');
+      await chartTitle.waitFor();
+      await page.waitForFunction(() => document.activeElement?.classList.contains('tape-chart-title'));
+      assert.equal(await chartTitle.evaluate((element) => document.activeElement === element), true,
+        'Activating a Tape row must move focus to its chart heading.');
+      await page.waitForFunction(() => document.querySelector('[data-chart-stage]')?.classList.contains('no-volume'));
+      await page.screenshot({ path: path.join(screenshotDir, 'tape-desktop-chart.png') });
+
+      await panel.locator('[data-chart-close]').click();
+      const ratesButton = page.locator('[data-tape-group-button]').filter({ hasText: 'Rates & Credit' });
+      await ratesButton.click();
+      const treasuryRow = page.locator('[data-tape-chart-row="UST10Y"]').locator('..');
+      assert.match((await treasuryRow.locator('.tape-asof-button').innerText()).trim(), /^As of [A-Z][a-z]{2} \d{1,2}$/);
+      await treasuryRow.locator('.tape-asof-button').click();
+      assert.match(await treasuryRow.locator('[role="tooltip"]').textContent(), /date precision only/i);
+      await treasuryRow.locator('.tape-asof-button').click();
+
+      await page.setViewportSize({ width: 820, height: 1000 });
+      await page.locator('.section-tape').screenshot({ path: path.join(screenshotDir, 'tape-tablet.png') });
+      await page.setViewportSize({ width: 390, height: 844 });
+      const mobileRow = treasuryRow;
+      assert.equal(await mobileRow.locator('.tape-mobile-quote').evaluate((element) => getComputedStyle(element).display !== 'none'), true);
+      assert.equal(await mobileRow.locator(':scope > .tape-value').evaluateAll((elements) => elements.every((element) => getComputedStyle(element).display === 'none')), true);
+      assert.equal(await mobileRow.locator('.tape-mobile-quote .quote-last').count(), 1);
+      assert.equal(await mobileRow.locator('.tape-mobile-quote .metric-value').count(), 1,
+        'Daily Treasury rows show only their basis-point change when percent change is unavailable.');
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.locator('[data-tape-group-button]').filter({ hasText: 'Equities' }).click();
+      const mobileFixtureRow = page.locator('[data-tape-chart-row="SPX"]').locator('..');
+      await page.setViewportSize({ width: 390, height: 844 });
+      assert.equal(await mobileFixtureRow.locator('.tape-mobile-quote .quote-last').count(), 1);
+      assert.equal(await mobileFixtureRow.locator('.tape-mobile-quote .metric-value').count(), 2,
+        'Mobile session rows show Last plus absolute and percentage change only.');
+      await page.locator('.section-tape').screenshot({ path: path.join(screenshotDir, 'tape-mobile.png') });
+
+      const cryptoButton = page.locator('[data-tape-group-button]').filter({ hasText: 'Crypto' });
+      if (await cryptoButton.count()) {
+        await cryptoButton.click();
+        const cryptoAsOf = page.locator('[data-tape-group-panel]:not([hidden]) .tape-asof-button').first();
+        await cryptoAsOf.click();
+        await page.waitForFunction(() => {
+          const button = document.querySelector('[data-tape-group-panel]:not([hidden]) .tape-asof-button');
+          const tooltip = button?.closest('[data-stale-info]')?.querySelector('[role="tooltip"]');
+          const style = tooltip && getComputedStyle(tooltip);
+          return style?.visibility === 'visible' && Number(style.opacity) === 1;
+        });
+        await page.locator('.section-tape').screenshot({ path: path.join(screenshotDir, 'tape-mobile-crypto-tooltip.png') });
+        await cryptoAsOf.click();
+      }
+    }
+
+    async function assertTimedTapeTimestamp(page) {
+      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+        await page.setViewportSize(viewport);
+        await page.locator('[data-tape-group-button]').filter({ hasText: 'Equities' }).click();
+        const button = page.locator('[data-tape-chart-row="SPX"]').locator('..').locator('.tape-asof-button');
+        await button.scrollIntoViewIfNeeded();
+        assert.equal((await button.innerText()).trim(), viewport.width > 1100 ? 'As of Sep 28, 3:00 PM CDT' : '9/28 3:00 PM CDT');
+        const bounds = await button.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, viewportWidth: window.innerWidth };
+        });
+        assert.equal(bounds.left >= -1 && bounds.right <= bounds.viewportWidth + 1, true, JSON.stringify(bounds));
       }
     }
 
@@ -1858,7 +1949,16 @@ async function testActualDashboardStartsInBrowser() {
       await section.locator('[data-week-impact-toggle]').click();
     }
 
-    async function assertDashboardStarts(file, { testTooltips = false, testWeekAheadImpactFilter = false, earningsState = '' } = {}) {
+    async function assertDashboardStarts(file, {
+      testTooltips = false,
+      testTapePresentation = false,
+      testTimedTapeTimestamp = false,
+      testWeekAheadImpactFilter = false,
+      carriedTapeTicker = '',
+      earningsState = '',
+      malformedTapeTicker = '',
+      unavailableTape = false
+    } = {}) {
       const errors = [];
       const page = await browser.newPage();
       try {
@@ -1895,15 +1995,59 @@ async function testActualDashboardStartsInBrowser() {
           assert.equal(await earnings.locator('[data-earnings-calendar-cue]').count(), earningsState === 'calendar' ? 1 : 0);
         }
         if (testTooltips) await assertTooltipInteractions(page);
+        if (testTapePresentation) await assertTapePresentation(page);
+        if (testTimedTapeTimestamp) await assertTimedTapeTimestamp(page);
         if (testWeekAheadImpactFilter) await assertWeekAheadImpactFiltering(page);
+        if (malformedTapeTicker) {
+          const malformedRow = page.locator(`[data-tape-chart-row="${malformedTapeTicker}"]`).locator('..');
+          assert.equal((await malformedRow.locator('.tape-last').textContent()).trim(), '—');
+          assert.match(await malformedRow.locator('.instrument').textContent(), /Quote unavailable/);
+          assert.notEqual((await page.locator('[data-tape-chart-row="VCR"]').locator('..').locator('.tape-last').textContent()).trim(), '—',
+            'Malformed quote metadata must not degrade a valid sibling row.');
+        }
+        if (carriedTapeTicker) {
+          const carriedRow = page.locator(`[data-tape-chart-row="${carriedTapeTicker}"]`).locator('..');
+          assert.notEqual((await carriedRow.locator('.tape-last').textContent()).trim(), '—');
+          await carriedRow.locator('.tape-asof-button').click();
+          assert.match(await carriedRow.locator('[role="tooltip"]').textContent(), /stale|latest refresh is unavailable/i);
+        }
+        if (unavailableTape) {
+          assert.equal(await page.locator('.tape-row .tape-last').evaluateAll(
+            (elements) => elements.length > 0 && elements.every((element) => element.textContent.trim() === '—')
+          ), true);
+        }
         assert.deepEqual(errors, []);
       } finally {
         await page.close();
       }
     }
 
+    async function assertTapeFragmentNavigation(file) {
+      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+        const page = await browser.newPage({ viewport });
+        try {
+          await page.route('https://192.168.2.2:2210/api/market-refresh', (route) => {
+            route.fulfill({ status: 204, body: '' });
+          });
+          await page.goto(`${pathToFileURL(file).href}#section-tape`);
+          const tape = page.locator('#section-tape');
+          await tape.waitFor();
+          await page.waitForFunction(() => {
+            const rect = document.getElementById('section-tape')?.getBoundingClientRect();
+            return rect && rect.bottom > 0 && rect.top >= -1 && rect.top < 120;
+          });
+          assert.equal(await page.evaluate(() => window.location.hash), '#section-tape');
+          assert.equal(await page.evaluate(() => window.innerWidth), viewport.width);
+          assert.equal(await tape.isVisible(), true);
+        } finally {
+          await page.close();
+        }
+      }
+    }
+
     const canonicalDashboard = path.join(root, 'daily_financial_news.html');
-    await assertDashboardStarts(canonicalDashboard);
+    await assertDashboardStarts(canonicalDashboard, { testTapePresentation: true });
+    await assertTapeFragmentNavigation(canonicalDashboard);
 
     const recoverableDir = makeTemporaryDirectory('dfd-browser-recoverable-');
     const recoverableFile = path.join(recoverableDir, 'dashboard.html');
@@ -1937,23 +2081,85 @@ async function testActualDashboardStartsInBrowser() {
 
     const overlayFile = path.join(recoverableDir, 'dashboard-local-overlay.html');
     const overlayFixture = createDashboardValidationFixture();
+    const canonicalChartData = readJsonBlock(recoverableHtml, 'chart-data');
+    const canonicalObjectChartData = roundChartPayload(canonicalChartData);
+    const overlayTickers = ['SPX', 'VCR', 'UST10Y', 'GC'];
+    overlayFixture.dashboard.tape.rows = overlayTickers.map((ticker) => (
+      structuredClone(recoverableData.tape.rows.find((row) => row.ticker === ticker))
+    ));
+    overlayFixture.chartData = {
+      ...structuredClone(canonicalChartData),
+      series: overlayTickers.map((ticker) => (
+        structuredClone(canonicalChartData.series.find((series) => series.ticker === ticker))
+      ))
+    };
+    overlayFixture.chartData.series.find((series) => series.ticker === 'SPX').quote.observedAt = '2026-09-28T20:00:00.000Z';
     overlayFixture.dashboard.crypto.stats.find((row) => row.sym === 'F&G').availability = {
       status: 'carried_forward',
       lastValidatedAt: '2026-07-09T21:00:00.000Z'
     };
-    fs.writeFileSync(overlayFile, replaceJsonBlock(
+    const overlayHtml = replaceJsonBlock(
       replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(overlayFixture.dashboard)),
       'chart-data', JSON.stringify(overlayFixture.chartData)
-    ));
-    const spxFresh = structuredClone(chartSeriesFixture()[0]);
-    spxFresh.quoteRevision = '2026-07-10T21:05:00.000Z';
-    spxFresh.bars[1].high = 105;
-    spxFresh.bars[1].close = 104;
-    const spxOneBar = { ...spxFresh, quoteRevision: '2026-07-10T21:06:00.000Z', bars: [spxFresh.bars[1]] };
-    const vcrFresh = structuredClone(chartSeriesFixture()[1]);
-    vcrFresh.quoteRevision = '2026-07-10T21:07:00.000Z';
-    vcrFresh.bars[1].high = 106;
-    vcrFresh.bars[1].close = 105;
+    );
+    fs.writeFileSync(overlayFile, overlayHtml);
+    await assertDashboardStarts(overlayFile, { testTimedTapeTimestamp: true });
+
+    for (const testCase of malformedTapeQuotePublishedCases) {
+      const malformedChartData = structuredClone(overlayFixture.chartData);
+      testCase.change(malformedChartData.series.find((series) => series.ticker === 'SPX'));
+      const file = path.join(recoverableDir, `dashboard-tape-quote-${testCase.name}.html`);
+      fs.writeFileSync(file, replaceJsonBlock(overlayHtml, 'chart-data', JSON.stringify(malformedChartData)));
+      await assertDashboardStarts(file, { malformedTapeTicker: 'SPX' });
+    }
+
+    const carriedForwardChartData = structuredClone(overlayFixture.chartData);
+    carriedForwardChartData.series.find((series) => series.ticker === 'SPX').availability = {
+      status: 'carried_forward',
+      reason: 'source_refresh_failed',
+      checkedAt: '2026-07-11T12:00:00.000Z'
+    };
+    const carriedForwardFile = path.join(recoverableDir, 'dashboard-tape-quote-carried-forward.html');
+    fs.writeFileSync(carriedForwardFile, replaceJsonBlock(overlayHtml, 'chart-data', JSON.stringify(carriedForwardChartData)));
+    await assertDashboardStarts(carriedForwardFile, { carriedTapeTicker: 'SPX' });
+
+    const unavailableChartData = structuredClone(overlayFixture.chartData);
+    unavailableChartData.availability = {
+      status: 'unavailable',
+      reason: 'source_refresh_failed',
+      checkedAt: '2026-07-11T12:00:00.000Z'
+    };
+    unavailableChartData.series = [];
+    const unavailableFile = path.join(recoverableDir, 'dashboard-tape-quote-unavailable.html');
+    fs.writeFileSync(unavailableFile, replaceJsonBlock(overlayHtml, 'chart-data', JSON.stringify(unavailableChartData)));
+    await assertDashboardStarts(unavailableFile, { unavailableTape: true });
+
+    const spxFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'SPX'));
+    spxFresh.quoteRevision = '2026-09-28T21:05:00.000Z';
+    spxFresh.bars.at(-1).high = 7785;
+    spxFresh.bars.at(-1).close = 7780;
+    spxFresh.quote = {
+      ...spxFresh.quote,
+      observedAt: spxFresh.quoteRevision,
+      last: 7780,
+      high: 7785
+    };
+    const spxOneBar = {
+      ...spxFresh,
+      quoteRevision: '2026-09-28T21:06:00.000Z',
+      quote: { ...spxFresh.quote, observedAt: '2026-09-28T21:06:00.000Z' },
+      bars: [spxFresh.bars.at(-1)]
+    };
+    const vcrFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'VCR'));
+    vcrFresh.quoteRevision = '2026-09-28T21:07:00.000Z';
+    vcrFresh.bars.at(-1).high = 375;
+    vcrFresh.bars.at(-1).close = 374;
+    vcrFresh.quote = {
+      ...vcrFresh.quote,
+      observedAt: vcrFresh.quoteRevision,
+      last: 374,
+      high: 375
+    };
     let overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
     const overlayPage = await browser.newPage();
     try {
@@ -1972,16 +2178,72 @@ async function testActualDashboardStartsInBrowser() {
       await noNewerAtStartup;
       assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'idle');
       assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), null);
-      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 0);
 
       overlayPayload = { schemaVersion: 1, generatedAt: spxFresh.quoteRevision, series: [spxFresh] };
       await overlayPage.reload();
       await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
-      const spxQuote = await tapeRow('SPX').locator('.quote-last').textContent();
-      const spxNote = await tapeRow('SPX').locator('.tape-signal-copy').textContent();
-      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+      const spxQuote = await tapeRow('SPX').locator('.tape-last').textContent();
       const acceptedCache = await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2'));
       assert.ok(acceptedCache);
+
+      const assertRejectedSeries = async (series, generatedAt, label) => {
+        overlayPayload = { schemaVersion: 1, generatedAt, series: [series] };
+        const rejected = overlayPage.waitForEvent('console', {
+          predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
+        });
+        await overlayPage.reload();
+        await rejected;
+        assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'cached', label);
+        assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), acceptedCache, label);
+        assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote, label);
+      };
+
+      const wrongEquitySource = structuredClone(spxFresh);
+      wrongEquitySource.sourceSymbol = 'AAPL';
+      wrongEquitySource.quoteRevision = '2026-09-28T21:08:00.000Z';
+      wrongEquitySource.quote.observedAt = wrongEquitySource.quoteRevision;
+      await assertRejectedSeries(wrongEquitySource, wrongEquitySource.quoteRevision, 'SPX must reject an AAPL source identity.');
+
+      const wrongCryptoSource = structuredClone(spxFresh);
+      wrongCryptoSource.sourceSymbol = 'BTC-USD';
+      wrongCryptoSource.quoteRevision = '2026-09-28T21:09:00.000Z';
+      wrongCryptoSource.quote = {
+        ...wrongCryptoSource.quote,
+        behavior: 'crypto_utc',
+        observedAt: wrongCryptoSource.quoteRevision
+      };
+      await assertRejectedSeries(wrongCryptoSource, wrongCryptoSource.quoteRevision, 'SPX must reject a BTC-USD source identity.');
+
+      const unexpectedContract = structuredClone(spxFresh);
+      unexpectedContract.quoteRevision = '2026-09-28T21:10:00.000Z';
+      unexpectedContract.quote = {
+        ...unexpectedContract.quote,
+        observedAt: unexpectedContract.quoteRevision,
+        contractSymbol: 'ESZ26.CME'
+      };
+      await assertRejectedSeries(unexpectedContract, unexpectedContract.quoteRevision, 'A non-futures quote must reject contractSymbol.');
+
+      const wrongObservationDay = structuredClone(spxFresh);
+      wrongObservationDay.quoteRevision = '2026-09-28T21:11:00.000Z';
+      wrongObservationDay.quote.observedAt = '2026-09-27T21:11:00.000Z';
+      await assertRejectedSeries(wrongObservationDay, wrongObservationDay.quoteRevision, 'A session quote must match its latest bar date.');
+
+      const indexWithVolume = structuredClone(spxFresh);
+      indexWithVolume.quoteRevision = '2026-09-28T21:12:00.000Z';
+      indexWithVolume.quote.observedAt = indexWithVolume.quoteRevision;
+      indexWithVolume.noVolume = false;
+      indexWithVolume.bars.at(-1).volume = 123456;
+      await assertRejectedSeries(indexWithVolume, indexWithVolume.quoteRevision, 'A cash index must reject volume.');
+
+      const wrongFuturesContract = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'GC'));
+      wrongFuturesContract.quoteRevision = '2026-09-28T21:13:00.000Z';
+      wrongFuturesContract.quote = {
+        ...wrongFuturesContract.quote,
+        observedAt: wrongFuturesContract.quoteRevision,
+        previous: 4100,
+        contractSymbol: 'CLZ26.NYM'
+      };
+      await assertRejectedSeries(wrongFuturesContract, wrongFuturesContract.quoteRevision, 'GC must reject a contract from the wrong root and exchange.');
 
       overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
       const noNewerPrices = overlayPage.waitForEvent('console', {
@@ -1991,18 +2253,14 @@ async function testActualDashboardStartsInBrowser() {
       await noNewerPrices;
       assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'cached');
       assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), acceptedCache);
-      assert.equal(await tapeRow('SPX').locator('.quote-last').textContent(), spxQuote);
-      assert.equal(await tapeRow('SPX').locator('.tape-signal-copy').textContent(), spxNote);
-      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+      assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote);
 
-      const vcrQuote = await tapeRow('VCR').locator('.quote-last').textContent();
+      const vcrQuote = await tapeRow('VCR').locator('.tape-last').textContent();
       overlayPayload = { schemaVersion: 1, generatedAt: vcrFresh.quoteRevision, series: [vcrFresh, spxOneBar] };
       await overlayPage.reload();
       await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
-      assert.notEqual(await tapeRow('VCR').locator('.quote-last').textContent(), vcrQuote);
-      assert.equal(await tapeRow('SPX').locator('.quote-last').textContent(), spxQuote);
-      assert.equal(await tapeRow('SPX').locator('.tape-signal-copy').textContent(), spxNote);
-      assert.equal(await tapeRow('SPX').locator('.commentary-stale-info').count(), 1);
+      assert.notEqual(await tapeRow('VCR').locator('.tape-last').textContent(), vcrQuote);
+      assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote);
 
       const crypto = overlayPage.locator('.section-crypto');
       const totalBefore = await crypto.locator('.crypto-stat--total').innerText();
@@ -2031,13 +2289,6 @@ async function testActualDashboardStartsInBrowser() {
 
     const tooltipFile = path.join(recoverableDir, 'dashboard-tooltips.html');
     const tooltipData = readJsonBlock(recoverableHtml, 'dashboard-data');
-    const tooltipTapeRow = tooltipData.tape?.rows?.[0];
-    if (!tooltipTapeRow) throw new Error('Tooltip browser fixture requires one Tape row.');
-    tooltipTapeRow.note = '';
-    tooltipTapeRow.noteDisposition = {
-      status: 'commentary_unavailable',
-      quoteRevision: tooltipTapeRow.noteDisposition?.quoteRevision || tooltipData.editionId
-    };
     const tooltipPortfolioRow = tooltipData.assetAllocationPortfolio?.rows?.[0];
     if (!tooltipPortfolioRow) throw new Error('Tooltip browser fixture requires one Asset Allocation row.');
     tooltipPortfolioRow.dividends = [{ exDate: '2026-08-15', amount: 0.25 }];
@@ -2117,6 +2368,7 @@ async function main() {
   try {
     testSharedCalendarClockHelpers();
     await testScheduledMarketHolidayGate();
+    testTapeQuoteContract();
     testNewsReviewEvidenceDiagnosticsAndIsolation();
     testEditorialApplyAdvisories();
     testArchitectureSingleWriterAndCliBoundaries();
@@ -2129,7 +2381,6 @@ async function main() {
     await testNewPreparationDiscardsPreviousRecoveryState();
     await require('./test_context_recovery').runSelfTests();
     testApplyFiltersFuturesPublicationMetadataWithoutCrossSectionDamage();
-    testRefreshedQuoteCannotReusePriorCommentary();
     testPublishedGateAllowsRecoverableSectionsButBlocksStartupShell();
     testFuturesStoryPublicationWindowValidation();
     testValidatorUsesBrowserEquivalentScriptIdentity();

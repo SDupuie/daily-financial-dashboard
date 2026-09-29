@@ -7,16 +7,21 @@ const path = require('path');
 const chartData = require('./fetch_chart_data');
 const cryptoStats = require('./fetch_crypto_stats');
 const {
-  attachTapeComparisonContext,
   buildChartDataFallback,
   buildUnavailableChartData,
+  commodityContractCandidates,
   compactChartPayload,
+  deriveQuoteRowsFromSeries,
   fetchFuture,
+  finnhubQuoteBarFromPayload,
   futuresContractCandidates,
+  parseYahooSeries,
   priorFuturesContracts,
   quoteRowFromSeries,
+  resolveCommodityContract,
   resolveFuturesContract,
   roundChartPayload,
+  supportsFinnhubQuote,
   validateChartStagingPayload,
   validateFuturesPayload
 } = chartData;
@@ -61,10 +66,21 @@ function chartSeries(overrides = {}) {
     source: 'Yahoo Finance Chart API',
     dataKind: 'ohlc',
     priceOnly: false,
-    noVolume: false,
+    noVolume: true,
+    currency: 'USD',
+    exchangeTimezoneName: 'America/New_York',
+    quote: {
+      behavior: 'session',
+      observedAt: '2026-07-10T20:00:00.000Z',
+      last: 101,
+      previous: 100,
+      open: 100,
+      high: 102,
+      low: 99
+    },
     bars: [
-      { time: '2026-07-09', open: 100, high: 101, low: 99, close: 100, volume: 1000 },
-      { time: '2026-07-10', open: 100, high: 102, low: 99, close: 101, volume: 1100 }
+      { time: '2026-07-09', open: 100, high: 101, low: 99, close: 100 },
+      { time: '2026-07-10', open: 100, high: 102, low: 99, close: 101 }
     ],
     ...overrides
   };
@@ -333,47 +349,220 @@ function dashboardHtmlForRows(rows, chartData = null) {
   }))}</script>`;
 }
 
-function testTapeComparisonContext() {
-  const sources = [
-    ['BTC', 'BTC-USD', 'yahoo_chart', 'continuous_market'],
-    ['IBIT', 'IBIT', 'yahoo_chart', 'exchange_session'],
-    ['ETHA', 'ETHA', 'yahoo_chart', 'exchange_session'],
-    ['MSTR', 'MSTR', 'yahoo_chart', 'exchange_session'],
-    ['CL', 'CL=F', 'yahoo_chart', 'exchange_session'],
-    ['UST10Y', 'TREASURY:10Y', 'treasury_yield_curve', 'daily_observation'],
-    ['USYC', 'TREASURY:CURVE', 'treasury_yield_curve', 'daily_observation'],
-    ['MOVE', 'MOVE.INDX', 'eodhd_eod', 'daily_observation'],
-    ['NEW', 'NEW', 'new_provider', 'unknown']
+function yahooDailyPayload(symbol, sourceBars, overrides = {}) {
+  return {
+    chart: {
+      result: [{
+        meta: {
+          symbol,
+          instrumentType: overrides.instrumentType || 'EQUITY',
+          exchangeName: overrides.exchangeName || 'NMS',
+          currency: 'USD',
+          exchangeTimezoneName: overrides.timeZone || 'America/New_York',
+          regularMarketPrice: overrides.last ?? sourceBars.at(-1).close,
+          regularMarketTime: overrides.observedAt ?? Date.parse('2026-07-10T20:00:00Z') / 1000
+        },
+        timestamp: sourceBars.map((bar) => Date.parse(`${bar.time}T12:00:00Z`) / 1000),
+        indicators: { quote: [{
+          open: sourceBars.map((bar) => bar.open),
+          high: sourceBars.map((bar) => bar.high),
+          low: sourceBars.map((bar) => bar.low),
+          close: sourceBars.map((bar) => bar.close),
+          volume: sourceBars.map((bar) => bar.volume ?? 1000)
+        }] }
+      }],
+      error: null
+    }
+  };
+}
+
+function testQuoteMetadataContractAndProviderTimestamps() {
+  const bars = [
+    { time: '2026-07-09', open: 99, high: 101, low: 98, close: 100 },
+    { time: '2026-07-10', open: 100.5, high: 102, low: 99, close: 101 }
   ];
-  const series = sources.map(([ticker, sourceSymbol, sourceKey]) => chartSeries({ ticker, sourceSymbol, sourceKey }));
-  const rows = series.map(({ ticker, sourceSymbol }) => ({ ticker, sourceSymbol, group: 'Crypto' }));
-  const payload = { series };
-  const snapshot = JSON.stringify(payload);
-  const enrichedRows = attachTapeComparisonContext(rows, payload);
-  const contexts = enrichedRows.map((row) => row.comparisonContext);
-  assert.deepEqual(Object.keys(contexts[0]), [
-    'quoteStatus', 'marketType', 'previousBarDate', 'latestBarDate', 'timeZone'
-  ]);
-  assert.deepEqual(contexts.map((item) => item.marketType), sources.map((item) => item[3]));
-  assert.deepEqual(enrichedRows.map(({ comparisonContext, ...row }) => row), rows);
-  assert.ok(contexts.every((item) => item.previousBarDate === '2026-07-09' && item.latestBarDate === '2026-07-10'));
-  assert.deepEqual(attachTapeComparisonContext(rows, compactChartPayload(payload)), enrichedRows);
-  assert.equal(JSON.stringify(payload), snapshot);
-  for (const bars of [null, [], [series[0].bars[0]], [null, null], [{ time: 'bad' }, { time: '2026-07-10' }]]) {
-    const result = attachTapeComparisonContext(rows, { series: [{ ...series[0], bars }, ...series.slice(1)] });
-    assert.equal(result[0].comparisonContext.quoteStatus, 'unavailable');
-    assert.deepEqual(result.slice(1), enrichedRows.slice(1), 'One bad comparison cannot affect other rows.');
+  const yahoo = parseYahooSeries(
+    { ticker: 'IBIT', name: 'Bitcoin ETF', section: 'tape', sourceSymbol: 'IBIT' },
+    yahooDailyPayload('IBIT', bars, { last: 101.5 }),
+    'query1.finance.yahoo.com'
+  );
+  assert.deepEqual(yahoo.quote, {
+    behavior: 'session',
+    observedAt: '2026-07-10T20:00:00.000Z',
+    last: 101.5,
+    previous: 100,
+    open: 100.5,
+    high: 102,
+    low: 99
+  });
+  const crypto = parseYahooSeries(
+    { ticker: 'BTC', name: 'Bitcoin', section: 'tape', sourceSymbol: 'BTC-USD' },
+    yahooDailyPayload('BTC-USD', bars, { last: 101.5, timeZone: 'UTC' }),
+    'query1.finance.yahoo.com'
+  );
+  assert.equal(crypto.quote.behavior, 'crypto_utc');
+  assert.equal(crypto.quote.previous, 100, 'Crypto compares with the previous UTC daily close, not the current-day open.');
+  const withoutTimestamp = yahooDailyPayload('IBIT', bars, { last: 999 });
+  delete withoutTimestamp.chart.result[0].meta.regularMarketTime;
+  assert.deepEqual(parseYahooSeries(
+    { ticker: 'IBIT', name: 'Bitcoin ETF', section: 'tape', sourceSymbol: 'IBIT' },
+    withoutTimestamp,
+    'query1.finance.yahoo.com'
+  ).quote, {
+    behavior: 'session', observedAt: '2026-07-10', last: 101, previous: 100, open: 100.5, high: 102, low: 99
+  }, 'Missing quote time must retain the actual daily observation, not pair fetch metadata with its price.');
+  const future = parseYahooSeries(
+    { ticker: 'GC', name: 'Gold', section: 'tape', sourceSymbol: 'GC=F' },
+    yahooDailyPayload('GCQ26.CMX', bars, {
+      instrumentType: 'FUTURE', exchangeName: 'CMX', last: 101.5,
+      observedAt: Date.parse('2026-07-10T01:00:00Z') / 1000
+    }),
+    'query1.finance.yahoo.com',
+    { contractSymbol: 'GCQ26.CMX' }
+  );
+  assert.equal(future.quote.observedAt, '2026-07-10T01:00:00.000Z');
+  assert.equal(future.quote.last, 101.5, 'The full futures session may begin on the prior local calendar date.');
+
+  const finnhubTime = Date.parse('2026-07-10T19:59:30Z') / 1000;
+  assert.deepEqual(finnhubQuoteBarFromPayload({ o: 100, h: 102, l: 99, c: 101.5, pc: 100, t: finnhubTime }).quote, {
+    behavior: 'session',
+    observedAt: '2026-07-10T19:59:30.000Z',
+    last: 101.5,
+    previous: 100,
+    open: 100,
+    high: 102,
+    low: 99
+  });
+  assert.equal(finnhubQuoteBarFromPayload({ o: 100, h: 102, l: 99, c: 101.5, pc: null, t: finnhubTime }), null);
+  for (const sourceSymbol of ['IBIT', 'ETHA', 'MSTR']) assert.equal(supportsFinnhubQuote({ sourceSymbol }), true);
+  for (const sourceSymbol of ['BTC-USD', 'GC=F', 'TREASURY:10Y']) assert.equal(supportsFinnhubQuote({ sourceSymbol }), false);
+
+  const base = chartSeries();
+  const payloadFor = (series) => ({
+    schemaVersion: 1,
+    generatedAt: '2026-07-10T21:00:00.000Z',
+    range: { days: 1826, startDate: '2021-07-10', endDate: '2026-07-10' },
+    series: [series]
+  });
+  assert.deepEqual(validateChartStagingPayload(payloadFor(base), [{ ticker: 'SPX', sourceSymbol: '^GSPC' }]), []);
+  for (const [label, quote, pattern] of [
+    ['absent', undefined, /quote must be an object/],
+    ['null', null, /quote must be an object/],
+    ['wrong primitive', 'bad', /quote must be an object/],
+    ['wrong container', [], /quote must be an object/],
+    ['bad behavior', { ...base.quote, behavior: 'continuous' }, /behavior is invalid/],
+    ['bad time', { ...base.quote, observedAt: 'today' }, /observedAt/],
+    ['mismatched date', { ...base.quote, observedAt: '2026-07-09T20:00:00Z' }, /latest chart bar date/],
+    ['nonfinite last', { ...base.quote, last: '101' }, /quote.last/],
+    ['bad previous', { ...base.quote, previous: '100' }, /quote.previous/],
+    ['missing OHL', { ...base.quote, open: undefined }, /quote.open/],
+    ['nonpositive price', { ...base.quote, last: 0 }, /must be positive/]
+  ]) {
+    const candidate = structuredClone(base);
+    if (quote === undefined) delete candidate.quote;
+    else candidate.quote = quote;
+    assert.match(validateChartStagingPayload(payloadFor(candidate), [{ ticker: 'SPX', sourceSymbol: '^GSPC' }]).join('\n'), pattern, label);
   }
-  assert.equal(attachTapeComparisonContext(rows, { series: [{ ...series[0], sourceSymbol: 'WRONG' }] })[0].comparisonContext.quoteStatus, 'unavailable');
-  for (const missing of [undefined, null, {}, { series: null }, { series: 'bad' }, { availability: { status: 'unavailable' }, series: [] }]) {
-    assert.ok(attachTapeComparisonContext(rows, missing).every((row) => row.comparisonContext.quoteStatus === 'unavailable'));
+  const daily = chartSeries({
+    ticker: 'MOVE', sourceSymbol: 'MOVE.INDX', source: 'EODHD EOD API', sourceKey: 'eodhd_eod', fetchedFrom: 'eodhd.com',
+    quote: { behavior: 'daily_observation', observedAt: '2026-07-10', last: 101, previous: 100 }
+  });
+  assert.deepEqual(validateChartStagingPayload(payloadFor(daily), [{ ticker: 'MOVE', sourceSymbol: 'MOVE.INDX' }]), []);
+  const badDaily = structuredClone(daily);
+  badDaily.quote.open = 101;
+  assert.match(validateChartStagingPayload(payloadFor(badDaily), [{ ticker: 'MOVE', sourceSymbol: 'MOVE.INDX' }]).join('\n'), /not supported for daily observations/);
+  const timestampedDaily = structuredClone(daily);
+  timestampedDaily.quote.observedAt = '2026-07-10T20:00:00Z';
+  assert.match(validateChartStagingPayload(payloadFor(timestampedDaily), [{ ticker: 'MOVE', sourceSymbol: 'MOVE.INDX' }]).join('\n'), /ISO date for daily observations/);
+  const unavailableFuture = chartSeries({
+    ticker: 'GC', sourceSymbol: 'GC=F',
+    quote: { behavior: 'futures', observedAt: '2026-07-10', last: 101, previous: null, open: 100, high: 102, low: 99 }
+  });
+  assert.deepEqual(validateChartStagingPayload(payloadFor(unavailableFuture), [{ ticker: 'GC', sourceSymbol: 'GC=F' }]), []);
+  const malformedFuture = structuredClone(unavailableFuture);
+  malformedFuture.quote.contractSymbol = 'GCQXX.CMX';
+  assert.match(validateChartStagingPayload(payloadFor(malformedFuture), [{ ticker: 'GC', sourceSymbol: 'GC=F' }]).join('\n'), /explicit futures contract/);
+}
+
+function testCommodityContractQuoteSelection() {
+  assert.deepEqual(commodityContractCandidates('GC=F', new Date('2026-07-10T18:00:00Z')), ['GCQ26.CMX', 'GCV26.CMX', 'GCZ26.CMX']);
+  assert.deepEqual(commodityContractCandidates('CL=F', new Date('2026-12-20T18:00:00Z')), ['CLZ26.NYM', 'CLF27.NYM', 'CLG27.NYM', 'CLH27.NYM']);
+  const bars = [
+    { time: '2026-07-08', open: 100, high: 102, low: 99, close: 101 },
+    { time: '2026-07-09', open: 101, high: 103, low: 100, close: 102 },
+    { time: '2026-07-10', open: 102, high: 104, low: 101, close: 103 }
+  ];
+  const alias = yahooDailyPayload('GC=F', bars, { instrumentType: 'FUTURE', exchangeName: 'CMX', last: 103 });
+  const current = yahooDailyPayload('GCQ26.CMX', bars, { instrumentType: 'FUTURE', exchangeName: 'CMX', last: 103 });
+  const next = yahooDailyPayload('GCV26.CMX', bars.map((bar) => ({ ...bar, close: bar.close + 10, high: bar.high + 10 })), {
+    instrumentType: 'FUTURE', exchangeName: 'CMX', last: 113
+  });
+  assert.equal(resolveCommodityContract(alias, new Map([['GCQ26.CMX', current], ['GCV26.CMX', next]])), 'GCQ26.CMX');
+}
+
+async function testCommodityCandidateValidationAndFallback() {
+  const row = { ticker: 'GC', name: 'Gold', sourceSymbol: 'GC=F', section: 'tape' };
+  const startDate = new Date('2026-07-01T00:00:00Z');
+  const endDate = new Date('2026-07-10T21:00:00Z');
+  const bars = [
+    { time: '2026-07-08', open: 100, high: 102, low: 99, close: 101 },
+    { time: '2026-07-09', open: 101, high: 103, low: 100, close: 102 },
+    { time: '2026-07-10', open: 102, high: 104, low: 101, close: 103 }
+  ];
+  const payload = (symbol, values = bars, overrides = {}) => yahooDailyPayload(symbol, values, {
+    instrumentType: 'FUTURE', exchangeName: 'CMX', ...overrides
+  });
+  const fetchCandidate = (preferred, { alternate = payload('GCV26.CMX'), alias = payload('GC=F'), allInvalid = false } = {}) => (
+    chartData.fetchSeries(row, { delayMs: 0, yahooRateLimitRetries: 0 }, startDate, endDate, new Map(), {
+      priorSeries: { quote: { contractSymbol: 'GCQ26.CMX' } },
+      fetchJson: async (url) => {
+        const symbol = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+        if (symbol === 'GC=F') return alias;
+        if (symbol === 'GCQ26.CMX') {
+          if (preferred instanceof Error) throw preferred;
+          return preferred;
+        }
+        if (symbol === 'GCV26.CMX' && !allInvalid) return alternate;
+        throw new Error('candidate unavailable');
+      }
+    })
+  );
+  const assertValidSelection = (series, contract, previous = 102) => {
+    assert.equal(series.quote.contractSymbol, contract);
+    assert.equal(series.quote.previous, previous);
+    assert.deepEqual(chartData.validateChartSeriesContract({ ...series, quoteRevision: endDate.toISOString() }, row).errors, []);
+    assert.equal(series.quoteRevision, undefined, 'The caller must still own the final revision stamp.');
+  };
+  assertValidSelection(await fetchCandidate(payload('GCQ26.CMX')), 'GCQ26.CMX');
+  for (const [label, preferred] of [
+    ['rejected', new Error('source rejected')],
+    ['absent', undefined], ['null', null], ['primitive', 7], ['container', []],
+    ['malformed quote member', payload('GCQ26.CMX', bars, { last: 1000 })]
+  ]) {
+    const selected = await fetchCandidate(preferred);
+    assertValidSelection(selected, 'GCV26.CMX');
+    assert.equal(selected.quote.last, 103, label);
+    assert.equal(selected.quote.open, 102, label);
+    assert.equal(selected.quote.high, 104, label);
+    assert.equal(selected.quote.low, 101, label);
+    assert.equal(selected.quote.observedAt, '2026-07-10T20:00:00.000Z', label);
   }
-  const carried = { series: [{ ...series[0], availability: { status: 'carried_forward' } }, ...series.slice(1)] };
-  assert.equal(attachTapeComparisonContext(rows, carried)[0].comparisonContext.quoteStatus, 'carried_forward');
-  assert.deepEqual(attachTapeComparisonContext(rows, carried).slice(1), enrichedRows.slice(1));
-  assert.deepEqual(attachTapeComparisonContext([], payload), []);
-  const weekend = { series: [{ ...series[0], bars: [{ time: '2026-09-25' }, { time: '2026-09-28' }] }] };
-  assert.equal(attachTapeComparisonContext(rows.slice(0, 1), weekend)[0].comparisonContext.previousBarDate, '2026-09-25');
+  const stale = payload('GCQ26.CMX', bars.slice(0, 2), {
+    observedAt: Date.parse('2026-07-09T20:00:00Z') / 1000
+  });
+  assertValidSelection(await fetchCandidate(stale), 'GCV26.CMX');
+
+  // An invalid newer candidate must not set the freshness cutoff for healthy ones.
+  const olderBars = bars.slice(0, 2);
+  const older = (symbol) => payload(symbol, olderBars, { observedAt: Date.parse('2026-07-09T20:00:00Z') / 1000 });
+  assertValidSelection(await fetchCandidate(payload('GCQ26.CMX', bars, { last: 1000 }), {
+    alternate: older('GCV26.CMX'), alias: older('GC=F')
+  }), 'GCV26.CMX', 101);
+
+  await assert.rejects(fetchCandidate(payload('GCQ26.CMX', bars, { last: 1000 }), { allInvalid: true }),
+    /explicit contract quote data was unavailable/);
+  // Failure is per acquisition; a subsequent healthy ticker fetch is unaffected.
+  assertValidSelection(await fetchCandidate(payload('GCQ26.CMX')), 'GCQ26.CMX');
 }
 
 function testChartSeriesOwnsDerivedQuoteRows() {
@@ -381,8 +570,33 @@ function testChartSeriesOwnsDerivedQuoteRows() {
   const quote = quoteRowFromSeries(series);
   assert.equal(quote.ticker, 'SPX');
   assert.equal(quote.last, '101.00');
+  assert.equal(quote.previous, '100.00');
   assert.equal(quote.delta, '+1.00');
   assert.equal(quote.pct, '+1.00%');
+  assert.equal(quote.open, '100.00');
+  assert.equal(quote.high, '102.00');
+  assert.equal(quote.low, '99.00');
+  assert.equal(quote.asOf, '2026-07-10T20:00:00.000Z');
+  assert.equal(quote.quoteRevision, series.quoteRevision);
+
+  const cryptoQuote = quoteRowFromSeries(chartSeries({
+    ticker: 'BTC', sourceSymbol: 'BTC-USD',
+    quote: { behavior: 'crypto_utc', observedAt: '2026-07-10T20:00:00.000Z', last: 101, previous: 100, open: 100, high: 102, low: 99 }
+  }));
+  assert.deepEqual([cryptoQuote.last, cryptoQuote.previous, cryptoQuote.delta, cryptoQuote.pct], ['$101.00', '$100.00', '+$1.00', '+1.00%']);
+  const moveQuote = quoteRowFromSeries(chartSeries({
+    ticker: 'MOVE', sourceSymbol: 'MOVE.INDX',
+    quote: { behavior: 'daily_observation', observedAt: '2026-07-10', last: 101, previous: 100 }
+  }));
+  assert.deepEqual([moveQuote.open, moveQuote.high, moveQuote.low], ['—', '—', '—']);
+  const yieldQuote = quoteRowFromSeries(chartSeries({
+    ticker: 'UST10Y', sourceSymbol: 'TREASURY:10Y', unit: 'percent_yield',
+    quote: { behavior: 'daily_observation', observedAt: '2026-07-10', last: 4.25, previous: 4.2 }
+  }));
+  assert.deepEqual([yieldQuote.last, yieldQuote.previous, yieldQuote.delta, yieldQuote.pct], ['4.25%', '4.20%', '+5 bp', '—']);
+  const unavailableComparison = quoteRowFromSeries(chartSeries({ quote: { ...series.quote, previous: null } }));
+  assert.deepEqual([unavailableComparison.previous, unavailableComparison.delta, unavailableComparison.pct], ['—', '—', '—']);
+  assert.deepEqual(deriveQuoteRowsFromSeries([series, chartSeries({ ticker: 'VCR', sourceSymbol: 'VCR' })]).map((row) => row.ticker), ['SPX', 'VCR']);
 
   const payload = {
     schemaVersion: 1,
@@ -463,10 +677,13 @@ async function testCurrentMarketFailuresStayIsolated() {
     now: new Date('2026-07-10T21:05:00.000Z'),
     fetchSeries: async (row) => row.ticker === 'VCR'
       ? chartSeries({ ticker: 'VCR', name: 'VCR', sourceSymbol: 'VCR', bars: [{ time: '2026-07-10', open: 1, high: 1, low: 1, close: 1, volume: 1 }] })
-      : chartSeries({ bars: [
-        { time: '2026-07-09', open: 100, high: 101, low: 99, close: 100, volume: 1000 },
-        { time: '2026-07-10', open: 100, high: 105, low: 99, close: 104, volume: 1100 }
-      ] })
+      : chartSeries({
+        quote: { behavior: 'session', observedAt: '2026-07-10T20:00:00.000Z', last: 104, previous: 100, open: 100, high: 105, low: 99 },
+        bars: [
+          { time: '2026-07-09', open: 100, high: 101, low: 99, close: 100 },
+          { time: '2026-07-10', open: 100, high: 105, low: 99, close: 104 }
+        ]
+      })
   });
 
   const stagedChartData = JSON.parse(fs.readFileSync(chartOutput, 'utf8'));
@@ -605,8 +822,10 @@ function testCompactChartBarsStayTupleEncoded() {
     series: [chartSeries()]
   });
   assert.equal(compact.barEncoding, 'tuple-v1');
-  assert.deepEqual(compact.series[0].bars[0], ['2026-07-09', 100, 101, 99, 100, 1000]);
+  assert.deepEqual(compact.series[0].bars[0], ['2026-07-09', 100, 101, 99, 100, null]);
+  assert.deepEqual(compact.series[0].quote, chartSeries().quote);
   assert.equal(roundChartPayload(compact).series[0].bars[0].close, 100);
+  assert.deepEqual(roundChartPayload(compact).series[0].quote, chartSeries().quote);
 }
 
 function testAssetAllocationStagingContracts() {
@@ -771,7 +990,9 @@ async function main() {
     await testPremarketFuturesUsesOneExplicitContract();
     testPriorFuturesContractIdentity();
     testChartSeriesOwnsDerivedQuoteRows();
-    testTapeComparisonContext();
+    testQuoteMetadataContractAndProviderTimestamps();
+    testCommodityContractQuoteSelection();
+    await testCommodityCandidateValidationAndFallback();
     testChartStagingFallbackAndIsolation();
     await testCurrentMarketFailuresStayIsolated();
     await testCryptoProviderTransitions();
