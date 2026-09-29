@@ -189,6 +189,8 @@ Local refresh may overlay fresher browser data, but it never writes that overlay
 
 Use `node scripts/local_market_server.js --port 2211` to choose another local port for direct testing; the published dashboard only auto-checks port `2210`.
 
+Browser-rejected quote integrity failures set the Tape header indicator to partial and list the affected tickers in its tooltip, even when other updates succeed. Rejected updates leave the last valid quote intact. Cached responses undergo the same checks; their warning survives an unavailable live helper. Unchanged or older valid observations and intentionally excluded instruments do not count as integrity failures.
+
 ## Browser Support
 
 The supported baseline is Chromium 120+ (Chrome and Edge), Firefox 121+, and Safari 17.4+ on macOS and iOS. Older browsers, browser-version branches, and polyfills are out of scope unless a concrete supported-browser behavior requires them.

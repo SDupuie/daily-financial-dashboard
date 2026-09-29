@@ -2178,12 +2178,9 @@ async function testActualDashboardStartsInBrowser() {
       }));
       const indicator = overlayPage.locator('[data-local-refresh-indicator]');
       const tapeRow = (ticker) => overlayPage.locator(`[data-tape-chart-row="${ticker}"]`).locator('..');
-      const noNewerAtStartup = overlayPage.waitForEvent('console', {
-        predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
-      });
       await overlayPage.goto(pathToFileURL(overlayFile).href);
-      await noNewerAtStartup;
-      assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'idle');
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'partial');
+      assert.match(await indicator.textContent(), /Quote integrity check failed: SPX/);
       assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), null);
 
       overlayPayload = { schemaVersion: 1, generatedAt: spxFresh.quoteRevision, series: [spxFresh] };
@@ -2195,15 +2192,17 @@ async function testActualDashboardStartsInBrowser() {
 
       const assertRejectedSeries = async (series, generatedAt, label) => {
         overlayPayload = { schemaVersion: 1, generatedAt, series: [series] };
-        const rejected = overlayPage.waitForEvent('console', {
-          predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
-        });
         await overlayPage.reload();
-        await rejected;
-        assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'cached', label);
+        await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'partial');
+        assert.ok((await indicator.textContent()).includes(`Quote integrity check failed: ${series.ticker}`), label);
         assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), acceptedCache, label);
         assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote, label);
       };
+
+      for (const quote of [undefined, null, 'invalid']) {
+        const malformed = { ...structuredClone(spxFresh), quote, quoteRevision: freshRevision(4) };
+        await assertRejectedSeries(malformed, malformed.quoteRevision, 'Missing, null, or wrongly typed quotes must warn and preserve the accepted quote.');
+      }
 
       const wrongEquitySource = structuredClone(spxFresh);
       wrongEquitySource.sourceSymbol = 'AAPL';
@@ -2253,19 +2252,16 @@ async function testActualDashboardStartsInBrowser() {
       await assertRejectedSeries(wrongFuturesContract, wrongFuturesContract.quoteRevision, 'GC must reject a contract from the wrong root and exchange.');
 
       overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
-      const noNewerPrices = overlayPage.waitForEvent('console', {
-        predicate: (message) => message.text().includes('Local market refresh found no newer prices.')
-      });
       await overlayPage.reload();
-      await noNewerPrices;
-      assert.equal(await indicator.getAttribute('data-local-refresh-state'), 'cached');
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'partial');
       assert.equal(await overlayPage.evaluate(() => localStorage.getItem('daily-financial-dashboard:local-market-refresh:v2')), acceptedCache);
       assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote);
 
       const vcrQuote = await tapeRow('VCR').locator('.tape-last').textContent();
       overlayPayload = { schemaVersion: 1, generatedAt: vcrFresh.quoteRevision, series: [vcrFresh, spxOneBar] };
       await overlayPage.reload();
-      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
+      await overlayPage.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'partial');
+      assert.match(await indicator.textContent(), /Quote integrity check failed: SPX/);
       assert.notEqual(await tapeRow('VCR').locator('.tape-last').textContent(), vcrQuote);
       assert.equal(await tapeRow('SPX').locator('.tape-last').textContent(), spxQuote);
 

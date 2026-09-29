@@ -7225,7 +7225,7 @@
           && (bar.volume === undefined || (isFiniteChartNumber(bar.volume) && bar.volume >= 0));
       }
 
-      function mergeSeriesMap(seriesMap, refreshedSeries) {
+      function mergeSeriesMap(seriesMap, refreshedSeries, rejectedTickers) {
         const acceptedTickers = new Set();
         for (const item of refreshedSeries) {
           const ticker = String(item?.ticker || '').toUpperCase();
@@ -7234,13 +7234,16 @@
           const existing = seriesMap.get(ticker);
           // Local refreshes may update an embedded series but cannot introduce a new chartable instrument.
           if (!existing) continue;
-          if (item.ticker !== ticker || item.sourceSymbol !== existing.sourceSymbol || item.section !== existing.section) continue;
-          if (!isValidLocalQuoteRevision(item?.quoteRevision)) continue;
-          if (!Array.isArray(item.bars) || item.bars.length < 2
-            || !item.bars.every(isValidLocalChartBar) || !strictlyAscendingChartBars(item.bars)) continue;
-          if (typeof item.noVolume !== 'boolean' || item.noVolume !== !item.bars.some((bar) => bar.volume !== undefined)) continue;
-          if (['SPX', 'NDX', 'DJI', 'RUT', 'VIX'].includes(ticker) && !item.noVolume) continue;
-          if (!validTapeQuote(item.quote, item)) continue;
+          if (item.ticker !== ticker || item.sourceSymbol !== existing.sourceSymbol || item.section !== existing.section
+            || !isValidLocalQuoteRevision(item.quoteRevision)
+            || !Array.isArray(item.bars) || item.bars.length < 2
+            || !item.bars.every(isValidLocalChartBar) || !strictlyAscendingChartBars(item.bars)
+            || typeof item.noVolume !== 'boolean' || item.noVolume !== !item.bars.some((bar) => bar.volume !== undefined)
+            || (['SPX', 'NDX', 'DJI', 'RUT', 'VIX'].includes(ticker) && !item.noVolume)
+            || !validTapeQuote(item.quote, item)) {
+            rejectedTickers.add(ticker);
+            continue;
+          }
           // A newer download must not replace a newer source observation with an older quote.
           if (validTapeQuote(existing.quote, existing)
             && Date.parse(item.quote.observedAt) < Date.parse(existing.quote.observedAt)) continue;
@@ -7252,7 +7255,10 @@
           const merged = existingLatest && refreshedLatest && refreshedLatest < existingLatest
             ? { ...existing, quoteRevision: item.quoteRevision, bars }
             : { ...existing, ...item, bars };
-          if (item.quoteRevision === existing?.quoteRevision && !sameJsonValue(existing, merged)) continue;
+          if (item.quoteRevision === existing?.quoteRevision && !sameJsonValue(existing, merged)) {
+            rejectedTickers.add(ticker);
+            continue;
+          }
           if (sameJsonValue(existing, merged)) continue;
           seriesMap.set(ticker, merged);
           acceptedTickers.add(ticker);
@@ -7436,15 +7442,18 @@
         return `${label} CT`;
       }
 
-      function localRefreshResultMessage(payload, state = payload?.partial ? 'partial' : 'live') {
+      function localRefreshResultMessage(payload, state = payload?.partial ? 'partial' : 'live', rejectedTickers = new Set()) {
         const status = state === 'cached'
           ? 'Cached local market data shown'
           : state === 'embedded'
             ? 'Embedded market data shown'
             : state === 'partial'
-              ? 'Local market data partial · Available updates applied'
+              ? 'Local market data partial · Last valid quotes retained where updates are unavailable'
               : 'Local market data updated';
-        return `${status} · Checked ${localRefreshStatusText(payload)}`;
+        const integrity = rejectedTickers.size
+          ? ` · Quote integrity check failed: ${[...rejectedTickers].sort().join(', ')}. Rejected updates were not applied.`
+          : '';
+        return `${status}${integrity} · Checked ${localRefreshStatusText(payload)}`;
       }
       function localRefreshIndicatorHtml() {
         const { state, message } = localRefreshIndicator;
@@ -7475,10 +7484,10 @@
         };
       }
 
-      function applyLocalMarketRefresh(data, payload) {
+      function applyLocalMarketRefresh(data, payload, rejectedTickers = new Set()) {
         if (!payload || payload.schemaVersion !== 1) return false;
         const sections = localRefreshSections(payload);
-        const acceptedTickers = mergeSeriesMap(chartSeriesByTicker, sections.series);
+        const acceptedTickers = mergeSeriesMap(chartSeriesByTicker, sections.series, rejectedTickers);
         let changed = acceptedTickers.size > 0;
         if (acceptedTickers.size) {
           changed = syncDashboardPricesFromSeriesMap(data, chartSeriesByTicker, acceptedTickers) || changed;
@@ -7526,12 +7535,14 @@
         }
       }
       async function tryLocalMarketRefresh(data) {
+        const priorIndicator = localRefreshIndicator;
         const cachedDataActive = localRefreshIndicator.state === 'cached';
         const fallbackState = cachedDataActive ? 'cached' : 'idle';
         const fallbackMessage = () => localRefreshResultMessage(null, cachedDataActive ? 'cached' : 'embedded');
         if (typeof fetch !== 'function' || typeof AbortController !== 'function') {
           console.warn('Local market refresh skipped because fetch or AbortController is unavailable.');
-          setLocalRefreshIndicator(fallbackState, fallbackMessage());
+          setLocalRefreshIndicator(priorIndicator.state === 'partial' ? 'partial' : fallbackState,
+            priorIndicator.state === 'partial' ? priorIndicator.message : fallbackMessage());
           return;
         }
         setLocalRefreshIndicator('checking', 'Checking for local market data');
@@ -7558,19 +7569,23 @@
               continue;
             }
             if (payload.partial) console.warn('Local market refresh completed partially.', payload.errors || []);
-            const changed = applyLocalMarketRefresh(data, payload);
+            const rejectedTickers = new Set();
+            const changed = applyLocalMarketRefresh(data, payload, rejectedTickers);
+            const partial = payload.partial || rejectedTickers.size > 0;
+            const state = partial ? 'partial' : 'live';
+            const message = localRefreshResultMessage(payload, state, rejectedTickers);
             if (changed) {
               const restoreIndicatorFocus = document.activeElement?.matches?.('[data-local-refresh-indicator]') === true;
               writeCachedLocalMarketRefresh(data, payload);
               render(data);
-              setLocalRefreshIndicator(payload.partial ? 'partial' : 'live', localRefreshResultMessage(payload));
+              setLocalRefreshIndicator(state, message);
               if (restoreIndicatorFocus) {
                 document.querySelector('[data-local-refresh-indicator]')?.focus({ preventScroll: true });
               }
               return;
             }
-            if (payload.partial) {
-              setLocalRefreshIndicator('partial', localRefreshResultMessage(payload));
+            if (partial) {
+              setLocalRefreshIndicator('partial', message);
               return;
             }
             // A 200 response can still be stale or empty; try the next configured helper URL unless something actually changed.
@@ -7584,7 +7599,8 @@
         }
         if (helperError === 'no_newer_prices') console.info('Local market refresh found no newer prices.');
         else if (helperError || lastFailure) console.warn('Local market refresh did not replace the active market data.', { helperError, lastFailure });
-        setLocalRefreshIndicator(fallbackState, fallbackMessage());
+        setLocalRefreshIndicator(priorIndicator.state === 'partial' ? 'partial' : fallbackState,
+          priorIndicator.state === 'partial' ? priorIndicator.message : fallbackMessage());
       }
 
       function tapeChartIcon() {
@@ -10382,11 +10398,13 @@
         dashboardData = loadData();
         syncDashboardPricesFromSeriesMap(dashboardData, chartSeriesByTicker);
         const cachedLocalRefresh = readCachedLocalMarketRefresh(dashboardData);
-        if (cachedLocalRefresh && applyLocalMarketRefresh(dashboardData, cachedLocalRefresh)) {
-          setLocalRefreshIndicator(
-            'cached',
-            localRefreshResultMessage(cachedLocalRefresh, 'cached')
-          );
+        if (cachedLocalRefresh) {
+          const rejectedTickers = new Set();
+          const changed = applyLocalMarketRefresh(dashboardData, cachedLocalRefresh, rejectedTickers);
+          if (changed || rejectedTickers.size) {
+            const state = cachedLocalRefresh.partial || rejectedTickers.size ? 'partial' : 'cached';
+            setLocalRefreshIndicator(state, localRefreshResultMessage(cachedLocalRefresh, state, rejectedTickers));
+          }
         }
         render(dashboardData);
         tryLocalMarketRefresh(dashboardData);
