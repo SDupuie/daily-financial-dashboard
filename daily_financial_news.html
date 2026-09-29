@@ -656,7 +656,6 @@
     .tape-name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; line-height: 1.1; }
     .tape-name-line .tape-ticker { margin-top: 0; font-size: 12px; white-space: nowrap; }
     .tape-observation-line { display: flex; align-items: flex-start; margin-top: 0; line-height: 1; }
-    .tape-date-mobile { display: none; }
     .tape-value {
       min-width: 0;
       font-family: "SFMono-Regular", Consolas, monospace;
@@ -2493,8 +2492,8 @@
       .tape-quote-header, .tape-row > .tape-value { display: none; }
       .tape-mobile-quote { display: grid; gap: 3px; text-align: right; font-family: "SFMono-Regular", Consolas, monospace; }
       .tape-mobile-quote .metric-pair { justify-content: end; }
-      .tape-date-desktop { display: none; }
-      .tape-date-mobile { display: inline; }
+      .tape-observation-line .tape-asof { flex: 0 1 100%; min-width: 0; }
+      .tape-asof-button { max-width: 100%; white-space: normal; }
     }
     @media (max-width: 1050px) {
       .futures-module {
@@ -7708,10 +7707,8 @@
         const date = new Date(timed ? quote.observedAt : `${quote.observedAt}T12:00:00Z`);
         const timeZone = timed ? 'America/Chicago' : 'UTC';
         const day = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone }).format(date);
-        const shortDay = new Intl.DateTimeFormat('en-US', { month: 'numeric', day: 'numeric', timeZone }).format(date);
         const time = timed ? new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago', timeZoneName: 'short' }).format(date) : '';
         const label = day + (timed ? ', ' + time : '');
-        const compactLabel = shortDay + (timed ? ' ' + time : '');
         let window = quote.behavior === 'crypto_utc'
           ? 'Open, high, and low cover the UTC calendar day beginning at midnight UTC. Change is measured from the previous UTC daily close.'
           : quote.behavior === 'futures'
@@ -7727,7 +7724,7 @@
         window += timed ? ' Quote time is displayed in Central Time.' : ' The source observation is available at date precision only.';
         if (tapeSeriesIsStale(series)) window += ' The latest refresh is unavailable or this observation is stale; the last valid quote is shown.';
         const id = `tape-asof-${String(row.ticker).toLowerCase()}`;
-        return `<span class="stale-info tape-asof" data-stale-info><button class="tape-asof-button" type="button" aria-label="${esc(`${row.name}: As of ${label}. Quote window details`)}" aria-describedby="${id}" aria-expanded="false" data-stale-button><span class="tape-date-desktop">As of ${esc(label)}</span><span class="tape-date-mobile">${esc(compactLabel)}</span></button><span class="stale-info-tooltip" id="${id}" role="tooltip">${esc(window)}</span></span>`;
+        return `<span class="stale-info tape-asof" data-stale-info><button class="tape-asof-button" type="button" aria-label="${esc(`${row.name}: As of ${label}. Quote window details`)}" aria-describedby="${id}" aria-expanded="false" data-stale-button>As of ${esc(label)}</button><span class="stale-info-tooltip" id="${id}" role="tooltip">${esc(window)}</span></span>`;
       }
       function chartInfoDataLabel(series) {
         if (isYieldCurveSeries(series)) return 'Yield curve snapshot';

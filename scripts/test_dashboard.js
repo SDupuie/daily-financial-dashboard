@@ -1893,18 +1893,23 @@ async function testActualDashboardStartsInBrowser() {
       }
     }
 
-    async function assertTimedTapeTimestamp(page) {
-      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+    async function assertTimedTapeTimestamp(page, observedAt) {
+      const date = new Date(observedAt);
+      const day = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Chicago' }).format(date);
+      const time = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago', timeZoneName: 'short' }).format(date);
+      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 720 }]) {
         await page.setViewportSize(viewport);
         await page.locator('[data-tape-group-button]').filter({ hasText: 'Equities' }).click();
         const button = page.locator('[data-tape-chart-row="SPX"]').locator('..').locator('.tape-asof-button');
         await button.scrollIntoViewIfNeeded();
-        assert.equal((await button.innerText()).trim(), viewport.width > 1100 ? 'As of Sep 28, 3:00 PM CDT' : '9/28 3:00 PM CDT');
+        assert.equal((await button.innerText()).trim(), `As of ${day}, ${time}`);
         const bounds = await button.evaluate((element) => {
           const rect = element.getBoundingClientRect();
-          return { left: rect.left, right: rect.right, viewportWidth: window.innerWidth };
+          const quote = element.closest('.tape-row')?.querySelector('.tape-mobile-quote')?.getBoundingClientRect();
+          return { left: rect.left, right: rect.right, quoteLeft: quote?.left, viewportWidth: window.innerWidth };
         });
         assert.equal(bounds.left >= -1 && bounds.right <= bounds.viewportWidth + 1, true, JSON.stringify(bounds));
+        if (viewport.width <= 1100) assert.equal(bounds.right <= bounds.quoteLeft + 1, true, JSON.stringify(bounds));
       }
     }
 
@@ -1996,7 +2001,7 @@ async function testActualDashboardStartsInBrowser() {
         }
         if (testTooltips) await assertTooltipInteractions(page);
         if (testTapePresentation) await assertTapePresentation(page);
-        if (testTimedTapeTimestamp) await assertTimedTapeTimestamp(page);
+        if (testTimedTapeTimestamp) await assertTimedTapeTimestamp(page, testTimedTapeTimestamp);
         if (testWeekAheadImpactFilter) await assertWeekAheadImpactFiltering(page);
         if (malformedTapeTicker) {
           const malformedRow = page.locator(`[data-tape-chart-row="${malformedTapeTicker}"]`).locator('..');
@@ -2093,7 +2098,7 @@ async function testActualDashboardStartsInBrowser() {
         structuredClone(canonicalChartData.series.find((series) => series.ticker === ticker))
       ))
     };
-    overlayFixture.chartData.series.find((series) => series.ticker === 'SPX').quote.observedAt = '2026-09-28T20:00:00.000Z';
+    const spxObservedAt = overlayFixture.chartData.series.find((series) => series.ticker === 'SPX').quote.observedAt;
     overlayFixture.dashboard.crypto.stats.find((row) => row.sym === 'F&G').availability = {
       status: 'carried_forward',
       lastValidatedAt: '2026-07-09T21:00:00.000Z'
@@ -2103,7 +2108,7 @@ async function testActualDashboardStartsInBrowser() {
       'chart-data', JSON.stringify(overlayFixture.chartData)
     );
     fs.writeFileSync(overlayFile, overlayHtml);
-    await assertDashboardStarts(overlayFile, { testTimedTapeTimestamp: true });
+    await assertDashboardStarts(overlayFile, { testTimedTapeTimestamp: spxObservedAt });
 
     for (const testCase of malformedTapeQuotePublishedCases) {
       const malformedChartData = structuredClone(overlayFixture.chartData);
@@ -2135,7 +2140,10 @@ async function testActualDashboardStartsInBrowser() {
     await assertDashboardStarts(unavailableFile, { unavailableTape: true });
 
     const spxFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'SPX'));
-    spxFresh.quoteRevision = '2026-09-28T21:05:00.000Z';
+    const vcrFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'VCR'));
+    const freshBase = Math.max(Date.parse(spxFresh.quoteRevision), Date.parse(vcrFresh.quoteRevision));
+    const freshRevision = (minutes) => new Date(freshBase + minutes * 60_000).toISOString();
+    spxFresh.quoteRevision = freshRevision(1);
     spxFresh.bars.at(-1).high = 7785;
     spxFresh.bars.at(-1).close = 7780;
     spxFresh.quote = {
@@ -2146,12 +2154,11 @@ async function testActualDashboardStartsInBrowser() {
     };
     const spxOneBar = {
       ...spxFresh,
-      quoteRevision: '2026-09-28T21:06:00.000Z',
-      quote: { ...spxFresh.quote, observedAt: '2026-09-28T21:06:00.000Z' },
+      quoteRevision: freshRevision(2),
+      quote: { ...spxFresh.quote, observedAt: freshRevision(2) },
       bars: [spxFresh.bars.at(-1)]
     };
-    const vcrFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'VCR'));
-    vcrFresh.quoteRevision = '2026-09-28T21:07:00.000Z';
+    vcrFresh.quoteRevision = freshRevision(3);
     vcrFresh.bars.at(-1).high = 375;
     vcrFresh.bars.at(-1).close = 374;
     vcrFresh.quote = {
