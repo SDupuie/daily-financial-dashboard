@@ -21,6 +21,8 @@ const YAHOO_HOSTS = ['query1.finance.yahoo.com', 'query2.finance.yahoo.com'];
 const FINNHUB_HOST = 'finnhub.io';
 const EODHD_HOST = 'eodhd.com';
 const EODHD_MOVE_SYMBOL = 'MOVE.INDX';
+const COIN_METRICS_HOST = 'community-api.coinmetrics.io';
+const REALIZED_PRICE_ASSETS = new Map([['BTC', 'btc'], ['ETH', 'eth'], ['XRP', 'xrp']]);
 const EODHD_FREE_HISTORY_DAYS = 365;
 const CHART_ROW_CONCURRENCY = 4;
 const DEFAULT_YAHOO_RATE_LIMIT_RETRIES = 1;
@@ -1289,6 +1291,14 @@ function roundChartPayload(payload) {
       return {
         ...seriesFields,
         ...(quote === undefined ? {} : { quote }),
+        ...(seriesFields.realizedPrice && Array.isArray(seriesFields.realizedPrice.values) ? {
+          realizedPrice: {
+            ...seriesFields.realizedPrice,
+            values: seriesFields.realizedPrice.values.map((point) => point && typeof point === 'object' && !Array.isArray(point)
+              ? { ...point, value: fourDecimalNumber(point.value) }
+              : point)
+          }
+        } : {}),
         bars: (Array.isArray(series?.bars) ? series.bars : []).map((rawBar) => {
           const bar = objectBar(rawBar);
           return {
@@ -1350,8 +1360,13 @@ function buildUnavailableChartData(checkedAt = new Date()) {
 }
 
 function carriedForwardChartSeries(prior, checkedAt) {
+  const { realizedPrice, ...corePrior } = prior;
   return {
-    ...prior,
+    ...corePrior,
+    ...(realizedPrice === undefined || !REALIZED_PRICE_ASSETS.has(prior.ticker) ? {} : {
+      realizedPrice: priorRealizedPriceOverlay(prior.ticker, realizedPrice, checkedAt),
+      quoteRevision: checkedAt
+    }),
     availability: {
       status: 'carried_forward',
       reason: 'source_refresh_failed',
@@ -1368,6 +1383,93 @@ function isChartQuoteRevision(value) {
 
 function isQuoteObservedAt(value) {
   return isIsoDate(value) || isChartQuoteRevision(value);
+}
+
+// Supplemental history has its own gate: a bad overlay never disqualifies the
+// otherwise usable quote/history bundle from per-series carry-forward.
+function validateRealizedPriceOverlay(overlay, ticker, { label = `${ticker}.realizedPrice` } = {}) {
+  if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)) return [`${label} must be an object.`];
+  const errors = [];
+  if (!REALIZED_PRICE_ASSETS.has(ticker) || overlay.asset !== REALIZED_PRICE_ASSETS.get(ticker)) errors.push(`${label}.asset must match BTC, ETH, or XRP.`);
+  if (overlay.source !== 'Coin Metrics Community API' || overlay.sourceKey !== 'coin_metrics_community') errors.push(`${label} must identify Coin Metrics Community API.`);
+  if (!['fresh', 'stale', 'unavailable'].includes(overlay.freshness)) errors.push(`${label}.freshness is invalid.`);
+  if (!isChartQuoteRevision(overlay.checkedAt)) errors.push(`${label}.checkedAt must be an offset-bearing ISO timestamp.`);
+  if (overlay.freshness === 'fresh' ? overlay.reason !== undefined : overlay.reason !== 'source_refresh_failed') errors.push(`${label}.reason must match freshness.`);
+  if (!Array.isArray(overlay.values)) return [...errors, `${label}.values must be an array.`];
+  if (overlay.freshness === 'unavailable') {
+    if (overlay.values.length || overlay.observedAt !== null) errors.push(`${label} unavailable history must be empty with observedAt null.`);
+    return errors;
+  }
+  if (overlay.values.length < 2) errors.push(`${label}.values must contain at least two daily observations.`);
+  let previousTime = '';
+  const completedDate = isChartQuoteRevision(overlay.checkedAt)
+    ? isoDateFromDate(new Date(Date.parse(overlay.checkedAt) - 86400000))
+    : '';
+  for (const [index, point] of overlay.values.entries()) {
+    if (!point || typeof point !== 'object' || Array.isArray(point)
+      || Object.keys(point).some((key) => !['time', 'value'].includes(key))) {
+      errors.push(`${label}.values[${index}] must contain only time and value.`);
+      continue;
+    }
+    if (!isIsoDate(point.time) || point.time > completedDate || (previousTime && point.time <= previousTime)) errors.push(`${label}.values[${index}].time must be a completed, strictly ascending UTC date.`);
+    if (asStoredChartNumber(point.value) === null || point.value <= 0) errors.push(`${label}.values[${index}].value must be a positive finite JSON number.`);
+    previousTime = point.time;
+  }
+  if (!isIsoDate(overlay.observedAt) || overlay.observedAt !== overlay.values.at(-1)?.time) errors.push(`${label}.observedAt must match the latest observation.`);
+  return errors;
+}
+
+function priorRealizedPriceOverlay(ticker, prior, checkedAt) {
+  const base = { asset: REALIZED_PRICE_ASSETS.get(ticker), source: 'Coin Metrics Community API', sourceKey: 'coin_metrics_community', checkedAt };
+  if (!validateRealizedPriceOverlay(prior, ticker).length && prior.freshness !== 'unavailable') {
+    return { ...prior, checkedAt, freshness: 'stale', reason: 'source_refresh_failed' };
+  }
+  return { ...base, freshness: 'unavailable', reason: 'source_refresh_failed', observedAt: null, values: [] };
+}
+
+async function fetchRealizedPriceOverlays(rows, args, startDate, endDate, priorByTicker = new Map(), dependencies = {}) {
+  const tickers = rows.map((row) => String(row.ticker || '').toUpperCase()).filter((ticker) => REALIZED_PRICE_ASSETS.has(ticker));
+  const checkedAt = (dependencies.now instanceof Date ? dependencies.now : new Date()).toISOString();
+  const overlays = new Map(tickers.map((ticker) => [ticker, priorRealizedPriceOverlay(ticker, priorByTicker.get(ticker)?.realizedPrice, checkedAt)]));
+  if (!tickers.length) return overlays;
+  const completedEndDate = isoDateFromDate(new Date(endDate.getTime() - 86400000));
+  const rangeStartDate = isoDateFromDate(startDate);
+  const params = new URLSearchParams({ assets: tickers.map((ticker) => REALIZED_PRICE_ASSETS.get(ticker)).join(','), metrics: 'PriceUSD,CapMVRVCur', frequency: '1d', start_time: rangeStartDate, end_time: completedEndDate, page_size: '10000' });
+  const pointsByAsset = new Map(tickers.map((ticker) => [REALIZED_PRICE_ASSETS.get(ticker), []]));
+  const invalidAssets = new Set();
+  try {
+    let url = `https://${COIN_METRICS_HOST}/v4/timeseries/asset-metrics?${params}`;
+    const seenUrls = new Set();
+    while (url) {
+      const pageUrl = new URL(url);
+      if (pageUrl.protocol !== 'https:' || pageUrl.hostname !== COIN_METRICS_HOST || pageUrl.port || pageUrl.username || pageUrl.password || pageUrl.pathname !== '/v4/timeseries/asset-metrics' || seenUrls.has(pageUrl.href)) throw new Error('Invalid Coin Metrics pagination URL.');
+      seenUrls.add(pageUrl.href);
+      if (seenUrls.size > 100) throw new Error('Coin Metrics pagination exceeded the supported history window.');
+      const payload = await (dependencies.fetchJson || fetchJson)(pageUrl.href, args, {});
+      if (!payload || !Array.isArray(payload.data)) throw new Error('Coin Metrics daily metrics are malformed.');
+      for (const row of payload.data) {
+        if (!row || !pointsByAsset.has(row.asset)) continue;
+        const time = typeof row.time === 'string' && /^\d{4}-\d{2}-\d{2}T00:00:00(?:\.0+)?Z$/.test(row.time) ? row.time.slice(0, 10) : '';
+        const price = ['string', 'number'].includes(typeof row.PriceUSD) ? asFiniteNumber(row.PriceUSD) : null;
+        const mvrv = ['string', 'number'].includes(typeof row.CapMVRVCur) ? asFiniteNumber(row.CapMVRVCur) : null;
+        const value = price !== null && mvrv !== null && price > 0 && mvrv > 0 ? fourDecimalNumber(price / mvrv) : null;
+        if (!isIsoDate(time) || time < rangeStartDate || time > completedEndDate || value === null || value <= 0) invalidAssets.add(row.asset);
+        else pointsByAsset.get(row.asset).push({ time, value });
+      }
+      if (payload.next_page_url !== undefined && payload.next_page_url !== null && typeof payload.next_page_url !== 'string') throw new Error('Coin Metrics pagination metadata is malformed.');
+      url = payload.next_page_url ? new URL(payload.next_page_url, pageUrl).href : '';
+    }
+    for (const ticker of tickers) {
+      const asset = REALIZED_PRICE_ASSETS.get(ticker);
+      if (invalidAssets.has(asset)) continue;
+      const values = pointsByAsset.get(asset).sort((left, right) => left.time.localeCompare(right.time));
+      const overlay = { asset, source: 'Coin Metrics Community API', sourceKey: 'coin_metrics_community', checkedAt, freshness: 'fresh', observedAt: values.at(-1)?.time ?? null, values };
+      if (!validateRealizedPriceOverlay(overlay, ticker).length) overlays.set(ticker, overlay);
+    }
+  } catch (_error) {
+    // Transport/pagination failure leaves independent validated prior histories.
+  }
+  return overlays;
 }
 
 function quoteObservationDate(quote, series) {
@@ -1502,6 +1604,7 @@ function validateChartSeriesContract(rawSeries, expectedRow = null, options = {}
     bars: Array.isArray(sourceItem.bars) ? sourceItem.bars.map(objectBar) : sourceItem.bars
   };
   if (!ticker) errors.push(`${label}.ticker must be populated.`);
+  if (sourceItem.realizedPrice !== undefined) errors.push(...validateRealizedPriceOverlay(sourceItem.realizedPrice, ticker, { label: `${label}.realizedPrice` }));
   const expectedSource = String(expectedRow?.sourceSymbol || '');
   if (expectedSource && item.sourceSymbol !== expectedSource) errors.push(`${label}.sourceSymbol must be ${expectedSource}.`);
   if (item.providerSymbol !== undefined) {
@@ -2520,8 +2623,10 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     const tickerKey = String(row.ticker || '').toUpperCase();
     const prior = rawCanonicalByTicker.get(tickerKey);
     if (!prior) continue;
-    const priorValidation = validateChartSeriesContract(prior, row, { label: `Prior canonical ${tickerKey}` });
+    const { realizedPrice, ...corePrior } = prior;
+    const priorValidation = validateChartSeriesContract(corePrior, row, { label: `Prior canonical ${tickerKey}` });
     if (!priorValidation.errors.length) {
+      if (realizedPrice !== undefined && REALIZED_PRICE_ASSETS.has(tickerKey)) priorValidation.series.realizedPrice = priorRealizedPriceOverlay(tickerKey, realizedPrice, quoteRevision);
       canonicalByTicker.set(tickerKey, priorValidation.series);
       if (tickerKey === 'MOVE') moveHistoryByTicker.set(tickerKey, priorValidation.series);
       continue;
@@ -2558,8 +2663,12 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
         { priorSeries: canonicalByTicker.get(tickerKey) }
       );
       const prior = tickerKey === 'MOVE' ? moveHistoryByTicker.get(tickerKey) : canonicalByTicker.get(tickerKey);
+      const { realizedPrice: _unusedOverlay, ...coreItem } = item;
       const refreshedSeries = {
-        ...mergeMoveHistory(item, prior, row, startDate, endDate),
+        ...mergeMoveHistory(coreItem, prior, row, startDate, endDate),
+        ...(REALIZED_PRICE_ASSETS.has(tickerKey) ? {
+          realizedPrice: priorRealizedPriceOverlay(tickerKey, rawCanonicalByTicker.get(tickerKey)?.realizedPrice, quoteRevision)
+        } : {}),
         quoteRevision
       };
       const validationErrors = validateChartStagingPayload(
@@ -2598,6 +2707,12 @@ async function main(argv = process.argv.slice(2), dependencies = {}) {
     mapConcurrent(treasuryIndexes, 1, processRow, concurrencyOptions)
   ]);
 
+  const overlays = await (dependencies.fetchRealizedPriceOverlays || fetchRealizedPriceOverlays)(inputRows, args, startDate, endDate, rawCanonicalByTicker, { ...dependencies, now: executionTime });
+  for (const [index, row] of inputRows.entries()) {
+    const overlay = overlays.get(String(row.ticker || '').toUpperCase());
+    if (seriesByIndex[index] && overlay) seriesByIndex[index] = { ...seriesByIndex[index], realizedPrice: overlay, quoteRevision };
+  }
+
   const missingRows = inputRows.filter((row, index) => !seriesByIndex[index]
     && !canonicalByTicker.has(String(row.ticker || '').toUpperCase()));
   if (missingRows.length) {
@@ -2631,6 +2746,7 @@ module.exports = {
   eodhdMoveUrl,
   assertFinnhubQuoteRepairFreshness,
   fetchSeries,
+  fetchRealizedPriceOverlays,
   fetchEodhdMoveSeries,
   fetchFuture: futuresModule.fetchFuture,
   fetchYahooSeries,
@@ -2658,6 +2774,7 @@ module.exports = {
   validateChartPayloadMetadata,
   validateChartSeriesContract,
   validateChartStagingPayload,
+  validateRealizedPriceOverlay,
   readChartableRows,
   readEmbeddedChartPayload,
   readTapeRows,

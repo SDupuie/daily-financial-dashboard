@@ -13,6 +13,7 @@ const {
   compactChartPayload,
   deriveQuoteRowsFromSeries,
   fetchFuture,
+  fetchRealizedPriceOverlays,
   finnhubQuoteBarFromPayload,
   futuresContractCandidates,
   parseYahooSeries,
@@ -828,6 +829,154 @@ function testCompactChartBarsStayTupleEncoded() {
   assert.deepEqual(roundChartPayload(compact).series[0].quote, chartSeries().quote);
 }
 
+function realizedPriceFixture(asset = 'btc', overrides = {}) {
+  return {
+    asset,
+    source: 'Coin Metrics Community API',
+    sourceKey: 'coin_metrics_community',
+    observedAt: '2026-07-09',
+    freshness: 'fresh',
+    checkedAt: '2026-07-10T21:00:00.000Z',
+    values: [{ time: '2026-07-08', value: 40 }, { time: '2026-07-09', value: 50 }],
+    ...overrides
+  };
+}
+
+async function testRealizedPriceSourceAndFallbackIsolation() {
+  const now = new Date('2026-07-10T21:05:00Z');
+  const start = new Date('2026-07-08T00:00:00Z');
+  const rows = ['BTC', 'ETH', 'XRP', 'SOL', 'IBIT'].map((ticker) => ({ ticker }));
+  const prior = new Map([
+    ['ETH', { realizedPrice: realizedPriceFixture('eth') }],
+    ['XRP', { realizedPrice: realizedPriceFixture('xrp', { values: [{ time: '2026-07-08', value: '40' }] }) }]
+  ]);
+  const observations = ['btc', 'eth', 'xrp'].flatMap((asset) => [
+    { asset, time: '2026-07-08T00:00:00Z', PriceUSD: '100.123456', CapMVRVCur: '2' },
+    { asset, time: '2026-07-09T00:00:00Z', PriceUSD: '120', CapMVRVCur: '3' }
+  ]);
+  const requests = [];
+  const fetch = (payload, sourcePrior = prior) => fetchRealizedPriceOverlays(rows, {}, start, now, sourcePrior, {
+    now,
+    fetchJson: async (url) => { requests.push(url); return payload; }
+  });
+  const fresh = await fetch({ data: observations });
+  assert.deepEqual([...fresh.keys()], ['BTC', 'ETH', 'XRP'], 'SOL and proxy instruments must not receive overlays.');
+  for (const [ticker, overlay] of fresh) {
+    assert.equal(overlay.freshness, 'fresh');
+    assert.equal(overlay.observedAt, '2026-07-09');
+    assert.deepEqual(overlay.values, [{ time: '2026-07-08', value: 50.0617 }, { time: '2026-07-09', value: 40 }]);
+    assert.deepEqual(chartData.validateRealizedPriceOverlay(overlay, ticker), []);
+  }
+  assert.equal(new URL(requests[0]).searchParams.get('end_time'), '2026-07-09', 'Only completed UTC days are requested.');
+  assert.equal(new URL(requests[0]).searchParams.get('metrics'), 'PriceUSD,CapMVRVCur');
+  const malformed = observations.map((row) => row.asset === 'eth' ? { ...row, CapMVRVCur: null } : row.asset === 'xrp' ? { ...row, PriceUSD: true } : row);
+  const isolated = await fetch({ data: malformed });
+  assert.equal(isolated.get('BTC').freshness, 'fresh');
+  assert.equal(isolated.get('ETH').freshness, 'stale');
+  assert.equal(isolated.get('ETH').observedAt, '2026-07-09');
+  assert.deepEqual(isolated.get('ETH').values, prior.get('ETH').realizedPrice.values);
+  assert.equal(isolated.get('XRP').freshness, 'unavailable');
+  assert.deepEqual(isolated.get('XRP').values, []);
+  const missing = await fetch({ data: observations.filter((row) => row.asset !== 'eth') });
+  assert.equal(missing.get('BTC').freshness, 'fresh');
+  assert.equal(missing.get('ETH').freshness, 'stale');
+  assert.equal(missing.get('XRP').freshness, 'fresh');
+  for (const badValue of [0, -1, 'Infinity', '', {}, undefined]) {
+    const bad = await fetch({ data: observations.map((row) => row.asset === 'eth' ? { ...row, CapMVRVCur: badValue } : row) });
+    assert.equal(bad.get('ETH').freshness, 'stale');
+    assert.equal(bad.get('BTC').freshness, 'fresh');
+  }
+  for (const badTime of ['2026-07-10T00:00:00Z', '2026-02-30T00:00:00Z', '2026-07-09T01:00:00Z']) {
+    const bad = await fetch({ data: observations.map((row) => row.asset === 'eth' ? { ...row, time: badTime } : row) });
+    assert.equal(bad.get('ETH').freshness, 'stale');
+    assert.equal(bad.get('BTC').freshness, 'fresh');
+  }
+  const duplicated = await fetch({ data: [...observations, observations[0]] });
+  assert.equal(duplicated.get('BTC').freshness, 'unavailable');
+  assert.equal(duplicated.get('ETH').freshness, 'fresh');
+  const rejected = await fetchRealizedPriceOverlays(rows, {}, start, now, prior, { now, fetchJson: async () => { throw new Error('source rejected'); } });
+  assert.equal(rejected.get('ETH').freshness, 'stale');
+  assert.equal(rejected.get('BTC').freshness, 'unavailable');
+  for (const payload of [null, [], { data: null }, { data: {} }]) {
+    const unavailable = await fetch(payload);
+    assert.equal(unavailable.get('ETH').freshness, 'stale');
+    assert.equal(unavailable.get('BTC').freshness, 'unavailable');
+  }
+  let pages = 0;
+  const paginated = await fetchRealizedPriceOverlays(rows, {}, start, now, prior, { now, fetchJson: async () => {
+    pages += 1;
+    return pages === 1 ? { data: observations.slice(0, 1), next_page_url: '/v4/timeseries/asset-metrics?next_page_token=next' } : { data: observations.slice(1) };
+  } });
+  assert.equal(pages, 2);
+  assert.equal(paginated.get('BTC').freshness, 'fresh');
+  for (const next_page_url of ['https://attacker.example/v4/timeseries/asset-metrics', 'http://community-api.coinmetrics.io/v4/timeseries/asset-metrics', 'https://community-api.coinmetrics.io/wrong']) {
+    let contacts = 0;
+    const unsafe = await fetchRealizedPriceOverlays(rows, {}, start, now, prior, { now, fetchJson: async () => { contacts += 1; return { data: observations, next_page_url }; } });
+    assert.equal(contacts, 1, 'Unsafe pagination must be rejected before a second request.');
+    assert.equal(unsafe.get('ETH').freshness, 'stale');
+  }
+  const compact = compactChartPayload({ series: [chartSeries({ ticker: 'BTC', realizedPrice: realizedPriceFixture('btc', { values: [{ time: '2026-07-08', value: 1.123456 }, { time: '2026-07-09', value: 2.123456 }] }) })] });
+  assert.equal(compact.series[0].bars[0].length, 6);
+  assert.equal(compact.series[0].realizedPrice.values[0].value, 1.1235);
+  const malformedShapes = [null, [], 'bad', realizedPriceFixture('eth'), realizedPriceFixture('btc', { observedAt: '2026-07-08' }), realizedPriceFixture('btc', { checkedAt: '2026-07-10' }), realizedPriceFixture('btc', { freshness: 'unavailable' }), realizedPriceFixture('btc', { values: [{ time: '2026-07-09', value: '2' }, { time: '2026-07-08', value: 2 }] })];
+  for (const overlay of malformedShapes) assert.ok(chartData.validateRealizedPriceOverlay(overlay, 'BTC').length);
+  for (const checkedAt of [null, undefined, {}, 1, 'bad']) assert.ok(chartData.validateRealizedPriceOverlay(realizedPriceFixture('btc', { checkedAt }), 'BTC').length);
+  for (const values of [[null, null], [[], []], ['bad', 'bad']]) {
+    const malformedHistory = realizedPriceFixture('btc', { values });
+    assert.ok(chartData.validateRealizedPriceOverlay(malformedHistory, 'BTC').length);
+    const failed = buildChartDataFallback({ series: [chartSeries({ ticker: 'BTC', realizedPrice: malformedHistory })] }, now);
+    assert.equal(failed.series[0].realizedPrice.freshness, 'unavailable');
+  }
+  assert.deepEqual(chartData.validateChartSeriesContract(chartSeries()).errors, [], 'Legacy absence remains valid.');
+}
+
+async function testRealizedPriceRevisionAndCoreFallback() {
+  const dir = makeTemporaryDirectory('dfd-realized-price-');
+  const input = path.join(dir, 'dashboard.html');
+  const output = path.join(dir, 'chart.json');
+  const crypto = (ticker, overlay) => chartSeries({ ticker, name: ticker, sourceSymbol: `${ticker}-USD`, quote: { ...chartSeries().quote, behavior: 'crypto_utc' }, ...(overlay === undefined ? {} : { realizedPrice: overlay }) });
+  const priorSeries = [crypto('BTC', null), crypto('ETH', realizedPriceFixture('eth'))];
+  fs.writeFileSync(input, dashboardHtmlForRows(['BTC', 'ETH'].map((ticker) => ({ group: 'Crypto', name: ticker, ticker, sourceSymbol: `${ticker}-USD` })), {
+    schemaVersion: 1, generatedAt: '2026-07-10T21:00:00.000Z', range: { days: 1826, startDate: '2021-07-10', endDate: '2026-07-10' }, series: priorSeries
+  }));
+  const now = new Date('2026-07-10T21:05:00Z');
+  await chartData.runChart(['--input', input, '--output', output, '--as-of', now.toISOString(), '--days', '1826', '--delay-ms', '0'], {
+    now,
+    fetchSeries: async () => { throw new Error('core price failure'); },
+    fetchJson: async () => ({ data: [
+      { asset: 'btc', time: '2026-07-08T00:00:00Z', PriceUSD: '100', CapMVRVCur: '2' },
+      { asset: 'btc', time: '2026-07-09T00:00:00Z', PriceUSD: '120', CapMVRVCur: '2' }
+    ] })
+  });
+  const staged = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.deepEqual(validateChartStagingPayload(staged), []);
+  const btc = staged.series.find((series) => series.ticker === 'BTC');
+  const eth = staged.series.find((series) => series.ticker === 'ETH');
+  assert.equal(btc.realizedPrice.freshness, 'fresh', 'Fresh supplement survives failed core fetch and malformed prior supplement.');
+  assert.equal(eth.realizedPrice.freshness, 'stale');
+  assert.equal(btc.availability.status, 'carried_forward');
+  assert.equal(btc.quoteRevision, now.toISOString(), 'Supplemental refresh participates in revision identity.');
+  assert.deepEqual(btc.quote, priorSeries[0].quote, 'Supplemental updates preserve source quote observation.');
+  assert.deepEqual(btc.bars, priorSeries[0].bars);
+  const wholeFallback = buildChartDataFallback(staged, new Date('2026-07-11T12:00:00Z'));
+  assert.equal(wholeFallback.series[0].realizedPrice.freshness, 'stale');
+  const snapshots = [];
+  await chartData.runChart(['--input', input, '--output', output, '--as-of', now.toISOString(), '--days', '1826', '--delay-ms', '0'], {
+    now,
+    fetchSeries: async (row) => crypto(row.ticker, { values: 'bad fresh supplement' }),
+    fetchJson: async () => { throw new Error('supplement failed'); },
+    writeJson: (_path, payload) => snapshots.push(structuredClone(payload))
+  });
+  assert.ok(snapshots.length >= 3);
+  for (const snapshot of snapshots) {
+    const savedEth = snapshot.series.find((series) => series.ticker === 'ETH');
+    assert.equal(savedEth.realizedPrice.freshness, 'stale', 'Progress snapshots preserve validated prior supplement through a fresh core update.');
+    assert.deepEqual(savedEth.realizedPrice.values, priorSeries[1].realizedPrice.values);
+  }
+  assert.equal(snapshots.at(-1).series.find((series) => series.ticker === 'BTC').realizedPrice.freshness, 'unavailable');
+  assert.equal(snapshots.at(-1).availability, undefined, 'Supplemental failure does not mark core price history partial.');
+}
+
 function testAssetAllocationStagingContracts() {
   const portfolio = {
     compiledAt: '2026-07-10T21:00:00.000Z',
@@ -997,6 +1146,8 @@ async function main() {
     await testCurrentMarketFailuresStayIsolated();
     await testCryptoProviderTransitions();
     testCompactChartBarsStayTupleEncoded();
+    await testRealizedPriceSourceAndFallbackIsolation();
+    await testRealizedPriceRevisionAndCoreFallback();
     testAssetAllocationStagingContracts();
     testLocalRefreshReadsOnlyEligibleRows();
     testLocalRefreshWindowAndOriginPolicy();

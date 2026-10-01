@@ -1750,8 +1750,8 @@ async function testActualDashboardStartsInBrowser() {
       assert.equal(Boolean(openTooltip?.text), true);
       assert.equal(openTooltip.visibility, 'visible');
       assert.equal(openTooltip.opacity > 0, true, JSON.stringify(openTooltip));
-      assert.equal(openTooltip.left >= -1 && openTooltip.right <= openTooltip.viewportWidth + 1, true);
-      assert.equal(openTooltip.top >= -1 && openTooltip.bottom <= openTooltip.viewportHeight + 1, true);
+      assert.equal(openTooltip.left >= -1 && openTooltip.right <= openTooltip.viewportWidth + 1, true, JSON.stringify(openTooltip));
+      assert.equal(openTooltip.top >= -1 && openTooltip.bottom <= openTooltip.viewportHeight + 1, true, JSON.stringify(openTooltip));
 
       await button.click();
       assert.equal(await isOpen(), false);
@@ -1890,6 +1890,18 @@ async function testActualDashboardStartsInBrowser() {
         });
         await page.locator('.section-tape').screenshot({ path: path.join(screenshotDir, 'tape-mobile-crypto-tooltip.png') });
         await cryptoAsOf.click();
+      }
+      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+        await page.setViewportSize(viewport);
+        await cryptoButton.click();
+        for (const ticker of ['BTC', 'ETH', 'XRP']) {
+          await page.locator(`[data-tape-chart-row="${ticker}"]`).click();
+          await page.locator('[data-realized-price-readout]').filter({ hasText: 'Realized price' }).waitFor();
+          const card = page.locator('.tape-inline-chart-slot.is-open .tape-chart-shell');
+          const bounds = await card.boundingBox();
+          assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= viewport.width);
+          await card.screenshot({ path: path.join(screenshotDir, `realized-price-${ticker.toLowerCase()}-${viewport.width}.png`) });
+        }
       }
     }
 
@@ -2143,29 +2155,32 @@ async function testActualDashboardStartsInBrowser() {
     const vcrFresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'VCR'));
     const freshBase = Math.max(Date.parse(spxFresh.quoteRevision), Date.parse(vcrFresh.quoteRevision));
     const freshRevision = (minutes) => new Date(freshBase + minutes * 60_000).toISOString();
+    // Revisions can be downloaded on a later day than their source observations.
+    // Keep valid fixture observations on their actual latest candle dates.
+    const freshObservation = (series, minutes) => new Date(Date.parse(series.quote.observedAt) + minutes * 60_000).toISOString();
     spxFresh.quoteRevision = freshRevision(1);
-    spxFresh.bars.at(-1).high = 7785;
-    spxFresh.bars.at(-1).close = 7780;
+    spxFresh.bars.at(-1).close = Math.max(spxFresh.quote.last, spxFresh.bars.at(-1).high) + 1;
+    spxFresh.bars.at(-1).high = spxFresh.bars.at(-1).close + 1;
     spxFresh.quote = {
       ...spxFresh.quote,
-      observedAt: spxFresh.quoteRevision,
-      last: 7780,
-      high: 7785
+      observedAt: freshObservation(spxFresh, 1),
+      last: spxFresh.bars.at(-1).close,
+      high: spxFresh.bars.at(-1).high
     };
     const spxOneBar = {
       ...spxFresh,
       quoteRevision: freshRevision(2),
-      quote: { ...spxFresh.quote, observedAt: freshRevision(2) },
+      quote: { ...spxFresh.quote, observedAt: freshObservation(spxFresh, 1) },
       bars: [spxFresh.bars.at(-1)]
     };
     vcrFresh.quoteRevision = freshRevision(3);
-    vcrFresh.bars.at(-1).high = 375;
-    vcrFresh.bars.at(-1).close = 374;
+    vcrFresh.bars.at(-1).close = Math.max(vcrFresh.quote.last, vcrFresh.bars.at(-1).high) + 1;
+    vcrFresh.bars.at(-1).high = vcrFresh.bars.at(-1).close + 1;
     vcrFresh.quote = {
       ...vcrFresh.quote,
-      observedAt: vcrFresh.quoteRevision,
-      last: 374,
-      high: 375
+      observedAt: freshObservation(vcrFresh, 1),
+      last: vcrFresh.bars.at(-1).close,
+      high: vcrFresh.bars.at(-1).high
     };
     let overlayPayload = { schemaVersion: 1, generatedAt: spxOneBar.quoteRevision, series: [spxOneBar] };
     const overlayPage = await browser.newPage();
@@ -2288,6 +2303,262 @@ async function testActualDashboardStartsInBrowser() {
       assert.equal(await crypto.locator('.crypto-stat--altcoin-season').innerText(), altseasonBefore);
     } finally {
       await overlayPage.close();
+    }
+
+    // Use the real runtime and library; capture their series data rather than
+    // approximating a canvas line from pixels or replacing the chart library.
+    const realizedChartData = structuredClone(canonicalChartData);
+    const realizedDateFormat = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    for (const [index, ticker] of ['BTC', 'ETH', 'XRP'].entries()) {
+      const series = realizedChartData.series.find((item) => item.ticker === ticker);
+      const dates = series.bars.map((bar) => Array.isArray(bar) ? bar[0] : bar.time);
+      assert.ok(dates.length > 40, `${ticker} requires enough canonical history for range coverage.`);
+      // XRP has a single visible observation in short ranges, while the full
+      // source history remains valid and contains two observations.
+      const values = (ticker === 'XRP' ? [dates[0], dates.at(-2)] : [dates[0], dates.at(-40), dates.at(-4), dates.at(-2)]).map((time, point) => ({
+        time, value: (index + 1) * 100 + point + 0.25
+      }));
+      series.realizedPrice = {
+        asset: ticker.toLowerCase(), source: 'Coin Metrics Community API', sourceKey: 'coin_metrics_community',
+        observedAt: values.at(-1).time, freshness: ticker === 'ETH' ? 'stale' : 'fresh',
+        checkedAt: '2026-10-01T12:00:00.000Z', values,
+        ...(ticker === 'ETH' ? { reason: 'source_refresh_failed' } : {})
+      };
+      if (ticker === 'BTC') {
+        // A valid overlay-only date must remain selectable even without its candle.
+        const gapDate = values.at(-2).time;
+        series.bars = series.bars.filter((bar) => (Array.isArray(bar) ? bar[0] : bar.time) !== gapDate);
+      }
+    }
+    const realizedFile = path.join(recoverableDir, 'dashboard-realized-price.html');
+    const realizedHtml = replaceJsonBlock(recoverableHtml, 'chart-data', JSON.stringify(realizedChartData));
+    fs.writeFileSync(realizedFile, realizedHtml);
+
+    async function captureRealizedCharts(page) {
+      await page.evaluate(() => {
+        const library = window.LightweightCharts;
+        window.__realizedCharts = [];
+        window.LightweightCharts = { ...library, createChart(...args) {
+          const chart = library.createChart(...args);
+          const captured = { chart, ticker: args[0].closest('.tape-chart-shell')?.querySelector('.tape-chart-meta')?.textContent.trim(), series: [], crosshair: null };
+          window.__realizedCharts.push(captured);
+          const addSeries = chart.addSeries.bind(chart);
+          chart.addSeries = (definition, options, pane) => {
+            const api = addSeries(definition, options, pane);
+            const record = { api, kind: api.seriesType(), options, data: [] };
+            captured.series.push(record);
+            const setData = api.setData.bind(api);
+            api.setData = (data) => { record.data = structuredClone(data); return setData(data); };
+            return api;
+          };
+          const subscribe = chart.subscribeCrosshairMove.bind(chart);
+          chart.subscribeCrosshairMove = (handler) => {
+            captured.crosshair = handler;
+            return subscribe((param) => {
+              captured.pointerTime = param.time;
+              captured.pointerSeries = [...param.seriesData.keys()].map((api) => api.seriesType());
+              handler(param);
+            });
+          };
+          return chart;
+        } };
+      });
+    }
+    async function openRealizedChart(page, ticker) {
+      await page.locator('[data-tape-group-button]').filter({ hasText: ['BTC', 'ETH', 'XRP', 'SOL', 'IBIT', 'ETHA', 'MSTR'].includes(ticker) ? 'Crypto' : 'Equities' }).click();
+      const previous = await page.evaluate(() => window.__realizedCharts.length);
+      await page.locator(`[data-tape-chart-row="${ticker}"]`).click();
+      await page.waitForFunction(({ count, ticker }) => window.__realizedCharts.length > count
+        && window.__realizedCharts.at(-1).ticker === ticker
+        && window.__realizedCharts.at(-1).series.some((series) => series.kind === 'Candlestick'), { count: previous, ticker });
+    }
+    async function capturedRealizedData(page) {
+      return page.evaluate(() => window.__realizedCharts.at(-1).series.map(({ kind, options, data }) => ({ kind, options, data })));
+    }
+    async function assertRealizedRange(page, expectedOverlay) {
+      // Opening a chart can scroll its plot underneath the pointer and trigger
+      // a valid missing-day crosshair. Reset before checking the default readout.
+      await page.mouse.move(0, 0);
+      await page.locator('[data-price-chart]').dispatchEvent('pointerleave');
+      const records = await capturedRealizedData(page);
+      const candles = records.find((record) => record.kind === 'Candlestick').data;
+      const lines = records.filter((record) => record.kind === 'Line');
+      const expected = expectedOverlay.values.filter((point) => point.time >= candles[0].time && point.time <= candles.at(-1).time);
+      assert.equal(lines.length, expected.length ? 1 : 0);
+      if (expected.length) {
+        assert.deepEqual(lines[0].data, expected, 'Realized history must clip to the selected candle interval without filling gaps or extending its endpoint.');
+        assert.equal(lines[0].options.priceScaleId, 'right');
+        assert.equal(lines[0].options.title, 'Realized price');
+        assert.equal(lines[0].options.color, '#c99718', 'The realized-price line must be gold.');
+        assert.equal(lines[0].options.priceLineVisible, false, 'A last-value horizontal price line must not extrapolate realized history.');
+        const readout = await page.locator('[data-realized-price-readout]').innerText();
+        assert.match(readout, /Realized price/i);
+        assert.ok(readout.includes(String(expected.at(-1).value)), readout);
+        assert.ok(readout.includes(realizedDateFormat.format(new Date(`${expected.at(-1).time}T00:00:00Z`))), readout);
+      }
+      return candles;
+    }
+    async function assertRealizedCrosshair(page, time, expectedValue) {
+      await page.evaluate((date) => {
+        const captured = window.__realizedCharts.at(-1);
+        const candle = captured.series.find((record) => record.kind === 'Candlestick');
+        captured.crosshair({ point: { x: 20, y: 20 }, time: date,
+          seriesData: new Map([[candle.api, candle.data.find((point) => point.time === date)]]) });
+      }, time);
+      const text = await page.locator('[data-realized-price-readout]').innerText();
+      if (expectedValue === null) assert.match(text, /—/, 'Missing-day crosshairs must not borrow a neighboring observation.');
+      else assert.ok(text.includes(String(expectedValue)), text);
+    }
+
+    for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 900 }]) {
+      const page = await browser.newPage({ viewport });
+      const errors = [];
+      try {
+        page.on('pageerror', (error) => errors.push(error.message));
+        await page.route('https://192.168.2.2:2210/api/market-refresh', (route) => route.fulfill({ status: 204, body: '' }));
+        await page.goto(pathToFileURL(realizedFile).href);
+        await page.locator('#content').waitFor();
+        await captureRealizedCharts(page);
+        for (const ticker of ['BTC', 'ETH', 'XRP']) {
+          const overlay = realizedChartData.series.find((series) => series.ticker === ticker).realizedPrice;
+          await openRealizedChart(page, ticker);
+          const ranges = await page.locator('[data-chart-range]').evaluateAll((buttons) => buttons.map((button) => button.dataset.chartRange));
+          for (const range of ranges) {
+            const previous = await page.evaluate(() => window.__realizedCharts.length);
+            await page.locator(`[data-chart-range="${range}"]`).click();
+            await page.waitForFunction((count) => window.__realizedCharts.length > count, previous);
+            await assertRealizedRange(page, overlay);
+          }
+          if (ticker === 'BTC') {
+            const previous = await page.evaluate(() => window.__realizedCharts.length);
+            await page.locator('[data-chart-range="1M"]').click();
+            await page.waitForFunction((count) => window.__realizedCharts.length > count, previous);
+            await assertRealizedRange(page, overlay);
+            const observation = overlay.values.at(-2);
+            const plot = page.locator('[data-price-chart]');
+            await plot.scrollIntoViewIfNeeded();
+            const bounds = await plot.boundingBox();
+            const x = await page.evaluate((time) => window.__realizedCharts.at(-1).chart.timeScale().timeToCoordinate(time), observation.time);
+            assert.ok(bounds && Number.isFinite(x), 'The overlay-only date must have a real chart coordinate.');
+            await page.mouse.move(bounds.x + x, bounds.y + 100);
+            await page.waitForFunction((time) => window.__realizedCharts.at(-1).pointerTime === time, observation.time);
+            assert.deepEqual(await page.evaluate(() => window.__realizedCharts.at(-1).pointerSeries), ['Line']);
+            assert.ok((await page.locator('[data-realized-price-readout]').innerText()).includes(String(observation.value)));
+            const candleReadout = await page.locator('[data-chart-readout] > span').allTextContents();
+            assert.equal(candleReadout[0], `Date ${realizedDateFormat.format(new Date(`${observation.time}T00:00:00Z`))}`);
+            assert.deepEqual(candleReadout.slice(1, 5), ['O N/A', 'H N/A', 'L N/A', 'C N/A'], 'A missing candle must not borrow the latest OHLC values.');
+            await page.screenshot({ path: path.join(root, 'generated', `realized-candle-gap-${viewport.width}.png`) });
+          }
+          await assertRealizedCrosshair(page, overlay.values.at(-1).time, overlay.values.at(-1).value);
+          const candles = (await capturedRealizedData(page)).find((record) => record.kind === 'Candlestick').data;
+          const gap = candles.find((point) => point.time > overlay.values.at(-2).time && point.time < overlay.values.at(-1).time
+            && !overlay.values.some((observation) => observation.time === point.time));
+          if (gap) await assertRealizedCrosshair(page, gap.time, null);
+          await assertRealizedCrosshair(page, candles.at(-1).time, null);
+          await page.locator('[data-price-chart]').dispatchEvent('pointerleave');
+          await assertRealizedRange(page, overlay);
+          const info = await page.locator('[data-chart-info] [role="tooltip"]').textContent();
+          assert.match(info, /Coin Metrics/i);
+          assert.match(info, /daily/i);
+          assert.match(info, ticker === 'ETH' ? /stale/i : /fresh/i);
+          if (ticker === 'XRP') assert.match(info, /escrow/i);
+          await assertTooltipInteraction(page, '[data-chart-info]', '[data-chart-info-button]');
+          if (viewport.width === 1280 && ticker === 'XRP') {
+            await page.setViewportSize({ width: 820, height: 1000 });
+            await assertTooltipInteraction(page, '[data-chart-info]', '[data-chart-info-button]');
+            await page.setViewportSize(viewport);
+            await page.locator('[data-chart-info-button]').click();
+            await page.mouse.move(0, 0);
+            for (const size of [{ width: 1280, height: 500 }, { width: 1000, height: 900 }, { width: 390, height: 844 }, { width: 390, height: 500 }, viewport]) {
+              // Keep the panel open; reactivation would mask missing resize positioning.
+              await page.setViewportSize(size);
+              await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+              const state = await page.locator('[data-chart-info-button]').evaluate((button) => {
+                const panel = button.closest('[data-chart-info]').querySelector('[role="tooltip"]');
+                const bounds = panel.getBoundingClientRect();
+                const anchor = button.getBoundingClientRect();
+                return { top: bounds.top, bottom: bounds.bottom, left: bounds.left, right: bounds.right,
+                  width: innerWidth, height: innerHeight, anchorVisible: anchor.bottom >= 0 && anchor.top <= innerHeight,
+                  visibility: getComputedStyle(panel).visibility, open: button.getAttribute('aria-expanded') };
+              });
+              assert.equal(state.open, 'true', 'Resize must preserve the open tooltip state.');
+              if (state.anchorVisible) {
+                assert.equal(state.visibility, 'visible', JSON.stringify(state));
+                assert.ok(state.top >= 0 && state.bottom <= state.height && state.left >= 0 && state.right <= state.width, JSON.stringify(state));
+              } else assert.equal(state.visibility, 'hidden', JSON.stringify(state));
+              if (size.width === 1280 && size.height === 500) await page.screenshot({ path: path.join(root, 'generated', 'realized-tooltip-resize-1280.png') });
+            }
+            await page.locator('[data-chart-info-button]').click();
+          }
+        }
+        for (const ticker of ['SOL', 'IBIT', 'ETHA', 'MSTR', 'SPX']) {
+          await openRealizedChart(page, ticker);
+          assert.equal((await capturedRealizedData(page)).some((series) => series.kind === 'Line'), false, `${ticker} must not receive a coin realized-price overlay.`);
+          assert.equal(await page.locator('[data-realized-price-readout]').count(), 0);
+        }
+        assert.deepEqual(errors, []);
+      } finally { await page.close(); }
+    }
+
+    const malformedRealizedCases = [
+      ['absent', (series) => { delete series.realizedPrice; }],
+      ['null', (series) => { series.realizedPrice = null; }],
+      ['wrong-type', (series) => { series.realizedPrice = []; }],
+      ['invalid-date', (series) => { series.realizedPrice.values[0].time = '2026-02-30'; }],
+      ['unordered', (series) => { series.realizedPrice.values.reverse(); }],
+      ['duplicate-date', (series) => { series.realizedPrice.values[1].time = series.realizedPrice.values[0].time; }],
+      ['wrong-value-type', (series) => { series.realizedPrice.values[0].value = '100'; }],
+      ['nonpositive-value', (series) => { series.realizedPrice.values[0].value = 0; }],
+      ['null-values', (series) => { series.realizedPrice.values = null; }],
+      ['mismatched-asset', (series) => { series.realizedPrice.asset = 'eth'; }],
+      ['unavailable', (series) => { Object.assign(series.realizedPrice, { freshness: 'unavailable', observedAt: null, values: [], reason: 'source_refresh_failed' }); }]
+    ];
+    for (const [label, change] of malformedRealizedCases) {
+      const data = structuredClone(realizedChartData);
+      change(data.series.find((series) => series.ticker === 'BTC'));
+      const file = path.join(recoverableDir, `dashboard-realized-${label}.html`);
+      fs.writeFileSync(file, replaceJsonBlock(realizedHtml, 'chart-data', JSON.stringify(data)));
+      const page = await browser.newPage();
+      const errors = [];
+      try {
+        page.on('pageerror', (error) => errors.push(error.message));
+        await page.route('https://192.168.2.2:2210/api/market-refresh', (route) => route.fulfill({ status: 204, body: '' }));
+        await page.goto(pathToFileURL(file).href);
+        await page.locator('#content').waitFor();
+        await captureRealizedCharts(page);
+        await openRealizedChart(page, 'BTC');
+        assert.equal((await capturedRealizedData(page)).some((record) => record.kind === 'Line'), false, label);
+        await openRealizedChart(page, 'ETH');
+        await assertRealizedRange(page, data.series.find((series) => series.ticker === 'ETH').realizedPrice);
+        await openRealizedChart(page, 'SPX');
+        assert.deepEqual(errors, [], `${label} must leave sibling charts and dashboard startup usable.`);
+      } finally { await page.close(); }
+    }
+
+    for (const localOverlay of [undefined, null, { asset: 'btc', values: [{ time: '2099-01-01', value: 999999 }] }]) {
+      const fresh = structuredClone(canonicalObjectChartData.series.find((series) => series.ticker === 'BTC'));
+      fresh.quoteRevision = new Date(Date.parse(fresh.quoteRevision) + 60_000).toISOString();
+      fresh.quote.observedAt = fresh.quoteRevision;
+      if (localOverlay === undefined) delete fresh.realizedPrice;
+      else fresh.realizedPrice = localOverlay;
+      const payload = { schemaVersion: 1, generatedAt: fresh.quoteRevision, series: [fresh] };
+      const page = await browser.newPage();
+      try {
+        await page.route('https://192.168.2.2:2210/api/market-refresh', (route) => route.fulfill({
+          status: 200, contentType: 'application/json',
+          headers: { 'access-control-allow-origin': '*', 'access-control-allow-private-network': 'true' }, body: JSON.stringify(payload)
+        }));
+        await page.goto(pathToFileURL(realizedFile).href);
+        await page.waitForFunction(() => document.querySelector('[data-local-refresh-indicator]')?.dataset.localRefreshState === 'live');
+        await captureRealizedCharts(page);
+        await openRealizedChart(page, 'BTC');
+        const embedded = realizedChartData.series.find((series) => series.ticker === 'BTC').realizedPrice;
+        await assertRealizedRange(page, embedded);
+        const info = await page.locator('[data-chart-info] [role="tooltip"]').textContent();
+        assert.match(info, /Coin Metrics/i);
+        assert.ok(info.includes(realizedDateFormat.format(new Date(`${embedded.observedAt}T00:00:00Z`))), info);
+        assert.match(info, /fresh/i);
+      } finally { await page.close(); }
     }
 
     const tooltipFile = path.join(recoverableDir, 'dashboard-tooltips.html');
