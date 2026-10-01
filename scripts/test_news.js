@@ -1255,6 +1255,12 @@ async function testMarketScreenerReutersAcquisition() {
       title: 'Missing mapping fixture',
       url: '/news/missing-mapping-fixture-ce3',
       publishedAt: '2026-07-11T16:00:00Z'
+    }),
+    marketScreenerReutersRow({
+      title: 'Non-Reuters row in filtered response',
+      url: '/news/non-reuters-fixture-ce5',
+      publishedAt: '2026-07-11T16:30:00Z',
+      source: 'Other'
     })
   ]);
   const secondPage = marketScreenerReutersPage([
@@ -1271,10 +1277,22 @@ async function testMarketScreenerReutersAcquisition() {
     })
   ]);
   const listingRequests = [];
-  const fetchPage = async (url) => {
+  const fetchPage = async (url, requestOptions) => {
     const requestUrl = new URL(url);
     if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
     if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+    assert.equal(requestUrl.searchParams.get('cf'),
+      'ZmdtVTc3WkxPLytJM3NBSHhVVVR6bUV4bWxGcjVGbE50cTBoV01DeTV6VjExUWVnZ2ljeTE3S095YVdhL3h4cGFXaTNucTlLVThkclVtL0cvZnRraVE9PQ',
+      'Every listing page must use the public Reuters-only screener configuration.');
+    assert.equal(requestOptions.allowRedirect(new URL(url)), true);
+    const unfilteredUrl = new URL(url);
+    unfilteredUrl.searchParams.delete('cf');
+    assert.equal(requestOptions.allowRedirect(unfilteredUrl), false,
+      'A redirect that drops the Reuters filter must remain outside the fixed endpoint policy.');
+    const nextPageUrl = new URL(url);
+    nextPageUrl.searchParams.set('p', String(Number(requestUrl.searchParams.get('p')) + 1));
+    assert.equal(requestOptions.allowRedirect(nextPageUrl), false,
+      'The filtered listing must still reject redirects to another page.');
     listingRequests.push(requestUrl.searchParams.get('p'));
     if (requestUrl.searchParams.get('p') === '1') return { text: async () => firstPage };
     if (requestUrl.searchParams.get('p') === '2') return { text: async () => secondPage };
@@ -1287,6 +1305,8 @@ async function testMarketScreenerReutersAcquisition() {
   });
   assert.deepEqual(listingRequests, ['1', '2'], 'A stale listing row must stop pagination after its page.');
   assert.equal(result.items.length, 3, 'Repeated MarketScreener listing URLs must be deduplicated across pages.');
+  assert.equal(result.items.some((item) => item.title === 'Non-Reuters row in filtered response'), false,
+    'The row-level attribution check must still reject non-Reuters stories in a filtered response.');
   const byTitle = new Map(result.items.map((item) => [item.title, item]));
   assert.equal(byTitle.get('Unique mapping fixture').url,
     'https://www.reuters.com/markets/us/unique-mapping-fixture-2026-07-11');
