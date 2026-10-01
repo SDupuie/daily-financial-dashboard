@@ -1319,6 +1319,31 @@ async function testMarketScreenerReutersAcquisition() {
     'https://www.marketscreener.com/news/missing-mapping-fixture-ce3',
     'A missing Reuters lookup must retain the MarketScreener listing URL.');
 
+  const cappedListingRequests = [];
+  const cappedListing = await fetchMarketScreenerReuters(acquisitionPath, {
+    eligibleDates: new Set(['2026-07-10', '2026-07-11']),
+    timeoutMs: 1000,
+    fetchPage: async (url) => {
+      const requestUrl = new URL(url);
+      if (requestUrl.pathname.includes('news-sitemap-index')) return { text: async () => sitemapIndex };
+      if (requestUrl.hostname === 'www.reuters.com') return { text: async () => sitemap };
+      const page = Number(requestUrl.searchParams.get('p'));
+      cappedListingRequests.push(page);
+      if (page > 10) throw new Error('anonymous page-11 restriction fixture');
+      return { text: async () => marketScreenerReutersPage([
+        marketScreenerReutersRow({
+          title: `Capped listing fixture ${page}`,
+          url: `/news/capped-listing-fixture-${page}`,
+          publishedAt: '2026-07-11T12:00:00Z'
+        })
+      ]) };
+    }
+  });
+  assert.deepEqual(cappedListingRequests, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    'Listing acquisition must stop at page 10 even when the freshness cutoff has not been reached.');
+  assert.equal(cappedListing.items.length, 10, 'The cap must preserve items from every retrieved page.');
+  assert.equal(cappedListing.error, undefined, 'Reaching the listing cap must not report a feed failure.');
+
   const unavailableLookup = await fetchMarketScreenerReuters(acquisitionPath, {
     eligibleDates: new Set(['2026-07-10']),
     timeoutMs: 1000,
