@@ -1966,11 +1966,100 @@ async function testActualDashboardStartsInBrowser() {
       await section.locator('[data-week-impact-toggle]').click();
     }
 
+    async function assertFedSpeechDisclosure(page) {
+      const section = page.locator('.section-week-ahead');
+      const toggle = section.locator('[data-week-impact-toggle]');
+      if (await toggle.getAttribute('aria-pressed') === 'true') await toggle.click();
+      const days = section.locator('.week-day-row');
+      const multipleDay = days.nth(0);
+      const disclosure = multipleDay.locator('details.week-fed-speeches');
+      const summary = disclosure.locator('summary.week-event-row');
+      const singleDay = days.nth(1);
+      const noSpeechDay = days.nth(2);
+      const mixedDay = days.nth(3);
+
+      assert.equal(await disclosure.count(), 1);
+      assert.equal(await disclosure.getAttribute('open'), null);
+      assert.equal((await summary.locator('.week-event-name').textContent()).trim(), 'Fed Speeches (2)');
+      assert.equal((await summary.locator('.week-event-kind').textContent()).trim(), 'Federal Reserve · Policy');
+      assert.equal((await summary.locator('.week-event-time').textContent()).trim(), '8:00 AM');
+      assert.deepEqual(await multipleDay.locator('.week-events > *').evaluateAll((rows) => rows.map(
+        (row) => row.querySelector('.week-event-name')?.textContent.trim()
+      )), ['Fixture Early Release', 'Fed Speeches (2)', 'Fixture Midday Release', 'FOMC Minutes',
+        'Fed Chair Powell Testimony', 'Federal Reserve Decision', 'ECB President Speech']);
+      assert.equal((await multipleDay.locator('.week-day-count').textContent()).trim(), '9 events · 1 medium hidden');
+      assert.equal(await disclosure.getByText('Waller', { exact: true }).count(), 0,
+        'A high-impact speech must not expose a filtered medium-impact speech.');
+      for (const day of [singleDay, noSpeechDay, mixedDay]) {
+        assert.equal(await day.locator('details.week-fed-speeches').count(), 0);
+      }
+      assert.equal(await singleDay.getByText('Fed Williams Speech', { exact: true }).count(), 1);
+      assert.equal((await singleDay.locator('.week-event-kind').textContent()).trim(), 'Federal Reserve · Policy');
+      assert.equal(await mixedDay.getByText('Fed Jefferson Speech', { exact: true }).count(), 1);
+      assert.equal((await mixedDay.locator('.week-day-count').textContent()).trim(), '1 event · 1 medium hidden');
+      assert.equal(await mixedDay.getByText('Medium speech lens', { exact: true }).count(), 0);
+
+      await summary.click();
+      assert.equal(await disclosure.getAttribute('open'), '');
+      assert.deepEqual(await disclosure.locator('.week-fed-speech-list .week-event-name').allTextContents(), ['Jefferson', 'Kugler']);
+      assert.deepEqual(await disclosure.locator('.week-fed-speech-list .week-event-time').allTextContents(), ['8:00 AM', '10:00 AM']);
+      await summary.click();
+      assert.equal(await disclosure.getAttribute('open'), null);
+      await summary.focus();
+      await page.keyboard.press('Enter');
+      assert.equal(await disclosure.getAttribute('open'), '');
+      await page.keyboard.press('Space');
+      assert.equal(await disclosure.getAttribute('open'), null);
+
+      await toggle.click();
+      assert.equal((await summary.locator('.week-event-name').textContent()).trim(), 'Fed Speeches (3)');
+      assert.equal((await multipleDay.locator('.week-day-count').textContent()).trim(), '10 events');
+      assert.equal(await mixedDay.locator('details.week-fed-speeches').count(), 1);
+      assert.equal((await mixedDay.locator('.week-day-count').textContent()).trim(), '2 events');
+      assert.equal(await mixedDay.getByText('Medium speech lens', { exact: true }).count(), 1,
+        'Lens visibility must still use underlying event IDs.');
+      await summary.click();
+      assert.deepEqual(await disclosure.locator('.week-fed-speech-list .week-event-name').allTextContents(), ['Jefferson', 'Kugler', 'Waller']);
+      for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 720 }]) {
+        await page.setViewportSize(viewport);
+        await summary.scrollIntoViewIfNeeded();
+        const typography = await disclosure.evaluate((element) => {
+          const measure = (node) => {
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return { size: style.fontSize, weight: style.fontWeight, left: rect.left, right: rect.right };
+          };
+          return {
+            names: [...element.querySelectorAll('.week-fed-speech-list .week-event-name')].map(measure),
+            times: [...element.querySelectorAll('.week-fed-speech-list .week-event-time')].map(measure),
+            width: window.innerWidth
+          };
+        });
+        assert.equal(typography.names.length, 3);
+        assert.equal(typography.times.length, 3);
+        for (const name of typography.names) {
+          assert.equal(name.size, '15px');
+          assert.equal(name.weight, '500');
+          assert.ok(name.left >= -1 && name.right <= typography.width + 1, JSON.stringify(typography));
+        }
+        for (const time of typography.times) {
+          assert.equal(time.size, '12px');
+          assert.equal(time.weight, '800');
+          assert.ok(time.left >= -1 && time.right <= typography.width + 1, JSON.stringify(typography));
+        }
+      }
+      await toggle.click();
+      assert.equal((await summary.locator('.week-event-name').textContent()).trim(), 'Fed Speeches (2)');
+      assert.equal(await mixedDay.locator('details.week-fed-speeches').count(), 0);
+      assert.equal(await mixedDay.getByText('Medium speech lens', { exact: true }).count(), 0);
+    }
+
     async function assertDashboardStarts(file, {
       testTooltips = false,
       testTapePresentation = false,
       testTimedTapeTimestamp = false,
       testWeekAheadImpactFilter = false,
+      testFedSpeeches = false,
       carriedTapeTicker = '',
       earningsState = '',
       malformedTapeTicker = '',
@@ -2015,6 +2104,7 @@ async function testActualDashboardStartsInBrowser() {
         if (testTapePresentation) await assertTapePresentation(page);
         if (testTimedTapeTimestamp) await assertTimedTapeTimestamp(page, testTimedTapeTimestamp);
         if (testWeekAheadImpactFilter) await assertWeekAheadImpactFiltering(page);
+        if (testFedSpeeches) await assertFedSpeechDisclosure(page);
         if (malformedTapeTicker) {
           const malformedRow = page.locator(`[data-tape-chart-row="${malformedTapeTicker}"]`).locator('..');
           assert.equal((await malformedRow.locator('.tape-last').textContent()).trim(), '—');
@@ -2615,6 +2705,54 @@ async function testActualDashboardStartsInBrowser() {
     };
     fs.writeFileSync(weekAheadFilterFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(weekAheadFilterData)));
     await assertDashboardStarts(weekAheadFilterFile, { testWeekAheadImpactFilter: true });
+
+    const fedSpeechesFile = path.join(recoverableDir, 'dashboard-fed-speeches.html');
+    const fedSpeechesData = readJsonBlock(recoverableHtml, 'dashboard-data');
+    const policyEvent = (id, name, time, impact = 'high', agency = 'Federal Reserve') => ({
+      ...weekAheadEvent(id, name, agency, impact, 'Policy'),
+      time,
+      actual: null,
+      forecast: null,
+      previous: null,
+      valuesApplicable: false,
+      lensPath: 'policy'
+    });
+    fedSpeechesData.weekAhead = {
+      ...weekAheadFilterData.weekAhead,
+      days: [{
+        date: '2026-07-13', label: 'Mon, Jul 13', closure: null,
+        events: [
+          { ...weekAheadEvent('early-release', 'Fixture Early Release', 'BEA', 'high'), time: '08:00' },
+          policyEvent('jefferson', 'Fed Jefferson Speech', '09:00'),
+          { ...weekAheadEvent('midday-release', 'Fixture Midday Release', 'BEA', 'high'), time: '10:00' },
+          policyEvent('kugler', 'Fed Kugler Speech', '11:00'),
+          policyEvent('waller', 'Fed Waller Speech', '13:00', 'medium'),
+          policyEvent('minutes', 'FOMC Minutes', '14:00'),
+          policyEvent('testimony', 'Fed Chair Powell Testimony', '15:00'),
+          policyEvent('decision', 'Fed Interest Rate Decision', '16:00'),
+          policyEvent('press', 'Fed Press Conference', '16:30'),
+          policyEvent('ecb', 'ECB President Speech', '17:00', 'high', 'ECB')
+        ]
+      }, {
+        date: '2026-07-14', label: 'Tue, Jul 14', closure: null,
+        events: [policyEvent('williams', 'Fed Williams Speech', '09:00')]
+      }, {
+        date: '2026-07-15', label: 'Wed, Jul 15', closure: null,
+        events: [weekAheadEvent('ordinary-release', 'Fixture Ordinary Release', 'BEA', 'high')]
+      }, {
+        date: '2026-07-16', label: 'Thu, Jul 16', closure: null,
+        events: [
+          policyEvent('mixed-jefferson', 'Fed Jefferson Speech', '09:00'),
+          policyEvent('mixed-waller', 'Fed Waller Speech', '13:00', 'medium')
+        ],
+        marketLens: {
+          eventIds: ['mixed-waller'],
+          copy: { title: 'Medium speech lens', body: 'Fixture lens anchored to the medium speech.' }
+        }
+      }]
+    };
+    fs.writeFileSync(fedSpeechesFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(fedSpeechesData)));
+    await assertDashboardStarts(fedSpeechesFile, { testFedSpeeches: true });
 
     const absentSectionsFile = path.join(recoverableDir, 'dashboard-empty-object.html');
     fs.writeFileSync(absentSectionsFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', '{}'));

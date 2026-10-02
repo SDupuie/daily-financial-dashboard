@@ -2161,6 +2161,19 @@
       min-width: 0;
     }
     .week-event-variant-rows { display: grid; gap: 4px; margin-top: 4px; }
+    .week-fed-speeches > summary { cursor: pointer; list-style: none; }
+    .week-fed-speeches > summary::-webkit-details-marker { display: none; }
+    .week-fed-speeches > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+    .week-fed-speech-chevron { color: var(--blue); font-size: 20px; line-height: 20px; }
+    .week-fed-speeches[open] .week-fed-speech-chevron { transform: rotate(90deg); }
+    .week-fed-speech-list {
+      display: grid;
+      gap: 6px;
+      list-style: none;
+      margin: 9px 0 0;
+      padding: 0;
+    }
+    .week-fed-speech-list .week-event-name { font-weight: 500; }
     .week-event-variant {
       align-items: start;
       display: grid;
@@ -10186,7 +10199,7 @@
           <time class="week-event-time">${esc(weekAheadTimeLabel(day, event))}</time>
           <span class="week-impact-dot ${esc(event.impact)}" aria-label="${esc(event.impact)} impact"></span>
           <span class="week-event-group-body">${weekAheadEventTitleHtml(event)}<span class="week-event-variant-rows"><span class="week-event-variant">
-            ${weekAheadEventKindHtml(event)}
+            ${weekAheadEventKindHtml(event, weekAheadIsFedSpeech(event) ? 'Federal Reserve \u00b7 Policy' : null)}
             ${weekAheadEventValuesHtml(event)}
           </span></span></span>
         </div>`;
@@ -10287,6 +10300,26 @@
           <span class="week-impact-dot ${esc(lead.impact)}" aria-label="${esc(lead.impact)} impact"></span>
           <span class="week-event-group-body">${weekAheadEventTitleHtml(lead)}<span class="week-event-variant-rows">${variants}</span></span>
         </div>`;
+      }
+
+      function weekAheadIsFedSpeech(event) {
+        return event.agency === 'Federal Reserve' && event.valuesApplicable === false && /^Fed .+ Speech$/i.test(event.name);
+      }
+
+      function weekAheadFedSpeechesHtml(day, speeches) {
+        const impact = speeches.some((event) => event.impact === 'high') ? 'high' : 'medium';
+        const rows = speeches.map((event) => `<li class="week-event-row">
+          <time class="week-event-time">${esc(weekAheadTimeLabel(day, event))}</time>
+          <span class="week-event-group-body"><span class="week-event-name">${esc(event.name.replace(/^Fed /i, '').replace(/ Speech$/i, ''))}</span></span>
+        </li>`).join('');
+        return `<details class="week-fed-speeches">
+          <summary class="week-event-row">
+            <time class="week-event-time">${esc(weekAheadTimeLabel(day, speeches[0]))}</time>
+            <span class="week-impact-dot ${impact}" aria-label="${impact} impact"></span>
+            <span class="week-event-group-body"><span class="week-event-title-line"><span class="week-event-name">Fed Speeches (${speeches.length})</span><span class="week-fed-speech-chevron" aria-hidden="true">›</span></span><span class="week-event-variant-rows"><span class="week-event-kind">Federal Reserve \u00b7 Policy</span></span></span>
+          </summary>
+          <ul class="week-fed-speech-list">${rows}</ul>
+        </details>`;
       }
 
       function weekChartSlotId(dayKey) {
@@ -10437,9 +10470,14 @@
             : hiddenMediumCount
               ? `${visibleCount} · ${hiddenMediumCount} medium hidden`
               : visibleCount;
+          const speeches = events.filter(weekAheadIsFedSpeech);
+          const eventHtml = groups.map((group) => {
+            if (speeches.length < 2 || !weekAheadIsFedSpeech(group.events[0])) return weekAheadEventGroupHtml(day, group);
+            return group.events[0] === speeches[0] ? weekAheadFedSpeechesHtml(day, speeches) : '';
+          }).join('');
           const calendar = [
             day.closure ? `<div class="week-closure"><strong>${esc(day.closure.label)}</strong> &middot; ${esc(day.closure.reason)}</div>` : '',
-            events.length ? `<div class="week-events">${groups.map((group) => weekAheadEventGroupHtml(day, group)).join('')}</div>` : '',
+            events.length ? `<div class="week-events">${eventHtml}</div>` : '',
             !events.length && !day.closure
               ? `<div class="week-quiet">${showMediumImpact ? 'No high- or medium-impact U.S. releases scheduled.' : 'No high-impact U.S. releases scheduled.'}</div>`
               : ''
