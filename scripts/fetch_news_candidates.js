@@ -452,13 +452,14 @@ async function fetchMarketaux(acquisitionPath, { eligibleDates, timeoutMs, env =
   const earliestEligibleDate = [...eligibleDates].sort()[0];
   if (!earliestEligibleDate) throw new Error('Marketaux requires at least one eligible News date.');
   const publishedAfter = chicagoMidnight(earliestEligibleDate).toISOString().slice(0, 19);
+  const requestLimit = acquisitionPath.limit || 3;
   const requestPage = async (page) => {
     const url = new URL(MARKETAUX_URL);
     url.searchParams.set('search', `"${ticker}"`);
     url.searchParams.set('language', 'en');
     url.searchParams.set('published_after', publishedAfter);
     url.searchParams.set('sort', 'relevance_score');
-    url.searchParams.set('limit', String(acquisitionPath.limit || 3));
+    url.searchParams.set('limit', String(requestLimit));
     url.searchParams.set('page', String(page));
     url.searchParams.set('api_token', apiKey);
     const response = await fetchPage(url, { timeoutMs, headers: { Accept: 'application/json' } });
@@ -468,36 +469,34 @@ async function fetchMarketaux(acquisitionPath, { eligibleDates, timeoutMs, env =
       throw new Error(message.replaceAll(apiKey, '[redacted]'));
     }
     if (!Array.isArray(payload?.data)) throw new Error('Marketaux response must contain data[].');
+    if (payload.meta?.page !== page) {
+      throw new Error(`Marketaux response page metadata did not match requested page ${page}.`);
+    }
+    const { found, limit, returned } = payload.meta;
+    if (!Number.isInteger(found) || found < 0 || found > 20_000
+      || !Number.isInteger(limit) || limit <= 0 || limit > requestLimit) {
+      throw new Error('Marketaux response must contain valid bounded meta.found and meta.limit values.');
+    }
+    if (!Number.isInteger(returned) || returned < 0 || returned > limit || returned !== payload.data.length) {
+      throw new Error('Marketaux meta.returned must match data.length within meta.limit.');
+    }
     return payload;
   };
   const firstPayload = await requestPage(1);
-  if (Number(firstPayload.meta?.page) !== 1) {
-    throw new Error('Marketaux response page metadata did not match requested page 1.');
-  }
-  const found = Number(firstPayload.meta?.found);
-  const pageLimit = Number(firstPayload.meta?.limit);
-  if (!Number.isInteger(found) || found < 0 || found > 20_000
-    || !Number.isInteger(pageLimit) || pageLimit <= 0) {
-    throw new Error('Marketaux response must contain valid bounded meta.found and meta.limit values.');
-  }
   const items = [...firstPayload.data];
   const pageErrors = [];
-  const reportedPageCount = Math.ceil(found / pageLimit);
-  const pageCount = Math.min(reportedPageCount, MARKETAUX_MAX_PAGES);
-  for (let page = 2; page <= pageCount; page += 1) {
+  const pageCount = Math.min(Math.ceil(firstPayload.meta.found / firstPayload.meta.limit), MARKETAUX_MAX_PAGES);
+  let lastPayload = firstPayload;
+  // A valid short page ends Marketaux results even when meta.found is larger.
+  for (let page = 2; page <= pageCount && lastPayload.meta.returned === lastPayload.meta.limit; page += 1) {
     try {
       const payload = await requestPage(page);
-      if (Number(payload.meta?.page) !== page) {
-        throw new Error(`response page metadata did not match requested page ${page}`);
-      }
       items.push(...payload.data);
+      lastPayload = payload;
     } catch (error) {
       pageErrors.push(`page ${page}: ${String(error?.message || error)}`);
       break;
     }
-  }
-  if (!pageErrors.length && reportedPageCount <= MARKETAUX_MAX_PAGES && items.length < found) {
-    pageErrors.push(`received ${items.length} of ${found} reported results`);
   }
   return {
     items: items.map((item) => ({

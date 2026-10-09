@@ -357,7 +357,7 @@ async function testMarketauxTickerAcquisition() {
       const page = Number(new URL(url).searchParams.get('page'));
       requests.push({ url: new URL(url), ...options });
       const data = page === 1 ? providerItems.slice(0, 3) : providerItems.slice(3);
-      return { json: async () => ({ meta: { found: 4, returned: data.length, limit: 3, page }, data }) };
+      return { json: async () => ({ meta: { found: 6, returned: data.length, limit: 3, page }, data }) };
     }
   });
 
@@ -366,6 +366,7 @@ async function testMarketauxTickerAcquisition() {
   assert.ok(requests.every((request) => request.url.searchParams.get('published_after') === '2026-08-19T05:00:00'));
   assert.ok(requests.every((request) => request.headers.Accept === 'application/json'));
   assert.equal(result.items.length, 4);
+  assert.equal(result.error, undefined);
 
   const candidate = normalizeProviderCandidate(result.items[0], acquisitionPath, new Set(['2026-08-19']));
   assert.equal(candidate.sourceId, 'marketaux:financefeeds.com');
@@ -420,6 +421,125 @@ async function testMarketauxTickerAcquisition() {
   assert.deepEqual(cappedRequests, [1, 2, 3, 4, 5]);
   assert.equal(capped.items.length, 15);
   assert.equal(capped.error, undefined);
+}
+
+async function testMarketauxPaginationResponses() {
+  const acquisitionPath = MARKETAUX_TICKER_NEWS_PATHS.find((entry) => entry.ticker === 'IBIT');
+  const apiKey = 'fixture-marketaux-key';
+  const data = [1, 2, 3].map((index) => ({
+    title: `IBIT pagination fixture ${index}`,
+    url: `https://financefeeds.com/ibit-pagination-fixture-${index}`,
+    published_at: '2026-08-19T12:00:00.000Z'
+  }));
+  const options = {
+    eligibleDates: new Set(['2026-08-19']),
+    timeoutMs: 1000,
+    env: { MARKETAUX_API_KEY: apiKey }
+  };
+
+  // Synthetic API responses exercise normal end-of-results, not live coverage.
+  for (const { found, pageSizes } of [
+    { found: 100, pageSizes: [1] },
+    { found: 0, pageSizes: [0] },
+    { found: 6, pageSizes: [0] },
+    { found: 100, pageSizes: [3, 1] },
+    { found: 6, pageSizes: [3, 0] },
+    { found: 6, pageSizes: [3, 3] }
+  ]) {
+    const requests = [];
+    const result = await fetchAcquisitionPath(acquisitionPath, {
+      ...options,
+      fetchPage: async (url) => {
+        const page = Number(new URL(url).searchParams.get('page'));
+        requests.push(page);
+        const items = data.slice(0, pageSizes[page - 1]);
+        return { json: async () => ({ meta: { found, limit: 3, returned: items.length, page }, data: items }) };
+      }
+    });
+    assert.deepEqual(requests, pageSizes.map((_, index) => index + 1));
+    assert.equal(result.items.length, pageSizes.reduce((total, size) => total + size, 0));
+    assert.equal(result.error, undefined);
+  }
+
+  const failures = [
+    { name: 'HTTP rate limit', rejection: new Error('HTTP 429'), pattern: /HTTP 429/ },
+    { name: 'timeout', rejection: new Error('Request timed out'), pattern: /timed out/ },
+    { name: 'invalid JSON', jsonError: new SyntaxError('Invalid fixture JSON'), pattern: /Invalid fixture JSON/ },
+    { name: 'API error', change: () => ({ error: { message: `Rejected ${apiKey}` } }), pattern: /Rejected \[redacted\]/ },
+    { name: 'absent data', change: (payload) => ({ meta: payload.meta }), pattern: /data\[\]/ },
+    { name: 'null data', change: (payload) => ({ ...payload, data: null }), pattern: /data\[\]/ },
+    { name: 'wrong data container', change: (payload) => ({ ...payload, data: {} }), pattern: /data\[\]/ },
+    { name: 'absent metadata', change: () => ({ data }), pattern: /page metadata/ },
+    { name: 'null metadata', change: () => ({ data, meta: null }), pattern: /page metadata/ },
+    { name: 'wrong metadata type', change: () => ({ data, meta: 'invalid' }), pattern: /page metadata/ },
+    { name: 'wrong page', meta: { page: 99 }, pattern: /page metadata/ },
+    { name: 'null found', meta: { found: null }, pattern: /bounded meta.found/ },
+    { name: 'invalid limit', meta: { limit: 0 }, pattern: /bounded meta.found/ },
+    { name: 'limit exceeds request', meta: { limit: 4 }, pattern: /bounded meta.found/ },
+    { name: 'absent returned', meta: { returned: undefined }, pattern: /meta.returned/ },
+    { name: 'null returned', meta: { returned: null }, pattern: /meta.returned/ },
+    { name: 'wrong returned type', meta: { returned: '3' }, pattern: /meta.returned/ },
+    { name: 'returned exceeds limit', meta: { returned: 4 }, pattern: /meta.returned/ },
+    { name: 'false short page', meta: { returned: 1 }, pattern: /meta.returned/ }
+  ];
+  for (const failure of failures) {
+    for (const failedPage of [1, 2]) {
+      const requests = [];
+      const resultPromise = fetchAcquisitionPath(acquisitionPath, {
+        ...options,
+        fetchPage: async (url) => {
+          const page = Number(new URL(url).searchParams.get('page'));
+          requests.push(page);
+          const payload = { meta: { found: 12, returned: 3, limit: 3, page }, data };
+          if (page === failedPage && failure.rejection) throw failure.rejection;
+          return { json: async () => {
+            if (page !== failedPage) return payload;
+            if (failure.jsonError) throw failure.jsonError;
+            return failure.change ? failure.change(payload) : { ...payload, meta: { ...payload.meta, ...failure.meta } };
+          } };
+        }
+      });
+      if (failedPage === 1) {
+        await assert.rejects(resultPromise, failure.pattern, failure.name);
+      } else {
+        const result = await resultPromise;
+        assert.deepEqual(result.items.map((item) => item.url), data.map((item) => item.url), failure.name);
+        assert.match(result.error, /Marketaux IBIT pagination partial: page 2:/, failure.name);
+        assert.match(result.error, failure.pattern, failure.name);
+        assert.equal(result.error.includes(apiKey), false, failure.name);
+      }
+      assert.deepEqual(requests, failedPage === 1 ? [1] : [1, 2], failure.name);
+    }
+  }
+
+  const asOf = new Date('2026-08-19T13:00:00.000Z');
+  const artifact = await collectNewsCandidates({
+    asOf,
+    clock: () => asOf,
+    env: options.env,
+    acquisitionPaths: MARKETAUX_TICKER_NEWS_PATHS.filter((entry) => ['IBIT', 'ETHA'].includes(entry.ticker)),
+    fetchPath: (pathEntry, pathOptions) => fetchAcquisitionPath(pathEntry, {
+      ...pathOptions,
+      fetchPage: async (url) => {
+        const page = Number(new URL(url).searchParams.get('page'));
+        if (pathEntry.ticker === 'IBIT' && page === 2) throw new Error('HTTP 429');
+        const items = data.slice(0, page === 1 ? 3 : 1).map((item) => ({
+          ...item,
+          title: `${item.title.replace('IBIT', pathEntry.ticker)} page ${page}`,
+          url: `${item.url}-${pathEntry.ticker}-${page}`
+        }));
+        return { json: async () => ({ meta: { found: 6, returned: items.length, limit: 3, page }, data: items }) };
+      }
+    }),
+    fetchArticle: async () => { throw new Error('Fixture article page unavailable.'); }
+  });
+  const ibit = artifact.attempts.find((attempt) => attempt.id === 'marketaux-ibit');
+  const etha = artifact.attempts.find((attempt) => attempt.id === 'marketaux-etha');
+  assert.match(ibit.error, /pagination partial: page 2: HTTP 429/);
+  assert.equal(ibit.acceptedCount, 3);
+  assert.equal(etha.error, null);
+  assert.equal(etha.acceptedCount, 4);
+  assert.equal(artifact.cryptoCandidates.length, 7);
 }
 
 async function testMarketauxTickerPriorCardCarryForward() {
@@ -1966,6 +2086,7 @@ async function main() {
   await testAlphaVantageProviderErrorRedaction();
   await testStockfitProviderRequestHeaders();
   await testMarketauxTickerAcquisition();
+  await testMarketauxPaginationResponses();
   await testMarketauxTickerPriorCardCarryForward();
   testCryptoRssSourceManifest();
   testArticleMetadataExtraction();
