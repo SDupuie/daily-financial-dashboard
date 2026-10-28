@@ -417,7 +417,7 @@ function eventPeriod(row) {
   const measure = title.match(/\b(MoM|YoY|QoQ|WoW)\b/i)?.[1];
   if (measure) return measure[0].toUpperCase() + measure.slice(1);
   if (/weekly|jobless claims|eia |api crude/i.test(title)) return 'Weekly';
-  if (/press conference|speech|speaks|testimony|minutes|meeting/i.test(title)) return 'Policy';
+  if (/press conference|speech|speaks|testimony|minutes|meeting|fomc statement/i.test(title)) return 'Policy';
   if (/rate decision/i.test(title)) return 'Policy';
   if (/pmi|index|confidence|sentiment/i.test(title)) return 'Index';
   if (row?.scale === 'K' || row?.scale === 'M') return 'Level';
@@ -442,7 +442,7 @@ function inferLensPath(row, rule) {
 }
 
 function valuesApplyToEvent(row) {
-  return !/press conference|speech|speaks|testimony|hearing|minutes|meeting/i.test(String(row?.title || ''));
+  return !/press conference|speech|speaks|testimony|hearing|minutes|meeting|fomc statement/i.test(String(row?.title || ''));
 }
 
 function tradingViewEvent(row) {
@@ -562,6 +562,15 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
     const sourceEvents = Array.isArray(sourceDay.events) ? sourceDay.events : [];
     day.events = sourceEvents.map((sourceEvent) => {
       const event = { ...sourceEvent };
+      // Rebuild communication metadata for carried-forward calendars as well.
+      if (!valuesApplyToEvent({ title: event.name })) {
+        event.valuesApplicable = false;
+        event.period = eventPeriod({ title: event.name });
+        event.actual = null;
+        event.forecast = null;
+        event.previous = null;
+        event.forecastType = null;
+      }
       const releaseInstant = weekAheadReleaseInstant(day.date, event.time, week?.range?.marketTimeZone || SOURCE_TIME_ZONE);
       const hasActual = event.actual !== null && event.actual !== undefined && event.actual !== '';
       if (hasActual && releaseInstant && now < releaseInstant) event.actual = null;
@@ -583,8 +592,8 @@ function applyWeekAheadLifecycle(week, chartData = null, { now = new Date() } = 
     const selectedContextComplete = weekAheadMarketLensIsComplete(day);
     const selectedContextJustCompleted = selectedContextComplete
       && selectedEvents.some((event) => priorEventsById.get(event.id)?.status !== 'released');
-    if (selectedContextJustCompleted && day.marketLens?.status === 'verified') {
-      day.marketLens = defaultMarketLensForEvents(day.events);
+    if (selectedContextJustCompleted && ['verified', 'setup'].includes(day.marketLens?.status)) {
+      day.marketLens = unavailableMarketLensForEvents(day.events);
     }
 
     const reactionSpecs = Array.isArray(day.marketLens?.reactions) ? day.marketLens.reactions : [];

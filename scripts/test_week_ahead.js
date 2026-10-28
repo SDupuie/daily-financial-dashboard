@@ -484,8 +484,42 @@ function testNonStatisticalReleaseReopensMarketLensReview() {
     now: new Date('2026-07-29T18:00:00Z')
   });
   const carriedWednesday = carriedForward.days.find((day) => day.date === '2026-07-29');
-  assert.equal(carriedWednesday.marketLens.status, 'setup');
+  assert.equal(carriedWednesday.marketLens.status, 'commentary_unavailable');
   assert.equal(prepareWeekAheadForEditorial(carriedForward).days.find((day) => day.date === '2026-07-29').marketLens.copy.title, '');
+}
+
+function testFomcStatementCompletesWithoutStatisticalActual() {
+  const provider = {
+    status: 'ok',
+    result: [
+      tradingViewRow({ id: 'fomc-statement', title: 'FOMC Statement', indicator: 'Federal Reserve', actual: null, forecast: null, previous: null, importance: 0 }),
+      tradingViewRow({ id: 'fed-rate', title: 'Fed Interest Rate Decision', indicator: 'Federal Reserve', actual: null, importance: 0 })
+    ]
+  };
+  const before = normalizeWeekAhead(provider, { range: RANGE, now: BEFORE_WEEK });
+  const statement = findEvent(before, 'fomc-statement');
+  assert.equal(statement.valuesApplicable, false);
+  assert.equal(statement.period, 'Policy');
+  assert.equal(statement.status, 'scheduled');
+  const after = applyWeekAheadLifecycle(before, null, { now: new Date('2026-07-28T21:00:00Z') });
+  assert.equal(findEvent(after, 'fomc-statement').status, 'released');
+  assert.equal(findEvent(after, 'fomc-statement').actual, null);
+  assert.equal(findEvent(after, 'fed-rate').status, 'awaiting_actual');
+  assert.equal(after.days[1].lifecycle, 'awaiting_actual');
+
+  const carried = structuredClone(before);
+  Object.assign(findEvent(carried, 'fomc-statement'), { valuesApplicable: true, period: 'Release' });
+  findEvent(carried, 'fed-rate').actual = '4%';
+  const chartData = { series: carried.days[1].marketLens.reactions.map((reaction) => ({
+    ticker: reaction.ticker, unit: 'yield',
+    bars: [{ time: '2026-07-27', close: 4 }, { time: '2026-07-28', close: 4.1 }]
+  })) };
+  const closed = applyWeekAheadLifecycle(carried, chartData, { now: new Date('2026-07-28T21:00:00Z') });
+  assert.equal(findEvent(closed, 'fomc-statement').valuesApplicable, false);
+  assert.equal(findEvent(closed, 'fomc-statement').period, 'Policy');
+  assert.equal(closed.days[1].lifecycle, 'close_available');
+  assert.equal(prepareWeekAheadForEditorial(closed).days[1].outcome.status, 'pending_review');
+  assert.deepEqual(validateWeekAheadPayload(closed), []);
 }
 
 function testNonStatisticalCloseCreatesOutcomeAssignment() {
@@ -956,6 +990,7 @@ async function main() {
   testLatestTradingViewValuesOwnRefresh();
   testStatisticalReleaseReopensMarketLensReview();
   testNonStatisticalReleaseReopensMarketLensReview();
+  testFomcStatementCompletesWithoutStatisticalActual();
   testNonStatisticalCloseCreatesOutcomeAssignment();
   testPostReleaseMarketLensSurvivesUnchangedRefresh();
   testCorrectedReleasedFactsReopenMarketLensReview();
