@@ -86,6 +86,7 @@ Read only the routed files or README sections needed for the current task:
 - If sanitized result data is unavailable, show instrument-level data without fabricating tactical weights.
 - Tape quote behavior, observation, derivation, and fallback follow the canonical [Tape and chart data](docs/reference.md#tape-and-chart-data) contract.
 - Do not include future dividend events in current MTD totals or returns.
+- For dashboard research that permits external sources, use ordinary web retrieval first. When it is insufficient, use the Codex in-app browser.
 - Prefer reputable free-to-read or less paywalled articles when equivalent coverage exists, without sacrificing source quality, timeliness, or originality.
 - Keep removed or filtered dashboard items out of prominent visible summaries.
 - When labels are renamed, sweep generated data, fetch scripts, validation, mockups, and visible UI strings for stale wording.
