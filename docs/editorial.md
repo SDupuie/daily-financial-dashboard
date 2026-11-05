@@ -22,7 +22,7 @@ Required editorial fields are active assignments, including `pending_review` fie
 
 1. Review downloaded News after prices and before other editorial decisions. Complete the News inventory contract's metadata triage and deep review, then select and provisionally order cards under the News-card contract and Story selection policy.
 2. Work through the handoff in this order, applying each section contract: `masthead`, `opening`, `futuresModule`, `assetAllocationPortfolio`, `stories`, `crypto`, `earnings.week`, `weekAhead`, `footer`.
-3. Once section drafting and review are finished, including identifying any unresolved fields, perform the Story selection policy's collection review and finalize News ordering. Apply the News inventory contract’s decision-update rule when a selection changes.
+3. Once section drafting and review are finished, including identifying any unresolved fields, perform the Story selection policy's collection review and finalize News ordering. Apply the News inventory contract’s decision-update rule when a selection changes. Then follow the Reuters link lookup below for the final selections.
 4. Run the Final Pre-Apply Editorial Gate below. Revisit only a specific problem it reveals, not the whole completed research process.
 
 ### Shared copy and tone
@@ -88,6 +88,14 @@ Every news card is a dated, reader-facing article. Do not use `referencePage`; d
 - Do not set or edit coverage/New-pill fields.
 - Resolve duplicate URLs/titles, wrong section category, and missing-inventory URLs during AI Editorial Work using qualified reviewed shortlist alternatives; Apply Handoff does not select replacement stories.
 - Use only candidates with a valid publication date. When the Futures article publication window is known, Futures selections also require a verified offset-bearing ISO `publishedAt` within that window, including its endpoints. If no articles qualify, leave Futures stories empty; do not switch to the fallback or widen the window to fill slots. Under the normal News freshness fallback described above, a verified precise timestamp is not required. Apply Handoff mirrors the Prepare Handoff eligibility check defensively; the Futures catalyst requirements apply in either case.
+
+### Reuters link lookup
+
+After selection and copy are final, use Codex web search to look up the reader-facing Reuters links for selected General, Futures, and Crypto candidates labeled `Reuters` whose inventory URL is on MarketScreener and whose `publishedAt` is verified. Start with the original inventory headline and `site:reuters.com`. For a miss or headline change, try a focused query with distinctive terms and the publication date. Skip candidates already pointing to Reuters. Search results are evidence for the click destination only. Use the saved inventory for all card facts, wording, and selection decisions. This lookup uses the search index and public corroborating sources without scripted requests to Reuters search, account setup, approval prompts, or downloads.
+
+- Accept one direct HTTPS Reuters article URL with a terminal date matching the UTC date of the candidate's verified publication timestamp. Use the original headline from the inventory for comparison. When the indexed headline differs, verify the same reporting with distinctive details or an earlier version that points to the same URL. A shared topic, similar slug, or first search result alone is insufficient.
+- On that selection row, keep its inventory `url` and add `reutersLink: { url, headline }` with the direct article URL and the headline from the result. For a headline variant also add `corroboration: { sourceUrl, note }` inside `reutersLink`, with the public HTTPS evidence URL and a concise explanation of what ties the two versions together. Apply uses these fields to check the proposed destination and publishes only the accepted destination.
+- Omit `reutersLink` for a missing, ambiguous, or unverified match. Keep the card and continue the update. If a selection changes during final review, look up the newly selected eligible story and keep the evidence attached to its own selection. Use the Apply report for the edition's counts and state if search was unavailable.
 
 ### Story selection policy
 

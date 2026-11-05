@@ -204,6 +204,73 @@ function canonicalStoryUrl(value) {
   }
 }
 
+function reutersArticlePublishedOn(value) {
+  try {
+    const match = new URL(value).pathname.match(/-(\d{4}-\d{2}-\d{2})\/?$/);
+    return isIsoDate(match?.[1]) ? match[1] : '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function httpsLink(value) {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port ? url : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function directReutersArticleUrl(value) {
+  const url = httpsLink(value);
+  if (!url
+    || !['reuters.com', 'www.reuters.com'].includes(url.hostname)
+    || !/^\/(?:[a-z0-9-]+\/)+[a-z0-9-]+\/?$/.test(url.pathname)
+    || /^\/(?:arc|site-search|search|sitemap|archive|account|info-pages|ar|de|es|fr|it|ja|pt|ru|zh)\//.test(url.pathname)
+    || !reutersArticlePublishedOn(url)) return '';
+  return `https://www.reuters.com${url.pathname.replace(/\/$/, '')}`;
+}
+
+function verifiedReutersLink(candidate, match) {
+  if (candidate?.sourceLabel !== 'Reuters'
+    || !/^https:\/\/www\.marketscreener\.com\/news\/[^/?#]+/.test(candidate.url)
+    || candidate.publishedAtVerified !== true
+    || !isIsoDateTime(candidate.publishedAt)
+    || typeof match?.headline !== 'string') return '';
+  const url = directReutersArticleUrl(match.url);
+  const originalHeadline = normalizeStoryTitle(candidate.title);
+  const foundHeadline = normalizeStoryTitle(match.headline);
+  const publishedDate = new Date(candidate.publishedAt).toISOString().slice(0, 10);
+  if (!url || !originalHeadline || !foundHeadline || reutersArticlePublishedOn(url) !== publishedDate) return '';
+  if (originalHeadline === foundHeadline) return url;
+
+  // Editorial verifies that a changed headline still represents the same story.
+  // Apply checks that the evidence is present without fetching it.
+  const { sourceUrl, note } = match.corroboration || {};
+  return httpsLink(sourceUrl) && typeof note === 'string' && note.trim() ? url : '';
+}
+
+function finalizeReutersLinks(stories) {
+  const preparedLinks = new Set(stories.map((story) => directReutersArticleUrl(story.url)).filter(Boolean));
+  const claims = new Map();
+  for (const { directReutersUrl } of stories) {
+    if (directReutersUrl) claims.set(directReutersUrl, (claims.get(directReutersUrl) || 0) + 1);
+  }
+  const counts = { selected: 0, webSearchMatches: 0, preparedDirect: 0, fallback: 0 };
+  for (const story of stories) {
+    if (story.sourceLabel !== 'Reuters') continue;
+    counts.selected += 1;
+    const link = story.directReutersUrl;
+    if (link && (preparedLinks.has(link) || claims.get(link) > 1)) delete story.directReutersUrl;
+    if (story.directReutersUrl) counts.webSearchMatches += 1;
+    else if (directReutersArticleUrl(story.url)) counts.preparedDirect += 1;
+    else counts.fallback += 1;
+  }
+  return counts;
+}
+
 function storyIdentity(story) {
   const url = canonicalStoryUrl(story?.url);
   if (url) return `url:${url}`;
@@ -318,11 +385,14 @@ module.exports = {
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   dashboardNewsItems,
+  finalizeReutersLinks,
   futuresStoryPublicationWindow,
   normalizeStoryTitle,
+  reutersArticlePublishedOn,
   sanitizeNewsBaseline,
   sortedDashboardNewsIds,
   storyIdentity,
   sharedFuturesSessionDate,
-  validateNewsCoverageState
+  validateNewsCoverageState,
+  verifiedReutersLink
 };

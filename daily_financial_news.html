@@ -14619,10 +14619,14 @@
       };
       const storyMetaRow = (story, url) => {
         const meta = storySourceMeta(story);
-        return meta && url ? `
+        const direct = story?.directReutersUrl;
+        const isReutersLink = story?.sourceLabel === 'Reuters' && typeof direct === 'string'
+          && /^https:\/\/www\.reuters\.com\/(?:[a-z0-9-]+\/)+[a-z0-9-]+-\d{4}-\d{2}-\d{2}$/.test(direct);
+        const readMoreUrl = (isReutersLink && safeUrl(direct)) || url;
+        return meta && readMoreUrl ? `
           <div class="story-meta-row">
             <span class="story-source">${esc(meta)}</span>
-            <a class="story-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Read more</a>
+            <a class="story-link" href="${esc(readMoreUrl)}" target="_blank" rel="noopener noreferrer">Read more</a>
           </div>
         ` : '';
       };

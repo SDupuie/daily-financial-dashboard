@@ -74,9 +74,11 @@ const {
   applyNewsBaseline,
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
+  finalizeReutersLinks,
   futuresStoryPublicationWindow,
   sharedFuturesSessionDate,
-  storyIdentity
+  storyIdentity,
+  verifiedReutersLink
 } = require('./news_contract');
 const { candidateForHandoff, priorNewsCandidates } = require('./fetch_news_candidates');
 const { APPROVED_NEWS_SOURCES } = require('./news_sources');
@@ -1539,7 +1541,7 @@ function editorialStyleAdvisories(data) {
   return advisories;
 }
 
-function editorialApplyReport(data, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues) {
+function editorialApplyReport(data, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues, reutersLinks) {
   const earningsRows = Array.isArray(data?.earnings?.week?.rows) ? data.earnings.week.rows : [];
   const nonblank = (value) => typeof value === 'string' && Boolean(value.trim());
   return {
@@ -1561,7 +1563,8 @@ function editorialApplyReport(data, reviewManifest, newsEvaluation, pendingEarni
     earningsIssues: [...earningsIssues],
     styleAdvisories: editorialStyleAdvisories(data),
     pendingEarnings: [...pendingEarnings],
-    newsReview: structuredClone(reviewManifest.newsReview)
+    newsReview: structuredClone(reviewManifest.newsReview),
+    reutersLinks
   };
 }
 
@@ -1657,6 +1660,19 @@ function sanitizeStoryList(editorial, options = {}) {
       const reason = blockedDuplicate ? options.blockedDuplicateReason || 'duplicate_editorial_item' : 'duplicate_editorial_item';
       if (Array.isArray(options.systemFallbacks)) options.systemFallbacks.push({ section: options.section, path: `${options.path}[${originalIndex}]`, action: 'omitted', reason });
       return;
+    }
+    if (item.reutersLink !== undefined) {
+      const directUrl = verifiedReutersLink(candidate, item.reutersLink);
+      if (directUrl) {
+        story.directReutersUrl = directUrl;
+      } else {
+        options.systemFallbacks?.push({
+          section: options.section,
+          path: `${options.path}[${originalIndex}].reutersLink`,
+          action: 'retained_candidate',
+          reason: 'unverified_reuters_link'
+        });
+      }
     }
     seenUrls.add(url);
     selected.push(story);
@@ -1980,6 +1996,9 @@ function applyDashboardDataJson(args) {
       blockedDuplicateReason: 'cross_section_duplicate'
     })
   };
+  const reutersLinks = finalizeReutersLinks([
+    ...dashboardData.futuresModule.stories, ...dashboardData.stories, ...dashboardData.crypto.notes
+  ]);
   applyNewsCoverageState(dashboardData, { now: editorialNow });
   reviewManifest.newsReview = buildNewsReviewSummary(newsEvaluation, newsSource, {
     futures: dashboardData.futuresModule.stories,
@@ -2031,7 +2050,7 @@ function applyDashboardDataJson(args) {
   nextHtml = patchDashboardDataBlock(nextHtml, dashboardData, reviewManifest, reviewChartData, { stampEdition: false });
   const publishingDefaultDashboard = path.resolve(args.dashboard) === DEFAULT_DASHBOARD;
   const recoveredEarningsPublication = isEmptyEarningsRecoveryWeek(finalizedEarnings?.week);
-  const report = editorialApplyReport(dashboardData, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues);
+  const report = editorialApplyReport(dashboardData, reviewManifest, newsEvaluation, pendingEarnings, earningsIssues, reutersLinks);
   if (report.earningsIssues.length) {
     process.stderr.write(`Earnings editorial issues: ${report.earningsIssues.join(' ')}\n`);
   }

@@ -20,7 +20,8 @@ const {
   candidateInFuturesPublicationWindow,
   canonicalStoryUrl,
   futuresStoryPublicationWindow,
-  normalizeStoryTitle
+  normalizeStoryTitle,
+  reutersArticlePublishedOn
 } = require('./news_contract');
 const {
   APPROVED_NEWS_SOURCES,
@@ -861,15 +862,6 @@ function englishReutersArticleUrl(value) {
   if (!url || sourceForUrl(url)?.id !== 'reuters' || !articlePathUrl(url)) return '';
   const firstPath = new URL(url).pathname.split('/').filter(Boolean)[0]?.toLowerCase() || '';
   return REUTERS_UNSUPPORTED_PATHS.has(firstPath) ? '' : url;
-}
-
-function reutersArticlePublishedOn(value) {
-  try {
-    const match = new URL(value).pathname.match(/-(\d{4}-\d{2}-\d{2})\/?$/);
-    return isIsoDate(match?.[1]) ? match[1] : '';
-  } catch (_error) {
-    return '';
-  }
 }
 
 function parseReutersNewsSitemap(xml) {

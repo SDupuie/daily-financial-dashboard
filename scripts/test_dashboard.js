@@ -994,7 +994,7 @@ function testRecoveryNotesDoNotAffectApply() {
 function testApplyPreviewParityAndNoWrites() {
   const { dashboard, chartData } = createDashboardValidationFixture();
   const originalHtml = renderDashboardValidationFixture(dashboard, chartData);
-  const setup = (name) => {
+  const setup = (name, configure = () => {}) => {
     const dir = makeTemporaryDirectory(`dfd-preview-${name}-`);
     const args = {
       dashboard: path.join(dir, 'dashboard.html'),
@@ -1007,7 +1007,6 @@ function testApplyPreviewParityAndNoWrites() {
     fs.writeFileSync(args.candidate, originalHtml);
     const inventory = fixtureNewsCandidatesArtifact(dashboard);
     const selection = fixtureNewsSelection(dashboard);
-    writeJson(args.newsCandidatesPath, inventory);
     const payload = structuredClone(dashboard);
     payload.editionId = inventory.generatedAt;
     payload.opening.catalysts.push({ label: 'Extra catalyst', body: 'Preserved advisory-only copy.' });
@@ -1017,12 +1016,15 @@ function testApplyPreviewParityAndNoWrites() {
       reviewedAt: null,
       baseEditionId: dashboard.editionId,
       verifiedClaims: [],
-      reviewEvidence: fixtureReviewEvidence(inventory, selection),
+      reviewEvidence: null,
       newsSelection: selection,
       openingDecision: { action: 'reviewed' }
     };
+    configure({ inventory, selection, payload });
+    payload.editorialReview.reviewEvidence = fixtureReviewEvidence(inventory, selection);
+    writeJson(args.newsCandidatesPath, inventory);
     writeJson(args.applyDashboardDataJson, payload);
-    return { args, dir };
+    return { args, dir, payload };
   };
   const directorySnapshot = (dir) => new Map(fs.readdirSync(dir).sort()
     .map((name) => [name, fs.readFileSync(path.join(dir, name))]));
@@ -1073,6 +1075,115 @@ function testApplyPreviewParityAndNoWrites() {
   assert.deepEqual(previewReport, actualReport, 'Preview must report the same normalization result as actual Apply.');
   const published = readJsonBlock(fs.readFileSync(actual.args.dashboard, 'utf8'), 'dashboard-data');
   assert.equal(published.opening.catalysts.length, 5, 'Style advisories must not truncate otherwise valid copy.');
+
+  const configureReutersLinks = ({ inventory, selection }) => {
+    const sectionPools = {
+      futures: { selection: selection.futures, candidates: inventory.futuresCandidates },
+      stories: { selection: selection.stories, candidates: inventory.generalCandidates },
+      crypto: { selection: selection.crypto, candidates: inventory.cryptoCandidates }
+    };
+    const setReutersCandidate = (section, index, {
+      candidateUrl,
+      directUrl,
+      publishedAt = '2026-07-10T18:30:00.000Z',
+      publishedAtVerified = true,
+      headline,
+      corroboration,
+      includeClaim = true
+    }) => {
+      const pool = sectionPools[section];
+      const selected = pool.selection[index];
+      const candidate = pool.candidates.find((item) => item.url === selected.url);
+      assert.ok(candidate, `${section}[${index}] must have an inventory candidate.`);
+      const originalCandidateUrl = candidateUrl || `https://www.marketscreener.com/news/fixture-${section}-${index}/`;
+      candidate.url = originalCandidateUrl;
+      candidate.sourceLabel = 'Reuters';
+      candidate.publishedAt = publishedAt;
+      candidate.publishedAtVerified = publishedAtVerified;
+      selected.url = originalCandidateUrl;
+      if (includeClaim) {
+        selected.reutersLink = {
+          url: directUrl || `https://www.reuters.com/world/us/fixture-${section}-${index}-2026-07-10/?utm_source=fixture#article`,
+          headline: headline || selected.title,
+          ...(corroboration ? { corroboration } : {})
+        };
+      }
+      return { candidate, selected };
+    };
+
+    const futuresExact = setReutersCandidate('futures', 0, {});
+    assert.equal(futuresExact.selected.reutersLink.headline, futuresExact.candidate.title);
+    setReutersCandidate('stories', 0, {
+      headline: `${selection.stories[0].title} updated wording`,
+      corroboration: {
+        sourceUrl: 'https://www.reuters.com/world/us/fixture-headline-update/',
+        note: 'Reuters published a shortened headline for the same dated report.'
+      }
+    });
+    setReutersCandidate('stories', 1, { includeClaim: false });
+    setReutersCandidate('crypto', 0, { publishedAt: '2026-07-09T18:30:00.000Z' });
+    setReutersCandidate('crypto', 1, { candidateUrl: 'https://www.marketscreener.com/markets/fixture-crypto-1/' });
+    setReutersCandidate('crypto', 2, { publishedAtVerified: false });
+    setReutersCandidate('futures', 1, {
+      candidateUrl: 'https://www.reuters.com/business/fixture-prepared-direct-2026-07-10/',
+      includeClaim: false
+    });
+    for (const { section, index } of [{ section: 'stories', index: 4 }, { section: 'crypto', index: 3 }]) {
+      const { selected } = setReutersCandidate(section, index, {
+        directUrl: 'https://www.reuters.com/world/us/fixture-collision-2026-07-10/'
+      });
+      selected.reutersLink.headline = selected.title;
+    }
+  };
+  const reutersPreview = setup('reuters-preview', configureReutersLinks);
+  const reutersPreviewBefore = directorySnapshot(reutersPreview.dir);
+  const reutersPreviewReport = runPreview(reutersPreview.args, 0);
+  assert.deepEqual(reutersPreviewReport.reutersLinks, {
+    selected: 9,
+    webSearchMatches: 2,
+    preparedDirect: 1,
+    fallback: 6
+  });
+  const reutersPreviewAfter = directorySnapshot(reutersPreview.dir);
+  assert.deepEqual([...reutersPreviewAfter.keys()], [...reutersPreviewBefore.keys()]);
+  for (const [name, contents] of reutersPreviewBefore) {
+    assert.deepEqual(reutersPreviewAfter.get(name), contents, `Reuters preview wrote ${name}.`);
+  }
+
+  const reutersApply = setup('reuters-actual', configureReutersLinks);
+  const reutersApplyReport = withScheduledNow(FIXTURE_NOW, () => applyDashboardDataJson(reutersApply.args));
+  assert.deepEqual(reutersPreviewReport, reutersApplyReport, 'Reuters-link Preview must report the same result as Apply.');
+  const reutersPublished = readJsonBlock(fs.readFileSync(reutersApply.args.dashboard, 'utf8'), 'dashboard-data');
+  assert.equal(reutersPublished.futuresModule.stories[0].url, reutersApply.payload.editorialReview.newsSelection.futures[0].url);
+  assert.equal(reutersPublished.futuresModule.stories[0].directReutersUrl,
+    'https://www.reuters.com/world/us/fixture-futures-0-2026-07-10',
+    'A verified direct URL must lose query, fragment, and trailing slash while preserving the original story URL.');
+  assert.equal(reutersPublished.stories[0].directReutersUrl,
+    'https://www.reuters.com/world/us/fixture-stories-0-2026-07-10',
+    'A title variant with HTTPS corroboration must be accepted.');
+  assert.equal(reutersPublished.stories[1].url, reutersApply.payload.editorialReview.newsSelection.stories[1].url,
+    'A Reuters card without a claim must retain its selected candidate URL.');
+  assert.equal(Object.hasOwn(reutersPublished.stories[1], 'directReutersUrl'), false);
+  for (const index of [0, 1, 2]) {
+    const note = reutersPublished.crypto.notes[index];
+    assert.equal(note.url, reutersApply.payload.editorialReview.newsSelection.crypto[index].url);
+    assert.equal(Object.hasOwn(note, 'directReutersUrl'), false,
+      `An invalid Crypto Reuters claim at index ${index} must keep the base card without a direct link.`);
+  }
+  assert.equal(reutersPublished.futuresModule.stories[1].url,
+    'https://www.reuters.com/business/fixture-prepared-direct-2026-07-10/');
+  assert.equal(Object.hasOwn(reutersPublished.futuresModule.stories[1], 'directReutersUrl'), false,
+    'A prepared direct Reuters URL must remain the card URL without a redundant override.');
+  for (const [section, story] of [
+    ['stories', reutersPublished.stories[4]],
+    ['crypto', reutersPublished.crypto.notes[3]]
+  ]) {
+    const selected = reutersApply.payload.editorialReview.newsSelection[section === 'stories' ? 'stories' : 'crypto'][section === 'stories' ? 4 : 3];
+    assert.equal(story.url, selected.url, `${section}: a collision must retain the selected candidate URL.`);
+    assert.equal(Object.hasOwn(story, 'directReutersUrl'), false, `${section}: a collision must drop the duplicate direct URL.`);
+  }
+  assert.ok(reutersApplyReport.fallbacks.some((item) => item.path === 'editorialReview.newsSelection.crypto[0].reutersLink'
+    && item.reason === 'unverified_reuters_link'));
 }
 
 function testCrossSectionDuplicateFallbackPreservesPriority() {
@@ -2063,7 +2174,8 @@ async function testActualDashboardStartsInBrowser() {
       carriedTapeTicker = '',
       earningsState = '',
       malformedTapeTicker = '',
-      unavailableTape = false
+      unavailableTape = false,
+      readMoreLinks = []
     } = {}) {
       const errors = [];
       const page = await browser.newPage();
@@ -2089,6 +2201,11 @@ async function testActualDashboardStartsInBrowser() {
             && footer
             && footer.textContent.trim().length > 0;
         });
+        for (const { selector, href, index = 0 } of readMoreLinks) {
+          const link = page.locator(selector).nth(index);
+          assert.equal(await link.count(), 1, `${selector}[${index}] must render.`);
+          assert.equal(await link.getAttribute('href'), href, `${selector}[${index}] has the wrong Read more destination.`);
+        }
         const more = page.locator('[data-news-more-toggle]').first();
         if (await more.count()) await more.click();
         if (earningsState) {
@@ -2165,6 +2282,35 @@ async function testActualDashboardStartsInBrowser() {
     recoverableData.opening = null;
     fs.writeFileSync(recoverableFile, replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(recoverableData)));
     await assertDashboardStarts(recoverableFile);
+
+    const { dashboard: reutersLinkData, chartData: reutersLinkCharts } = createDashboardValidationFixture();
+    const futuresDirectUrl = 'https://www.reuters.com/world/us/browser-futures-2026-07-10';
+    const generalDirectUrl = 'https://www.reuters.com/business/browser-general-2026-07-10';
+    const nonReutersDirectUrl = 'https://www.reuters.com/world/us/browser-non-reuters-2026-07-10';
+    reutersLinkData.futuresModule.stories[0].sourceLabel = 'Reuters';
+    reutersLinkData.futuresModule.stories[0].directReutersUrl = futuresDirectUrl;
+    reutersLinkData.stories[0].sourceLabel = 'Reuters';
+    reutersLinkData.stories[0].directReutersUrl = generalDirectUrl;
+    reutersLinkData.stories[1].sourceLabel = 'Fixture News';
+    reutersLinkData.stories[1].directReutersUrl = nonReutersDirectUrl;
+    reutersLinkData.crypto.notes[0].url = 'https://www.marketscreener.com/news/browser-crypto-fallback/';
+    reutersLinkData.crypto.notes[0].sourceLabel = 'Reuters';
+    reutersLinkData.crypto.notes[0].directReutersUrl = 'https://www.reuters.com/world/us/not-a-dated-article';
+    const reutersLinkFile = path.join(recoverableDir, 'dashboard-reuters-links.html');
+    const reutersLinkHtml = replaceJsonBlock(
+      replaceJsonBlock(recoverableHtml, 'dashboard-data', JSON.stringify(reutersLinkData)),
+      'chart-data',
+      JSON.stringify(reutersLinkCharts)
+    );
+    fs.writeFileSync(reutersLinkFile, reutersLinkHtml);
+    await assertDashboardStarts(reutersLinkFile, {
+      readMoreLinks: [
+        { selector: '.futures-module-news .story-link', href: futuresDirectUrl },
+        { selector: '.section-news .story-link', href: generalDirectUrl },
+        { selector: '.section-news .story-link', href: reutersLinkData.stories[1].url, index: 1 },
+        { selector: '.crypto-notes .story-link', href: 'https://www.marketscreener.com/news/browser-crypto-fallback/' }
+      ]
+    });
 
     for (const testCase of malformedEarningsPublishedCases) {
       const malformed = structuredClone(recoverableData);
