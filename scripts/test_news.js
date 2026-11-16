@@ -3,6 +3,7 @@
 const assert = require('assert/strict');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
@@ -27,6 +28,7 @@ const {
   collectNewsCandidates,
   extractArticleMetadata,
   fetchAcquisitionPath,
+  fetchArticlePage,
   fetchMarketScreenerReuters,
   fetchReutersSitemapLookup,
   fetchResponse,
@@ -884,10 +886,11 @@ async function testAllNewsCandidatesReceiveArticleReviewAndProgress() {
     fetchArticle: async (candidate) => {
       reviewed.push(candidate.title);
       return {
-        finalUrl: candidate.url,
+        finalUrl: candidate.url === items[1].url ? `${candidate.url}/different` : candidate.url,
         pageTitle: candidate.title,
         description: 'Fixture description.',
         excerpt: 'Fixture article content.',
+        paywalled: false,
         publishedAt: new Date(candidate.publishedAt)
       };
     },
@@ -900,6 +903,8 @@ async function testAllNewsCandidatesReceiveArticleReviewAndProgress() {
   assert.equal(artifact.articleReview.reviewedCount, itemCount);
   assert.equal(artifact.generalCandidates.length, itemCount);
   assert.ok(artifact.generalCandidates.every((candidate) => candidate.article?.excerpt === 'Fixture article content.'));
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.url === items[0].url).article.paywalled, false);
+  assert.equal(artifact.generalCandidates.find((candidate) => candidate.url === items[1].url).article.paywalled, null);
   assert.ok(
     progressArtifacts.some((progressArtifact) => progressArtifact.articleReview?.status === 'acquiring'
       && progressArtifact.generalCandidates.length === 0),
@@ -951,6 +956,77 @@ function testArticleMetadataExtraction() {
     <time datetime="2026-07-23T20:24:09Z">Updated Jul 23, 2026</time>`);
   assert.equal(unlabeledTime.publishedAt, null,
     'Modified and generic time elements must not verify an original publication timestamp.');
+}
+
+async function testArticlePaywallFromMetadataRequest() {
+  const first = 'The synthetic article begins with a paragraph that describes the first fixture detail.';
+  const last = 'The synthetic article ends with a paragraph that describes the last fixture detail.';
+  const body = `<p>${first}</p><p>${last}</p>`;
+  const page = (access, content = body, extra = {}) => `
+    <html><head><script type="application/ld+json">${JSON.stringify({
+      '@type': 'NewsArticle',
+      datePublished: '2026-07-10T16:30:00Z',
+      isAccessibleForFree: access,
+      articleBody: `${first} ${last}`,
+      ...extra
+    })}</script></head>
+    <body><article><header><h1>Access fixture</h1></header>${content}</article></body></html>`;
+  const fixtures = {
+    '/free': [page(true), false],
+    '/gated': [page(false), true],
+    '/partly-gated': [page(true, body, { hasPart: { isAccessibleForFree: 'false' } }), true],
+    '/unmarked': [page(undefined), null],
+    '/preview': [page(true, `<p>${first}</p>`), null],
+    '/truncated': [page(true).replace('</body></html>', ''), null],
+    '/hidden': [page(true, `<div hidden>${body}</div>`), null],
+    '/other-schema': [page(false, body, { '@type': 'WebSite' }), null]
+  };
+  const calls = [];
+  const server = await startHttpServer((req, res) => {
+    calls.push(req.url);
+    assert.equal(req.headers.cookie, undefined);
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(fixtures[req.url][0]);
+  });
+  try {
+    for (const [route, [, expected]] of Object.entries(fixtures)) {
+      const url = `${server.baseUrl}${route}`;
+      const result = await fetchArticlePage({ url }, { timeoutMs: 1000 });
+      assert.equal(result.paywalled, expected, route);
+      assert.equal(result.excerpt, `${first} ${last}`);
+      assert.equal(result.publishedAt.toISOString(), '2026-07-10T16:30:00.000Z');
+    }
+    assert.deepEqual(calls, Object.keys(fixtures), 'Access evidence must come from the metadata GET.');
+  } finally {
+    await closeHttpServer(server.server);
+  }
+}
+
+async function testArticleRequestDoesNotRetry() {
+  const calls = [];
+  const { server, baseUrl } = await startHttpServer((req, res) => {
+    calls.push(req.url);
+    if (req.url === '/forbidden') res.writeHead(403);
+    else res.writeHead(302, { location: req.url === '/redirect' ? '/return' : '/redirect' });
+    res.end();
+  });
+  const originalRequest = https.request;
+  // Use a publisher that normally qualifies for the discovery retry, with a local response.
+  https.request = (url, options, callback) => http.request(new URL(url.pathname, baseUrl), options, callback);
+  try {
+    await assert.rejects(
+      fetchArticlePage({ url: 'https://www.marketscreener.com/forbidden' }, { timeoutMs: 1000 }),
+      /HTTP 403/
+    );
+    await assert.rejects(
+      fetchArticlePage({ url: 'https://www.marketscreener.com/redirect' }, { timeoutMs: 1000 }),
+      /Redirect target is outside the request policy/
+    );
+    assert.deepEqual(calls, ['/forbidden', '/redirect', '/return']);
+  } finally {
+    https.request = originalRequest;
+    await closeHttpServer(server);
+  }
 }
 
 function testNewsTimestampParsing() {
@@ -1550,6 +1626,7 @@ async function testMarketScreenerArticleFetchUrlLifecycle() {
         pageTitle: candidate.title,
         description: 'Fixture description.',
         excerpt: 'Fixture article content.',
+        paywalled: false,
         publishedAt: new Date(candidate.publishedAt)
       };
     }
@@ -1557,6 +1634,8 @@ async function testMarketScreenerArticleFetchUrlLifecycle() {
   assert.equal(reviewedFetchUrl, 'https://www.marketscreener.com/news/reuters-fixture-headline-ce1');
   assert.equal(artifact.generalCandidates[0].url,
     'https://www.reuters.com/markets/us/reuters-fixture-2026-07-10');
+  assert.equal(artifact.generalCandidates[0].article.paywalled, null,
+    'A readable MarketScreener copy cannot verify the Reuters URL.');
   assert.equal(JSON.stringify(artifact).includes('articleFetchUrl'), false,
     'The internal MarketScreener fetch URL must not be serialized into the handoff artifact.');
 }
@@ -1751,6 +1830,7 @@ async function testNewsTransportFailureIsolation() {
     assert.equal(artifact.generalCandidates[0].title, 'Isolation fixture');
     assert.deepEqual(articleCalls, ['https://apnews.com/article/isolation-fixture-123']);
     assert.equal(artifact.generalCandidates[0].article.accessible, false);
+    assert.equal(artifact.generalCandidates[0].article.paywalled, null);
     assert.match(artifact.attempts.find((attempt) => attempt.id === 'bad-ap').error, /Invalid URL/);
     assert.equal(artifact.attempts.find((attempt) => attempt.id === 'good-ap').error, null);
   } finally {
@@ -2090,6 +2170,8 @@ async function main() {
   await testMarketauxTickerPriorCardCarryForward();
   testCryptoRssSourceManifest();
   testArticleMetadataExtraction();
+  await testArticlePaywallFromMetadataRequest();
+  await testArticleRequestDoesNotRetry();
   testNewsTimestampParsing();
   testRssParsing();
   testApNewsSitemapParsing();

@@ -364,7 +364,8 @@ async function fetchResponse(url, {
   maxBodyBytes = NEWS_HTTP_MAX_COMPRESSED_BODY_BYTES,
   maxDecodedBytes = NEWS_HTTP_MAX_DECODED_BODY_BYTES,
   allowRedirect = sameOriginRedirect,
-  stopWhen = null
+  stopWhen = null,
+  retryForbidden = true
 }) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error('Request timeout must be a positive number');
@@ -390,7 +391,7 @@ async function fetchResponse(url, {
   try {
     return await requestNewsResponse(url, options, 0);
   } catch (error) {
-    if (error.message !== 'HTTP 403' || !impersonatedNewsHost(url)) throw error;
+    if (!retryForbidden || error.message !== 'HTTP 403' || !impersonatedNewsHost(url)) throw error;
     return fetchImpersonatedNewsResponse(url, options);
   }
 }
@@ -1158,6 +1159,49 @@ function firstValidDate(values) {
   return null;
 }
 
+function extractArticlePaywall(html) {
+  const articles = [];
+  for (const [, markup] of html.matchAll(/<script\b[^>]*\btype\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+    let data;
+    try {
+      data = JSON.parse(markup);
+    } catch (_error) {
+      continue;
+    }
+    const nodes = Array.isArray(data) ? data : [data];
+    for (const node of nodes) {
+      for (const item of [node, node?.mainEntity, ...(Array.isArray(node?.['@graph']) ? node['@graph'] : [])]) {
+        if ([item?.['@type']].flat().some((type) => typeof type === 'string'
+          && /^(?:https?:\/\/schema\.org\/)?(?:[a-z]*Article|BlogPosting)$/i.test(type))) {
+          articles.push(item);
+        }
+      }
+    }
+  }
+
+  if (articles.length !== 1) return null;
+  const [article] = articles;
+  const free = article.isAccessibleForFree;
+  if ([free, ...[article.hasPart].flat().map((part) => part?.isAccessibleForFree)]
+    .some((value) => value === false || value === 'false')) return true;
+  if (free !== true && free !== 'true') return null;
+
+  if (typeof article.articleBody !== 'string' || !/<\/html\s*>/i.test(html)) return null;
+  const structuredBody = plainText(article.articleBody);
+  if (structuredBody.length < 40) return null;
+  // A free label or a copy of the article in page metadata can accompany a preview.
+  // Require the full structured body to also be present in the anonymous HTML.
+  const visible = html.replace(/<(script|style|template|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->/gi, ' ');
+  const region = visible.match(/<article\b[^>]*>(?:(?!<\/article\s*>)[\s\S])*?<h1\b[^>]*>[\s\S]*?<\/h1\s*>([\s\S]*?)<\/article\s*>/i);
+  if (!region || /<[^>]+(?:\shidden(?:\s|=|>)|aria-hidden\s*=\s*["']true["']|display\s*:\s*none|visibility\s*:\s*hidden|paywall|metered)/i.test(visible)) {
+    return null;
+  }
+  const prose = region[1].replace(/<(nav|aside|header|footer)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
+  const paragraphs = [...prose.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p\s*>/gi)]
+    .map((match) => plainText(match[1])).filter(Boolean).join(' ');
+  return paragraphs === structuredBody ? false : null;
+}
+
 function extractArticleExcerpt(html) {
   const structuredBody = String(html).match(/["']articleBody["']\s*:\s*("(?:\\.|[^"\\])*")/i);
   if (structuredBody) {
@@ -1331,6 +1375,7 @@ async function fetchImpersonatedNewsResponse(url, options) {
 
 async function fetchArticlePage(candidate, { timeoutMs }) {
   const requestUrl = candidate.articleFetchUrl || candidate.url;
+  const requestedUrls = new Set([new URL(requestUrl).href.split('#', 1)[0]]);
   const stopWhen = (html) => {
     const metadata = extractArticleMetadata(html);
     return metadata.excerpt.length >= ARTICLE_EXCERPT_LIMIT && Boolean(metadata.publishedAt);
@@ -1339,7 +1384,13 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
     timeoutMs,
     maxDecodedBytes: ARTICLE_BYTE_LIMIT,
     stopWhen,
-    allowRedirect: (nextUrl) => articleRedirectAllowed(requestUrl, nextUrl),
+    retryForbidden: false,
+    allowRedirect: (nextUrl) => {
+      const target = nextUrl.href.split('#', 1)[0];
+      if (requestedUrls.has(target) || !articleRedirectAllowed(requestUrl, nextUrl)) return false;
+      requestedUrls.add(target);
+      return true;
+    },
     headers: {
       Accept: 'text/html,application/xhtml+xml',
       'User-Agent': 'Mozilla/5.0 (compatible; DailyFinancialDashboard/1.0; personal news acquisition)'
@@ -1352,6 +1403,7 @@ async function fetchArticlePage(candidate, { timeoutMs }) {
   const html = await response.text();
   return {
     ...extractArticleMetadata(html),
+    paywalled: extractArticlePaywall(html),
     finalUrl: candidate.articleFetchUrl
       ? candidate.url
       : canonicalStoryUrl(response.url || candidate.url) || candidate.url
@@ -1485,10 +1537,12 @@ function articleRecord(page) {
 }
 
 async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTimeoutMs }) {
-  let hostedPage;
   try {
-    hostedPage = await fetchArticle(candidate, { timeoutMs: articleTimeoutMs });
-    candidate.article = articleRecord(hostedPage);
+    const hostedPage = await fetchArticle(candidate, { timeoutMs: articleTimeoutMs });
+    const reviewedUrl = candidate.articleFetchUrl || candidate.url;
+    const paywalled = reviewedUrl === candidate.url && hostedPage.finalUrl === candidate.url
+      && typeof hostedPage.paywalled === 'boolean' ? hostedPage.paywalled : null;
+    candidate.article = { ...articleRecord(hostedPage), paywalled };
     if (hostedPage.publishedAt) {
       const publishedOn = chicagoIsoDate(hostedPage.publishedAt);
       candidate.pagePublishedAt = hostedPage.publishedAt.toISOString();
@@ -1510,7 +1564,7 @@ async function reviewArticle(candidate, { eligibleDates, fetchArticle, articleTi
       }
     }
   } catch (error) {
-    candidate.article = { accessible: false, error: String(error?.message || error) };
+    candidate.article = { accessible: false, paywalled: null, error: String(error?.message || error) };
   } finally {
     delete candidate.articleFetchUrl;
   }
